@@ -198,7 +198,11 @@ func (b *Builder) AddCABindings() *Builder {
 func (b *Builder) AddSandboxHome() *Builder {
 	home := b.cfg.HomeDir
 
-	b.ShareNet()
+	// Use shared network unless proxy mode is enabled
+	// (proxy mode uses --unshare-net with pasta/slirp4netns)
+	if !b.cfg.ProxyEnabled {
+		b.ShareNet()
+	}
 	b.Bind(b.cfg.SandboxHome, home)
 
 	homeDirs := []string{
@@ -381,6 +385,49 @@ func (b *Builder) AddEnvironment() *Builder {
 
 	b.SetEnv("SANDBOX", "1")
 	b.SetEnv("SANDBOX_PROJECT", b.cfg.ProjectName)
+
+	// Add proxy environment if enabled
+	if b.cfg.ProxyEnabled {
+		b.AddProxyEnvironment()
+	}
+
+	return b
+}
+
+func (b *Builder) AddProxyEnvironment() *Builder {
+	proxyURL := fmt.Sprintf("http://%s:%d", b.cfg.GatewayIP, b.cfg.ProxyPort)
+
+	b.SetEnv("HTTP_PROXY", proxyURL)
+	b.SetEnv("HTTPS_PROXY", proxyURL)
+	b.SetEnv("http_proxy", proxyURL)
+	b.SetEnv("https_proxy", proxyURL)
+	b.SetEnv("NO_PROXY", "localhost,127.0.0.1")
+	b.SetEnv("no_proxy", "localhost,127.0.0.1")
+
+	// CA certificate paths for various tools
+	caCertPath := "/etc/ssl/certs/devsandbox-ca.crt"
+	b.SetEnv("REQUESTS_CA_BUNDLE", caCertPath)
+	b.SetEnv("NODE_EXTRA_CA_CERTS", caCertPath)
+	b.SetEnv("CURL_CA_BUNDLE", caCertPath)
+	b.SetEnv("GIT_SSL_CAINFO", caCertPath)
+	b.SetEnv("SSL_CERT_FILE", caCertPath)
+
+	b.SetEnv("SANDBOX_PROXY", "1")
+
+	return b
+}
+
+func (b *Builder) AddProxyCACertificate() *Builder {
+	if !b.cfg.ProxyEnabled || b.cfg.ProxyCAPath == "" {
+		return b
+	}
+
+	// Mount CA certificate to standard locations
+	caCertDest := "/etc/ssl/certs/devsandbox-ca.crt"
+	b.ROBindIfExists(b.cfg.ProxyCAPath, caCertDest)
+
+	// Also mount to other common locations
+	b.ROBindIfExists(b.cfg.ProxyCAPath, "/usr/local/share/ca-certificates/devsandbox-ca.crt")
 
 	return b
 }

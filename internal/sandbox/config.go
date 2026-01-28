@@ -16,6 +16,13 @@ type Config struct {
 	ProjectName string
 	SandboxHome string
 	XDGRuntime  string
+
+	// Proxy settings
+	ProxyEnabled bool
+	ProxyPort    int
+	ProxyLog     bool
+	ProxyCAPath  string
+	GatewayIP    string
 }
 
 func NewConfig() (*Config, error) {
@@ -68,4 +75,8 @@ func (c *Config) EnsureSandboxDirs() error {
 	}
 
 	return nil
+}
+
+func (c *Config) SandboxBase() string {
+	return filepath.Join(c.HomeDir, SandboxBase)
 }
