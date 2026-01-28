@@ -1,0 +1,7 @@
+tmp/
+bin/
+.idea
+dist
+/devsandbox
+coverage.out
+claudedocs/
