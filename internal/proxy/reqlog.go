@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	DefaultMaxLogSize = 10 * 1024 * 1024 // 10MB
+	DefaultMaxLogSize = 50 * 1024 * 1024 // 50MB
+	MaxLogFiles       = 5                // Keep only this many log files
 	LogFilePrefix     = "requests"
 	LogFileSuffix     = ".jsonl.gz"
 )
@@ -62,6 +63,9 @@ func NewRequestLogger(dir string) (*RequestLogger, error) {
 
 // Log writes a request/response pair to the log
 func (rl *RequestLogger) Log(entry *RequestLog) error {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("failed to marshal log entry: %w", err)
@@ -75,7 +79,16 @@ func (rl *RequestLogger) Log(entry *RequestLog) error {
 	rl.written += int64(n)
 
 	// Flush to ensure data is written
-	return rl.gzWriter.Flush()
+	if err := rl.gzWriter.Flush(); err != nil {
+		return err
+	}
+
+	// Rotate if file exceeds max size
+	if rl.written >= DefaultMaxLogSize {
+		return rl.rotate()
+	}
+
+	return nil
 }
 
 // LogRequest captures request details and returns a function to log the response
@@ -151,6 +164,9 @@ func (rl *RequestLogger) rotate() error {
 	rl.gzWriter = gzip.NewWriter(file)
 	rl.written = 0
 
+	// Prune old log files
+	rl.pruneOldFiles()
+
 	return nil
 }
 
@@ -159,6 +175,44 @@ func (rl *RequestLogger) findNextIndex() int {
 	pattern := filepath.Join(rl.dir, fmt.Sprintf("%s_%s_*%s", LogFilePrefix, today, LogFileSuffix))
 	matches, _ := filepath.Glob(pattern)
 	return len(matches)
+}
+
+// pruneOldFiles removes old log files, keeping only MaxLogFiles most recent
+func (rl *RequestLogger) pruneOldFiles() {
+	pattern := filepath.Join(rl.dir, LogFilePrefix+"*"+LogFileSuffix)
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) <= MaxLogFiles {
+		return
+	}
+
+	// Sort by modification time (oldest first)
+	type fileInfo struct {
+		path    string
+		modTime time.Time
+	}
+	files := make([]fileInfo, 0, len(matches))
+	for _, path := range matches {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{path: path, modTime: info.ModTime()})
+	}
+
+	// Sort oldest first
+	for i := 0; i < len(files)-1; i++ {
+		for j := i + 1; j < len(files); j++ {
+			if files[j].modTime.Before(files[i].modTime) {
+				files[i], files[j] = files[j], files[i]
+			}
+		}
+	}
+
+	// Remove oldest files, keeping MaxLogFiles
+	toRemove := len(files) - MaxLogFiles
+	for i := 0; i < toRemove; i++ {
+		_ = os.Remove(files[i].path)
+	}
 }
 
 // Close closes the logger

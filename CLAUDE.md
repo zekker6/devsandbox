@@ -22,5 +22,4 @@ Linters: golangci + go default linters.
 
 - add telemetry sending via otel
 - capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
-- restore file logger rotation
 - collision for sandboxes names from same folders
