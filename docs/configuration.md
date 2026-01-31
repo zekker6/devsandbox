@@ -160,11 +160,13 @@ flush_interval = "5s"
 
 OTLP logs automatically include these resource attributes:
 
-| Attribute         | Value                         |
-|-------------------|-------------------------------|
-| `service.name`    | `devsandbox`                  |
-| `service.version` | Build version (e.g., `1.0.0`) |
-| `service.commit`  | Git commit hash               |
+| Attribute            | Value                                        |
+|----------------------|----------------------------------------------|
+| `service.name`       | `devsandbox`                                 |
+| `service.version`    | Build version (e.g., `1.0.0`)                |
+| `service.commit`     | Git commit hash                              |
+| `service.dirty`      | `true` if built with uncommitted changes     |
+| `service.dirty_hash` | Hash of uncommitted changes (if dirty build) |
 
 Plus any custom attributes from `[logging.attributes]`.
 

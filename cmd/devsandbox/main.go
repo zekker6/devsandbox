@@ -63,7 +63,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newToolsCmd())
 
-	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox v%s (commit: %s, built: %s)\n", version.Version, version.Commit, version.Date))
+	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date))
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

@@ -274,6 +274,17 @@ func (w *OTLPWriter) buildResourceAttributes() []*commonpb.KeyValue {
 			Key:   "service.commit",
 			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: version.Commit}},
 		},
+		{
+			Key:   "service.dirty",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: version.IsDirty()}},
+		},
+	}
+
+	if version.DirtyHash != "" {
+		attrs = append(attrs, &commonpb.KeyValue{
+			Key:   "service.dirty_hash",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: version.DirtyHash}},
+		})
 	}
 
 	// Add custom resource attributes
@@ -342,6 +353,10 @@ func (w *OTLPWriter) buildJSONPayload(entries []*Entry) []byte {
 		{Key: "service.name", Value: otlpAnyValue{StringValue: "devsandbox"}},
 		{Key: "service.version", Value: otlpAnyValue{StringValue: version.Version}},
 		{Key: "service.commit", Value: otlpAnyValue{StringValue: version.Commit}},
+		{Key: "service.dirty", Value: otlpAnyValue{BoolValue: version.IsDirty()}},
+	}
+	if version.DirtyHash != "" {
+		resourceAttrs = append(resourceAttrs, otlpKeyValue{Key: "service.dirty_hash", Value: otlpAnyValue{StringValue: version.DirtyHash}})
 	}
 	for k, v := range w.cfg.ResourceAttributes {
 		resourceAttrs = append(resourceAttrs, otlpKeyValue{Key: k, Value: otlpAnyValue{StringValue: v}})

@@ -20,7 +20,7 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
-- update included commit info to include hash of modifications and dirty state
+- goreleaser builds for releases and local builds
 - http filtering
     - ability to define whitelist/blacklist/ask mode for http(s) requests
 - configuration support
