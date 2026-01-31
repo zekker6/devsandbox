@@ -16,6 +16,13 @@ type Config struct {
 	// Sandbox contains sandbox settings.
 	Sandbox SandboxConfig `toml:"sandbox"`
 
+	// Overlay contains global overlayfs settings.
+	Overlay OverlayConfig `toml:"overlay"`
+
+	// Tools contains per-tool configuration as raw maps.
+	// Each tool is responsible for parsing its own section.
+	Tools map[string]any `toml:"tools"`
+
 	// Logging contains remote logging settings.
 	Logging LoggingConfig `toml:"logging"`
 }
@@ -34,6 +41,36 @@ type SandboxConfig struct {
 	// BasePath is the directory where sandbox homes are stored.
 	// Defaults to ~/.local/share/devsandbox if not set.
 	BasePath string `toml:"base_path"`
+}
+
+// OverlayConfig contains global overlayfs settings.
+type OverlayConfig struct {
+	// Enabled allows tools to use overlayfs for writable mounts.
+	// When false, all overlay mounts are disabled (tools use read-only bind mounts).
+	// Default: true
+	Enabled *bool `toml:"enabled"`
+}
+
+// IsEnabled returns whether overlays are enabled (defaults to true).
+func (o OverlayConfig) IsEnabled() bool {
+	if o.Enabled == nil {
+		return true
+	}
+	return *o.Enabled
+}
+
+// GetToolConfig returns the configuration map for a specific tool.
+// Returns nil if the tool has no configuration.
+func (c *Config) GetToolConfig(toolName string) map[string]any {
+	if c.Tools == nil {
+		return nil
+	}
+	if toolCfg, ok := c.Tools[toolName]; ok {
+		if m, ok := toolCfg.(map[string]any); ok {
+			return m
+		}
+	}
+	return nil
 }
 
 // LoggingConfig contains remote logging configuration.
@@ -90,6 +127,10 @@ func DefaultConfig() *Config {
 		Sandbox: SandboxConfig{
 			BasePath: "", // Empty means use default XDG path
 		},
+		Overlay: OverlayConfig{
+			Enabled: nil, // nil means enabled (default true)
+		},
+		Tools: make(map[string]any),
 	}
 }
 
@@ -183,6 +224,26 @@ port = 8080
 # Base directory for sandbox homes
 # Defaults to ~/.local/share/devsandbox if not set
 # base_path = "~/.local/share/devsandbox"
+
+# Overlay filesystem settings (global)
+[overlay]
+# Master switch for overlay filesystem support
+# When disabled, all tools use read-only bind mounts regardless of their settings
+# enabled = true
+
+# Tool-specific configuration
+# Each tool can have its own section under [tools.<name>]
+
+# Mise tool manager settings
+[tools.mise]
+# Allow mise to install/update tools via overlayfs
+# When enabled, mise directories are mounted with a writable overlay layer
+writable = false
+
+# Persist mise changes across sandbox sessions
+# When false: changes are discarded when sandbox exits (safer)
+# When true: changes are stored in ~/.local/share/devsandbox/<project>/overlay/
+persistent = false
 
 # Remote logging configuration
 # Proxy logs can be forwarded to remote destinations

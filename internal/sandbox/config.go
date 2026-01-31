@@ -41,6 +41,10 @@ type Config struct {
 	GatewayIP    string
 	// True if network namespace is isolated (pasta)
 	NetworkIsolated bool
+
+	// Overlay settings
+	OverlayEnabled bool           // Global overlay enable/disable
+	ToolsConfig    map[string]any // Per-tool configuration from config file
 }
 
 // Options allows customizing sandbox configuration.

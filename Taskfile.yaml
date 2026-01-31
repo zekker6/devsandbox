@@ -51,7 +51,7 @@ tasks:
       - build
     cmds:
       - rm bin/devsandbox_*.zip || true
-      - zip -j bin/devsandbox_{{.GIT_COMMIT}}.zip bin/devsandbox README.md docs/
+      - zip -r bin/devsandbox_{{.GIT_COMMIT}}.zip bin/devsandbox README.md docs/
 
   prune-local:
     cmds:

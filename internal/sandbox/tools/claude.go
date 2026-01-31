@@ -46,6 +46,12 @@ func (c *Claude) Available(homeDir string) bool {
 
 func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 	bindings := []Binding{
+		// Claude Code system installation (npm global)
+		{
+			Source:   "/opt/claude-code",
+			ReadOnly: true,
+			Optional: true,
+		},
 		// Claude directory
 		{
 			Source:   filepath.Join(homeDir, ".claude"),
@@ -107,6 +113,7 @@ func (c *Claude) Check(homeDir string) CheckResult {
 
 	// Check config paths
 	configPaths := []string{
+		"/opt/claude-code",
 		filepath.Join(homeDir, ".claude"),
 		filepath.Join(homeDir, ".claude.json"),
 		filepath.Join(homeDir, ".config", "Claude"),

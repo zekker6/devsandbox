@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"devsandbox/internal/sandbox/tools"
 )
 
 type Builder struct {
-	cfg  *Config
-	args []string
+	cfg            *Config
+	args           []string
+	overlaySrcSeen bool // tracks if OverlaySrc was called before overlay mount
 }
 
 func NewBuilder(cfg *Config) *Builder {
@@ -92,6 +94,61 @@ func (b *Builder) Symlink(target, linkPath string) *Builder {
 	return b
 }
 
+// OverlaySrc adds a source directory for the following overlay mount.
+// Multiple sources are stacked (first call is bottom layer).
+// Must be called before TmpOverlay, Overlay, or ROOverlay.
+func (b *Builder) OverlaySrc(src string) *Builder {
+	b.add("--overlay-src", src)
+	b.overlaySrcSeen = true
+	return b
+}
+
+// OverlaySrcIfExists adds a source directory if it exists.
+func (b *Builder) OverlaySrcIfExists(src string) *Builder {
+	if pathExists(src) {
+		b.OverlaySrc(src)
+	}
+	return b
+}
+
+// requireOverlaySrc panics if OverlaySrc was not called before an overlay mount.
+func (b *Builder) requireOverlaySrc(method string) {
+	if !b.overlaySrcSeen {
+		panic(fmt.Sprintf("builder: %s called without preceding OverlaySrc", method))
+	}
+}
+
+// TmpOverlay mounts overlayfs with writes to an invisible tmpfs.
+// Changes are lost when the sandbox exits.
+// Panics if OverlaySrc was not called first.
+func (b *Builder) TmpOverlay(dest string) *Builder {
+	b.requireOverlaySrc("TmpOverlay")
+	b.add("--tmp-overlay", dest)
+	b.overlaySrcSeen = false // reset for next overlay
+	return b
+}
+
+// Overlay mounts overlayfs with persistent writes.
+// rwSrc: host directory for writes (upper layer)
+// workDir: work directory (must be on same filesystem as rwSrc)
+// dest: mount point inside sandbox
+// Panics if OverlaySrc was not called first.
+func (b *Builder) Overlay(rwSrc, workDir, dest string) *Builder {
+	b.requireOverlaySrc("Overlay")
+	b.add("--overlay", rwSrc, workDir, dest)
+	b.overlaySrcSeen = false // reset for next overlay
+	return b
+}
+
+// ROOverlay mounts overlayfs read-only.
+// Panics if OverlaySrc was not called first.
+func (b *Builder) ROOverlay(dest string) *Builder {
+	b.requireOverlaySrc("ROOverlay")
+	b.add("--ro-overlay", dest)
+	b.overlaySrcSeen = false // reset for next overlay
+	return b
+}
+
 func (b *Builder) Dir(path string) *Builder {
 	b.add("--dir", path)
 	return b
@@ -139,11 +196,6 @@ func (b *Builder) AddBaseArgs() *Builder {
 
 func (b *Builder) AddSystemBindings() *Builder {
 	b.ROBind("/usr", "/usr")
-
-	if pathExists("/opt/claude-code") {
-		b.ROBind("/opt/claude-code", "/opt/claude-code")
-	}
-
 	b.addLibBinding("/lib", "usr/lib")
 	b.addLibBinding("/lib64", "usr/lib64")
 	b.addLibBinding("/bin", "usr/bin")
@@ -243,6 +295,13 @@ func (b *Builder) AddTools() *Builder {
 	home := b.cfg.HomeDir
 	sandboxHome := b.cfg.SandboxHome
 
+	// Configure tools that support it
+	for _, tool := range tools.Available(home) {
+		if configurable, ok := tool.(tools.ToolWithConfig); ok {
+			b.configureTool(configurable, tool.Name())
+		}
+	}
+
 	// Run setup for tools that need it (e.g., generate safe gitconfig, starship config)
 	for _, tool := range tools.Available(home) {
 		if setup, ok := tool.(tools.ToolWithSetup); ok {
@@ -253,28 +312,118 @@ func (b *Builder) AddTools() *Builder {
 	// Apply bindings from all available tools
 	for _, tool := range tools.Available(home) {
 		for _, binding := range tool.Bindings(home, sandboxHome) {
-			dest := binding.Dest
-			if dest == "" {
-				dest = binding.Source
-			}
-
-			if binding.Optional {
-				if binding.ReadOnly {
-					b.ROBindIfExists(binding.Source, dest)
-				} else {
-					b.BindIfExists(binding.Source, dest)
-				}
-			} else {
-				if binding.ReadOnly {
-					b.ROBind(binding.Source, dest)
-				} else {
-					b.Bind(binding.Source, dest)
-				}
-			}
+			b.applyBinding(binding, sandboxHome)
 		}
 	}
 
 	return b
+}
+
+// configureTool applies configuration to a tool based on sandbox config.
+func (b *Builder) configureTool(tool tools.ToolWithConfig, toolName string) {
+	// Build global config
+	globalCfg := tools.GlobalConfig{
+		OverlayEnabled: b.cfg.OverlayEnabled,
+	}
+
+	// Get tool's config section from ToolsConfig
+	var toolCfg map[string]any
+	if b.cfg.ToolsConfig != nil {
+		if section, ok := b.cfg.ToolsConfig[toolName]; ok {
+			toolCfg, _ = section.(map[string]any)
+		}
+	}
+
+	tool.Configure(globalCfg, toolCfg)
+}
+
+// applyBinding applies a single binding based on its type.
+func (b *Builder) applyBinding(binding tools.Binding, sandboxHome string) {
+	dest := binding.Dest
+	if dest == "" {
+		dest = binding.Source
+	}
+
+	switch binding.Type {
+	case tools.MountTmpOverlay:
+		b.applyTmpOverlay(binding, dest)
+
+	case tools.MountOverlay:
+		b.applyPersistentOverlay(binding, dest, sandboxHome)
+
+	default: // MountBind or empty
+		b.applyBindMount(binding, dest)
+	}
+}
+
+// applyBindMount applies a regular bind mount.
+func (b *Builder) applyBindMount(binding tools.Binding, dest string) {
+	if binding.Optional {
+		if binding.ReadOnly {
+			b.ROBindIfExists(binding.Source, dest)
+		} else {
+			b.BindIfExists(binding.Source, dest)
+		}
+	} else {
+		if binding.ReadOnly {
+			b.ROBind(binding.Source, dest)
+		} else {
+			b.Bind(binding.Source, dest)
+		}
+	}
+}
+
+// applyTmpOverlay applies an overlay with writes to tmpfs (discarded on exit).
+func (b *Builder) applyTmpOverlay(binding tools.Binding, dest string) {
+	// Check if source exists when optional
+	if binding.Optional && !pathExists(binding.Source) {
+		return
+	}
+
+	// Add additional overlay sources (lower layers)
+	for _, src := range binding.OverlaySources {
+		if binding.Optional {
+			b.OverlaySrcIfExists(src)
+		} else {
+			b.OverlaySrc(src)
+		}
+	}
+
+	// Add primary source and mount
+	b.OverlaySrc(binding.Source)
+	b.TmpOverlay(dest)
+}
+
+// applyPersistentOverlay applies an overlay with persistent writes.
+func (b *Builder) applyPersistentOverlay(binding tools.Binding, dest string, sandboxHome string) {
+	// Check if source exists when optional
+	if binding.Optional && !pathExists(binding.Source) {
+		return
+	}
+
+	// Create upper/work directories for persistent storage
+	// Use a path based on dest to avoid collisions
+	safePath := strings.ReplaceAll(strings.TrimPrefix(dest, "/"), "/", "_")
+	overlayDir := filepath.Join(sandboxHome, "overlay", safePath)
+	upperDir := filepath.Join(overlayDir, "upper")
+	workDir := filepath.Join(overlayDir, "work")
+
+	// Ensure directories exist
+	_ = os.MkdirAll(upperDir, 0o755)
+	_ = os.MkdirAll(workDir, 0o755)
+
+	// Add additional overlay sources (lower layers)
+	for _, src := range binding.OverlaySources {
+		if binding.Optional {
+			b.OverlaySrcIfExists(src)
+		} else {
+			b.OverlaySrc(src)
+		}
+	}
+
+	// Add primary source and mount with persistent upper layer
+	b.OverlaySrc(binding.Source)
+	b.Overlay(upperDir, workDir, dest)
 }
 
 func (b *Builder) AddProjectBindings() *Builder {

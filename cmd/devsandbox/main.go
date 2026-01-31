@@ -109,6 +109,10 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 		cfg.ProxyPort = proxyPort
 	}
 
+	// Pass overlay and tools settings to sandbox config
+	cfg.OverlayEnabled = appCfg.Overlay.IsEnabled()
+	cfg.ToolsConfig = appCfg.Tools
+
 	if showInfo {
 		printInfo(cfg)
 		return nil
@@ -227,6 +231,9 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 }
 
 func printInfo(cfg *sandbox.Config) {
+	// Extract mise config from ToolsConfig
+	miseWritable, misePersistent := getMiseConfig(cfg)
+
 	fmt.Println("Sandbox Configuration:")
 	fmt.Printf("  Project:      %s\n", cfg.ProjectName)
 	fmt.Printf("  Project Dir:  %s\n", cfg.ProjectDir)
@@ -236,7 +243,15 @@ func printInfo(cfg *sandbox.Config) {
 	fmt.Println("Mounted Paths:")
 	fmt.Println("  /usr, /lib, /lib64, /bin (read-only system)")
 	fmt.Printf("  %s (read-write)\n", cfg.ProjectDir)
-	fmt.Println("  ~/.config/mise, ~/.local/share/mise (read-only tools)")
+	if cfg.OverlayEnabled && miseWritable {
+		mode := "tmpoverlay"
+		if misePersistent {
+			mode = "overlay"
+		}
+		fmt.Printf("  ~/.local/share/mise (%s, writable)\n", mode)
+	} else {
+		fmt.Println("  ~/.config/mise, ~/.local/share/mise (read-only tools)")
+	}
 	fmt.Printf("  Shell config for %s (read-only)\n", cfg.Shell)
 	fmt.Println("  ~/.config/nvim, ~/.local/share/nvim (read-only editor)")
 	fmt.Println()
@@ -254,4 +269,36 @@ func printInfo(cfg *sandbox.Config) {
 		fmt.Printf("  CA Path:  %s\n", cfg.ProxyCAPath)
 		fmt.Printf("  Gateway:  %s\n", cfg.GatewayIP)
 	}
+
+	if cfg.OverlayEnabled && miseWritable {
+		fmt.Println()
+		fmt.Println("Overlay Mode:")
+		fmt.Printf("  Mise Writable:   %v\n", miseWritable)
+		fmt.Printf("  Mise Persistent: %v\n", misePersistent)
+		if misePersistent {
+			fmt.Printf("  Overlay Dir:     %s/overlay/\n", cfg.SandboxHome)
+		}
+	}
+}
+
+// getMiseConfig extracts mise configuration from ToolsConfig.
+func getMiseConfig(cfg *sandbox.Config) (writable, persistent bool) {
+	if cfg.ToolsConfig == nil {
+		return false, false
+	}
+	miseSection, ok := cfg.ToolsConfig["mise"]
+	if !ok {
+		return false, false
+	}
+	m, ok := miseSection.(map[string]any)
+	if !ok {
+		return false, false
+	}
+	if v, ok := m["writable"].(bool); ok {
+		writable = v
+	}
+	if v, ok := m["persistent"].(bool); ok {
+		persistent = v
+	}
+	return
 }

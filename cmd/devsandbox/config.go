@@ -52,6 +52,21 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Printf("  base_path = %s\n", basePath)
 			fmt.Println()
 
+			fmt.Println("[overlay]")
+			fmt.Printf("  enabled = %v\n", cfg.Overlay.IsEnabled())
+			fmt.Println()
+
+			// Print tool configurations dynamically
+			for toolName, toolCfg := range cfg.Tools {
+				fmt.Printf("[tools.%s]\n", toolName)
+				if m, ok := toolCfg.(map[string]any); ok {
+					for k, v := range m {
+						fmt.Printf("  %s = %v\n", k, v)
+					}
+				}
+				fmt.Println()
+			}
+
 			fmt.Println("[logging]")
 			if len(cfg.Logging.Receivers) == 0 {
 				fmt.Println("  receivers = (none)")

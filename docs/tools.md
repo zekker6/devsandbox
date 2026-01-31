@@ -110,10 +110,10 @@ the sandbox.
 
 ### How It Works
 
-The following mise directories are bind-mounted read-only:
+By default, mise directories are bind-mounted read-only:
 
 ```
-~/.config/mise     → Sandbox (read-only)
+~/.config/mise      → Sandbox (read-only)
 ~/.local/share/mise → Sandbox (read-only)
 ~/.local/state/mise → Sandbox (read-only)
 ```
@@ -122,7 +122,25 @@ This means:
 
 - All installed tool versions are available
 - Tool configurations (`.mise.toml`) are respected
-- New tools cannot be installed from inside the sandbox
+- New tools cannot be installed from inside the sandbox (by default)
+
+### Writable Mise (Overlay Mode)
+
+Enable overlayfs to allow installing tools inside the sandbox by configuring `~/.config/devsandbox/config.toml`:
+
+```toml
+[tools.mise]
+writable = true    # Allow installing tools
+persistent = false # Discard on exit (safer)
+```
+
+With overlay enabled:
+
+- Sandbox can install new tool versions
+- Host mise directories remain unchanged
+- Changes are isolated to the sandbox
+
+See [sandboxing.md](sandboxing.md#overlay-filesystem) for more details on overlay configuration.
 
 ### Supported Tools
 

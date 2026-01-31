@@ -36,6 +36,35 @@ port = 8080
 # base_path = "~/.local/share/devsandbox"
 ```
 
+### Overlay Settings
+
+Global overlayfs settings:
+
+```toml
+[overlay]
+# Master switch for overlay filesystem support
+# When disabled, all tools use read-only bind mounts
+enabled = true
+```
+
+### Tool-Specific Configuration
+
+Each tool can have its own configuration section under `[tools.<name>]`.
+
+#### Mise
+
+```toml
+[tools.mise]
+# Allow mise to install/update tools via overlayfs
+# When enabled, mise directories are mounted with a writable overlay layer
+writable = false
+
+# Persist mise changes across sandbox sessions
+# When false: changes are discarded when sandbox exits (safer)
+# When true: changes are stored in ~/.local/share/devsandbox/<project>/overlay/
+persistent = false
+```
+
 ## Remote Logging
 
 Proxy request logs can be forwarded to remote destinations for centralized logging and monitoring. Multiple receivers
@@ -198,6 +227,16 @@ port = 8080
 [sandbox]
 # Use custom location for sandbox data
 # base_path = "/data/devsandbox"
+
+[overlay]
+# Master switch for overlay filesystem support
+enabled = true
+
+[tools.mise]
+# Allow mise to install tools inside sandbox
+writable = true
+# Don't persist changes (safer default)
+persistent = false
 
 [logging]
 # Custom attributes for all log entries

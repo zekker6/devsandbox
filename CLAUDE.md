@@ -20,10 +20,6 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
-- overlayfs usage
-  - allow tools to use overlayfs to provide writable fs based on host fs
-  - allow to define which paths should be writable/read-only/masked
-  - for example - mise might use writable overlayfs to allow updating/changing tools without affecting host fs
 - http filtering
   - ability to define whitelist/blacklist/ask mode for http(s) requests
 - configuration support

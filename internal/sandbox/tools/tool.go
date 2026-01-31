@@ -3,12 +3,36 @@
 // and shell initialization commands.
 package tools
 
+// MountType defines how a binding is mounted in the sandbox.
+type MountType string
+
+const (
+	// MountBind is a regular bind mount (default behavior).
+	MountBind MountType = "bind"
+
+	// MountOverlay uses overlayfs with persistent writes.
+	// Changes are stored in the sandbox directory and persist across sessions.
+	MountOverlay MountType = "overlay"
+
+	// MountTmpOverlay uses overlayfs with writes to an invisible tmpfs.
+	// Changes are discarded when the sandbox exits.
+	MountTmpOverlay MountType = "tmpoverlay"
+)
+
 // Binding represents a filesystem binding for bwrap.
 type Binding struct {
-	Source   string // Host path
+	Source   string // Host path (lower layer for overlays)
 	Dest     string // Container path (defaults to Source if empty)
-	ReadOnly bool   // Mount as read-only
+	ReadOnly bool   // Mount as read-only (only for bind mounts)
 	Optional bool   // Skip if source doesn't exist
+
+	// Type specifies how to mount (bind, overlay, tmpoverlay).
+	// Defaults to MountBind if empty.
+	Type MountType
+
+	// OverlaySources specifies additional lower layers for overlay mounts.
+	// These are stacked below the primary Source (first is bottom layer).
+	OverlaySources []string
 }
 
 // EnvVar represents an environment variable.
@@ -74,4 +98,22 @@ type ToolWithCheck interface {
 	// Check performs detailed availability checking.
 	// Returns information about binary location, config paths, and any issues.
 	Check(homeDir string) CheckResult
+}
+
+// GlobalConfig contains global settings that tools may need.
+type GlobalConfig struct {
+	// OverlayEnabled indicates if overlays are globally enabled.
+	OverlayEnabled bool
+}
+
+// ToolWithConfig extends Tool with configuration support.
+// Tools that have configurable options should implement this interface.
+type ToolWithConfig interface {
+	Tool
+
+	// Configure applies configuration to the tool.
+	// globalCfg contains global settings (overlay enabled, etc.)
+	// toolCfg contains the tool's section from [tools.<name>] in config.toml.
+	// Called before Bindings() to set up tool state.
+	Configure(globalCfg GlobalConfig, toolCfg map[string]any)
 }

@@ -12,7 +12,7 @@ untrusted code.
 | `~/.ssh`                          | Blocked                             |
 | `~/.gitconfig`                    | Sanitized (no credentials)          |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Blocked                             |
-| mise-managed tools                | Read-only                           |
+| mise-managed tools                | Read-only or overlay                |
 | Network (default)                 | Full access                         |
 | Network (proxy mode)              | Isolated, routed through MITM proxy |
 
@@ -199,9 +199,62 @@ DEVSANDBOX_DEBUG=1 devsandbox
 - Ensure your user owns the project directory
 - Check for ACLs that might interfere
 
+## Overlay Filesystem
+
+By default, mise directories are mounted read-only. Use overlayfs to allow installing tools inside the sandbox without
+modifying host files.
+
+### Enabling Writable Mise
+
+Configure in `~/.config/devsandbox/config.toml`:
+
+```toml
+[tools.mise]
+writable = true    # Allow installing tools
+persistent = false # Discard on exit (or true to persist)
+```
+
+### How Overlay Works
+
+Overlayfs creates a layered filesystem:
+
+```
+┌─────────────────────────────────────┐
+│  Sandbox view (merged)              │  ← What you see inside sandbox
+├─────────────────────────────────────┤
+│  Upper layer (writable)             │  ← New/modified files go here
+├─────────────────────────────────────┤
+│  Lower layer (host, read-only)      │  ← Original host files
+└─────────────────────────────────────┘
+```
+
+- **tmpoverlay** (default): Upper layer is tmpfs, discarded on exit
+- **overlay** (persistent): Upper layer stored in `~/.local/share/devsandbox/<project>/home/overlay/`
+
+### Configuration
+
+Set defaults in `~/.config/devsandbox/config.toml`:
+
+```toml
+[overlay]
+# Master switch - disable to force read-only everywhere
+enabled = true
+
+[tools.mise]
+writable = true    # Allow mise to install tools
+persistent = false # Discard changes on exit (safer)
+```
+
+### Use Cases
+
+- Install project-specific tool versions without polluting host
+- Test new tool versions before committing to them
+- Allow AI assistants to install tools they need temporarily
+
 ## Limitations
 
 - **Linux only** - Uses Linux-specific namespaces and capabilities
 - **User namespaces required** - Most modern distros have this enabled
 - **No nested containers** - Running Docker inside the sandbox is not supported
 - **Some tools may break** - Tools that require specific system access may fail
+- **Overlay requires kernel support** - Most modern kernels (3.18+) support overlayfs

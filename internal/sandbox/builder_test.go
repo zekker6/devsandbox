@@ -138,3 +138,118 @@ func TestBuilder_AddBaseArgs(t *testing.T) {
 		t.Error("AddBaseArgs() missing --gid flag")
 	}
 }
+
+func TestBuilder_OverlaySrc(t *testing.T) {
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.OverlaySrc("/lower1").OverlaySrc("/lower2")
+
+	args := b.Build()
+	expected := []string{
+		"--overlay-src", "/lower1",
+		"--overlay-src", "/lower2",
+	}
+
+	if !reflect.DeepEqual(args, expected) {
+		t.Errorf("OverlaySrc args = %v, want %v", args, expected)
+	}
+}
+
+func TestBuilder_TmpOverlay(t *testing.T) {
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.OverlaySrc("/lower").TmpOverlay("/dest")
+
+	args := b.Build()
+	expected := []string{
+		"--overlay-src", "/lower",
+		"--tmp-overlay", "/dest",
+	}
+
+	if !reflect.DeepEqual(args, expected) {
+		t.Errorf("TmpOverlay args = %v, want %v", args, expected)
+	}
+}
+
+func TestBuilder_Overlay(t *testing.T) {
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.OverlaySrc("/lower").Overlay("/upper", "/work", "/dest")
+
+	args := b.Build()
+	expected := []string{
+		"--overlay-src", "/lower",
+		"--overlay", "/upper", "/work", "/dest",
+	}
+
+	if !reflect.DeepEqual(args, expected) {
+		t.Errorf("Overlay args = %v, want %v", args, expected)
+	}
+}
+
+func TestBuilder_ROOverlay(t *testing.T) {
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.OverlaySrc("/lower1").OverlaySrc("/lower2").ROOverlay("/dest")
+
+	args := b.Build()
+	expected := []string{
+		"--overlay-src", "/lower1",
+		"--overlay-src", "/lower2",
+		"--ro-overlay", "/dest",
+	}
+
+	if !reflect.DeepEqual(args, expected) {
+		t.Errorf("ROOverlay args = %v, want %v", args, expected)
+	}
+}
+
+func TestBuilder_TmpOverlay_PanicWithoutSrc(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("TmpOverlay should panic without preceding OverlaySrc")
+		}
+	}()
+
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.TmpOverlay("/dest") // should panic
+}
+
+func TestBuilder_Overlay_PanicWithoutSrc(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("Overlay should panic without preceding OverlaySrc")
+		}
+	}()
+
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.Overlay("/upper", "/work", "/dest") // should panic
+}
+
+func TestBuilder_ROOverlay_PanicWithoutSrc(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("ROOverlay should panic without preceding OverlaySrc")
+		}
+	}()
+
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.ROOverlay("/dest") // should panic
+}
+
+func TestBuilder_Overlay_ResetsState(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("second TmpOverlay should panic after state reset")
+		}
+	}()
+
+	cfg := &Config{}
+	b := NewBuilder(cfg)
+	b.OverlaySrc("/lower").TmpOverlay("/dest1")
+	// State should be reset, so this should panic
+	b.TmpOverlay("/dest2")
+}
