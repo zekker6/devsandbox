@@ -20,11 +20,12 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
-- refactor tools to more modular approach
-  - each tool should build its own paths/envs to be used
 - add telemetry sending:
   - via otel - send logs/metrics/traces to otlp endpoint. metrics and traces TBD, logs are must
   - syslog - host and remote options
+- add tools management subcommand
+  - allow checking tools availability
+  - allow checking binds/env for tools
 - capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
 - overlayfs usage
   - allow tools to use overlayfs to provide writable fs based on host fs
