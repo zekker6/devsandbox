@@ -10,7 +10,7 @@ import (
 func CheckInstalled() error {
 	_, err := exec.LookPath("bwrap")
 	if err != nil {
-		return errors.New("bubblewrap (bwrap) is not installed\nInstall with: sudo apt install bubblewrap")
+		return errors.New("bubblewrap (bwrap) is not installed\nRun 'devsandbox doctor' for installation instructions")
 	}
 	return nil
 }
@@ -39,7 +39,7 @@ func Exec(bwrapArgs []string, shellCmd []string) error {
 func ExecWithPasta(bwrapArgs []string, shellCmd []string) error {
 	pastaPath, err := exec.LookPath("pasta")
 	if err != nil {
-		return errors.New("pasta is not installed (from passt package)")
+		return errors.New("pasta is not installed (required for proxy mode)\nRun 'devsandbox doctor' for installation instructions")
 	}
 
 	bwrapPath, err := exec.LookPath("bwrap")

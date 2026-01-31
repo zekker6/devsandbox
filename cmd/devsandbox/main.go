@@ -110,7 +110,7 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 		// Without pasta, applications could bypass the proxy entirely.
 		netProvider, err = network.SelectProvider()
 		if err != nil {
-			return fmt.Errorf("proxy mode requires pasta: %w\nInstall with: sudo pacman -S passt (Arch) or apt install passt (Debian/Ubuntu)", err)
+			return fmt.Errorf("proxy mode requires pasta: %w\nRun 'devsandbox doctor' for installation instructions", err)
 		}
 
 		cfg.NetworkIsolated = netProvider.NetworkIsolated()

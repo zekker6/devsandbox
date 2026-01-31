@@ -22,4 +22,3 @@ Linters: golangci + go default linters.
 
 - add telemetry sending via otel
 - capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
-- update error messages when some requirements are not met (e.g. bwrap missing) to suggest using doctor command
