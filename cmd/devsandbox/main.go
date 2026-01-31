@@ -185,7 +185,7 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	bwrapArgs := builder.Build()
 	shellCmd := sandbox.BuildShellCommand(cfg, args)
 
-	debug := os.Getenv("SANDBOX_DEBUG") != ""
+	debug := os.Getenv("DEVSANDBOX_DEBUG") != ""
 	if debug {
 		fmt.Fprintln(os.Stderr, "=== Sandbox Debug ===")
 		fmt.Fprintln(os.Stderr, "bwrap \\")

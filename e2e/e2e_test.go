@@ -126,8 +126,8 @@ func TestSandbox_EnvironmentVariables(t *testing.T) {
 
 	outputStr := string(output)
 	expectedVars := []string{
-		"SANDBOX=1",
-		"SANDBOX_PROJECT=",
+		"DEVSANDBOX=1",
+		"DEVSANDBOX_PROJECT=",
 		"XDG_CONFIG_HOME=",
 		"XDG_DATA_HOME=",
 	}
@@ -427,7 +427,7 @@ func TestSandbox_ProxyEnvironmentVariables(t *testing.T) {
 	expectedVars := []string{
 		"HTTP_PROXY=",
 		"HTTPS_PROXY=",
-		"SANDBOX_PROXY=1",
+		"DEVSANDBOX_PROXY=1",
 		"NODE_EXTRA_CA_CERTS=",
 		"REQUESTS_CA_BUNDLE=",
 	}

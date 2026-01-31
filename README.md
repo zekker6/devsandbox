@@ -130,9 +130,9 @@ Inside the sandbox, several environment variables are set:
 
 | Variable | Value |
 |----------|-------|
-| `SANDBOX` | `1` |
-| `SANDBOX_PROJECT` | Project directory name |
-| `SANDBOX_PROXY` | `1` (only in proxy mode) |
+| `DEVSANDBOX` | `1` |
+| `DEVSANDBOX_PROJECT` | Project directory name |
+| `DEVSANDBOX_PROXY` | `1` (only in proxy mode) |
 | `GOTOOLCHAIN` | `local` (prevents version conflicts) |
 
 ## How It Works
@@ -198,7 +198,7 @@ This verifies:
 
 ```bash
 # Enable debug output (shows bwrap arguments)
-SANDBOX_DEBUG=1 devsandbox
+DEVSANDBOX_DEBUG=1 devsandbox
 ```
 
 ## Limitations
