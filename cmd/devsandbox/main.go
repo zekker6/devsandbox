@@ -172,10 +172,8 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	builder.AddLocaleBindings()
 	builder.AddCABindings()
 	builder.AddSandboxHome()
-	builder.AddToolBindings()
-	builder.AddGitConfig()
+	builder.AddTools() // All tools: shells, mise, nvim, git, AI tools, etc.
 	builder.AddProjectBindings()
-	builder.AddAIToolBindings()
 	builder.AddProxyCACertificate() // Must come after AddBaseArgs (needs /tmp tmpfs)
 	builder.AddEnvironment()
 

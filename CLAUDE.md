@@ -26,6 +26,10 @@ Linters: golangci + go default linters.
   - via otel - send logs/metrics/traces to otlp endpoint. metrics and traces TBD, logs are must
   - syslog - host and remote options
 - capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
+- overlayfs usage
+  - allow tools to use overlayfs to provide writable fs based on host fs
+  - allow to define which paths should be writable/read-only/masked
+  - for example - mise might use writable overlayfs to allow updating/changing tools without affecting host fs
 - http filtering
   - ability to define whitelist/blacklist/ask mode for http(s) requests
 - configuration support
@@ -34,3 +38,15 @@ Linters: golangci + go default linters.
     - allow to generate config from logs for proxy
     - allow to generate config for tools based on detected tools availability
   - allow to configure per-project settings
+- create docs/ with more detailed info about specific use-cases
+  - proxy docs
+  - sandboxing docs
+  - how tools work docs
+  - use-cases docs
+    - cover how to set up autocompletion
+    - useful aliases like "run claude in shell with permissions turned off"
+  - configuration docs
+
+Backlog:
+- macOS support
+- tcp/udp proxying

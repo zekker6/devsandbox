@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"devsandbox/internal/sandbox/tools"
 )
 
 type Builder struct {
@@ -235,65 +237,42 @@ func (b *Builder) AddSandboxHome() *Builder {
 	return b
 }
 
-func (b *Builder) AddToolBindings() *Builder {
+// AddTools applies bindings from all available tools in the registry.
+// Tools are discovered automatically based on what's installed on the host.
+func (b *Builder) AddTools() *Builder {
 	home := b.cfg.HomeDir
+	sandboxHome := b.cfg.SandboxHome
 
-	b.ROBindIfExists(filepath.Join(home, ".local", "bin"), filepath.Join(home, ".local", "bin"))
-
-	// Mise directories - read-only to prevent sandbox from modifying host's tool state
-	miseDirs := []string{
-		filepath.Join(home, ".config", "mise"),
-		filepath.Join(home, ".local", "share", "mise"),
-		filepath.Join(home, ".cache", "mise"),
-		filepath.Join(home, ".local", "state", "mise"),
-	}
-	for _, d := range miseDirs {
-		b.ROBindIfExists(d, d)
-	}
-
-	// Shell-specific config bindings
-	b.AddShellConfigBindings()
-
-	nvimDirs := []struct {
-		path string
-		ro   bool
-	}{
-		{filepath.Join(home, ".config", "nvim"), true},
-		{filepath.Join(home, ".local", "share", "nvim"), true},
-		{filepath.Join(home, ".local", "state", "nvim"), true},
-		{filepath.Join(home, ".cache", "nvim"), true},
-	}
-	for _, d := range nvimDirs {
-		if d.ro {
-			b.ROBindIfExists(d.path, d.path)
-		} else {
-			b.BindIfExists(d.path, d.path)
+	// Run setup for tools that need it (e.g., generate safe gitconfig, starship config)
+	for _, tool := range tools.Available(home) {
+		if setup, ok := tool.(tools.ToolWithSetup); ok {
+			_ = setup.Setup(home, sandboxHome) // Ignore errors, bindings are optional
 		}
 	}
 
-	// Pywal (wal) cache for terminal colors
-	b.ROBindIfExists(filepath.Join(home, ".cache", "wal"), filepath.Join(home, ".cache", "wal"))
+	// Apply bindings from all available tools
+	for _, tool := range tools.Available(home) {
+		for _, binding := range tool.Bindings(home, sandboxHome) {
+			dest := binding.Dest
+			if dest == "" {
+				dest = binding.Source
+			}
 
-	return b
-}
-
-func (b *Builder) AddGitConfig() *Builder {
-	home := b.cfg.HomeDir
-	gitconfigPath := filepath.Join(home, ".gitconfig")
-
-	if !pathExists(gitconfigPath) {
-		return b
-	}
-
-	safeGitconfig := filepath.Join(b.cfg.SandboxHome, ".gitconfig.safe")
-
-	if !pathExists(safeGitconfig) {
-		if err := generateSafeGitconfig(safeGitconfig); err != nil {
-			return b
+			if binding.Optional {
+				if binding.ReadOnly {
+					b.ROBindIfExists(binding.Source, dest)
+				} else {
+					b.BindIfExists(binding.Source, dest)
+				}
+			} else {
+				if binding.ReadOnly {
+					b.ROBind(binding.Source, dest)
+				} else {
+					b.Bind(binding.Source, dest)
+				}
+			}
 		}
 	}
-
-	b.ROBind(safeGitconfig, filepath.Join(home, ".gitconfig"))
 
 	return b
 }
@@ -332,119 +311,11 @@ func (b *Builder) AddProjectBindings() *Builder {
 	return b
 }
 
-func (b *Builder) AddAIToolBindings() *Builder {
-	home := b.cfg.HomeDir
-
-	claudeDirs := []string{
-		filepath.Join(home, ".claude"),
-		filepath.Join(home, ".config", "Claude"),
-		filepath.Join(home, ".cache", "claude-cli-nodejs"),
-		filepath.Join(home, ".local", "share", "claude"), // Claude Code installation
-	}
-	for _, d := range claudeDirs {
-		b.BindIfExists(d, d)
-	}
-
-	claudeFiles := []string{
-		filepath.Join(home, ".claude.json"),
-		filepath.Join(home, ".claude.json.backup"),
-	}
-	for _, f := range claudeFiles {
-		b.BindIfExists(f, f)
-	}
-
-	copilotDirs := []string{
-		filepath.Join(home, ".config", "github-copilot"),
-		filepath.Join(home, ".cache", "github-copilot"),
-	}
-	for _, d := range copilotDirs {
-		b.BindIfExists(d, d)
-	}
-
-	opencodeDirs := []string{
-		filepath.Join(home, ".config", "opencode"),
-		filepath.Join(home, ".local", "share", "opencode"),
-		filepath.Join(home, ".cache", "opencode"),
-		filepath.Join(home, ".cache", "oh-my-opencode"),
-	}
-	for _, d := range opencodeDirs {
-		b.BindIfExists(d, d)
-	}
-
-	return b
-}
-
-func (b *Builder) AddShellConfigBindings() *Builder {
-	home := b.cfg.HomeDir
-
-	switch b.cfg.Shell {
-	case ShellFish:
-		b.ROBindIfExists(filepath.Join(home, ".config", "fish"), filepath.Join(home, ".config", "fish"))
-		b.ROBindIfExists(
-			filepath.Join(home, ".local", "share", "fish", "vendor_completions.d"),
-			filepath.Join(home, ".local", "share", "fish", "vendor_completions.d"),
-		)
-	case ShellZsh:
-		b.ROBindIfExists(filepath.Join(home, ".zshrc"), filepath.Join(home, ".zshrc"))
-		b.ROBindIfExists(filepath.Join(home, ".zshenv"), filepath.Join(home, ".zshenv"))
-		b.ROBindIfExists(filepath.Join(home, ".zprofile"), filepath.Join(home, ".zprofile"))
-		b.ROBindIfExists(filepath.Join(home, ".config", "zsh"), filepath.Join(home, ".config", "zsh"))
-		// Oh-my-zsh and other zsh frameworks
-		b.ROBindIfExists(filepath.Join(home, ".oh-my-zsh"), filepath.Join(home, ".oh-my-zsh"))
-		b.ROBindIfExists(filepath.Join(home, ".local", "share", "zsh"), filepath.Join(home, ".local", "share", "zsh"))
-	case ShellBash:
-		b.ROBindIfExists(filepath.Join(home, ".bashrc"), filepath.Join(home, ".bashrc"))
-		b.ROBindIfExists(filepath.Join(home, ".bash_profile"), filepath.Join(home, ".bash_profile"))
-		b.ROBindIfExists(filepath.Join(home, ".profile"), filepath.Join(home, ".profile"))
-		b.ROBindIfExists(filepath.Join(home, ".config", "bash"), filepath.Join(home, ".config", "bash"))
-	}
-
-	// Starship prompt - create sandbox-aware config
-	b.setupStarshipConfig()
-
-	return b
-}
-
-func (b *Builder) setupStarshipConfig() {
-	home := b.cfg.HomeDir
-	starshipConfig := filepath.Join(home, ".config", "starship.toml")
-
-	if !pathExists(starshipConfig) {
-		return
-	}
-
-	sandboxStarshipConfig := filepath.Join(b.cfg.SandboxHome, ".config", "starship.toml")
-
-	configDir := filepath.Join(b.cfg.SandboxHome, ".config")
-	_ = os.MkdirAll(configDir, 0o755)
-
-	original, err := os.ReadFile(starshipConfig)
-	if err != nil {
-		return
-	}
-
-	indicator := `
-
-# Sandbox indicator (auto-generated by devsandbox)
-[custom.devsandbox]
-command = "echo [sandboxed 🔒]"
-when = true
-format = "[$output]($style) "
-style = "bold red"
-shell = ["sh"]
-`
-	modified := string(original) + indicator
-
-	if err := os.WriteFile(sandboxStarshipConfig, []byte(modified), 0o644); err != nil {
-		return
-	}
-
-	b.ROBind(sandboxStarshipConfig, starshipConfig)
-}
-
 func (b *Builder) AddEnvironment() *Builder {
 	home := b.cfg.HomeDir
+	sandboxHome := b.cfg.SandboxHome
 
+	// Core environment
 	b.SetEnv("HOME", home)
 	b.SetEnv("USER", os.Getenv("USER"))
 	b.SetEnv("LOGNAME", os.Getenv("LOGNAME"))
@@ -456,30 +327,35 @@ func (b *Builder) AddEnvironment() *Builder {
 		home, home)
 	b.SetEnv("PATH", path)
 
+	// XDG directories
 	b.SetEnv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	b.SetEnv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	b.SetEnv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	b.SetEnv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	b.SetEnv("XDG_RUNTIME_DIR", b.cfg.XDGRuntime)
 
-	// Isolate Go environment to prevent version conflicts with host
-	b.SetEnv("GOPATH", filepath.Join(home, "go"))
-	b.SetEnv("GOCACHE", filepath.Join(home, ".cache", "go-build"))
-	b.SetEnv("GOMODCACHE", filepath.Join(home, ".cache", "go-mod"))
-	// Prevent Go from auto-downloading different toolchains which causes version mismatches
-	b.SetEnv("GOTOOLCHAIN", "local")
-
-	b.SetEnv("EDITOR", "nvim")
-	b.SetEnv("VISUAL", "nvim")
-
+	// Terminal settings
 	b.SetEnvIfSet("COLORTERM")
 	b.SetEnvIfSet("COLUMNS")
 	b.SetEnvIfSet("LINES")
 
+	// Mise shell integration
 	b.SetEnv("MISE_SHELL", string(b.cfg.Shell))
 
+	// Sandbox markers
 	b.SetEnv("DEVSANDBOX", "1")
 	b.SetEnv("DEVSANDBOX_PROJECT", b.cfg.ProjectName)
+
+	// Add environment from all available tools
+	for _, tool := range tools.Available(home) {
+		for _, env := range tool.Environment(home, sandboxHome) {
+			if env.FromHost {
+				b.SetEnvIfSet(env.Name)
+			} else {
+				b.SetEnv(env.Name, env.Value)
+			}
+		}
+	}
 
 	// Add proxy environment if enabled
 	if b.cfg.ProxyEnabled {
