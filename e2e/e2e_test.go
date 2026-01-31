@@ -675,6 +675,274 @@ func TestSandbox_ProxyAllowsHTTPSTraffic(t *testing.T) {
 	}
 }
 
+func TestSandbox_ProxyLogsCreated(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	if !networkProviderAvailable() {
+		t.Skip("pasta not available")
+	}
+
+	// Check if curl is available
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not installed on host")
+	}
+
+	// Create a temp project directory to have a known sandbox location
+	tmpDir, err := os.MkdirTemp("", "sandbox-logs-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Make an HTTP request through the proxy
+	cmd := exec.Command(binaryPath, "--proxy",
+		"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+		"--max-time", "10",
+		"http://httpbin.org/get")
+	cmd.Dir = tmpDir
+
+	output, err := cmd.CombinedOutput()
+	outputStr := strings.TrimSpace(string(output))
+
+	// Check if request succeeded
+	if strings.Contains(outputStr, "000") {
+		t.Skip("Network not available in test environment")
+	}
+
+	if !strings.Contains(outputStr, "200") {
+		if err != nil {
+			t.Skipf("HTTP request failed (network issue?): %v\nOutput: %s", err, outputStr)
+		}
+	}
+
+	// Now verify logs were created by using `devsandbox logs proxy`
+	// The sandbox stores logs in ~/.local/share/devsandbox/<project-name>/logs/proxy/
+	logsCmd := exec.Command(binaryPath, "logs", "proxy", "--last", "10", "--json")
+	logsCmd.Dir = tmpDir
+	logsOutput, logsErr := logsCmd.CombinedOutput()
+
+	if logsErr != nil {
+		t.Fatalf("logs proxy command failed: %v\nOutput: %s", logsErr, logsOutput)
+	}
+
+	logsStr := string(logsOutput)
+
+	// Should contain the httpbin.org request
+	if !strings.Contains(logsStr, "httpbin.org") {
+		t.Errorf("logs proxy output should contain httpbin.org request, got: %s", logsStr)
+	}
+
+	// Should be valid JSON with expected fields
+	if !strings.Contains(logsStr, `"method"`) {
+		t.Errorf("logs proxy output should contain method field, got: %s", logsStr)
+	}
+	if !strings.Contains(logsStr, `"status"`) {
+		t.Errorf("logs proxy output should contain status field, got: %s", logsStr)
+	}
+}
+
+func TestSandbox_ProxyLogsFiltering(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	if !networkProviderAvailable() {
+		t.Skip("pasta not available")
+	}
+
+	// Check if curl is available
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not installed on host")
+	}
+
+	// Create a temp project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-logs-filter-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Make multiple requests - one GET and one POST
+	cmds := []struct {
+		method string
+		args   []string
+	}{
+		{"GET", []string{"--proxy", "curl", "-s", "-o", "/dev/null", "--max-time", "10", "http://httpbin.org/get"}},
+		{"POST", []string{"--proxy", "curl", "-s", "-o", "/dev/null", "-X", "POST", "--max-time", "10", "http://httpbin.org/post"}},
+	}
+
+	for _, c := range cmds {
+		cmd := exec.Command(binaryPath, c.args...)
+		cmd.Dir = tmpDir
+		output, _ := cmd.CombinedOutput()
+		// Skip if network unavailable
+		if strings.Contains(string(output), "000") {
+			t.Skip("Network not available in test environment")
+		}
+	}
+
+	t.Run("filter_by_method", func(t *testing.T) {
+		// Filter for POST only
+		logsCmd := exec.Command(binaryPath, "logs", "proxy", "--method", "POST", "--json")
+		logsCmd.Dir = tmpDir
+		logsOutput, err := logsCmd.CombinedOutput()
+
+		if err != nil {
+			t.Fatalf("logs proxy --method POST failed: %v\nOutput: %s", err, logsOutput)
+		}
+
+		logsStr := string(logsOutput)
+		// Should contain POST request (JSON has space after colon)
+		if !strings.Contains(logsStr, `"method": "POST"`) {
+			t.Errorf("filtered logs should contain POST method, got: %s", logsStr)
+		}
+	})
+
+	t.Run("filter_by_url", func(t *testing.T) {
+		// Filter by URL substring
+		logsCmd := exec.Command(binaryPath, "logs", "proxy", "--url", "/get", "--json")
+		logsCmd.Dir = tmpDir
+		logsOutput, err := logsCmd.CombinedOutput()
+
+		if err != nil {
+			t.Fatalf("logs proxy --url /get failed: %v\nOutput: %s", err, logsOutput)
+		}
+
+		logsStr := string(logsOutput)
+		// Should contain /get URL
+		if !strings.Contains(logsStr, "/get") {
+			t.Errorf("filtered logs should contain /get URL, got: %s", logsStr)
+		}
+	})
+
+	t.Run("compact_output", func(t *testing.T) {
+		// Test compact output format
+		logsCmd := exec.Command(binaryPath, "logs", "proxy", "--compact", "--last", "5")
+		logsCmd.Dir = tmpDir
+		logsOutput, err := logsCmd.CombinedOutput()
+
+		if err != nil {
+			t.Fatalf("logs proxy --compact failed: %v\nOutput: %s", err, logsOutput)
+		}
+
+		logsStr := string(logsOutput)
+		// Compact format should have method and status visible
+		if !strings.Contains(logsStr, "GET") && !strings.Contains(logsStr, "POST") {
+			t.Errorf("compact output should show HTTP method, got: %s", logsStr)
+		}
+	})
+
+	t.Run("stats_output", func(t *testing.T) {
+		// Test stats summary
+		logsCmd := exec.Command(binaryPath, "logs", "proxy", "--stats")
+		logsCmd.Dir = tmpDir
+		logsOutput, err := logsCmd.CombinedOutput()
+
+		if err != nil {
+			t.Fatalf("logs proxy --stats failed: %v\nOutput: %s", err, logsOutput)
+		}
+
+		logsStr := string(logsOutput)
+		// Stats should show summary
+		if !strings.Contains(logsStr, "Total") {
+			t.Errorf("stats output should show Total, got: %s", logsStr)
+		}
+	})
+}
+
+func TestLogs_CommandHelp(t *testing.T) {
+	// Test that logs command help works
+	cmd := exec.Command(binaryPath, "logs", "--help")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("logs --help failed: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := string(output)
+	expectedStrings := []string{
+		"proxy",
+		"internal",
+		"View proxy and internal logs",
+	}
+
+	for _, expected := range expectedStrings {
+		if !strings.Contains(outputStr, expected) {
+			t.Errorf("logs --help output missing %q", expected)
+		}
+	}
+}
+
+func TestLogs_ProxyHelp(t *testing.T) {
+	// Test that logs proxy help shows all filter options
+	cmd := exec.Command(binaryPath, "logs", "proxy", "--help")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("logs proxy --help failed: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := string(output)
+	expectedFlags := []string{
+		"--last",
+		"--follow",
+		"--json",
+		"--url",
+		"--method",
+		"--status",
+		"--since",
+		"--errors",
+		"--compact",
+		"--stats",
+	}
+
+	for _, expected := range expectedFlags {
+		if !strings.Contains(outputStr, expected) {
+			t.Errorf("logs proxy --help output missing %q", expected)
+		}
+	}
+}
+
+func TestLogs_InternalHelp(t *testing.T) {
+	// Test that logs internal help shows options
+	cmd := exec.Command(binaryPath, "logs", "internal", "--help")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("logs internal --help failed: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := string(output)
+	expectedFlags := []string{
+		"--last",
+		"--follow",
+		"--type",
+		"--since",
+	}
+
+	for _, expected := range expectedFlags {
+		if !strings.Contains(outputStr, expected) {
+			t.Errorf("logs internal --help output missing %q", expected)
+		}
+	}
+}
+
+func TestSandboxes_DeprecatedLogsRemoved(t *testing.T) {
+	// Verify that the deprecated 'sandboxes logs' command no longer exists
+	// by checking that 'logs' is not listed as a subcommand
+	cmd := exec.Command(binaryPath, "sandboxes", "--help")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxes --help failed: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := string(output)
+	// 'logs' should NOT be in the available commands
+	// The help shows "Available Commands:" followed by command names
+	if strings.Contains(outputStr, "  logs") {
+		t.Errorf("'sandboxes logs' should be removed, but found 'logs' in help output: %s", outputStr)
+	}
+}
+
 func bwrapAvailable() bool {
 	_, err := exec.LookPath("bwrap")
 	return err == nil

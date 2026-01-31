@@ -20,6 +20,14 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
+- create docs/ with more detailed info about specific use-cases
+  - proxy docs
+  - sandboxing docs
+  - how tools work docs
+  - use-cases docs
+    - cover how to set up autocompletion
+    - useful aliases like "run claude in shell with permissions turned off"
+  - configuration docs
 - add tools management subcommand
   - allow checking tools availability
   - allow checking binds/env for tools
@@ -31,19 +39,14 @@ Linters: golangci + go default linters.
 - http filtering
   - ability to define whitelist/blacklist/ask mode for http(s) requests
 - configuration support
-  - support config file in toml
   - allow to configure tools to be enabled, proxy config
     - allow to generate config from logs for proxy
     - allow to generate config for tools based on detected tools availability
   - allow to configure per-project settings
-- create docs/ with more detailed info about specific use-cases
-  - proxy docs
-  - sandboxing docs
-  - how tools work docs
-  - use-cases docs
-    - cover how to set up autocompletion
-    - useful aliases like "run claude in shell with permissions turned off"
-  - configuration docs
+- improve doctor
+  - check internal logs for recent issues
+  - check overlayfs support
+  - check available tools and their versions
 
 Backlog:
 - macOS support

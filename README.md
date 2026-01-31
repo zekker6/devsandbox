@@ -181,6 +181,61 @@ devsandbox sandboxes prune --all
 devsandbox sandboxes prune --dry-run
 ```
 
+## Viewing Logs
+
+View proxy request logs and internal logs with the `logs` command.
+
+### Proxy Logs
+
+View HTTP/HTTPS traffic captured in proxy mode:
+
+```bash
+# View all proxy logs for current project
+devsandbox logs proxy
+
+# View last 50 requests
+devsandbox logs proxy --last 50
+
+# Follow/tail logs in real-time
+devsandbox logs proxy -f
+
+# Filter by time
+devsandbox logs proxy --since 1h        # Last hour
+devsandbox logs proxy --since today     # Since midnight
+devsandbox logs proxy --since 2024-01-15  # Since specific date
+
+# Filter by content
+devsandbox logs proxy --url /api        # URL contains "/api"
+devsandbox logs proxy --method POST     # Only POST requests
+devsandbox logs proxy --status 400-599  # Client/server errors
+devsandbox logs proxy --errors          # All errors (status >= 400)
+
+# Output formats
+devsandbox logs proxy --json            # JSON output
+devsandbox logs proxy --compact         # One-line format
+devsandbox logs proxy --stats           # Show summary statistics
+devsandbox logs proxy --body            # Include request/response bodies
+```
+
+### Internal Logs
+
+View proxy server errors and logging failures:
+
+```bash
+# View all internal logs
+devsandbox logs internal
+
+# View specific log type
+devsandbox logs internal --type proxy   # Proxy server warnings/errors
+devsandbox logs internal --type logging # Remote logging failures
+
+# Follow internal logs
+devsandbox logs internal -f
+
+# Show last N lines
+devsandbox logs internal --last 100
+```
+
 ## Configuration
 
 devsandbox can be configured via a TOML file at `~/.config/devsandbox/config.toml`.
