@@ -62,7 +62,7 @@ func NewConfig() (*Config, error) {
 		xdgRuntime = filepath.Join("/run/user", string(rune(os.Getuid())))
 	}
 
-	shell, shellPath := detectShell()
+	shell, shellPath := DetectShell()
 
 	return &Config{
 		HomeDir:     homeDir,
@@ -76,8 +76,7 @@ func NewConfig() (*Config, error) {
 	}, nil
 }
 
-// detectShell detects the current shell from SHELL environment variable
-func detectShell() (Shell, string) {
+func DetectShell() (Shell, string) {
 	shellEnv := os.Getenv("SHELL")
 	if shellEnv == "" {
 		shellEnv = "/bin/bash" // Default fallback

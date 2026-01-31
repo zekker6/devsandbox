@@ -179,6 +179,21 @@ devsandbox sandboxes prune --all
 devsandbox sandboxes prune --dry-run
 ```
 
+## Troubleshooting
+
+Check your installation with the doctor command:
+
+```bash
+devsandbox doctor
+```
+
+This verifies:
+- Required binaries (bwrap, shell)
+- Optional binaries (pasta for proxy mode)
+- User namespace support
+- Directory permissions and writability
+- Kernel version
+
 ## Debugging
 
 ```bash

@@ -209,12 +209,12 @@ func TestDetectShell(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("SHELL", tt.shellEnv)
-			shell, path := detectShell()
+			shell, path := DetectShell()
 			if shell != tt.expectedShell {
-				t.Errorf("detectShell() shell = %v, want %v", shell, tt.expectedShell)
+				t.Errorf("DetectShell() shell = %v, want %v", shell, tt.expectedShell)
 			}
 			if path != tt.expectedPath {
-				t.Errorf("detectShell() path = %v, want %v", path, tt.expectedPath)
+				t.Errorf("DetectShell() path = %v, want %v", path, tt.expectedPath)
 			}
 		})
 	}
