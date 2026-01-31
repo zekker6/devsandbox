@@ -38,7 +38,7 @@ func NewConfig(sandboxBase string, port int, logEnabled bool) *Config {
 }
 
 func DefaultConfig(homeDir string) *Config {
-	sandboxBase := filepath.Join(homeDir, ".sandboxes")
+	sandboxBase := filepath.Join(homeDir, ".local", "share", "devsandbox")
 	return NewConfig(sandboxBase, DefaultProxyPort, false)
 }
 

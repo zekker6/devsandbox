@@ -43,4 +43,11 @@ tasks:
 
   build:
     cmds:
+      - mkdir -p bin
       - go build -ldflags "-X main.version={{.GIT_COMMIT}} -X main.date={{.BUILD_DATE}}" -o bin/devsandbox ./cmd/devsandbox
+
+  archive:
+    deps:
+      - build
+    cmds:
+      - zip -j bin/devsandbox_{{.GIT_COMMIT}}.zip bin/devsandbox README.md

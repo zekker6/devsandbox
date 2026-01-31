@@ -22,6 +22,6 @@ Linters: golangci + go default linters.
 
 - add telemetry sending via otel
 - capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
-- subcommand to prune sandboxes
 - subcommand "doctor" - to check if everything is ok with the installation
 - restore file logger rotation
+- collision for sandboxes names from same folders

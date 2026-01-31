@@ -123,9 +123,27 @@ func (c *Config) EnsureSandboxDirs() error {
 		}
 	}
 
+	metadataPath := filepath.Join(c.SandboxRoot, MetadataFile)
+	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
+		m := CreateMetadata(c)
+		if err := SaveMetadata(m, c.SandboxRoot); err != nil {
+			return err
+		}
+	} else {
+		m, err := LoadMetadata(c.SandboxRoot)
+		if err == nil {
+			_ = m.UpdateLastUsed()
+		}
+	}
+
 	return nil
 }
 
 func (c *Config) SandboxBase() string {
 	return filepath.Join(c.HomeDir, ".local", "share", SandboxBaseDir)
+}
+
+// SandboxBasePath returns the base path for all sandboxes given a home directory
+func SandboxBasePath(homeDir string) string {
+	return filepath.Join(homeDir, ".local", "share", SandboxBaseDir)
 }

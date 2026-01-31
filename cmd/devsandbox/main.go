@@ -36,12 +36,13 @@ Security Model:
   - SSH: BLOCKED (no ~/.ssh access)
   - Git: read-only (can view history, cannot push)
   - .env files: BLOCKED (overlaid with /dev/null)
-  - Home directory: sandboxed per-project in ~/.sandboxes/<project>/
+  - Home directory: sandboxed per-project in ~/.local/share/devsandbox/<project>/
 
 Proxy Mode (--proxy):
   - All HTTP/HTTPS traffic routed through local proxy
   - MITM proxy with auto-generated CA certificate
-  - Network isolated via pasta (requires passt package)`,
+  - Network isolated via pasta (requires passt package)
+  - Request logs: ~/.local/share/devsandbox/<project>/proxy-logs/`,
 		Example: `  devsandbox                      # Interactive shell
   devsandbox npm install          # Install packages
   devsandbox --proxy npm install  # With proxy (traffic inspection)
@@ -61,6 +62,9 @@ Proxy Mode (--proxy):
 	rootCmd.Flags().Bool("proxy", false, "Enable proxy mode (route traffic through MITM proxy)")
 	rootCmd.Flags().Int("proxy-port", proxy.DefaultProxyPort, "Proxy server port")
 	rootCmd.Flags().Bool("proxy-log", false, "Log all HTTP/HTTPS requests through proxy")
+
+	// Add subcommands
+	rootCmd.AddCommand(newSandboxesCmd())
 
 	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox v%s (commit: %s, built: %s)\n", appVersion, version, date))
 

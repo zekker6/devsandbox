@@ -10,7 +10,7 @@ func TestBuilder_BasicArgs(t *testing.T) {
 		HomeDir:     "/home/test",
 		ProjectDir:  "/home/test/myproject",
 		ProjectName: "myproject",
-		SandboxHome: "/home/test/.sandboxes/myproject",
+		SandboxHome: "/home/test/.local/share/devsandbox/myproject/home",
 		XDGRuntime:  "/run/user/1000",
 	}
 

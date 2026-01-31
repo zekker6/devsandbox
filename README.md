@@ -142,6 +142,43 @@ Inside the sandbox, several environment variables are set:
 3. **Network isolation** (proxy mode): pasta creates a user-mode network namespace with NAT
 4. **Traffic enforcement** (proxy mode): iptables rules block all traffic except to the gateway IP
 
+## Managing Sandboxes
+
+List all sandbox instances:
+
+```bash
+# List sandboxes
+devsandbox sandboxes list
+
+# With sizes (slower, calculates disk usage)
+devsandbox sandboxes list --size
+
+# JSON output for scripting
+devsandbox sandboxes list --json
+
+# Sort by last used
+devsandbox sandboxes list --sort used
+```
+
+Prune stale sandboxes:
+
+```bash
+# Remove only orphaned sandboxes (project dir no longer exists)
+devsandbox sandboxes prune
+
+# Keep 5 most recently used, remove the rest
+devsandbox sandboxes prune --keep 5
+
+# Remove sandboxes not used in 30 days
+devsandbox sandboxes prune --older-than 30d
+
+# Remove all sandboxes
+devsandbox sandboxes prune --all
+
+# Preview what would be removed
+devsandbox sandboxes prune --dry-run
+```
+
 ## Debugging
 
 ```bash
