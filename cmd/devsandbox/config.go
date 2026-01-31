@@ -50,6 +50,29 @@ func newConfigShowCmd() *cobra.Command {
 				basePath = "(default)"
 			}
 			fmt.Printf("  base_path = %s\n", basePath)
+			fmt.Println()
+
+			fmt.Println("[logging]")
+			if len(cfg.Logging.Receivers) == 0 {
+				fmt.Println("  receivers = (none)")
+			} else {
+				for i, r := range cfg.Logging.Receivers {
+					fmt.Printf("  [[receivers]] #%d\n", i+1)
+					fmt.Printf("    type = %s\n", r.Type)
+					if r.Address != "" {
+						fmt.Printf("    address = %s\n", r.Address)
+					}
+					if r.Endpoint != "" {
+						fmt.Printf("    endpoint = %s\n", r.Endpoint)
+					}
+					if r.Facility != "" {
+						fmt.Printf("    facility = %s\n", r.Facility)
+					}
+					if r.Tag != "" {
+						fmt.Printf("    tag = %s\n", r.Tag)
+					}
+				}
+			}
 
 			return nil
 		},

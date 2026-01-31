@@ -50,7 +50,8 @@ func NewRotatingFileWriter(cfg RotatingFileWriterConfig) (*RotatingFileWriter, e
 		cfg: cfg,
 	}
 
-	if err := w.rotate(); err != nil {
+	// Try to reuse the last file if it's under the size limit
+	if err := w.openOrRotate(); err != nil {
 		return nil, err
 	}
 
@@ -83,6 +84,28 @@ func (w *RotatingFileWriter) Write(p []byte) (n int, err error) {
 	}
 
 	return n, nil
+}
+
+// openOrRotate tries to reuse the last file if under size limit, otherwise creates new
+func (w *RotatingFileWriter) openOrRotate() error {
+	// Find the latest file for today
+	lastFile, lastSize := w.findLastFile()
+
+	if lastFile != "" && lastSize < w.cfg.MaxSize {
+		// Reuse existing file - gzip streams can be concatenated
+		file, err := os.OpenFile(lastFile, os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			// Fall back to creating new file
+			return w.rotate()
+		}
+
+		w.file = file
+		w.gzWriter = gzip.NewWriter(file)
+		w.written = lastSize
+		return nil
+	}
+
+	return w.rotate()
 }
 
 func (w *RotatingFileWriter) rotate() error {
@@ -123,6 +146,27 @@ func (w *RotatingFileWriter) findNextIndex() int {
 	pattern := filepath.Join(w.cfg.Dir, fmt.Sprintf("%s_%s_*%s", w.cfg.Prefix, today, w.cfg.Suffix))
 	matches, _ := filepath.Glob(pattern)
 	return len(matches)
+}
+
+// findLastFile returns the most recent file for today and its size
+func (w *RotatingFileWriter) findLastFile() (string, int64) {
+	today := time.Now().Format("20060102")
+	pattern := filepath.Join(w.cfg.Dir, fmt.Sprintf("%s_%s_*%s", w.cfg.Prefix, today, w.cfg.Suffix))
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return "", 0
+	}
+
+	// Sort to get the latest (highest index)
+	sort.Strings(matches)
+	lastFile := matches[len(matches)-1]
+
+	info, err := os.Stat(lastFile)
+	if err != nil {
+		return "", 0
+	}
+
+	return lastFile, info.Size()
 }
 
 func (w *RotatingFileWriter) pruneOldFiles() {

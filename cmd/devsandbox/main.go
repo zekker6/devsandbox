@@ -14,15 +14,8 @@ import (
 	"devsandbox/internal/network"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
+	"devsandbox/internal/version"
 )
-
-// Set via ldflags at build time
-var (
-	version = "dev"
-	date    = "unknown"
-)
-
-const appVersion = "1.0.0"
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -43,13 +36,13 @@ Proxy Mode (--proxy):
   - All HTTP/HTTPS traffic routed through local proxy
   - MITM proxy with auto-generated CA certificate
   - Network isolated via pasta (requires passt package)
-  - Request logs: ~/.local/share/devsandbox/<project>/proxy-logs/`,
+  - Request logs: ~/.local/share/devsandbox/<project>/logs/proxy/`,
 		Example: `  devsandbox                      # Interactive shell
   devsandbox npm install          # Install packages
   devsandbox --proxy npm install  # With proxy (traffic inspection)
   devsandbox claude --dangerously-skip-permissions
   devsandbox bun run dev`,
-		Version:               appVersion,
+		Version:               version.Version,
 		Args:                  cobra.ArbitraryArgs,
 		DisableFlagsInUseLine: true,
 		SilenceUsage:          true,
@@ -68,7 +61,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newDoctorCmd())
 	rootCmd.AddCommand(newConfigCmd())
 
-	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox v%s (commit: %s, built: %s)\n", appVersion, version, date))
+	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox v%s (commit: %s, built: %s)\n", version.Version, version.Commit, version.Date))
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -143,6 +136,8 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 
 		// Set up proxy
 		proxyCfg := proxy.NewConfig(cfg.SandboxRoot, proxyPort)
+		proxyCfg.LogReceivers = appCfg.Logging.Receivers
+		proxyCfg.LogAttributes = appCfg.Logging.Attributes
 		proxyServer, err = proxy.NewServer(proxyCfg)
 		if err != nil {
 			return fmt.Errorf("failed to create proxy server: %w", err)
@@ -253,7 +248,7 @@ func printInfo(cfg *sandbox.Config) {
 		fmt.Println()
 		fmt.Println("Proxy Mode:")
 		fmt.Printf("  Port:     %d\n", cfg.ProxyPort)
-		fmt.Printf("  Log Dir:  %s/proxy-logs/\n", cfg.SandboxRoot)
+		fmt.Printf("  Log Dir:  %s/logs/proxy/\n", cfg.SandboxRoot)
 		fmt.Printf("  CA Path:  %s\n", cfg.ProxyCAPath)
 		fmt.Printf("  Gateway:  %s\n", cfg.GatewayIP)
 	}

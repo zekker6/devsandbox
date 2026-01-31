@@ -134,3 +134,83 @@ func TestRotatingFileWriter_Pruning(t *testing.T) {
 		t.Errorf("expected at most 2 files after pruning, got %d", len(files))
 	}
 }
+
+func TestRotatingFileWriter_ReuseExistingFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "filewriter-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	cfg := RotatingFileWriterConfig{
+		Dir:      tmpDir,
+		Prefix:   "test",
+		Suffix:   ".log.gz",
+		MaxSize:  1024, // Large enough to not rotate
+		MaxFiles: 3,
+	}
+
+	// First writer - write some data
+	w1, err := NewRotatingFileWriter(cfg)
+	if err != nil {
+		t.Fatalf("NewRotatingFileWriter 1 failed: %v", err)
+	}
+	_, err = w1.Write([]byte("first message\n"))
+	if err != nil {
+		t.Fatalf("Write 1 failed: %v", err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("Close 1 failed: %v", err)
+	}
+
+	// Count files after first writer
+	files1, _ := filepath.Glob(filepath.Join(tmpDir, "test_*.log.gz"))
+	if len(files1) != 1 {
+		t.Fatalf("expected 1 file after first writer, got %d", len(files1))
+	}
+
+	// Second writer - should reuse the same file
+	w2, err := NewRotatingFileWriter(cfg)
+	if err != nil {
+		t.Fatalf("NewRotatingFileWriter 2 failed: %v", err)
+	}
+	_, err = w2.Write([]byte("second message\n"))
+	if err != nil {
+		t.Fatalf("Write 2 failed: %v", err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatalf("Close 2 failed: %v", err)
+	}
+
+	// Should still have only 1 file (reused)
+	files2, _ := filepath.Glob(filepath.Join(tmpDir, "test_*.log.gz"))
+	if len(files2) != 1 {
+		t.Errorf("expected 1 file after reuse, got %d (file was not reused)", len(files2))
+	}
+
+	// Read the file and verify both messages are present
+	// Note: gzip streams are concatenated, so we need a multi-stream reader
+	f, _ := os.Open(files2[0])
+	defer func() { _ = f.Close() }()
+
+	var allContent bytes.Buffer
+	for {
+		gz, err := gzip.NewReader(f)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("gzip.NewReader failed: %v", err)
+		}
+		_, _ = io.Copy(&allContent, gz)
+		_ = gz.Close()
+	}
+
+	content := allContent.String()
+	if !strings.Contains(content, "first message") {
+		t.Errorf("content missing 'first message': %q", content)
+	}
+	if !strings.Contains(content, "second message") {
+		t.Errorf("content missing 'second message': %q", content)
+	}
+}

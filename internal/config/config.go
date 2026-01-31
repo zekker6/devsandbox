@@ -15,6 +15,9 @@ type Config struct {
 
 	// Sandbox contains sandbox settings.
 	Sandbox SandboxConfig `toml:"sandbox"`
+
+	// Logging contains remote logging settings.
+	Logging LoggingConfig `toml:"logging"`
 }
 
 // ProxyConfig contains proxy-related configuration.
@@ -31,6 +34,50 @@ type SandboxConfig struct {
 	// BasePath is the directory where sandbox homes are stored.
 	// Defaults to ~/.local/share/devsandbox if not set.
 	BasePath string `toml:"base_path"`
+}
+
+// LoggingConfig contains remote logging configuration.
+type LoggingConfig struct {
+	// Receivers is a list of remote log destinations.
+	Receivers []ReceiverConfig `toml:"receivers"`
+
+	// Attributes are custom key-value pairs added to all log entries.
+	Attributes map[string]string `toml:"attributes"`
+}
+
+// ReceiverConfig defines a single log receiver.
+type ReceiverConfig struct {
+	// Type is the receiver type: "syslog", "syslog-remote", or "otlp".
+	Type string `toml:"type"`
+
+	// Address is the remote server address (for syslog-remote and otlp).
+	Address string `toml:"address"`
+
+	// Endpoint is the OTLP endpoint URL (alias for Address, for otlp type).
+	Endpoint string `toml:"endpoint"`
+
+	// Protocol is the transport protocol:
+	// - For syslog-remote: "udp" or "tcp" (default: udp)
+	// - For otlp: "http" or "grpc" (default: http)
+	Protocol string `toml:"protocol"`
+
+	// Facility is the syslog facility (e.g., "local0").
+	Facility string `toml:"facility"`
+
+	// Tag is the syslog program tag.
+	Tag string `toml:"tag"`
+
+	// Headers are custom HTTP headers for OTLP.
+	Headers map[string]string `toml:"headers"`
+
+	// BatchSize is the OTLP batch size before flush.
+	BatchSize int `toml:"batch_size"`
+
+	// FlushInterval is the OTLP flush interval (e.g., "5s").
+	FlushInterval string `toml:"flush_interval"`
+
+	// Insecure disables TLS verification for gRPC connections.
+	Insecure bool `toml:"insecure"`
 }
 
 // DefaultConfig returns a Config with default values.
@@ -136,5 +183,46 @@ port = 8080
 # Base directory for sandbox homes
 # Defaults to ~/.local/share/devsandbox if not set
 # base_path = "~/.local/share/devsandbox"
+
+# Remote logging configuration
+# Proxy logs can be forwarded to remote destinations
+[logging]
+
+# Custom attributes added to all log entries
+# [logging.attributes]
+# environment = "development"
+# host = "myhost"
+
+# Example: Local syslog
+# [[logging.receivers]]
+# type = "syslog"
+# facility = "local0"
+# tag = "devsandbox"
+
+# Example: Remote syslog server
+# [[logging.receivers]]
+# type = "syslog-remote"
+# address = "logs.example.com:514"
+# protocol = "udp"  # or "tcp"
+# facility = "local0"
+# tag = "devsandbox"
+
+# Example: OpenTelemetry collector (HTTP)
+# [[logging.receivers]]
+# type = "otlp"
+# endpoint = "http://localhost:4318/v1/logs"
+# protocol = "http"  # default
+# headers = { "Authorization" = "Bearer token" }
+# batch_size = 100
+# flush_interval = "5s"
+
+# Example: OpenTelemetry collector (gRPC)
+# [[logging.receivers]]
+# type = "otlp"
+# endpoint = "localhost:4317"
+# protocol = "grpc"
+# insecure = true  # disable TLS for local testing
+# batch_size = 100
+# flush_interval = "5s"
 `
 }

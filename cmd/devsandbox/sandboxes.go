@@ -320,7 +320,7 @@ If no sandbox name is provided, uses the current directory's sandbox.`,
 
 			baseDir := sandbox.SandboxBasePath(homeDir)
 			sandboxRoot := filepath.Join(baseDir, name)
-			logDir := filepath.Join(sandboxRoot, proxy.LogDirName)
+			logDir := filepath.Join(sandboxRoot, proxy.LogBaseDirName, proxy.ProxyLogDirName)
 
 			// Check if log directory exists
 			if _, err := os.Stat(logDir); os.IsNotExist(err) {

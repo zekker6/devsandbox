@@ -20,9 +20,6 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
-- add telemetry sending:
-  - via otel - send logs/metrics/traces to otlp endpoint. metrics and traces TBD, logs are must
-  - syslog - host and remote options
 - add tools management subcommand
   - allow checking tools availability
   - allow checking binds/env for tools

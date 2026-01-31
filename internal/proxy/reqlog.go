@@ -3,10 +3,13 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
 	"time"
+
+	"devsandbox/internal/logging"
 )
 
 const (
@@ -29,13 +32,16 @@ type RequestLog struct {
 }
 
 // RequestLogger writes HTTP request/response logs to rotating gzip-compressed files
+// and optionally forwards them to remote destinations.
 type RequestLogger struct {
-	writer *RotatingFileWriter
-	mu     sync.Mutex
+	writer     *RotatingFileWriter
+	dispatcher *logging.Dispatcher
+	mu         sync.Mutex
 }
 
-// NewRequestLogger creates a new request logger
-func NewRequestLogger(dir string) (*RequestLogger, error) {
+// NewRequestLogger creates a new request logger.
+// If dispatcher is provided, logs will also be forwarded to remote destinations.
+func NewRequestLogger(dir string, dispatcher *logging.Dispatcher) (*RequestLogger, error) {
 	writer, err := NewRotatingFileWriter(RotatingFileWriterConfig{
 		Dir:    dir,
 		Prefix: RequestLogPrefix,
@@ -46,11 +52,12 @@ func NewRequestLogger(dir string) (*RequestLogger, error) {
 	}
 
 	return &RequestLogger{
-		writer: writer,
+		writer:     writer,
+		dispatcher: dispatcher,
 	}, nil
 }
 
-// Log writes a request/response pair to the log
+// Log writes a request/response pair to the log and forwards to remote destinations.
 func (rl *RequestLogger) Log(entry *RequestLog) error {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -61,8 +68,39 @@ func (rl *RequestLogger) Log(entry *RequestLog) error {
 	}
 	data = append(data, '\n')
 
+	// Write to local file
 	_, err = rl.writer.Write(data)
+
+	// Forward to remote destinations (if configured)
+	if rl.dispatcher != nil && rl.dispatcher.HasWriters() {
+		logEntry := rl.toLogEntry(entry)
+		_ = rl.dispatcher.Write(logEntry) // Don't fail on remote errors
+	}
+
 	return err
+}
+
+// toLogEntry converts a RequestLog to a logging.Entry for remote forwarding.
+func (rl *RequestLogger) toLogEntry(req *RequestLog) *logging.Entry {
+	level := logging.LevelInfo
+	if req.Error != "" {
+		level = logging.LevelError
+	} else if req.StatusCode >= 400 {
+		level = logging.LevelWarn
+	}
+
+	return &logging.Entry{
+		Timestamp: req.Timestamp,
+		Level:     level,
+		Message:   fmt.Sprintf("%s %s %d", req.Method, req.URL, req.StatusCode),
+		Fields: map[string]any{
+			"method":      req.Method,
+			"url":         req.URL,
+			"status":      req.StatusCode,
+			"duration_ms": req.Duration.Milliseconds(),
+			"error":       req.Error,
+		},
+	}
 }
 
 // LogRequest captures request details and returns a log entry
@@ -110,8 +148,11 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 	return respBody
 }
 
-// Close closes the logger
+// Close closes the logger and flushes remote destinations.
 func (rl *RequestLogger) Close() error {
+	if rl.dispatcher != nil {
+		_ = rl.dispatcher.Close()
+	}
 	return rl.writer.Close()
 }
 

@@ -94,7 +94,7 @@ In proxy mode:
 - Network is isolated via pasta (user-mode networking)
 - All traffic must go through the proxy (enforced via iptables)
 - A CA certificate is auto-generated for HTTPS interception
-- Requests are logged to `~/.local/share/devsandbox/<project>/proxy-logs/`
+- Requests are logged to `~/.local/share/devsandbox/<project>/logs/proxy/`
 
 The CA certificate is automatically configured for common tools via environment variables:
 - `NODE_EXTRA_CA_CERTS`
@@ -118,8 +118,12 @@ Sandbox data is stored following XDG conventions:
 ├── .ca/            # Proxy CA certificate and key
 │   ├── ca.crt
 │   └── ca.key
-└── proxy-logs/     # HTTP request/response logs (gzip compressed)
-    └── requests_20240115_0000.jsonl.gz
+└── logs/
+    ├── proxy/      # HTTP request/response logs (gzip compressed)
+    │   └── requests_20240115_0000.jsonl.gz
+    └── internal/   # Internal logs
+        ├── proxy_20240115_0000.log.gz   # Proxy server warnings/errors
+        └── logging-errors.log            # Remote logging failures
 ```
 
 ## Environment Variables
@@ -175,6 +179,114 @@ devsandbox sandboxes prune --all
 
 # Preview what would be removed
 devsandbox sandboxes prune --dry-run
+```
+
+## Configuration
+
+devsandbox can be configured via a TOML file at `~/.config/devsandbox/config.toml`.
+
+Generate a default config file:
+
+```bash
+devsandbox config init
+```
+
+### Configuration Options
+
+```toml
+# Proxy mode settings
+[proxy]
+# Enable proxy mode by default (can be overridden with --proxy flag)
+enabled = false
+
+# Default proxy server port
+port = 8080
+
+# Sandbox settings
+[sandbox]
+# Base directory for sandbox homes
+# Defaults to ~/.local/share/devsandbox if not set
+# base_path = "~/.local/share/devsandbox"
+```
+
+### Remote Logging
+
+Proxy request logs can be forwarded to remote destinations for centralized logging and monitoring. Multiple receivers can be configured simultaneously.
+
+```toml
+[logging]
+# Custom attributes added to all log entries (OTLP resource attributes)
+[logging.attributes]
+environment = "development"
+hostname = "myworkstation"
+```
+
+#### Local Syslog
+
+Send logs to the local syslog daemon:
+
+```toml
+[[logging.receivers]]
+type = "syslog"
+facility = "local0"
+tag = "devsandbox"
+```
+
+#### Remote Syslog
+
+Send logs to a remote syslog server:
+
+```toml
+[[logging.receivers]]
+type = "syslog-remote"
+address = "logs.example.com:514"
+protocol = "udp"  # or "tcp"
+facility = "local0"
+tag = "devsandbox"
+```
+
+#### OpenTelemetry (OTLP)
+
+Send logs to an OpenTelemetry collector. Supports both HTTP and gRPC protocols.
+
+**HTTP (default):**
+
+```toml
+[[logging.receivers]]
+type = "otlp"
+endpoint = "http://localhost:4318/v1/logs"
+protocol = "http"
+batch_size = 100
+flush_interval = "5s"
+
+# Optional: authentication headers
+headers = { "Authorization" = "Bearer token" }
+```
+
+**gRPC:**
+
+```toml
+[[logging.receivers]]
+type = "otlp"
+endpoint = "localhost:4317"
+protocol = "grpc"
+insecure = true  # disable TLS for local testing
+batch_size = 100
+flush_interval = "5s"
+```
+
+OTLP logs include these resource attributes:
+- `service.name`: "devsandbox"
+- `service.version`: Build version
+- `service.commit`: Git commit hash
+- Plus any custom attributes from `[logging.attributes]`
+
+#### Logging Errors
+
+If remote logging fails (network issues, authentication errors, etc.), errors are logged locally to:
+
+```
+~/.local/share/devsandbox/<project>/logs/internal/logging-errors.log
 ```
 
 ## Troubleshooting

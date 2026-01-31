@@ -44,10 +44,15 @@ tasks:
   build:
     cmds:
       - mkdir -p bin
-      - go build -ldflags "-X main.version={{.GIT_COMMIT}} -X main.date={{.BUILD_DATE}}" -o bin/devsandbox ./cmd/devsandbox
+      - go build -ldflags "-X devsandbox/internal/version.Commit={{.GIT_COMMIT}} -X devsandbox/internal/version.Date={{.BUILD_DATE}}" -o bin/devsandbox ./cmd/devsandbox
 
   archive:
     deps:
       - build
     cmds:
+      - rm bin/devsandbox_*.zip || true
       - zip -j bin/devsandbox_{{.GIT_COMMIT}}.zip bin/devsandbox README.md
+
+  prune-local:
+    cmds:
+      - rm -rf ~/.local/share/devsandbox/

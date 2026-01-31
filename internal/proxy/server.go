@@ -8,11 +8,12 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"syscall"
 
 	"github.com/elazarl/goproxy"
+
+	"devsandbox/internal/logging"
 )
 
 const (
@@ -43,7 +44,7 @@ func NewServer(cfg *Config) (*Server, error) {
 
 	// Create rotating file writer for goproxy's internal logs (warnings, errors)
 	proxyLogger, err := NewRotatingFileWriter(RotatingFileWriterConfig{
-		Dir:    filepath.Join(cfg.LogDir, "internal"),
+		Dir:    cfg.InternalLogDir,
 		Prefix: ProxyLogPrefix,
 		Suffix: ProxyLogSuffix,
 	})
@@ -54,10 +55,23 @@ func NewServer(cfg *Config) (*Server, error) {
 	// Route goproxy's internal warnings to rotating file
 	proxy.Logger = log.New(proxyLogger, "", log.LstdFlags)
 
+	// Create log dispatcher for remote forwarding (if configured)
+	var dispatcher *logging.Dispatcher
+	if len(cfg.LogReceivers) > 0 {
+		dispatcher, err = logging.NewDispatcherFromConfig(cfg.LogReceivers, cfg.LogAttributes, cfg.InternalLogDir)
+		if err != nil {
+			_ = proxyLogger.Close()
+			return nil, fmt.Errorf("failed to create log dispatcher: %w", err)
+		}
+	}
+
 	// Create request logger for persisting full request/response data
-	reqLogger, err := NewRequestLogger(cfg.LogDir)
+	reqLogger, err := NewRequestLogger(cfg.LogDir, dispatcher)
 	if err != nil {
 		_ = proxyLogger.Close()
+		if dispatcher != nil {
+			_ = dispatcher.Close()
+		}
 		return nil, fmt.Errorf("failed to create request logger: %w", err)
 	}
 

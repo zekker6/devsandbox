@@ -3,35 +3,48 @@ package proxy
 import (
 	"os"
 	"path/filepath"
+
+	"devsandbox/internal/config"
 )
 
 const (
-	DefaultProxyPort = 18080 // Use non-standard port to avoid conflicts with dev servers
-	MaxPortRetries   = 50    // Number of ports to try if default is busy
-	CADirName        = ".ca"
-	CACertFile       = "ca.crt"
-	CAKeyFile        = "ca.key"
-	LogDirName       = "proxy-logs"
+	DefaultProxyPort   = 18080 // Use non-standard port to avoid conflicts with dev servers
+	MaxPortRetries     = 50    // Number of ports to try if default is busy
+	CADirName          = ".ca"
+	CACertFile         = "ca.crt"
+	CAKeyFile          = "ca.key"
+	LogBaseDirName     = "logs"
+	ProxyLogDirName    = "proxy"
+	InternalLogDirName = "internal"
 )
 
 type Config struct {
-	Enabled    bool
-	Port       int
-	CADir      string
-	CACertPath string
-	CAKeyPath  string
-	LogDir     string
+	Enabled        bool
+	Port           int
+	CADir          string
+	CACertPath     string
+	CAKeyPath      string
+	LogDir         string // logs/proxy - for proxy request logs
+	InternalLogDir string // logs/internal - for internal error logs
+
+	// LogReceivers is the list of remote log receiver configurations.
+	LogReceivers []config.ReceiverConfig
+
+	// LogAttributes are custom attributes added to all log entries.
+	LogAttributes map[string]string
 }
 
 func NewConfig(sandboxBase string, port int) *Config {
 	caDir := filepath.Join(sandboxBase, CADirName)
+	logBase := filepath.Join(sandboxBase, LogBaseDirName)
 	return &Config{
-		Enabled:    true,
-		Port:       port,
-		CADir:      caDir,
-		CACertPath: filepath.Join(caDir, CACertFile),
-		CAKeyPath:  filepath.Join(caDir, CAKeyFile),
-		LogDir:     filepath.Join(sandboxBase, LogDirName),
+		Enabled:        true,
+		Port:           port,
+		CADir:          caDir,
+		CACertPath:     filepath.Join(caDir, CACertFile),
+		CAKeyPath:      filepath.Join(caDir, CAKeyFile),
+		LogDir:         filepath.Join(logBase, ProxyLogDirName),
+		InternalLogDir: filepath.Join(logBase, InternalLogDirName),
 	}
 }
 
