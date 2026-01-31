@@ -119,6 +119,14 @@ devsandbox logs proxy --stats       # Show statistics
 devsandbox logs internal            # View internal error logs
 ```
 
+### Inspecting Tools
+
+```bash
+devsandbox tools list               # List available tools
+devsandbox tools info mise          # Show tool details
+devsandbox tools check              # Verify tool setup
+```
+
 ### Configuration
 
 ```bash

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
@@ -50,6 +51,29 @@ func (f *Fish) Environment(homeDir, sandboxHome string) []EnvVar {
 
 func (f *Fish) ShellInit(shell string) string {
 	return ""
+}
+
+func (f *Fish) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "fish",
+		InstallHint: "Install via system package manager",
+	}
+
+	path, err := exec.LookPath("fish")
+	if err == nil {
+		result.BinaryPath = path
+	}
+
+	// Check config
+	fishConfig := filepath.Join(homeDir, ".config", "fish")
+	if _, err := os.Stat(fishConfig); err == nil {
+		result.ConfigPaths = append(result.ConfigPaths, fishConfig)
+		result.Available = true
+	} else {
+		result.Issues = append(result.Issues, "no ~/.config/fish found")
+	}
+
+	return result
 }
 
 // Zsh provides zsh shell configuration.
@@ -124,6 +148,39 @@ func (z *Zsh) ShellInit(shell string) string {
 	return ""
 }
 
+func (z *Zsh) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "zsh",
+		InstallHint: "Install via system package manager",
+	}
+
+	path, err := exec.LookPath("zsh")
+	if err == nil {
+		result.BinaryPath = path
+	}
+
+	// Check config paths
+	configPaths := []string{
+		filepath.Join(homeDir, ".zshrc"),
+		filepath.Join(homeDir, ".zshenv"),
+		filepath.Join(homeDir, ".config", "zsh"),
+	}
+
+	for _, p := range configPaths {
+		if _, err := os.Stat(p); err == nil {
+			result.ConfigPaths = append(result.ConfigPaths, p)
+		}
+	}
+
+	result.Available = len(result.ConfigPaths) > 0
+
+	if !result.Available {
+		result.Issues = append(result.Issues, "no zsh config files found")
+	}
+
+	return result
+}
+
 // Bash provides bash shell configuration.
 type Bash struct{}
 
@@ -183,4 +240,37 @@ func (b *Bash) Environment(homeDir, sandboxHome string) []EnvVar {
 
 func (b *Bash) ShellInit(shell string) string {
 	return ""
+}
+
+func (b *Bash) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "bash",
+		InstallHint: "Install via system package manager",
+	}
+
+	path, err := exec.LookPath("bash")
+	if err == nil {
+		result.BinaryPath = path
+	}
+
+	// Check config paths
+	configPaths := []string{
+		filepath.Join(homeDir, ".bashrc"),
+		filepath.Join(homeDir, ".bash_profile"),
+		filepath.Join(homeDir, ".profile"),
+	}
+
+	for _, p := range configPaths {
+		if _, err := os.Stat(p); err == nil {
+			result.ConfigPaths = append(result.ConfigPaths, p)
+		}
+	}
+
+	result.Available = len(result.ConfigPaths) > 0
+
+	if !result.Available {
+		result.Issues = append(result.Issues, "no bash config files found")
+	}
+
+	return result
 }

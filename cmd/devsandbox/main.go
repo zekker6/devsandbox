@@ -61,6 +61,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newDoctorCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newLogsCmd())
+	rootCmd.AddCommand(newToolsCmd())
 
 	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox v%s (commit: %s, built: %s)\n", version.Version, version.Commit, version.Date))
 

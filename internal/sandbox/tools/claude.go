@@ -93,3 +93,37 @@ func (c *Claude) Environment(homeDir, sandboxHome string) []EnvVar {
 func (c *Claude) ShellInit(shell string) string {
 	return ""
 }
+
+func (c *Claude) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "claude",
+		InstallHint: "https://code.claude.com/docs/en/setup",
+	}
+
+	path, err := exec.LookPath("claude")
+	if err == nil {
+		result.BinaryPath = path
+	}
+
+	// Check config paths
+	configPaths := []string{
+		filepath.Join(homeDir, ".claude"),
+		filepath.Join(homeDir, ".claude.json"),
+		filepath.Join(homeDir, ".config", "Claude"),
+	}
+
+	for _, p := range configPaths {
+		if _, err := os.Stat(p); err == nil {
+			result.ConfigPaths = append(result.ConfigPaths, p)
+		}
+	}
+
+	// Available if binary exists or config exists
+	result.Available = result.BinaryPath != "" || len(result.ConfigPaths) > 0
+
+	if !result.Available {
+		result.Issues = append(result.Issues, "claude binary not found and no config exists")
+	}
+
+	return result
+}

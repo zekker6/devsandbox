@@ -50,3 +50,21 @@ func (g *Go) Environment(homeDir, sandboxHome string) []EnvVar {
 func (g *Go) ShellInit(shell string) string {
 	return ""
 }
+
+func (g *Go) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "go",
+		InstallHint: "mise install go",
+	}
+
+	path, err := exec.LookPath("go")
+	if err != nil {
+		result.Issues = append(result.Issues, "go binary not found in PATH")
+		return result
+	}
+
+	result.Available = true
+	result.BinaryPath = path
+
+	return result
+}

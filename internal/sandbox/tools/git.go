@@ -102,6 +102,32 @@ func generateSafeGitconfig(src, dst string) error {
 	return os.WriteFile(dst, []byte(content), 0o644)
 }
 
+func (g *Git) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "git",
+		InstallHint: "Install via system package manager (apt install git, pacman -S git)",
+	}
+
+	path, err := exec.LookPath("git")
+	if err != nil {
+		result.Issues = append(result.Issues, "git binary not found in PATH")
+		return result
+	}
+
+	result.BinaryPath = path
+	result.Available = true
+
+	// Check for gitconfig
+	gitconfig := filepath.Join(homeDir, ".gitconfig")
+	if _, err := os.Stat(gitconfig); err == nil {
+		result.ConfigPaths = append(result.ConfigPaths, gitconfig)
+	} else {
+		result.Issues = append(result.Issues, "no ~/.gitconfig found (will use defaults)")
+	}
+
+	return result
+}
+
 // parseGitconfig extracts user.name and user.email from a gitconfig file.
 func parseGitconfig(path string) (name, email string) {
 	file, err := os.Open(path)

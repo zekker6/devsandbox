@@ -2,6 +2,7 @@ package tools
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
@@ -73,4 +74,38 @@ func (o *OpenCode) Environment(homeDir, sandboxHome string) []EnvVar {
 
 func (o *OpenCode) ShellInit(shell string) string {
 	return ""
+}
+
+func (o *OpenCode) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "opencode",
+		InstallHint: "https://opencode.ai/",
+	}
+
+	path, err := exec.LookPath("opencode")
+	if err == nil {
+		result.BinaryPath = path
+	}
+
+	// Check config paths
+	configPaths := []string{
+		filepath.Join(homeDir, ".config", "opencode"),
+		filepath.Join(homeDir, ".local", "share", "opencode"),
+		filepath.Join(homeDir, ".cache", "opencode"),
+	}
+
+	for _, p := range configPaths {
+		if _, err := os.Stat(p); err == nil {
+			result.ConfigPaths = append(result.ConfigPaths, p)
+		}
+	}
+
+	// Available if binary exists or config exists
+	result.Available = result.BinaryPath != "" || len(result.ConfigPaths) > 0
+
+	if !result.Available {
+		result.Issues = append(result.Issues, "opencode binary not found and no config exists")
+	}
+
+	return result
 }

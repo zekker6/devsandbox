@@ -61,3 +61,30 @@ func (c *Copilot) Environment(homeDir, sandboxHome string) []EnvVar {
 func (c *Copilot) ShellInit(shell string) string {
 	return ""
 }
+
+func (c *Copilot) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "gh",
+		InstallHint: "Install GitHub CLI: mise install gh, then: gh extension install github/gh-copilot",
+	}
+
+	// Copilot uses gh CLI, but availability is based on config dirs
+	configPaths := []string{
+		filepath.Join(homeDir, ".config", "github-copilot"),
+		filepath.Join(homeDir, ".cache", "github-copilot"),
+	}
+
+	for _, p := range configPaths {
+		if _, err := os.Stat(p); err == nil {
+			result.ConfigPaths = append(result.ConfigPaths, p)
+		}
+	}
+
+	result.Available = len(result.ConfigPaths) > 0
+
+	if !result.Available {
+		result.Issues = append(result.Issues, "no GitHub Copilot config directories found")
+	}
+
+	return result
+}

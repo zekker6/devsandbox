@@ -77,3 +77,33 @@ func (n *Nvim) Environment(homeDir, sandboxHome string) []EnvVar {
 func (n *Nvim) ShellInit(shell string) string {
 	return ""
 }
+
+func (n *Nvim) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "nvim",
+		InstallHint: "mise install neovim",
+	}
+
+	path, err := exec.LookPath("nvim")
+	if err != nil {
+		result.Issues = append(result.Issues, "nvim binary not found in PATH")
+		return result
+	}
+
+	result.Available = true
+	result.BinaryPath = path
+
+	// Check config paths
+	configPaths := []string{
+		filepath.Join(homeDir, ".config", "nvim"),
+		filepath.Join(homeDir, ".local", "share", "nvim"),
+	}
+
+	for _, p := range configPaths {
+		if _, err := os.Stat(p); err == nil {
+			result.ConfigPaths = append(result.ConfigPaths, p)
+		}
+	}
+
+	return result
+}

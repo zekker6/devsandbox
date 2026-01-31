@@ -20,9 +20,6 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
-- add tools management subcommand
-  - allow checking tools availability
-  - allow checking binds/env for tools
 - overlayfs usage
   - allow tools to use overlayfs to provide writable fs based on host fs
   - allow to define which paths should be writable/read-only/masked

@@ -54,6 +54,32 @@ func (s *Starship) ShellInit(shell string) string {
 	return ""
 }
 
+func (s *Starship) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "starship",
+		InstallHint: "mise install starship",
+	}
+
+	path, err := exec.LookPath("starship")
+	if err != nil {
+		result.Issues = append(result.Issues, "starship binary not found in PATH")
+		return result
+	}
+
+	result.BinaryPath = path
+
+	// Check config
+	starshipConfig := filepath.Join(homeDir, ".config", "starship.toml")
+	if _, err := os.Stat(starshipConfig); err == nil {
+		result.ConfigPaths = append(result.ConfigPaths, starshipConfig)
+		result.Available = true
+	} else {
+		result.Issues = append(result.Issues, "no ~/.config/starship.toml found")
+	}
+
+	return result
+}
+
 // Setup implements ToolWithSetup to generate the sandbox-aware starship config.
 func (s *Starship) Setup(homeDir, sandboxHome string) error {
 	starshipConfig := filepath.Join(homeDir, ".config", "starship.toml")

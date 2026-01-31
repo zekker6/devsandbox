@@ -55,3 +55,23 @@ type ToolWithSetup interface {
 	// sandboxHome is the sandbox home directory where files can be written.
 	Setup(homeDir, sandboxHome string) error
 }
+
+// CheckResult contains detailed availability information for a tool.
+type CheckResult struct {
+	Available   bool     // Whether the tool is available
+	BinaryPath  string   // Path to the tool's binary (if applicable)
+	BinaryName  string   // Name of the binary to look for
+	ConfigPaths []string // Configuration paths that exist
+	Issues      []string // Any issues or warnings
+	InstallHint string   // How to install if missing
+}
+
+// ToolWithCheck extends Tool with detailed availability checking.
+// Use this to provide richer information for the `tools check` command.
+type ToolWithCheck interface {
+	Tool
+
+	// Check performs detailed availability checking.
+	// Returns information about binary location, config paths, and any issues.
+	Check(homeDir string) CheckResult
+}

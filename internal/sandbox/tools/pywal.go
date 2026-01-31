@@ -45,3 +45,21 @@ func (p *Pywal) Environment(homeDir, sandboxHome string) []EnvVar {
 func (p *Pywal) ShellInit(shell string) string {
 	return ""
 }
+
+func (p *Pywal) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "wal",
+		InstallHint: "pip install pywal",
+	}
+
+	// Check if wal cache exists
+	walCache := filepath.Join(homeDir, ".cache", "wal")
+	if _, err := os.Stat(walCache); err == nil {
+		result.ConfigPaths = append(result.ConfigPaths, walCache)
+		result.Available = true
+	} else {
+		result.Issues = append(result.Issues, "no ~/.cache/wal found (pywal not configured)")
+	}
+
+	return result
+}

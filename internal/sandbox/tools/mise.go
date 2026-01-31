@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 )
@@ -79,4 +80,35 @@ func (m *Mise) ShellInit(shell string) string {
 	default:
 		return fmt.Sprintf(`if command -v mise &>/dev/null; then eval "$(mise activate %s)"; fi`, shell)
 	}
+}
+
+func (m *Mise) Check(homeDir string) CheckResult {
+	result := CheckResult{
+		BinaryName:  "mise",
+		InstallHint: "https://mise.jdx.dev/installing-mise.html",
+	}
+
+	path, err := exec.LookPath("mise")
+	if err != nil {
+		result.Issues = append(result.Issues, "mise binary not found in PATH")
+		return result
+	}
+
+	result.Available = true
+	result.BinaryPath = path
+
+	// Check config paths
+	configPaths := []string{
+		filepath.Join(homeDir, ".config", "mise"),
+		filepath.Join(homeDir, ".local", "share", "mise"),
+		filepath.Join(homeDir, ".local", "bin"),
+	}
+
+	for _, p := range configPaths {
+		if _, err := os.Stat(p); err == nil {
+			result.ConfigPaths = append(result.ConfigPaths, p)
+		}
+	}
+
+	return result
 }

@@ -2,6 +2,107 @@
 
 devsandbox makes development tools available inside the sandbox while maintaining security boundaries.
 
+## Inspecting Tools
+
+Use the `tools` command to see which tools are available and how they're configured.
+
+### List Available Tools
+
+```bash
+# List tools detected on your system
+devsandbox tools list
+
+# Include unavailable tools
+devsandbox tools list --all
+
+# JSON output for scripting
+devsandbox tools list --json
+```
+
+Example output:
+
+```
+┌────────────┬───────────┬───────────────────────────────────────────────┐
+│    NAME    │  STATUS   │                  DESCRIPTION                  │
+├────────────┼───────────┼───────────────────────────────────────────────┤
+│ claude     │ available │ Claude Code AI assistant                      │
+│ git        │ available │ Git configuration (safe mode, no credentials) │
+│ go         │ available │ Go language environment isolation             │
+│ mise       │ available │ Tool version manager (node, python, go, etc.) │
+│ nvim       │ available │ Neovim editor configuration                   │
+│ starship   │ available │ Starship prompt with sandbox indicator        │
+└────────────┴───────────┴───────────────────────────────────────────────┘
+```
+
+### Tool Details
+
+View bindings, environment variables, and shell init for a specific tool:
+
+```bash
+# Show details for a tool
+devsandbox tools info mise
+
+# Show details for all tools
+devsandbox tools info --all
+
+# JSON output
+devsandbox tools info mise --json
+```
+
+Example output:
+
+```
+Tool: mise
+Status: available
+Description: Tool version manager (node, python, go, etc.)
+Binary: /home/user/.local/bin/mise
+
+Bindings:
+  ~/.local/bin                        (read-only, optional)
+  ~/.config/mise                      (read-only, optional)
+  ~/.local/share/mise                 (read-only, optional)
+
+Environment Variables: (none)
+
+Shell Init:
+  if command -v mise &>/dev/null; then eval "$(mise activate bash)"; fi
+```
+
+### Verify Tool Setup
+
+Check tool availability and verify binding paths exist:
+
+```bash
+# Check all tools
+devsandbox tools check
+
+# Check specific tools
+devsandbox tools check mise git claude
+
+# JSON output
+devsandbox tools check --json
+```
+
+Example output:
+
+```
+Checking tools...
+
+✓ mise (/home/user/.local/bin/mise)
+    ✓ ~/.local/bin
+    ✓ ~/.config/mise
+    ✓ ~/.local/share/mise
+✓ git (/usr/bin/git)
+    ○ ~/.local/share/devsandbox/<project>/home/.gitconfig.safe (optional, missing)
+✓ claude (/home/user/.local/bin/claude)
+    ✓ ~/.claude
+    ✓ ~/.claude.json
+✗ starship (not available)
+    ! starship binary not found in PATH
+
+Summary: 3/4 tools available
+```
+
 ## Tool Management with mise
 
 [mise](https://mise.jdx.dev/) is the recommended tool manager. All mise-managed tools are automatically available inside
