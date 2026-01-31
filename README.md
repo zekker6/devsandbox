@@ -1,67 +1,47 @@
 # devsandbox
 
-A secure sandbox for running untrusted development tools. Uses [bubblewrap](https://github.com/containers/bubblewrap) for filesystem isolation and [pasta](https://passt.top/) for network isolation.
+A secure sandbox for running untrusted development tools. Uses [bubblewrap](https://github.com/containers/bubblewrap)
+for filesystem isolation and [pasta](https://passt.top/) for network isolation.
 
 ## Why?
 
-AI coding assistants like Claude Code, GitHub Copilot, and others can execute arbitrary commands on your system. 
-While useful, this creates security risks—especially when working with untrusted code or allowing agents to run with elevated permissions.
+AI coding assistants like Claude Code, GitHub Copilot, and others can execute arbitrary commands on your system. While
+useful, this creates security risks—especially when working with untrusted code or allowing agents to run with elevated
+permissions.
 
 `devsandbox` provides a security boundary that:
+
 - Allows full read/write access to your project directory
 - Blocks access to SSH keys, cloud credentials, and secrets
 - Optionally routes all network traffic through an inspectable proxy
 - Preserves access to your development tools (via mise)
 
-## Security Model
-
-| Resource | Access |
-|----------|--------|
-| Project directory | Read/Write |
-| `.env` files | Blocked (overlaid with /dev/null) |
-| `~/.ssh` | Blocked |
-| `~/.gitconfig` | Sanitized (no credentials) |
-| `~/.aws`, `~/.azure`, `~/.gcloud` | Blocked |
-| mise-managed tools | Read-only |
-| Network (default) | Full access |
-| Network (proxy mode) | Isolated, routed through MITM proxy |
-
-## Requirements
-
-- Linux (kernel 3.8+ with user namespaces)
-- [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
-- [mise](https://mise.jdx.dev/) (for tool management)
-- [passt](https://passt.top/) (only for proxy mode)
-- Supported shells: bash, zsh, fish (auto-detected from `$SHELL`)
+## Quick Start
 
 ### Installation
 
-**Arch Linux:**
+**Requirements:** Linux with user
+namespaces, [bubblewrap](https://github.com/containers/bubblewrap), [mise](https://mise.jdx.dev/)
+
 ```bash
+# Arch Linux
 sudo pacman -S bubblewrap passt
-```
 
-**Debian/Ubuntu:**
-```bash
+# Debian/Ubuntu
 sudo apt install bubblewrap passt
-```
 
-**Fedora:**
-```bash
+# Fedora
 sudo dnf install bubblewrap passt
 ```
 
-## Building
+**Build from source:**
 
 ```bash
-# Using task (recommended)
 task build
-
-# Or directly with go
-go build -o bin/devsandbox ./cmd/devsandbox
+# or: go build -o bin/devsandbox ./cmd/devsandbox
 ```
 
-## Usage
+### Basic Usage
 
 ```bash
 # Interactive shell in sandbox
@@ -76,302 +56,89 @@ devsandbox claude --dangerously-skip-permissions
 
 # Show sandbox configuration
 devsandbox --info
+
+# Check installation
+devsandbox doctor
 ```
 
 ### Proxy Mode
 
-Proxy mode creates a fully isolated network namespace where all HTTP/HTTPS traffic is routed through a local MITM proxy. This allows inspection and logging of all network requests.
+Route all HTTP/HTTPS traffic through an inspectable proxy:
 
 ```bash
 # Enable proxy mode
 devsandbox --proxy
 
-# Custom proxy port
-devsandbox --proxy --proxy-port 9090
-```
+# Run command with traffic logging
+devsandbox --proxy npm install
 
-In proxy mode:
-- Network is isolated via pasta (user-mode networking)
-- All traffic must go through the proxy (enforced via iptables)
-- A CA certificate is auto-generated for HTTPS interception
-- Requests are logged to `~/.local/share/devsandbox/<project>/logs/proxy/`
-
-The CA certificate is automatically configured for common tools via environment variables:
-- `NODE_EXTRA_CA_CERTS`
-- `REQUESTS_CA_BUNDLE`
-- `CURL_CA_BUNDLE`
-- `GIT_SSL_CAINFO`
-- `SSL_CERT_FILE`
-
-## Data Locations
-
-Sandbox data is stored following XDG conventions:
-
-```
-~/.local/share/devsandbox/<project>/
-├── home/           # Sandbox $HOME (isolated per-project)
-│   ├── .config/
-│   ├── .cache/
-│   │   ├── go-build/   # Isolated Go build cache
-│   │   └── go-mod/     # Isolated Go module cache
-│   └── go/             # Isolated GOPATH
-├── .ca/            # Proxy CA certificate and key
-│   ├── ca.crt
-│   └── ca.key
-└── logs/
-    ├── proxy/      # HTTP request/response logs (gzip compressed)
-    │   └── requests_20240115_0000.jsonl.gz
-    └── internal/   # Internal logs
-        ├── proxy_20240115_0000.log.gz   # Proxy server warnings/errors
-        └── logging-errors.log            # Remote logging failures
-```
-
-## Environment Variables
-
-Inside the sandbox, several environment variables are set:
-
-| Variable | Value |
-|----------|-------|
-| `DEVSANDBOX` | `1` |
-| `DEVSANDBOX_PROJECT` | Project directory name |
-| `DEVSANDBOX_PROXY` | `1` (only in proxy mode) |
-| `GOTOOLCHAIN` | `local` (prevents version conflicts) |
-
-## How It Works
-
-1. **Filesystem isolation**: bubblewrap creates a new mount namespace with selective bind mounts
-2. **PID isolation**: Processes inside can't see or signal processes outside
-3. **Network isolation** (proxy mode): pasta creates a user-mode network namespace with NAT
-4. **Traffic enforcement** (proxy mode): iptables rules block all traffic except to the gateway IP
-
-## Managing Sandboxes
-
-List all sandbox instances:
-
-```bash
-# List sandboxes
-devsandbox sandboxes list
-
-# With sizes (slower, calculates disk usage)
-devsandbox sandboxes list --size
-
-# JSON output for scripting
-devsandbox sandboxes list --json
-
-# Sort by last used
-devsandbox sandboxes list --sort used
-```
-
-Prune stale sandboxes:
-
-```bash
-# Remove only orphaned sandboxes (project dir no longer exists)
-devsandbox sandboxes prune
-
-# Keep 5 most recently used, remove the rest
-devsandbox sandboxes prune --keep 5
-
-# Remove sandboxes not used in 30 days
-devsandbox sandboxes prune --older-than 30d
-
-# Remove all sandboxes
-devsandbox sandboxes prune --all
-
-# Preview what would be removed
-devsandbox sandboxes prune --dry-run
-```
-
-## Viewing Logs
-
-View proxy request logs and internal logs with the `logs` command.
-
-### Proxy Logs
-
-View HTTP/HTTPS traffic captured in proxy mode:
-
-```bash
-# View all proxy logs for current project
-devsandbox logs proxy
-
-# View last 50 requests
+# View captured traffic
 devsandbox logs proxy --last 50
 
-# Follow/tail logs in real-time
+# Follow logs in real-time
 devsandbox logs proxy -f
-
-# Filter by time
-devsandbox logs proxy --since 1h        # Last hour
-devsandbox logs proxy --since today     # Since midnight
-devsandbox logs proxy --since 2024-01-15  # Since specific date
-
-# Filter by content
-devsandbox logs proxy --url /api        # URL contains "/api"
-devsandbox logs proxy --method POST     # Only POST requests
-devsandbox logs proxy --status 400-599  # Client/server errors
-devsandbox logs proxy --errors          # All errors (status >= 400)
-
-# Output formats
-devsandbox logs proxy --json            # JSON output
-devsandbox logs proxy --compact         # One-line format
-devsandbox logs proxy --stats           # Show summary statistics
-devsandbox logs proxy --body            # Include request/response bodies
 ```
 
-### Internal Logs
+## Security Model
 
-View proxy server errors and logging failures:
+| Resource                          | Access           |
+|-----------------------------------|------------------|
+| Project directory                 | Read/Write       |
+| `.env` files                      | Blocked          |
+| `~/.ssh`                          | Blocked          |
+| `~/.aws`, `~/.azure`, `~/.gcloud` | Blocked          |
+| mise-managed tools                | Read-only        |
+| Network (default)                 | Full access      |
+| Network (proxy mode)              | Isolated, logged |
+
+## Documentation
+
+- **[Sandboxing](docs/sandboxing.md)** - How isolation works, data locations, managing sandboxes
+- **[Proxy Mode](docs/proxy.md)** - Network isolation, traffic inspection, viewing logs
+- **[Tools](docs/tools.md)** - mise integration, supported tools, editor setup
+- **[Configuration](docs/configuration.md)** - Config file reference, remote logging (syslog, OTLP)
+- **[Use Cases](docs/use-cases.md)** - Workflows, shell aliases, autocompletion setup
+
+## Quick Reference
+
+### Managing Sandboxes
 
 ```bash
-# View all internal logs
-devsandbox logs internal
-
-# View specific log type
-devsandbox logs internal --type proxy   # Proxy server warnings/errors
-devsandbox logs internal --type logging # Remote logging failures
-
-# Follow internal logs
-devsandbox logs internal -f
-
-# Show last N lines
-devsandbox logs internal --last 100
+devsandbox sandboxes list           # List all sandboxes
+devsandbox sandboxes prune          # Remove orphaned sandboxes
+devsandbox sandboxes prune --all    # Remove all sandboxes
 ```
 
-## Configuration
-
-devsandbox can be configured via a TOML file at `~/.config/devsandbox/config.toml`.
-
-Generate a default config file:
+### Viewing Logs
 
 ```bash
-devsandbox config init
+devsandbox logs proxy               # View proxy request logs
+devsandbox logs proxy -f            # Follow/tail logs
+devsandbox logs proxy --errors      # Show only errors
+devsandbox logs proxy --stats       # Show statistics
+devsandbox logs internal            # View internal error logs
 ```
 
-### Configuration Options
+### Configuration
+
+```bash
+devsandbox config init              # Generate config file
+```
+
+Config file: `~/.config/devsandbox/config.toml`
 
 ```toml
-# Proxy mode settings
 [proxy]
-# Enable proxy mode by default (can be overridden with --proxy flag)
 enabled = false
-
-# Default proxy server port
 port = 8080
-
-# Sandbox settings
-[sandbox]
-# Base directory for sandbox homes
-# Defaults to ~/.local/share/devsandbox if not set
-# base_path = "~/.local/share/devsandbox"
-```
-
-### Remote Logging
-
-Proxy request logs can be forwarded to remote destinations for centralized logging and monitoring. Multiple receivers can be configured simultaneously.
-
-```toml
-[logging]
-# Custom attributes added to all log entries (OTLP resource attributes)
-[logging.attributes]
-environment = "development"
-hostname = "myworkstation"
-```
-
-#### Local Syslog
-
-Send logs to the local syslog daemon:
-
-```toml
-[[logging.receivers]]
-type = "syslog"
-facility = "local0"
-tag = "devsandbox"
-```
-
-#### Remote Syslog
-
-Send logs to a remote syslog server:
-
-```toml
-[[logging.receivers]]
-type = "syslog-remote"
-address = "logs.example.com:514"
-protocol = "udp"  # or "tcp"
-facility = "local0"
-tag = "devsandbox"
-```
-
-#### OpenTelemetry (OTLP)
-
-Send logs to an OpenTelemetry collector. Supports both HTTP and gRPC protocols.
-
-**HTTP (default):**
-
-```toml
-[[logging.receivers]]
-type = "otlp"
-endpoint = "http://localhost:4318/v1/logs"
-protocol = "http"
-batch_size = 100
-flush_interval = "5s"
-
-# Optional: authentication headers
-headers = { "Authorization" = "Bearer token" }
-```
-
-**gRPC:**
-
-```toml
-[[logging.receivers]]
-type = "otlp"
-endpoint = "localhost:4317"
-protocol = "grpc"
-insecure = true  # disable TLS for local testing
-batch_size = 100
-flush_interval = "5s"
-```
-
-OTLP logs include these resource attributes:
-- `service.name`: "devsandbox"
-- `service.version`: Build version
-- `service.commit`: Git commit hash
-- Plus any custom attributes from `[logging.attributes]`
-
-#### Logging Errors
-
-If remote logging fails (network issues, authentication errors, etc.), errors are logged locally to:
-
-```
-~/.local/share/devsandbox/<project>/logs/internal/logging-errors.log
-```
-
-## Troubleshooting
-
-Check your installation with the doctor command:
-
-```bash
-devsandbox doctor
-```
-
-This verifies:
-- Required binaries (bwrap, shell)
-- Optional binaries (pasta for proxy mode)
-- User namespace support
-- Directory permissions and writability
-- Kernel version
-
-## Debugging
-
-```bash
-# Enable debug output (shows bwrap arguments)
-DEVSANDBOX_DEBUG=1 devsandbox
 ```
 
 ## Limitations
 
 - Linux only (uses Linux namespaces)
-- Requires user namespaces enabled (most modern distros have this)
-- Some tools may not work correctly with network isolation
-- MITM proxy may break certificate pinning in some applications
+- Requires user namespaces enabled
+- MITM proxy may break certificate pinning
+- Docker not supported inside sandbox
 
 ## License
 

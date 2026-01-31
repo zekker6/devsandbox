@@ -20,18 +20,9 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
-- create docs/ with more detailed info about specific use-cases
-  - proxy docs
-  - sandboxing docs
-  - how tools work docs
-  - use-cases docs
-    - cover how to set up autocompletion
-    - useful aliases like "run claude in shell with permissions turned off"
-  - configuration docs
 - add tools management subcommand
   - allow checking tools availability
   - allow checking binds/env for tools
-- capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
 - overlayfs usage
   - allow tools to use overlayfs to provide writable fs based on host fs
   - allow to define which paths should be writable/read-only/masked
@@ -47,7 +38,8 @@ Linters: golangci + go default linters.
   - check internal logs for recent issues
   - check overlayfs support
   - check available tools and their versions
-
+- capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
+ 
 Backlog:
 - macOS support
 - tcp/udp proxying
