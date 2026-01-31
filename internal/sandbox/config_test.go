@@ -1,8 +1,6 @@
 package sandbox
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -93,44 +91,5 @@ func TestGenerateSandboxName(t *testing.T) {
 	// Name should contain hash suffix
 	if len(name) < 12 { // basename + "-" + 8 char hash
 		t.Errorf("Name should include hash suffix: %s", name)
-	}
-}
-
-func TestFindExistingSandbox(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "sandbox-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	// Create a sandbox with metadata
-	sandboxName := "test-sandbox"
-	sandboxRoot := filepath.Join(tmpDir, sandboxName)
-	if err := os.MkdirAll(sandboxRoot, 0o755); err != nil {
-		t.Fatalf("failed to create sandbox dir: %v", err)
-	}
-
-	projectDir := "/home/user/test/project"
-	m := &Metadata{
-		Name:       sandboxName,
-		ProjectDir: projectDir,
-	}
-	if err := SaveMetadata(m, sandboxRoot); err != nil {
-		t.Fatalf("failed to save metadata: %v", err)
-	}
-
-	// Should find the sandbox by project dir
-	found, ok := FindExistingSandbox(tmpDir, projectDir)
-	if !ok {
-		t.Error("should find existing sandbox")
-	}
-	if found != sandboxName {
-		t.Errorf("found sandbox name = %s, want %s", found, sandboxName)
-	}
-
-	// Should not find sandbox for different project dir
-	_, ok = FindExistingSandbox(tmpDir, "/home/user/other/project")
-	if ok {
-		t.Error("should not find sandbox for different project")
 	}
 }

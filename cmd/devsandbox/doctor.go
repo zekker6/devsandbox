@@ -10,6 +10,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -52,6 +53,8 @@ func runDoctor() error {
 	results = append(results, checkDirectories())
 
 	results = append(results, checkKernelVersion())
+
+	results = append(results, checkConfigFile())
 
 	printDoctorResults(results)
 
@@ -272,6 +275,50 @@ func checkKernelVersion() checkResult {
 		name:    "kernel",
 		status:  "ok",
 		message: version,
+	}
+}
+
+func checkConfigFile() checkResult {
+	configPath := config.ConfigPath()
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return checkResult{
+			name:    "config",
+			status:  "ok",
+			message: "not found (using defaults) - run 'devsandbox config init' to create",
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return checkResult{
+			name:    "config",
+			status:  "error",
+			message: fmt.Sprintf("failed to parse: %v", err),
+		}
+	}
+
+	// Build a summary of non-default settings
+	var settings []string
+	if cfg.Proxy.Enabled {
+		settings = append(settings, "proxy=enabled")
+	}
+	if cfg.Proxy.Port != 8080 {
+		settings = append(settings, fmt.Sprintf("port=%d", cfg.Proxy.Port))
+	}
+	if cfg.Sandbox.BasePath != "" {
+		settings = append(settings, fmt.Sprintf("base_path=%s", cfg.Sandbox.BasePath))
+	}
+
+	msg := configPath
+	if len(settings) > 0 {
+		msg = fmt.Sprintf("%s (%s)", configPath, strings.Join(settings, ", "))
+	}
+
+	return checkResult{
+		name:    "config",
+		status:  "ok",
+		message: msg,
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"devsandbox/internal/bwrap"
+	"devsandbox/internal/config"
 	"devsandbox/internal/network"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
@@ -65,6 +66,7 @@ Proxy Mode (--proxy):
 	// Add subcommands
 	rootCmd.AddCommand(newSandboxesCmd())
 	rootCmd.AddCommand(newDoctorCmd())
+	rootCmd.AddCommand(newConfigCmd())
 
 	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox v%s (commit: %s, built: %s)\n", appVersion, version, date))
 
@@ -79,14 +81,38 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	proxyEnabled, _ := cmd.Flags().GetBool("proxy")
 	proxyPort, _ := cmd.Flags().GetInt("proxy-port")
 
-	cfg, err := sandbox.NewConfig()
+	// Load configuration file
+	appCfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Create sandbox config with options from config file
+	opts := &sandbox.Options{
+		BasePath: appCfg.Sandbox.BasePath,
+	}
+
+	cfg, err := sandbox.NewConfig(opts)
 	if err != nil {
 		return err
 	}
 
-	// Configure proxy settings
-	cfg.ProxyEnabled = proxyEnabled
-	cfg.ProxyPort = proxyPort
+	// Apply config file defaults, then CLI overrides
+	// Config file defaults
+	if appCfg.Proxy.Enabled {
+		cfg.ProxyEnabled = true
+	}
+	if appCfg.Proxy.Port != 0 {
+		cfg.ProxyPort = appCfg.Proxy.Port
+	}
+
+	// CLI flags override config file (check if flag was explicitly set)
+	if cmd.Flags().Changed("proxy") {
+		cfg.ProxyEnabled = proxyEnabled
+	}
+	if cmd.Flags().Changed("proxy-port") {
+		cfg.ProxyPort = proxyPort
+	}
 
 	if showInfo {
 		printInfo(cfg)

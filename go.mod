@@ -3,6 +3,7 @@ module devsandbox
 go 1.25.6
 
 require (
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/clipperhouse/displaywidth v0.6.2 // indirect
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect

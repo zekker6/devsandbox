@@ -27,6 +27,7 @@ type Config struct {
 	HomeDir     string
 	ProjectDir  string
 	ProjectName string
+	SandboxBase string // Base directory for all sandboxes (e.g., ~/.local/share/devsandbox)
 	SandboxRoot string // ~/.local/share/devsandbox/<project>
 	SandboxHome string // ~/.local/share/devsandbox/<project>/home (mounted at $HOME)
 	XDGRuntime  string
@@ -42,7 +43,13 @@ type Config struct {
 	NetworkIsolated bool
 }
 
-func NewConfig() (*Config, error) {
+// Options allows customizing sandbox configuration.
+type Options struct {
+	// BasePath overrides the default sandbox base directory.
+	BasePath string
+}
+
+func NewConfig(opts *Options) (*Config, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -54,15 +61,11 @@ func NewConfig() (*Config, error) {
 	}
 
 	baseDir := filepath.Join(homeDir, ".local", "share", SandboxBaseDir)
-
-	// Check for existing sandbox for this project directory (backward compatibility)
-	var projectName string
-	if existingName, found := FindExistingSandbox(baseDir, projectDir); found {
-		projectName = existingName
-	} else {
-		// Generate new unique name with hash suffix
-		projectName = GenerateSandboxName(projectDir)
+	if opts != nil && opts.BasePath != "" {
+		baseDir = opts.BasePath
 	}
+
+	projectName := GenerateSandboxName(projectDir)
 
 	sandboxRoot := filepath.Join(baseDir, projectName)
 	sandboxHome := filepath.Join(sandboxRoot, "home")
@@ -78,6 +81,7 @@ func NewConfig() (*Config, error) {
 		HomeDir:     homeDir,
 		ProjectDir:  projectDir,
 		ProjectName: projectName,
+		SandboxBase: baseDir,
 		SandboxRoot: sandboxRoot,
 		SandboxHome: sandboxHome,
 		XDGRuntime:  xdgRuntime,
@@ -123,33 +127,6 @@ func GenerateSandboxName(projectDir string) string {
 	return basename + "-" + shortHash
 }
 
-// FindExistingSandbox looks for a sandbox that matches the given project directory.
-// Returns the sandbox name and true if found, empty string and false otherwise.
-func FindExistingSandbox(baseDir, projectDir string) (string, bool) {
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		return "", false
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		sandboxRoot := filepath.Join(baseDir, entry.Name())
-		m, err := LoadMetadata(sandboxRoot)
-		if err != nil {
-			continue
-		}
-
-		if m.ProjectDir == projectDir {
-			return entry.Name(), true
-		}
-	}
-
-	return "", false
-}
-
 func (c *Config) EnsureSandboxDirs() error {
 	dirs := []string{
 		c.SandboxHome,
@@ -184,8 +161,10 @@ func (c *Config) EnsureSandboxDirs() error {
 	return nil
 }
 
-func (c *Config) SandboxBase() string {
-	return filepath.Join(c.HomeDir, ".local", "share", SandboxBaseDir)
+// GetSandboxBase returns the base path for all sandboxes.
+// Deprecated: Use the SandboxBase field directly.
+func (c *Config) GetSandboxBase() string {
+	return c.SandboxBase
 }
 
 // SandboxBasePath returns the base path for all sandboxes given a home directory
