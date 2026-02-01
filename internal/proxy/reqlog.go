@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	RequestLogPrefix = "requests"
-	RequestLogSuffix = ".jsonl.gz"
+	RequestLogPrefix        = "requests"
+	RequestLogSuffix        = ".jsonl"    // Active file (uncompressed for tailing)
+	RequestLogArchiveSuffix = ".jsonl.gz" // Rotated files (compressed)
 )
 
 // RequestLog represents a logged HTTP request/response pair
@@ -45,9 +46,10 @@ type RequestLogger struct {
 // If dispatcher is provided, logs will also be forwarded to remote destinations.
 func NewRequestLogger(dir string, dispatcher *logging.Dispatcher) (*RequestLogger, error) {
 	writer, err := NewRotatingFileWriter(RotatingFileWriterConfig{
-		Dir:    dir,
-		Prefix: RequestLogPrefix,
-		Suffix: RequestLogSuffix,
+		Dir:           dir,
+		Prefix:        RequestLogPrefix,
+		Suffix:        RequestLogSuffix,
+		ArchiveSuffix: RequestLogArchiveSuffix,
 	})
 	if err != nil {
 		return nil, err
@@ -61,25 +63,25 @@ func NewRequestLogger(dir string, dispatcher *logging.Dispatcher) (*RequestLogge
 
 // Log writes a request/response pair to the log and forwards to remote destinations.
 func (rl *RequestLogger) Log(entry *RequestLog) error {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
 
-	// Write to local file
-	_, err = rl.writer.Write(data)
+	// Write to local file (protected by lock)
+	rl.mu.Lock()
+	_, writeErr := rl.writer.Write(data)
+	rl.mu.Unlock()
 
-	// Forward to remote destinations (if configured)
+	// Forward to remote destinations outside the lock to prevent blocking
+	// on slow network I/O (syslog, OTLP, etc.)
 	if rl.dispatcher != nil && rl.dispatcher.HasWriters() {
 		logEntry := rl.toLogEntry(entry)
 		_ = rl.dispatcher.Write(logEntry) // Don't fail on remote errors
 	}
 
-	return err
+	return writeErr
 }
 
 // toLogEntry converts a RequestLog to a logging.Entry for remote forwarding.

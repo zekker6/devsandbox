@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -334,7 +335,7 @@ Status filters support:
 	}
 
 	cmd.Flags().StringVarP(&sandboxName, "sandbox", "s", "", "Sandbox name (default: current directory)")
-	cmd.Flags().IntVarP(&last, "last", "n", 0, "Show only last N entries")
+	cmd.Flags().IntVarP(&last, "last", "n", 0, "Show only last N entries (default: 100)")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow/tail log output")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	cmd.Flags().BoolVar(&showBody, "body", false, "Include request/response bodies")
@@ -352,13 +353,14 @@ Status filters support:
 }
 
 func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, showBody, compact, noColor, showStats bool) error {
-	// Find log files
-	pattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogSuffix)
-	files, err := filepath.Glob(pattern)
-	if err != nil {
-		return err
-	}
+	// Find both compressed and uncompressed log files
+	activePattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogSuffix)
+	archivePattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogArchiveSuffix)
 
+	activeFiles, _ := filepath.Glob(activePattern)
+	archiveFiles, _ := filepath.Glob(archivePattern)
+
+	files := append(archiveFiles, activeFiles...)
 	if len(files) == 0 {
 		fmt.Println("No log files found.")
 		return nil
@@ -367,15 +369,36 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 	// Sort files by name (chronological order)
 	sort.Strings(files)
 
-	// Read all entries
+	// If --last not specified, default to last 100 entries
+	if last == 0 {
+		last = 100
+	}
+
+	// Read entries from files (newest first, stop when we have enough)
 	var entries []proxy.RequestLog
-	for _, file := range files {
-		fileEntries, err := readProxyLogFile(file)
+
+	// Process files in reverse order (newest first)
+	for i := len(files) - 1; i >= 0; i-- {
+		file := files[i]
+
+		fileEntries, err := readProxyLogFileWithLimit(file, last)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to read %s: %v\n", filepath.Base(file), err)
 			continue
 		}
-		entries = append(entries, fileEntries...)
+
+		// Prepend entries (since we're reading newest first)
+		entries = append(fileEntries, entries...)
+
+		// Trim to limit
+		if len(entries) > last {
+			entries = entries[len(entries)-last:]
+		}
+
+		// Stop if we have enough entries
+		if len(entries) >= last {
+			break
+		}
 	}
 
 	// Apply filter
@@ -405,7 +428,7 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 		return printProxyLogsCompact(entries, noColor)
 	}
 
-	err = printProxyLogsTable(entries, showBody, noColor)
+	err := printProxyLogsTable(entries, showBody, noColor)
 	if err != nil {
 		return err
 	}
@@ -419,25 +442,59 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 
 func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, compact, noColor bool) error {
 	// Set up signal handling for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		cancel()
-	}()
+	// Pattern for uncompressed active files
+	activePattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogSuffix)
 
-	pattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogSuffix)
+	// Helper to print an entry
+	printEntry := func(e *proxy.RequestLog) {
+		if !filter.Match(e) {
+			return
+		}
+		if jsonOutput {
+			data, _ := json.Marshal(e)
+			fmt.Println(string(data))
+		} else if compact {
+			printProxyLogCompactLine(e, noColor)
+		} else {
+			printProxyLogLine(e, noColor)
+		}
+	}
 
-	// Track seen entries by file and count
-	// For gzip files, we can't seek to arbitrary positions - gzip streams
-	// must be read from their header. So we re-read and skip seen entries.
+	// Find current active log file
+	findCurrentFile := func() string {
+		files, err := filepath.Glob(activePattern)
+		if err != nil || len(files) == 0 {
+			return ""
+		}
+		sort.Strings(files)
+		return files[len(files)-1]
+	}
+
+	// Show last 10 entries first (like tail -f)
+	currentFile := findCurrentFile()
+	if currentFile != "" {
+		entries, _ := readUncompressedProxyLogFile(currentFile, 10)
+		for i := range entries {
+			printEntry(&entries[i])
+		}
+	}
+
+	// Track file position for tailing
 	var lastFile string
-	var seenCount int
+	var lastOffset int64
 
-	ticker := time.NewTicker(200 * time.Millisecond)
+	// Start at end of current file
+	if currentFile != "" {
+		if info, err := os.Stat(currentFile); err == nil {
+			lastFile = currentFile
+			lastOffset = info.Size()
+		}
+	}
+
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	fmt.Fprintf(os.Stderr, "Following logs in %s (Ctrl+C to stop)...\n", logDir)
@@ -447,50 +504,140 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, compact,
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			// Find current log files
-			files, err := filepath.Glob(pattern)
-			if err != nil {
-				continue
-			}
-			if len(files) == 0 {
+			currentFile := findCurrentFile()
+			if currentFile == "" {
 				continue
 			}
 
-			sort.Strings(files)
-			currentFile := files[len(files)-1]
-
-			// If file changed, reset seen count
+			// If file changed (rotation), start from beginning of new file
 			if currentFile != lastFile {
 				lastFile = currentFile
-				seenCount = 0
+				lastOffset = 0
 			}
 
-			// Read all entries from file (gzip requires reading from start)
-			entries, err := readProxyLogFile(currentFile)
+			// Read new complete lines from file
+			entries, newOffset, err := tailProxyLogFile(currentFile, lastOffset)
 			if err != nil {
 				continue
 			}
+			lastOffset = newOffset
 
-			// Skip already seen entries, display new ones
-			for i := seenCount; i < len(entries); i++ {
-				e := entries[i]
-				if filter.Match(&e) {
-					if jsonOutput {
-						data, _ := json.Marshal(e)
-						fmt.Println(string(data))
-					} else if compact {
-						printProxyLogCompactLine(&e, noColor)
-					} else {
-						printProxyLogLine(&e, noColor)
-					}
-				}
+			for i := range entries {
+				printEntry(&entries[i])
 			}
-			seenCount = len(entries)
 		}
 	}
 }
 
-func readProxyLogFile(path string) ([]proxy.RequestLog, error) {
+// tailProxyLogFile reads new entries from an uncompressed JSONL file starting at offset.
+// It returns only complete lines and tracks the position after the last complete line,
+// so partial lines (from in-progress writes) are not lost.
+func tailProxyLogFile(path string, offset int64) ([]proxy.RequestLog, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, offset, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, offset, err
+	}
+
+	// No new data
+	if info.Size() <= offset {
+		return nil, offset, nil
+	}
+
+	// Seek to last position
+	if offset > 0 {
+		_, err = f.Seek(offset, io.SeekStart)
+		if err != nil {
+			return nil, offset, err
+		}
+	}
+
+	// Read all available data
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, offset, err
+	}
+
+	var entries []proxy.RequestLog
+	var bytesConsumed int64
+
+	// Process complete lines only (ending with \n)
+	for len(data) > 0 {
+		newlineIdx := bytes.IndexByte(data, '\n')
+		if newlineIdx == -1 {
+			// No complete line remaining - don't advance past partial data
+			break
+		}
+
+		line := data[:newlineIdx]
+		data = data[newlineIdx+1:]
+		bytesConsumed += int64(newlineIdx + 1)
+
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry proxy.RequestLog
+		if err := json.Unmarshal(line, &entry); err != nil {
+			// Skip malformed lines but still advance past them
+			continue
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, offset + bytesConsumed, nil
+}
+
+func readProxyLogFileWithLimit(path string, limit int) ([]proxy.RequestLog, error) {
+	// Check if file is compressed
+	isCompressed := strings.HasSuffix(path, ".gz")
+
+	if isCompressed {
+		return readCompressedProxyLogFile(path, limit)
+	}
+	return readUncompressedProxyLogFile(path, limit)
+}
+
+func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var entries []proxy.RequestLog
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var entry proxy.RequestLog
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+
+		// If limit is set, keep only the last N entries (sliding window)
+		if limit > 0 && len(entries) > limit*2 {
+			entries = entries[len(entries)-limit:]
+		}
+	}
+
+	// Final trim if limit is set
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+
+	return entries, scanner.Err()
+}
+
+func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -525,8 +672,18 @@ func readProxyLogFile(path string) ([]proxy.RequestLog, error) {
 				continue
 			}
 			entries = append(entries, entry)
+
+			// If limit is set, keep only the last N entries (sliding window)
+			if limit > 0 && len(entries) > limit*2 {
+				entries = entries[len(entries)-limit:]
+			}
 		}
 		_ = gz.Close()
+	}
+
+	// Final trim if limit is set
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
 	}
 
 	return entries, nil
@@ -988,15 +1145,8 @@ func readGzipLogFile(path string, since time.Time) ([]string, error) {
 }
 
 func followInternalLogs(logDir, logType string, since time.Time) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		cancel()
-	}()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	fmt.Fprintf(os.Stderr, "Following internal logs in %s (Ctrl+C to stop)...\n", logDir)
 
