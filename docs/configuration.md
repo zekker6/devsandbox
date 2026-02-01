@@ -51,6 +51,28 @@ enabled = true
 
 Each tool can have its own configuration section under `[tools.<name>]`.
 
+#### Git
+
+```toml
+[tools.git]
+# Git access mode:
+# - "readonly" (default): safe gitconfig with only user.name/email, no credentials
+# - "readwrite": full access with credentials, SSH keys, GPG keys
+# - "disabled": no git configuration (git commands work without user config)
+mode = "readonly"
+```
+
+**Mode Details:**
+
+| Mode       | gitconfig | Credentials | SSH Keys | GPG Keys | Use Case                    |
+|------------|-----------|-------------|----------|----------|-----------------------------|
+| `readonly` | Safe copy | No          | No       | No       | Default, maximum isolation  |
+| `readwrite`| Full      | Read-only   | Read-only| Read-only| Trusted projects, push/sign |
+| `disabled` | None      | No          | No       | No       | Fully anonymous git         |
+
+In `readwrite` mode, SSH and GPG directories are mounted read-only to protect private keys
+while still allowing git operations that need them.
+
 #### Mise
 
 ```toml
@@ -233,6 +255,10 @@ port = 8080
 [overlay]
 # Master switch for overlay filesystem support
 enabled = true
+
+[tools.git]
+# Use readonly mode for most projects
+mode = "readonly"
 
 [tools.mise]
 # Allow mise to install tools inside sandbox

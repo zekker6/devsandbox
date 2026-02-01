@@ -234,6 +234,14 @@ port = 8080
 # Tool-specific configuration
 # Each tool can have its own section under [tools.<name>]
 
+# Git access settings
+[tools.git]
+# Git access mode:
+# - "readonly" (default): safe gitconfig with only user.name/email, no credentials
+# - "readwrite": full git access with credentials, SSH keys, GPG keys
+# - "disabled": no git configuration (git commands work without user config)
+mode = "readonly"
+
 # Mise tool manager settings
 [tools.mise]
 # Allow mise to install/update tools via overlayfs

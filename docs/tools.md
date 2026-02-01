@@ -294,26 +294,57 @@ Works inside editors (Neovim, VS Code) running in the sandbox.
 
 ## Git
 
-Git is available but with restrictions:
+Git access is configurable via `[tools.git]` in `~/.config/devsandbox/config.toml`:
 
-### Allowed Operations
+```toml
+[tools.git]
+mode = "readonly"  # "readonly" (default), "readwrite", or "disabled"
+```
 
-- View history (`git log`, `git show`, `git diff`)
-- Stage changes (`git add`)
-- Commit (`git commit`)
-- Branch operations (`git branch`, `git checkout`)
-- Fetch/pull via HTTPS (`git fetch`, `git pull`)
-- Push via HTTPS (if credentials in URL or credential helper)
+### Modes
 
-### Blocked Operations
+#### readonly (default)
 
-- SSH-based operations (no `~/.ssh` access)
-- Credential helpers that access blocked paths
-- GPG signing (unless keys are in sandbox home)
+Maximum isolation - safe gitconfig with only user.name and email:
 
-### HTTPS Authentication
+- View history, diff, log
+- Stage and commit changes
+- Branch operations
+- **No SSH access** (HTTPS only)
+- **No GPG signing**
+- **No credential helpers**
 
-For HTTPS authentication, use one of:
+#### readwrite
+
+Full git access for trusted projects:
+
+- Everything in readonly mode
+- SSH keys (read-only access to `~/.ssh`)
+- GPG signing (read-only access to `~/.gnupg`)
+- Git credentials (read-only access to `~/.git-credentials`)
+- SSH agent forwarding (`SSH_AUTH_SOCK`)
+
+```toml
+[tools.git]
+mode = "readwrite"
+```
+
+**Security note:** SSH and GPG directories are mounted read-only to protect private keys.
+
+#### disabled
+
+No git user configuration:
+
+```toml
+[tools.git]
+mode = "disabled"
+```
+
+Git commands still work but without user.name/email (commits require `--author`).
+
+### HTTPS Authentication (readonly mode)
+
+When using readonly mode without credentials:
 
 1. **Token in URL** (not recommended for shared repos):
    ```bash
