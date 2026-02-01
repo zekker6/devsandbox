@@ -15,6 +15,12 @@ builds:
     goarch:
       - amd64
       - arm64
+    ldflags:
+      - -s -w
+      - -X devsandbox/internal/version.Version={{ .Version }}
+      - -X devsandbox/internal/version.Commit={{ .ShortCommit }}
+      - -X devsandbox/internal/version.Date={{ .Date }}
+      - -X devsandbox/internal/version.Dirty={{ if .IsSnapshot }}true{{ else }}false{{ end }}
 
 archives:
   - formats: tar.gz

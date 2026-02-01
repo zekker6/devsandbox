@@ -5,10 +5,11 @@ package version
 // Example: go build -ldflags "-X devsandbox/internal/version.Commit=abc123"
 var (
 	// Version is the semantic version (e.g., "1.0.0").
-	Version = "0.0.0"
+	// This is set from git tags if available.
+	Version = "dev"
 
 	// Commit is the git commit hash.
-	Commit = "dev"
+	Commit = "unknown"
 
 	// Date is the build date.
 	Date = "unknown"
@@ -28,7 +29,11 @@ func IsDirty() bool {
 }
 
 // FullVersion returns the version string with commit and dirty state.
-// Example: "0.1.0 (abc1234)" or "0.1.0 (abc1234-dirty:f3e2a1b)"
+// Examples:
+//   - Tagged release: "v1.0.0 (abc1234)"
+//   - Tagged dirty:   "v1.0.0 (abc1234-dirty:f3e2a1b)"
+//   - Untagged:       "dev (abc1234)"
+//   - Untagged dirty: "dev (abc1234-dirty:f3e2a1b)"
 func FullVersion() string {
 	v := Version + " (" + Commit
 	if IsDirty() {

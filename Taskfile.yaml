@@ -2,7 +2,7 @@ version: "3"
 
 vars:
   GIT_COMMIT:
-    sh: git rev-parse --short HEAD 2>/dev/null || echo "dev"
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
   BUILD_DATE:
     sh: date --iso-8601=seconds
   GIT_DIRTY:
@@ -15,6 +15,9 @@ vars:
       else
         echo ""
       fi
+  # Git tag for the current commit, or "dev" if not tagged
+  GIT_VERSION:
+    sh: git describe --tags --exact-match 2>/dev/null || echo "dev"
 
 tasks:
   default:
@@ -52,48 +55,15 @@ tasks:
       - go test -v ./...
 
   build:
+    desc: Build binary for local development
     cmds:
       - mkdir -p bin
-      - go build -ldflags "-X devsandbox/internal/version.Commit={{.GIT_COMMIT}} -X devsandbox/internal/version.Date={{.BUILD_DATE}} -X devsandbox/internal/version.Dirty={{.GIT_DIRTY}} -X devsandbox/internal/version.DirtyHash={{.GIT_DIRTY_HASH}}" -o bin/devsandbox ./cmd/devsandbox
+      - go build -ldflags "-X devsandbox/internal/version.Version={{.GIT_VERSION}} -X devsandbox/internal/version.Commit={{.GIT_COMMIT}} -X devsandbox/internal/version.Date={{.BUILD_DATE}} -X devsandbox/internal/version.Dirty={{.GIT_DIRTY}} -X devsandbox/internal/version.DirtyHash={{.GIT_DIRTY_HASH}}" -o bin/devsandbox ./cmd/devsandbox
 
-  archive:
-    desc: Create source archive for sharing (includes all files needed to build)
-    vars:
-      ARCHIVE_NAME:
-        sh: |
-          if [ "{{.GIT_DIRTY}}" = "true" ]; then
-            echo "devsandbox_{{.GIT_COMMIT}}-dirty-{{.GIT_DIRTY_HASH}}"
-          else
-            echo "devsandbox_{{.GIT_COMMIT}}"
-          fi
+  release:snapshot:
+    desc: Build snapshot release using goreleaser (for testing)
     cmds:
-      - mkdir -p bin
-      - rm -f bin/devsandbox_*.tar.gz bin/devsandbox_*.zip || true
-      - |
-        tar --transform 's,^,{{.ARCHIVE_NAME}}/,' \
-          --exclude='.git' \
-          --exclude='.idea' \
-          --exclude='.claude' \
-          --exclude='.serena' \
-          --exclude='claudedocs' \
-          --exclude='bin' \
-          --exclude='*.tar.gz' \
-          --exclude='*.zip' \
-          -czvf bin/{{.ARCHIVE_NAME}}.tar.gz \
-          cmd/ internal/ e2e/ docs/ \
-          go.mod go.sum \
-          Taskfile.yaml .mise.toml .gitignore \
-          README.md CLAUDE.md
-      - echo "Created bin/{{.ARCHIVE_NAME}}.tar.gz"
-
-  archive:bin:
-    desc: Create binary release archive
-    deps:
-      - build
-    cmds:
-      - rm -f bin/devsandbox_*_bin.zip || true
-      - zip -j bin/devsandbox_{{.GIT_COMMIT}}_bin.zip bin/devsandbox README.md
-      - zip -r bin/devsandbox_{{.GIT_COMMIT}}_bin.zip docs/
+      - goreleaser release --snapshot --clean
 
   prune-local:
     cmds:
