@@ -2,10 +2,13 @@ package bwrap
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"devsandbox/internal/network"
 )
 
 func CheckInstalled() error {
@@ -68,23 +71,23 @@ func ExecWithPasta(bwrapArgs []string, shellCmd []string) error {
 	// -f: Run in foreground (pasta exits when child exits)
 	//
 	// The wrapper script restricts network to proxy-only:
-	// 1. Add a host route to gateway (10.0.2.2) via the tap device
+	// 1. Add a host route to gateway via the tap device
 	// 2. Delete the default route to block direct internet access
 	// This forces all traffic through our proxy - direct connections to external IPs will fail.
-	const wrapperScript = `
+	wrapperScript := fmt.Sprintf(`
 		dev=$(ip -o route show default | awk '{print $5}')
-		ip route add 10.0.2.2/32 dev "$dev" 2>/dev/null
+		ip route add %s/32 dev "$dev" 2>/dev/null
 		ip route del default 2>/dev/null
 		exec "$@"
-	`
+	`, network.PastaGatewayIP)
 
 	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+16)
 	args = append(args, "--config-net") // Configure network interface
 
 	// Use --map-host-loopback if available (newer pasta versions)
-	// This maps 10.0.2.2 to host's 127.0.0.1 for proxy access
+	// This maps the gateway IP to host's 127.0.0.1 for proxy access
 	if pastaSupportsMapHostLoopback() {
-		args = append(args, "--map-host-loopback", "10.0.2.2")
+		args = append(args, "--map-host-loopback", network.PastaGatewayIP)
 	}
 
 	args = append(args, "-f") // Foreground mode
