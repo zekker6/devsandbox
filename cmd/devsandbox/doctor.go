@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
@@ -31,7 +33,9 @@ Checks:
   - Required binaries (bwrap, shell)
   - Optional binaries (pasta for proxy mode)
   - User namespace support
-  - Directory permissions`,
+  - Directory permissions
+  - Overlayfs support (for tool writable layers)
+  - Recent errors in internal logs`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor()
 		},
@@ -55,6 +59,10 @@ func runDoctor() error {
 	results = append(results, checkKernelVersion())
 
 	results = append(results, checkConfigFile())
+
+	results = append(results, checkOverlayfs())
+
+	results = append(results, checkRecentLogs())
 
 	printDoctorResults(results)
 
@@ -375,4 +383,219 @@ func printDetectedTools() {
 	_ = table.Render()
 
 	fmt.Printf("\n%d of %d tools available\n", len(availableTools), len(allTools))
+}
+
+// checkOverlayfs tests if bwrap's overlayfs support works.
+// This is needed for tool overlay features (e.g., mise with writable layers).
+func checkOverlayfs() checkResult {
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return checkResult{
+			name:    "overlayfs",
+			status:  "warn",
+			message: "cannot test (bwrap not found)",
+		}
+	}
+
+	// Create a temporary directory structure for testing
+	tmpDir, err := os.MkdirTemp("", "devsandbox-overlay-test")
+	if err != nil {
+		return checkResult{
+			name:    "overlayfs",
+			status:  "warn",
+			message: fmt.Sprintf("cannot create temp dir: %v", err),
+		}
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Create test directories
+	lowerDir := filepath.Join(tmpDir, "lower")
+	if err := os.MkdirAll(lowerDir, 0o755); err != nil {
+		return checkResult{
+			name:    "overlayfs",
+			status:  "warn",
+			message: fmt.Sprintf("cannot create test dirs: %v", err),
+		}
+	}
+
+	// Create a test file in lower dir
+	testFile := filepath.Join(lowerDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
+		return checkResult{
+			name:    "overlayfs",
+			status:  "warn",
+			message: fmt.Sprintf("cannot create test file: %v", err),
+		}
+	}
+
+	// Test bwrap with tmp-overlay (writes go to tmpfs, discarded on exit)
+	// Need to mount /tmp as tmpfs so overlay mount point can be created
+	cmd := exec.Command(bwrapPath,
+		"--ro-bind", "/", "/",
+		"--dev", "/dev",
+		"--proc", "/proc",
+		"--tmpfs", "/tmp",
+		"--unshare-user",
+		"--overlay-src", lowerDir,
+		"--tmp-overlay", "/tmp/overlay-test",
+		"--", "cat", "/tmp/overlay-test/test.txt",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Check for common failure reasons
+		errStr := string(output)
+		if strings.Contains(errStr, "fuse: unknown option") || strings.Contains(errStr, "fusermount") {
+			return checkResult{
+				name:    "overlayfs",
+				status:  "warn",
+				message: "not supported (fuse-overlayfs not installed)",
+			}
+		}
+		if strings.Contains(errStr, "Operation not permitted") {
+			return checkResult{
+				name:    "overlayfs",
+				status:  "warn",
+				message: "not supported (requires user namespace or fuse-overlayfs)",
+			}
+		}
+		return checkResult{
+			name:    "overlayfs",
+			status:  "warn",
+			message: fmt.Sprintf("not working: %v", strings.TrimSpace(errStr)),
+		}
+	}
+
+	if strings.TrimSpace(string(output)) != "test" {
+		return checkResult{
+			name:    "overlayfs",
+			status:  "warn",
+			message: "overlay mount works but content mismatch",
+		}
+	}
+
+	return checkResult{
+		name:    "overlayfs",
+		status:  "ok",
+		message: "supported (bwrap overlay works)",
+	}
+}
+
+// checkRecentLogs checks for recent errors in internal logs.
+// Looks at logs from the last 24 hours and summarizes any issues.
+func checkRecentLogs() checkResult {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return checkResult{
+			name:    "logs",
+			status:  "warn",
+			message: "cannot determine home directory",
+		}
+	}
+
+	logPath := filepath.Join(homeDir, ".local", "share", "devsandbox", "logs", "internal", "logging-errors.log")
+
+	info, err := os.Stat(logPath)
+	if os.IsNotExist(err) {
+		return checkResult{
+			name:    "logs",
+			status:  "ok",
+			message: "no error log found (good)",
+		}
+	}
+	if err != nil {
+		return checkResult{
+			name:    "logs",
+			status:  "warn",
+			message: fmt.Sprintf("cannot access log: %v", err),
+		}
+	}
+
+	// Check file age
+	if time.Since(info.ModTime()) > 7*24*time.Hour {
+		return checkResult{
+			name:    "logs",
+			status:  "ok",
+			message: fmt.Sprintf("no recent errors (last entry: %s)", info.ModTime().Format("2006-01-02")),
+		}
+	}
+
+	// Read and parse recent entries
+	file, err := os.Open(logPath)
+	if err != nil {
+		return checkResult{
+			name:    "logs",
+			status:  "warn",
+			message: fmt.Sprintf("cannot open log: %v", err),
+		}
+	}
+	defer func() { _ = file.Close() }()
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	var recentErrors []string
+	componentCounts := make(map[string]int)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		// Parse timestamp (format: 2006-01-02T15:04:05Z07:00)
+		if len(line) < 25 {
+			continue
+		}
+
+		timestamp, err := time.Parse(time.RFC3339, line[:25])
+		if err != nil {
+			// Try without timezone (some entries might have shorter timestamps)
+			timestamp, err = time.Parse("2006-01-02T15:04:05", line[:19])
+			if err != nil {
+				continue
+			}
+		}
+
+		if timestamp.After(cutoff) {
+			recentErrors = append(recentErrors, line)
+
+			// Extract component from [component] format
+			start := strings.Index(line, "[")
+			end := strings.Index(line, "]")
+			if start > 0 && end > start {
+				component := line[start+1 : end]
+				componentCounts[component]++
+			}
+		}
+	}
+
+	if len(recentErrors) == 0 {
+		return checkResult{
+			name:    "logs",
+			status:  "ok",
+			message: "no errors in last 24h",
+		}
+	}
+
+	// Build summary
+	var parts []string
+	for component, count := range componentCounts {
+		parts = append(parts, fmt.Sprintf("%s:%d", component, count))
+	}
+
+	msg := fmt.Sprintf("%d errors in last 24h", len(recentErrors))
+	if len(parts) > 0 {
+		msg += fmt.Sprintf(" (%s)", strings.Join(parts, ", "))
+	}
+
+	// Show last error if there's only one, or just the count
+	status := "warn"
+	if len(recentErrors) > 10 {
+		status = "error"
+	}
+
+	return checkResult{
+		name:    "logs",
+		status:  status,
+		message: msg,
+	}
 }

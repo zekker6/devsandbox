@@ -20,7 +20,6 @@ Linters: golangci + go default linters.
 
 ## TODOs
 
-- goreleaser builds for releases and local builds
 - http filtering
     - ability to define whitelist/blacklist/ask mode for http(s) requests
 - configuration support
@@ -38,5 +37,5 @@ Linters: golangci + go default linters.
 Backlog:
 
 - macOS support
-  - bubblewrap is available
+    - bubblewrap is available
 - tcp/udp proxying
