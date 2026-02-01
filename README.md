@@ -20,22 +20,21 @@ permissions.
 
 ### Installation
 
-**Requirements:** Linux with user namespaces, [bubblewrap](https://github.com/containers/bubblewrap), [mise](https://mise.jdx.dev/)
+**Required:** Linux with user namespaces, [bubblewrap](https://github.com/containers/bubblewrap)
 
-**Optional:** [passt](https://passt.top/) - only needed for proxy mode (`--proxy`)
+**Optional:**
+- [mise](https://mise.jdx.dev/) - for tool version management (node, python, etc.)
+- [passt](https://passt.top/) - for proxy mode (`--proxy`)
 
 ```bash
 # Arch Linux
 sudo pacman -S bubblewrap
-sudo pacman -S passt  # optional, for proxy mode
 
 # Debian/Ubuntu
 sudo apt install bubblewrap
-sudo apt install passt  # optional, for proxy mode
 
 # Fedora
 sudo dnf install bubblewrap
-sudo dnf install passt  # optional, for proxy mode
 ```
 
 **Build from source:**

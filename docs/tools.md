@@ -113,8 +113,7 @@ Summary: 3/4 tools available
 
 ## Tool Management with mise
 
-[mise](https://mise.jdx.dev/) is the recommended tool manager. All mise-managed tools are automatically available inside
-the sandbox.
+[mise](https://mise.jdx.dev/) is the recommended (but optional) tool manager. If installed, all mise-managed tools are automatically available inside the sandbox.
 
 ### How It Works
 
