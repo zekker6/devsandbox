@@ -65,6 +65,14 @@ tasks:
     cmds:
       - goreleaser release --snapshot --clean
 
+  install:
+    desc: Install binary to ~/.local/bin
+    deps:
+      - build
+    cmds:
+      - mkdir -p ~/.local/bin
+      - cp bin/devsandbox ~/.local/bin/
+
   prune-local:
     cmds:
       - rm -rf ~/.local/share/devsandbox/
