@@ -1,7 +1,7 @@
 # devsandbox
 
 A sandbox for running untrusted development tools. Uses [bubblewrap](https://github.com/containers/bubblewrap)
-for filesystem isolation and [pasta](https://passt.top/) for network isolation.
+for filesystem isolation and optionally [pasta](https://passt.top/) for network isolation (proxy mode).
 
 ## Why?
 
@@ -20,18 +20,22 @@ permissions.
 
 ### Installation
 
-**Requirements:** Linux with user
-namespaces, [bubblewrap](https://github.com/containers/bubblewrap), [mise](https://mise.jdx.dev/)
+**Requirements:** Linux with user namespaces, [bubblewrap](https://github.com/containers/bubblewrap), [mise](https://mise.jdx.dev/)
+
+**Optional:** [passt](https://passt.top/) - only needed for proxy mode (`--proxy`)
 
 ```bash
 # Arch Linux
-sudo pacman -S bubblewrap passt
+sudo pacman -S bubblewrap
+sudo pacman -S passt  # optional, for proxy mode
 
 # Debian/Ubuntu
-sudo apt install bubblewrap passt
+sudo apt install bubblewrap
+sudo apt install passt  # optional, for proxy mode
 
 # Fedora
-sudo dnf install bubblewrap passt
+sudo dnf install bubblewrap
+sudo dnf install passt  # optional, for proxy mode
 ```
 
 **Build from source:**
@@ -87,9 +91,27 @@ devsandbox logs proxy -f
 | `.env` files                      | Hidden                     |
 | `~/.ssh`                          | Not mounted (configurable) |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted                |
+| Git config                        | Safe mode (configurable)   |
 | mise-managed tools                | Read-only (configurable)   |
 | Network (default)                 | Full access                |
 | Network (proxy mode)              | Isolated, logged           |
+
+### Git Integration
+
+By default, git runs in **readonly** mode with a sanitized config containing only `user.name` and `user.email`. This allows commits without exposing credentials.
+
+| Mode | Description |
+|------|-------------|
+| `readonly` | Safe gitconfig (name/email only), no credentials **(default)** |
+| `readwrite` | Full access: credentials, SSH keys, GPG signing |
+| `disabled` | No git config, commands work with defaults |
+
+Configure in `~/.config/devsandbox/config.toml`:
+
+```toml
+[tools.git]
+mode = "readonly"  # or "readwrite", "disabled"
+```
 
 ## Documentation
 

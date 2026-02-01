@@ -13,7 +13,7 @@ sandbox.
 
 ## Requirements
 
-Proxy mode requires [passt/pasta](https://passt.top/) for network namespace creation:
+Proxy mode requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt—basic sandboxing works without it.
 
 ```bash
 # Arch Linux
@@ -31,6 +31,8 @@ Verify installation:
 ```bash
 devsandbox doctor
 ```
+
+If passt is not installed, the sandbox will still work but `--proxy` mode will be unavailable.
 
 ## Enabling Proxy Mode
 
