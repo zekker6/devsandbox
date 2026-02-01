@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -176,15 +177,7 @@ func (e *FilterEngine) Match(req *http.Request) FilterDecision {
 func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) string {
 	switch scope {
 	case FilterScopeHost:
-		// Remove port from host if present
-		host := req.Host
-		if idx := strings.LastIndex(host, ":"); idx > 0 {
-			// Check it's not IPv6 address
-			if !strings.Contains(host[idx:], "]") {
-				host = host[:idx]
-			}
-		}
-		return host
+		return normalizeHost(req.Host)
 
 	case FilterScopePath:
 		return req.URL.Path
@@ -193,11 +186,26 @@ func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) stri
 		return req.URL.String()
 
 	default:
-		return req.Host
+		return normalizeHost(req.Host)
 	}
 }
 
+// normalizeHost extracts the hostname without port, handling IPv6 addresses correctly.
+func normalizeHost(hostport string) string {
+	// Use net.SplitHostPort for robust parsing
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		// No port present, return as-is (but strip brackets from IPv6 if present)
+		if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+			return hostport[1 : len(hostport)-1]
+		}
+		return hostport
+	}
+	return host
+}
+
 // CacheDecision stores a decision for future requests to the same host.
+// The host is normalized (port removed) to ensure consistent cache keys.
 func (e *FilterEngine) CacheDecision(host string, action FilterAction) {
 	if !e.config.IsCacheEnabled() {
 		return
@@ -205,14 +213,15 @@ func (e *FilterEngine) CacheDecision(host string, action FilterAction) {
 
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
-	e.decisionCache[host] = action
+	e.decisionCache[normalizeHost(host)] = action
 }
 
 // getCachedDecision retrieves a cached decision for a host.
+// The host is normalized (port removed) to ensure consistent cache keys.
 func (e *FilterEngine) getCachedDecision(host string) FilterAction {
 	e.cacheMu.RLock()
 	defer e.cacheMu.RUnlock()
-	return e.decisionCache[host]
+	return e.decisionCache[normalizeHost(host)]
 }
 
 // ClearCache clears all cached decisions.

@@ -361,3 +361,71 @@ func TestBlockResponse(t *testing.T) {
 		t.Errorf("expected X-Blocked-By header")
 	}
 }
+
+func TestNormalizeHost(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		// Basic cases
+		{"example.com", "example.com"},
+		{"example.com:8080", "example.com"},
+		{"example.com:443", "example.com"},
+
+		// IPv4
+		{"127.0.0.1", "127.0.0.1"},
+		{"127.0.0.1:8080", "127.0.0.1"},
+
+		// IPv6
+		{"[::1]", "::1"},
+		{"[::1]:8080", "::1"},
+		{"[2001:db8::1]", "2001:db8::1"},
+		{"[2001:db8::1]:443", "2001:db8::1"},
+
+		// Edge cases
+		{"", ""},
+		{"localhost", "localhost"},
+		{"localhost:80", "localhost"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := normalizeHost(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeHost(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFilterEngine_CacheNormalization(t *testing.T) {
+	cfg := &FilterConfig{
+		DefaultAction:  FilterActionAsk,
+		CacheDecisions: boolPtr(true),
+	}
+
+	engine, err := NewFilterEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create filter engine: %v", err)
+	}
+
+	// Cache a decision for host without port
+	engine.CacheDecision("example.com", FilterActionAllow)
+
+	// Retrieve using host with port - should find the cached decision
+	cached := engine.getCachedDecision("example.com:8080")
+	if cached != FilterActionAllow {
+		t.Errorf("expected cached decision for host:port, got %s", cached)
+	}
+
+	// Also verify IPv6 normalization
+	engine.CacheDecision("[::1]:8080", FilterActionBlock)
+	cached = engine.getCachedDecision("::1")
+	if cached != FilterActionBlock {
+		t.Errorf("expected cached decision for IPv6, got %s", cached)
+	}
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
