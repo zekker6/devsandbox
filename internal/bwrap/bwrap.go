@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 )
 
@@ -13,6 +14,17 @@ func CheckInstalled() error {
 		return errors.New("bubblewrap (bwrap) is not installed\nRun 'devsandbox doctor' for installation instructions")
 	}
 	return nil
+}
+
+// pastaSupportsMapHostLoopback checks if pasta supports --map-host-loopback option.
+// This option was added in newer versions of passt/pasta.
+func pastaSupportsMapHostLoopback() bool {
+	cmd := exec.Command("pasta", "--help")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(output), "--map-host-loopback")
 }
 
 func Exec(bwrapArgs []string, shellCmd []string) error {
@@ -48,10 +60,11 @@ func ExecWithPasta(bwrapArgs []string, shellCmd []string) error {
 	}
 
 	// Build pasta command with network isolation:
-	// pasta --config-net --map-host-loopback 10.0.2.2 -f -- sh -c '...' _ bwrap [args] -- shell
+	// pasta --config-net [--map-host-loopback 10.0.2.2] -f -- sh -c '...' _ bwrap [args] -- shell
 	//
 	// --config-net: Configure tap interface in namespace (required for network to work)
 	// --map-host-loopback 10.0.2.2: Map 10.0.2.2 to host's 127.0.0.1 (for proxy access)
+	//   Note: This option is not available in older pasta versions (pre-2023)
 	// -f: Run in foreground (pasta exits when child exits)
 	//
 	// The wrapper script restricts network to proxy-only:
@@ -66,9 +79,15 @@ func ExecWithPasta(bwrapArgs []string, shellCmd []string) error {
 	`
 
 	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+16)
-	args = append(args, "--config-net")                    // Configure network interface
-	args = append(args, "--map-host-loopback", "10.0.2.2") // Map to host loopback
-	args = append(args, "-f")                              // Foreground mode
+	args = append(args, "--config-net") // Configure network interface
+
+	// Use --map-host-loopback if available (newer pasta versions)
+	// This maps 10.0.2.2 to host's 127.0.0.1 for proxy access
+	if pastaSupportsMapHostLoopback() {
+		args = append(args, "--map-host-loopback", "10.0.2.2")
+	}
+
+	args = append(args, "-f") // Foreground mode
 	args = append(args, "--")
 	args = append(args, "sh", "-c", wrapperScript, "_") // Wrapper to delete default route
 	args = append(args, bwrapPath)
