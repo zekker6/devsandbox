@@ -175,17 +175,30 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 			})
 		}
 
+		// Ensure cleanup on normal exit
+		defer cleanup()
+
 		// Handle signals for graceful shutdown
+		// We use a done channel to signal the main goroutine to exit after cleanup
 		sigChan := make(chan os.Signal, 1)
+		doneChan := make(chan struct{})
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-sigChan
 			cleanup()
-			os.Exit(0)
+			close(doneChan)
 		}()
 
-		// Ensure cleanup on normal exit too
-		defer cleanup()
+		// Check for signal-initiated shutdown after sandbox exits
+		defer func() {
+			select {
+			case <-doneChan:
+				// Signal received, exit cleanly (cleanup already done)
+				os.Exit(0)
+			default:
+				// Normal exit, cleanup handled by defer
+			}
+		}()
 
 		// Get actual port (may differ from requested if port was busy)
 		actualPort := proxyServer.Port()
@@ -228,6 +241,11 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	builder.AddTools()              // After project bindings so tools can override (e.g., .git read-only)
 	builder.AddProxyCACertificate() // Must come after AddBaseArgs (needs /tmp tmpfs)
 	builder.AddEnvironment()
+
+	// Check for errors from building (e.g., critical tool setup failures)
+	if err := builder.Err(); err != nil {
+		return fmt.Errorf("failed to build sandbox: %w", err)
+	}
 
 	bwrapArgs := builder.Build()
 	shellCmd := sandbox.BuildShellCommand(cfg, args)
