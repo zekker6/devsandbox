@@ -21,7 +21,7 @@ jobs:
           cache: true
 
       - name: Install mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v3
         with:
           install: true
 
@@ -67,7 +67,7 @@ jobs:
           cache: true
 
       - name: Install mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v3
         with:
           install: true
 
