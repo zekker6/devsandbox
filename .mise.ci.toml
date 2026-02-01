@@ -2,7 +2,7 @@
 # Used by GitHub Actions to set up tools for e2e tests
 
 [tools]
-go = "1.23"
+go = "1.25.6"
 task = "3.40"
 golangci-lint = "1.62"
 neovim = "0.10"
