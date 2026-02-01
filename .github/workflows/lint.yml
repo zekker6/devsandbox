@@ -1,0 +1,35 @@
+name: Lint
+
+on:
+  push: { }
+  pull_request: { }
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install mise
+        uses: jdx/mise-action@v3
+
+      - name: Run lint
+        run: task lint
+
+      - name: Run test
+        run: task test
+
+      - name: Run build
+        run: task build
+
+      - name: Run e2e tests
+        run: task test:e2e
