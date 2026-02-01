@@ -2,12 +2,20 @@ package sandbox
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"devsandbox/internal/sandbox/tools"
+)
+
+const (
+	// initialArgsCapacity is the initial capacity for bwrap arguments slice.
+	initialArgsCapacity = 128
+	// initialMountsCapacity is the initial capacity for mount tracking slice.
+	initialMountsCapacity = 64
 )
 
 // getCaller returns the name of the calling function (skipping n frames).
@@ -41,13 +49,14 @@ type Builder struct {
 	args           []string
 	overlaySrcSeen bool // tracks if OverlaySrc was called before overlay mount
 	mounts         []mountInfo
+	err            error // captures errors from build steps (e.g., critical tool setup failures)
 }
 
 func NewBuilder(cfg *Config) *Builder {
 	return &Builder{
 		cfg:    cfg,
-		args:   make([]string, 0, 128),
-		mounts: make([]mountInfo, 0, 64),
+		args:   make([]string, 0, initialArgsCapacity),
+		mounts: make([]mountInfo, 0, initialMountsCapacity),
 	}
 }
 
@@ -55,6 +64,10 @@ func NewBuilder(cfg *Config) *Builder {
 // Panics if:
 // - The exact destination was already mounted (ambiguous)
 // - This mount would shadow an existing child mount (parent after child)
+//
+// Note: We use filepath.Clean on destination paths, not symlink resolution,
+// because destinations are paths in the sandbox namespace (not host paths).
+// Symlink resolution would incorrectly resolve host symlinks like /etc/localtime.
 func (b *Builder) trackMount(dest, source string, readOnly bool, caller string) {
 	dest = filepath.Clean(dest)
 
@@ -97,6 +110,7 @@ func (b *Builder) trackMount(dest, source string, readOnly bool, caller string) 
 }
 
 // isParentPath checks if parent is a parent directory of child.
+// Both paths should already be cleaned before calling.
 func isParentPath(parent, child string) bool {
 	parent = filepath.Clean(parent)
 	child = filepath.Clean(child)
@@ -115,6 +129,12 @@ func isParentPath(parent, child string) bool {
 
 func (b *Builder) Build() []string {
 	return b.args
+}
+
+// Err returns any error that occurred during building.
+// This should be checked after all Add* methods are called.
+func (b *Builder) Err() error {
+	return b.err
 }
 
 func (b *Builder) add(args ...string) {
@@ -500,16 +520,33 @@ func (b *Builder) applyPersistentOverlay(binding tools.Binding, dest string, san
 		return
 	}
 
+	// Validate dest path to prevent path traversal
+	cleanDest := filepath.Clean(dest)
+	if !filepath.IsAbs(cleanDest) {
+		log.Printf("warning: overlay dest must be absolute path, got: %s", dest)
+		return
+	}
+	if strings.Contains(cleanDest, "..") {
+		log.Printf("warning: overlay dest contains invalid path traversal: %s", dest)
+		return
+	}
+
 	// Create upper/work directories for persistent storage
 	// Use a path based on dest to avoid collisions
-	safePath := strings.ReplaceAll(strings.TrimPrefix(dest, "/"), "/", "_")
+	safePath := strings.ReplaceAll(strings.TrimPrefix(cleanDest, "/"), "/", "_")
 	overlayDir := filepath.Join(sandboxHome, "overlay", safePath)
 	upperDir := filepath.Join(overlayDir, "upper")
 	workDir := filepath.Join(overlayDir, "work")
 
-	// Ensure directories exist
-	_ = os.MkdirAll(upperDir, 0o755)
-	_ = os.MkdirAll(workDir, 0o755)
+	// Ensure directories exist with proper error handling
+	if err := os.MkdirAll(upperDir, 0o755); err != nil {
+		log.Printf("warning: failed to create overlay upper dir %s: %v", upperDir, err)
+		return
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		log.Printf("warning: failed to create overlay work dir %s: %v", workDir, err)
+		return
+	}
 
 	// Add additional overlay sources (lower layers)
 	for _, src := range binding.OverlaySources {

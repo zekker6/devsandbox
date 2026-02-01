@@ -375,3 +375,23 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+func TestBuilderErr(t *testing.T) {
+	cfg := &Config{
+		HomeDir:     "/home/test",
+		SandboxHome: "/tmp/sandbox",
+	}
+
+	b := NewBuilder(cfg)
+
+	// Initially no error
+	if err := b.Err(); err != nil {
+		t.Errorf("expected no error initially, got %v", err)
+	}
+
+	// Build should still work
+	args := b.Build()
+	if args == nil {
+		t.Error("expected non-nil args")
+	}
+}
