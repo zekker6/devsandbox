@@ -83,6 +83,22 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Printf("  base_path = %s\n", basePath)
 			fmt.Println()
 
+			// Show custom mounts config
+			fmt.Println("[sandbox.mounts]")
+			if len(cfg.Sandbox.Mounts.Rules) == 0 {
+				fmt.Println("  # No custom mount rules configured")
+			} else {
+				fmt.Println("  rules:")
+				for i, rule := range cfg.Sandbox.Mounts.Rules {
+					mode := rule.Mode
+					if mode == "" {
+						mode = "readonly"
+					}
+					fmt.Printf("    %d. %s (%s)\n", i+1, rule.Pattern, mode)
+				}
+			}
+			fmt.Println()
+
 			fmt.Println("[overlay]")
 			fmt.Printf("  enabled = %v\n", cfg.Overlay.IsEnabled())
 			fmt.Println()

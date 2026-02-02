@@ -14,6 +14,7 @@ import (
 	"devsandbox/internal/network"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
+	"devsandbox/internal/sandbox/mounts"
 	"devsandbox/internal/version"
 )
 
@@ -121,6 +122,9 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	// Pass overlay and tools settings to sandbox config
 	cfg.OverlayEnabled = appCfg.Overlay.IsEnabled()
 	cfg.ToolsConfig = appCfg.Tools
+
+	// Initialize custom mounts engine
+	cfg.MountsConfig = mounts.NewEngine(appCfg.Sandbox.Mounts, cfg.HomeDir)
 
 	if showInfo {
 		printInfo(cfg)
@@ -236,6 +240,7 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	builder.AddNetworkBindings()
 	builder.AddLocaleBindings()
 	builder.AddCABindings()
+	builder.AddCustomMounts() // Custom mounts BEFORE sandbox home (for home paths)
 	builder.AddSandboxHome()
 	builder.AddProjectBindings()
 	builder.AddTools()              // After project bindings so tools can override (e.g., .git read-only)
@@ -299,10 +304,16 @@ func printInfo(cfg *sandbox.Config) {
 	fmt.Println("  ~/.config/nvim, ~/.local/share/nvim (read-only editor)")
 	fmt.Println()
 	fmt.Println("Blocked Paths:")
-	fmt.Println("  ~/.ssh (no SSH access)")
-	fmt.Println("  ~/.gitconfig (no git credentials)")
-	fmt.Println("  ~/.aws, ~/.azure, ~/.gcloud (no cloud credentials)")
-	fmt.Println("  .env, .env.* files (secrets blocked)")
+	fmt.Println("  ~/.ssh, ~/.aws, ~/.azure, ~/.gcloud (not mounted)")
+	fmt.Println("  .env, .env.* files (hidden, project secrets)")
+
+	if cfg.MountsConfig != nil && len(cfg.MountsConfig.Rules()) > 0 {
+		fmt.Println()
+		fmt.Println("Custom Mounts:")
+		for _, rule := range cfg.MountsConfig.Rules() {
+			fmt.Printf("  %s (%s)\n", rule.Pattern, rule.Mode)
+		}
+	}
 
 	if cfg.ProxyEnabled {
 		fmt.Println()

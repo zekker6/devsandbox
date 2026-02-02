@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // FilterEngine evaluates HTTP requests against filter rules.
@@ -68,14 +70,15 @@ func compileRule(rule FilterRule) (compiledRule, error) {
 		}
 
 	case PatternTypeGlob:
-		// Convert glob pattern to regex
-		regexPattern := globToRegex(rule.Pattern)
-		re, err := regexp.Compile(regexPattern)
-		if err != nil {
-			return compiledRule{}, fmt.Errorf("invalid glob pattern: %w", err)
+		// Use doublestar for glob matching (supports *, **, ?)
+		pattern := rule.Pattern
+		// Validate pattern at compile time
+		if !doublestar.ValidatePattern(pattern) {
+			return compiledRule{}, fmt.Errorf("invalid glob pattern: %s", pattern)
 		}
 		matcher = func(s string) bool {
-			return re.MatchString(s)
+			matched, _ := doublestar.Match(pattern, s)
+			return matched
 		}
 
 	case PatternTypeRegex:
@@ -95,31 +98,6 @@ func compileRule(rule FilterRule) (compiledRule, error) {
 		rule:    rule,
 		matcher: matcher,
 	}, nil
-}
-
-// globToRegex converts a glob pattern to a regex pattern.
-// Supports * (any characters) and ? (single character).
-func globToRegex(glob string) string {
-	var sb strings.Builder
-	sb.WriteString("^")
-
-	for _, ch := range glob {
-		switch ch {
-		case '*':
-			sb.WriteString(".*")
-		case '?':
-			sb.WriteString(".")
-		case '.', '+', '^', '$', '|', '(', ')', '[', ']', '{', '}', '\\':
-			// Escape regex special characters
-			sb.WriteRune('\\')
-			sb.WriteRune(ch)
-		default:
-			sb.WriteRune(ch)
-		}
-	}
-
-	sb.WriteString("$")
-	return sb.String()
 }
 
 // Match evaluates the request against filter rules and returns a decision.

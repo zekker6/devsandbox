@@ -160,8 +160,10 @@ func TestSandbox_MiseAvailable(t *testing.T) {
 		t.Fatalf("mise --version failed: %v\nOutput: %s", err, output)
 	}
 
-	if !strings.Contains(string(output), "mise") {
-		t.Errorf("mise version output unexpected: %s", output)
+	// mise --version outputs version string like "2026.1.2 linux-x64 (2026-01-13)"
+	// Just verify we got some output (command worked)
+	if len(strings.TrimSpace(string(output))) == 0 {
+		t.Errorf("mise version output empty")
 	}
 }
 
@@ -1231,6 +1233,648 @@ mode = "disabled"
 	if !strings.Contains(string(logOutput), "test commit") {
 		t.Errorf("commit should be visible in git log, got: %s", logOutput)
 	}
+}
+
+// Custom mounts tests
+
+func TestSandbox_CustomMounts_ReadOnly(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Create a temp directory with a file to mount readonly
+	mountSourceDir, err := os.MkdirTemp("", "sandbox-mount-source-*")
+	if err != nil {
+		t.Fatalf("failed to create mount source dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(mountSourceDir) }()
+
+	// Create a config file in the source dir
+	configFile := filepath.Join(mountSourceDir, "app.conf")
+	if err := os.WriteFile(configFile, []byte("setting=value123"), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+
+	// Create a temp config directory with custom mount rule
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-mounts-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "` + mountSourceDir + `"
+mode = "readonly"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create a temp project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-project-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	t.Run("can_read_mounted_file", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "cat", configFile)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to read mounted file: %v\nOutput: %s", err, output)
+		}
+		if !strings.Contains(string(output), "setting=value123") {
+			t.Errorf("mounted file should be readable, got: %s", output)
+		}
+	})
+
+	t.Run("cannot_write_to_mounted_file", func(t *testing.T) {
+		// Try to write to the readonly mounted file
+		cmd := exec.Command(binaryPath, "sh", "-c", "echo 'new content' > "+configFile)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+
+		// Should fail with permission denied or read-only error
+		if err == nil {
+			t.Error("writing to readonly mount should fail, but succeeded")
+		}
+		outputStr := string(output)
+		if !strings.Contains(outputStr, "Read-only") && !strings.Contains(outputStr, "read-only") &&
+			!strings.Contains(outputStr, "Permission denied") && !strings.Contains(outputStr, "permission denied") {
+			t.Errorf("expected read-only or permission error, got: %s", outputStr)
+		}
+	})
+}
+
+func TestSandbox_CustomMounts_Hidden(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Hidden mode overlays a file with /dev/null, making it appear empty.
+	// The file's parent directory must be mounted first for hidden to work.
+	// Note: Custom mounts under $HOME conflict with sandbox home, so we use /tmp.
+
+	// Create a directory with files (in /tmp which allows custom mounts)
+	secretDir, err := os.MkdirTemp("", "sandbox-hidden-source-*")
+	if err != nil {
+		t.Fatalf("failed to create secret dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(secretDir) }()
+
+	secretFile := filepath.Join(secretDir, "credentials.key")
+	if err := os.WriteFile(secretFile, []byte("SUPER_SECRET_KEY_12345"), 0o644); err != nil {
+		t.Fatalf("failed to create secret file: %v", err)
+	}
+
+	// Also create a visible file in the same directory
+	visibleFile := filepath.Join(secretDir, "readme.txt")
+	if err := os.WriteFile(visibleFile, []byte("visible content"), 0o644); err != nil {
+		t.Fatalf("failed to create visible file: %v", err)
+	}
+
+	// Create a temp project directory (separate from secret dir)
+	tmpDir, err := os.MkdirTemp("", "sandbox-hidden-project-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Create a temp config directory with custom mount rules
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-hidden-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	// Mount the directory first, then hide the specific file using glob
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "` + secretDir + `"
+mode = "readonly"
+
+[[sandbox.mounts.rules]]
+pattern = "` + secretDir + `/*.key"
+mode = "hidden"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	t.Run("hidden_file_content_not_exposed", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "cat", secretFile)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, _ := cmd.CombinedOutput()
+
+		// The key test: secret content should NOT be exposed
+		// Hidden mode may return empty content or permission denied,
+		// but it must not reveal the actual secret
+		if strings.Contains(string(output), "SUPER_SECRET_KEY") {
+			t.Error("hidden file should not expose its contents")
+		}
+	})
+
+	t.Run("visible_file_readable", func(t *testing.T) {
+		// The visible file in the same directory should still be readable
+		cmd := exec.Command(binaryPath, "cat", visibleFile)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to read visible file: %v\nOutput: %s", err, output)
+		}
+		if !strings.Contains(string(output), "visible content") {
+			t.Errorf("visible file should be readable, got: %s", output)
+		}
+	})
+}
+
+func TestSandbox_CustomMounts_ReadWrite(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Create a temp directory to mount as readwrite
+	mountSourceDir, err := os.MkdirTemp("", "sandbox-rw-source-*")
+	if err != nil {
+		t.Fatalf("failed to create mount source dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(mountSourceDir) }()
+
+	// Create a file that will be modified
+	dataFile := filepath.Join(mountSourceDir, "data.txt")
+	if err := os.WriteFile(dataFile, []byte("original"), 0o644); err != nil {
+		t.Fatalf("failed to create data file: %v", err)
+	}
+
+	// Create a temp config directory with custom mount rule
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-rw-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "` + mountSourceDir + `"
+mode = "readwrite"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create a temp project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-project-rw-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	t.Run("can_write_to_mounted_dir", func(t *testing.T) {
+		// Write to the readwrite mounted file
+		cmd := exec.Command(binaryPath, "sh", "-c", "echo 'modified' > "+dataFile)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("writing to readwrite mount should succeed: %v\nOutput: %s", err, output)
+		}
+
+		// Verify the change persisted on host
+		content, err := os.ReadFile(dataFile)
+		if err != nil {
+			t.Fatalf("failed to read file on host: %v", err)
+		}
+		if !strings.Contains(string(content), "modified") {
+			t.Errorf("changes should persist to host, got: %s", content)
+		}
+	})
+}
+
+func TestSandbox_CustomMounts_TmpOverlay(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Create a temp directory to mount with tmpoverlay
+	mountSourceDir, err := os.MkdirTemp("", "sandbox-tmpoverlay-source-*")
+	if err != nil {
+		t.Fatalf("failed to create mount source dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(mountSourceDir) }()
+
+	// Create a file that will be "modified" but changes discarded
+	dataFile := filepath.Join(mountSourceDir, "temp.txt")
+	if err := os.WriteFile(dataFile, []byte("original content"), 0o644); err != nil {
+		t.Fatalf("failed to create data file: %v", err)
+	}
+
+	// Create a temp config directory with custom mount rule
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-tmpoverlay-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "` + mountSourceDir + `"
+mode = "tmpoverlay"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create a temp project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-project-tmpoverlay-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	t.Run("can_write_inside_sandbox", func(t *testing.T) {
+		// Write to the tmpoverlay mounted file - should succeed
+		cmd := exec.Command(binaryPath, "sh", "-c", "echo 'sandbox modified' > "+dataFile+" && cat "+dataFile)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("writing in tmpoverlay should succeed: %v\nOutput: %s", err, output)
+		}
+		if !strings.Contains(string(output), "sandbox modified") {
+			t.Errorf("should see modified content inside sandbox, got: %s", output)
+		}
+	})
+
+	t.Run("changes_not_persisted_to_host", func(t *testing.T) {
+		// After sandbox exits, host file should be unchanged
+		content, err := os.ReadFile(dataFile)
+		if err != nil {
+			t.Fatalf("failed to read file on host: %v", err)
+		}
+		if !strings.Contains(string(content), "original content") {
+			t.Errorf("host file should be unchanged, got: %s", content)
+		}
+		if strings.Contains(string(content), "sandbox modified") {
+			t.Error("tmpoverlay changes should NOT persist to host")
+		}
+	})
+}
+
+func TestSandbox_CustomMounts_InfoShowsMounts(t *testing.T) {
+	// Create a temp config directory with custom mount rules
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-info-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "~/.config/testapp"
+mode = "readonly"
+
+[[sandbox.mounts.rules]]
+pattern = "**/secrets/**"
+mode = "hidden"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create the directories so they get expanded
+	home := os.Getenv("HOME")
+	testAppDir := filepath.Join(home, ".config", "testapp")
+	_ = os.MkdirAll(testAppDir, 0o755)
+	defer func() { _ = os.RemoveAll(testAppDir) }()
+
+	// Run --info with custom config
+	cmd := exec.Command(binaryPath, "--info")
+	cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("--info failed: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := string(output)
+
+	// Should show custom mounts section
+	if !strings.Contains(outputStr, "Custom Mounts:") {
+		t.Errorf("--info should show Custom Mounts section, got: %s", outputStr)
+	}
+
+	// Should show the testapp mount
+	if !strings.Contains(outputStr, "testapp") {
+		t.Errorf("--info should show testapp mount, got: %s", outputStr)
+	}
+}
+
+func TestSandbox_CustomMounts_ProjectInternalHidden(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Test that custom mounts can hide files INSIDE the project directory.
+	// This tests the new two-phase mount implementation where project-internal
+	// custom mounts are applied after the project is bound.
+
+	// Create a project directory with some files
+	tmpDir, err := os.MkdirTemp("", "sandbox-project-internal-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Create a secrets subdirectory with sensitive files
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	secretFile := filepath.Join(secretsDir, "api.key")
+	if err := os.WriteFile(secretFile, []byte("SUPER_SECRET_API_KEY_12345"), 0o644); err != nil {
+		t.Fatalf("failed to create secret file: %v", err)
+	}
+
+	// Create a normal file that should be readable
+	normalFile := filepath.Join(tmpDir, "readme.txt")
+	if err := os.WriteFile(normalFile, []byte("readable content"), 0o644); err != nil {
+		t.Fatalf("failed to create normal file: %v", err)
+	}
+
+	// Create a temp config directory with rule to hide secrets/**
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-project-internal-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	// Use glob pattern to hide all files in secrets directory
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "**/secrets/**"
+mode = "hidden"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	t.Run("project_internal_files_hidden", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "cat", "secrets/api.key")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, _ := cmd.CombinedOutput()
+
+		// The secret content should NOT be exposed
+		if strings.Contains(string(output), "SUPER_SECRET_API_KEY") {
+			t.Error("hidden project-internal file should not expose its contents")
+		}
+	})
+
+	t.Run("project_normal_files_readable", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "cat", "readme.txt")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to read normal file: %v\nOutput: %s", err, output)
+		}
+		if !strings.Contains(string(output), "readable content") {
+			t.Errorf("normal file should be readable, got: %s", output)
+		}
+	})
+
+	t.Run("project_secrets_dir_listing_shows_hidden", func(t *testing.T) {
+		// The secrets directory should still be listable, but files appear empty/inaccessible
+		cmd := exec.Command(binaryPath, "ls", "-la", "secrets/")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to list secrets dir: %v\nOutput: %s", err, output)
+		}
+		// The file should appear in the listing (hidden mode uses /dev/null overlay, not removal)
+		if !strings.Contains(string(output), "api.key") {
+			t.Errorf("hidden file should still appear in directory listing, got: %s", output)
+		}
+	})
+}
+
+func TestSandbox_CustomMounts_ProjectInternalReadOnly(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Test that custom mounts can make project subdirectories readonly
+
+	// Create a project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-project-readonly-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Create a vendor directory that should be readonly
+	vendorDir := filepath.Join(tmpDir, "vendor")
+	if err := os.MkdirAll(vendorDir, 0o755); err != nil {
+		t.Fatalf("failed to create vendor dir: %v", err)
+	}
+
+	vendorFile := filepath.Join(vendorDir, "library.js")
+	if err := os.WriteFile(vendorFile, []byte("// original vendor code"), 0o644); err != nil {
+		t.Fatalf("failed to create vendor file: %v", err)
+	}
+
+	// Create a normal file that should be writable
+	normalFile := filepath.Join(tmpDir, "app.js")
+	if err := os.WriteFile(normalFile, []byte("// app code"), 0o644); err != nil {
+		t.Fatalf("failed to create normal file: %v", err)
+	}
+
+	// Create a temp config directory with rule to make vendor readonly
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-project-ro-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "**/vendor/**"
+mode = "readonly"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	t.Run("vendor_readable", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "cat", "vendor/library.js")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to read vendor file: %v\nOutput: %s", err, output)
+		}
+		if !strings.Contains(string(output), "original vendor code") {
+			t.Errorf("vendor file should be readable, got: %s", output)
+		}
+	})
+
+	t.Run("vendor_not_writable", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "sh", "-c", "echo 'modified' > vendor/library.js")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+
+		if err == nil {
+			t.Error("writing to readonly vendor should fail, but succeeded")
+		}
+		outputStr := string(output)
+		if !strings.Contains(outputStr, "Read-only") && !strings.Contains(outputStr, "read-only") &&
+			!strings.Contains(outputStr, "Permission denied") && !strings.Contains(outputStr, "permission denied") {
+			t.Errorf("expected read-only or permission error, got: %s", outputStr)
+		}
+	})
+
+	t.Run("normal_project_file_writable", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "sh", "-c", "echo '// modified' > app.js")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("writing to normal project file should succeed: %v\nOutput: %s", err, output)
+		}
+
+		// Verify change persisted on host
+		content, err := os.ReadFile(normalFile)
+		if err != nil {
+			t.Fatalf("failed to read file on host: %v", err)
+		}
+		if !strings.Contains(string(content), "modified") {
+			t.Errorf("changes should persist to host, got: %s", content)
+		}
+	})
+}
+
+func TestSandbox_CustomMounts_GlobPattern(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Create an external directory with multiple conf files
+	// (custom mounts with hidden mode work on external paths, not project paths)
+	externalDir, err := os.MkdirTemp("", "sandbox-external-glob-*")
+	if err != nil {
+		t.Fatalf("failed to create external dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(externalDir) }()
+
+	// Create multiple .secret files that should be hidden
+	secretFiles := []string{"api.secret", "db.secret"}
+	for _, name := range secretFiles {
+		path := filepath.Join(externalDir, name)
+		if err := os.WriteFile(path, []byte("SECRET_"+name), 0o644); err != nil {
+			t.Fatalf("failed to create %s: %v", name, err)
+		}
+	}
+
+	// Create a normal file that should NOT be hidden
+	normalFile := filepath.Join(externalDir, "readme.txt")
+	if err := os.WriteFile(normalFile, []byte("normal content"), 0o644); err != nil {
+		t.Fatalf("failed to create normal file: %v", err)
+	}
+
+	// Create a temp project directory (separate from external dir)
+	tmpDir, err := os.MkdirTemp("", "sandbox-glob-project-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Create a temp config directory with glob pattern
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-glob-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	// Mount the external directory as readonly, then use glob to hide .secret files
+	configContent := `[[sandbox.mounts.rules]]
+pattern = "` + externalDir + `"
+mode = "readonly"
+
+[[sandbox.mounts.rules]]
+pattern = "` + externalDir + `/*.secret"
+mode = "hidden"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	t.Run("glob_hides_matching_files", func(t *testing.T) {
+		for _, name := range secretFiles {
+			path := filepath.Join(externalDir, name)
+			cmd := exec.Command(binaryPath, "cat", path)
+			cmd.Dir = tmpDir
+			cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+			output, _ := cmd.CombinedOutput()
+
+			if strings.Contains(string(output), "SECRET_") {
+				t.Errorf("%s should be hidden, but got content: %s", name, output)
+			}
+		}
+	})
+
+	t.Run("glob_does_not_hide_non_matching", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "cat", normalFile)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to read normal file: %v\nOutput: %s", err, output)
+		}
+		if !strings.Contains(string(output), "normal content") {
+			t.Errorf("normal file should be readable, got: %s", output)
+		}
+	})
 }
 
 // bwrapAvailable checks if bwrap is installed AND functional.

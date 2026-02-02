@@ -3,8 +3,9 @@ package proxy
 import (
 	"net/http"
 	"net/url"
-	"regexp"
 	"testing"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 func TestFilterEngine_GlobPattern(t *testing.T) {
@@ -287,7 +288,7 @@ func TestFilterConfig_Validate(t *testing.T) {
 	}
 }
 
-func TestGlobToRegex(t *testing.T) {
+func TestGlobMatching(t *testing.T) {
 	tests := []struct {
 		glob    string
 		input   string
@@ -300,26 +301,24 @@ func TestGlobToRegex(t *testing.T) {
 		{"api.?.com", "api.xx.com", false},
 		{"test.com", "test.com", true},
 		{"test.com", "other.com", false},
+		// Additional tests for doublestar features
+		{"**.github.com", "api.github.com", true},
+		{"**.github.com", "raw.githubusercontent.github.com", true},
+		{"*.tracking.io", "metrics.tracking.io", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.glob+"_"+tt.input, func(t *testing.T) {
-			regex := globToRegex(tt.glob)
-			matched := regexpMatch(regex, tt.input)
+			matched, err := doublestar.Match(tt.glob, tt.input)
+			if err != nil {
+				t.Fatalf("doublestar.Match(%q, %q) error: %v", tt.glob, tt.input, err)
+			}
 			if matched != tt.matches {
-				t.Errorf("globToRegex(%q).match(%q) = %v, want %v (regex: %s)",
-					tt.glob, tt.input, matched, tt.matches, regex)
+				t.Errorf("doublestar.Match(%q, %q) = %v, want %v",
+					tt.glob, tt.input, matched, tt.matches)
 			}
 		})
 	}
-}
-
-func regexpMatch(pattern, s string) bool {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return false
-	}
-	return re.MatchString(s)
 }
 
 func TestFilterRule_DetectPatternType(t *testing.T) {

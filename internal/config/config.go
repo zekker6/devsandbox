@@ -97,6 +97,32 @@ type SandboxConfig struct {
 	// BasePath is the directory where sandbox homes are stored.
 	// Defaults to ~/.local/share/devsandbox if not set.
 	BasePath string `toml:"base_path"`
+
+	// Mounts contains custom mount rules.
+	Mounts MountsConfig `toml:"mounts"`
+}
+
+// MountsConfig defines custom mount rules for the sandbox.
+type MountsConfig struct {
+	// Rules is the list of mount rules.
+	Rules []MountRule `toml:"rules"`
+}
+
+// MountRule defines a single mount rule.
+type MountRule struct {
+	// Pattern is the glob pattern to match paths.
+	// Supports ~ expansion and ** for recursive matching.
+	// Examples: "~/.config/myapp", "**/secrets/**", "/opt/tools"
+	Pattern string `toml:"pattern"`
+
+	// Mode specifies how to handle matching paths:
+	// - "hidden": overlay with /dev/null (hide the file/directory)
+	// - "readonly": mount as read-only bind mount
+	// - "readwrite": mount as read-write bind mount
+	// - "overlay": mount with persistent overlayfs (writes saved to sandbox)
+	// - "tmpoverlay": mount with tmpfs overlay (writes discarded on exit)
+	// Default: "readonly"
+	Mode string `toml:"mode"`
 }
 
 // OverlayConfig contains global overlayfs settings.
@@ -283,6 +309,20 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate mount rules
+	validMountModes := map[string]bool{
+		"hidden": true, "readonly": true, "readwrite": true,
+		"overlay": true, "tmpoverlay": true, "": true,
+	}
+	for i, rule := range c.Sandbox.Mounts.Rules {
+		if rule.Pattern == "" {
+			return fmt.Errorf("sandbox.mounts.rules[%d].pattern cannot be empty", i)
+		}
+		if !validMountModes[rule.Mode] {
+			return fmt.Errorf("sandbox.mounts.rules[%d].mode must be 'hidden', 'readonly', 'readwrite', 'overlay', or 'tmpoverlay', got %q", i, rule.Mode)
+		}
+	}
+
 	return nil
 }
 
@@ -376,6 +416,39 @@ port = 8080
 # Base directory for sandbox homes
 # Defaults to ~/.local/share/devsandbox if not set
 # base_path = "~/.local/share/devsandbox"
+
+# Custom mount rules - control how paths are mounted in the sandbox
+# Note: Home directory paths (~/.ssh, ~/.aws, etc.) are NOT mounted by default.
+# .env files in the project are hidden by default (hardcoded).
+#
+# Use these rules to:
+# - Mount additional paths from the host filesystem
+# - Hide sensitive files within the project
+# - Control read/write access to specific paths
+#
+# Modes:
+# - "hidden": overlay with /dev/null (hide the file/directory)
+# - "readonly": mount as read-only bind mount
+# - "readwrite": mount as read-write bind mount
+# - "overlay": mount with persistent overlayfs (writes saved to sandbox)
+# - "tmpoverlay": mount with tmpfs overlay (writes discarded on exit)
+#
+# Patterns support glob syntax with ** for recursive matching and ~ for home.
+
+# Example: Mount app config directory as read-only
+# [[sandbox.mounts.rules]]
+# pattern = "~/.config/myapp"
+# mode = "readonly"
+
+# Example: Hide secrets directory within the project
+# [[sandbox.mounts.rules]]
+# pattern = "**/secrets/**"
+# mode = "hidden"
+
+# Example: Mount cache with overlay (persistent writes)
+# [[sandbox.mounts.rules]]
+# pattern = "~/.cache/myapp"
+# mode = "overlay"
 
 # Overlay filesystem settings (global)
 [overlay]

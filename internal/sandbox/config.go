@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"devsandbox/internal/sandbox/mounts"
 )
 
 const (
@@ -45,6 +47,9 @@ type Config struct {
 	// Overlay settings
 	OverlayEnabled bool           // Global overlay enable/disable
 	ToolsConfig    map[string]any // Per-tool configuration from config file
+
+	// Custom mount settings
+	MountsConfig *mounts.Engine // Compiled mount rules
 }
 
 // Options allows customizing sandbox configuration.

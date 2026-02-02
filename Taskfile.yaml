@@ -47,6 +47,8 @@ tasks:
       - go test ./internal/...
 
   test:e2e:
+    deps:
+      - build
     cmds:
       - go test -v ./e2e/...
 

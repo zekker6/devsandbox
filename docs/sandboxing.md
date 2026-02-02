@@ -13,6 +13,7 @@ untrusted code.
 | `~/.gitconfig`                    | Sanitized copy (configurable)       |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted                         |
 | mise-managed tools                | Read-only or overlay                |
+| Custom mount rules                | User-configurable (see below)       |
 | Network (default)                 | Full access                         |
 | Network (proxy mode)              | Isolated, routed through MITM proxy |
 
@@ -251,6 +252,94 @@ persistent = false # Discard changes on exit (safer)
 - Install project-specific tool versions without polluting host
 - Test new tool versions before committing to them
 - Allow AI assistants to install tools they need temporarily
+
+## Custom Mounts
+
+Beyond the built-in security rules, you can configure custom mount rules to control exactly what the sandbox can access.
+
+### Modes
+
+| Mode         | Behavior                                                     |
+|--------------|--------------------------------------------------------------|
+| `readonly`   | Host path visible inside sandbox, but writes blocked         |
+| `readwrite`  | Full read/write access to host path                          |
+| `hidden`     | Path replaced with `/dev/null` (files only)                  |
+| `overlay`    | Writes saved to sandbox home, host unchanged                 |
+| `tmpoverlay` | Writes go to tmpfs, discarded on exit                        |
+
+### How Custom Mounts Work
+
+Custom mounts are processed **before** the sandbox home is mounted. This means:
+
+1. Home directory paths (`~/.config/myapp`) are mounted from the **host**
+2. Project-relative patterns (`**/secrets/**`) are applied to the project directory
+3. First matching rule wins when patterns overlap
+
+```
+Mount Order:
+1. System bindings (/usr, /lib, /etc)
+2. Network bindings (/etc/resolv.conf, etc)
+3. Custom mounts ← Your rules applied here
+4. Sandbox home (~/)
+5. Project directory
+6. Tool bindings (mise, git, etc)
+```
+
+### Pattern Matching
+
+Patterns use glob syntax with the [doublestar](https://github.com/bmatcuk/doublestar) library:
+
+| Pattern             | Description                           |
+|---------------------|---------------------------------------|
+| `~/.config/myapp`   | Exact path (~ expanded to $HOME)      |
+| `*.conf`            | Files ending in .conf (current dir)   |
+| `**/*.key`          | All .key files at any depth           |
+| `**/secrets/**`     | Anything under any "secrets" dir      |
+| `/opt/tools`        | Absolute path (no expansion)          |
+
+### Examples
+
+**Mount application config:**
+
+```toml
+[[sandbox.mounts.rules]]
+pattern = "~/.config/myapp"
+mode = "readonly"
+```
+
+**Hide project secrets:**
+
+```toml
+[[sandbox.mounts.rules]]
+pattern = "**/secrets/**"
+mode = "hidden"
+```
+
+**Writable cache with persistence:**
+
+```toml
+[[sandbox.mounts.rules]]
+pattern = "~/.cache/expensive-builds"
+mode = "overlay"
+```
+
+**Temporary scratch space:**
+
+```toml
+[[sandbox.mounts.rules]]
+pattern = "~/.local/share/myapp/tmp"
+mode = "tmpoverlay"
+```
+
+### Viewing Active Mounts
+
+Use `--info` to see what custom mounts are active:
+
+```bash
+devsandbox --info
+```
+
+Output includes a "Custom Mounts" section if rules are configured.
 
 ## Limitations
 

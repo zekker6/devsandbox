@@ -36,6 +36,54 @@ port = 8080
 # base_path = "~/.local/share/devsandbox"
 ```
 
+### Custom Mounts
+
+Control how specific paths are mounted in the sandbox. Use this to:
+
+- Mount additional host directories (e.g., app configs)
+- Hide sensitive files within your project
+- Set up overlay mounts for caches
+
+```toml
+# Mount app configuration as read-only
+[[sandbox.mounts.rules]]
+pattern = "~/.config/myapp"
+mode = "readonly"
+
+# Hide secrets directory within the project
+[[sandbox.mounts.rules]]
+pattern = "**/secrets/**"
+mode = "hidden"
+
+# Mount cache with overlay (persistent writes)
+[[sandbox.mounts.rules]]
+pattern = "~/.cache/myapp"
+mode = "overlay"
+```
+
+#### Mount Modes
+
+| Mode         | Description                                                  |
+|--------------|--------------------------------------------------------------|
+| `readonly`   | Bind mount as read-only (default)                            |
+| `readwrite`  | Bind mount as read-write                                     |
+| `hidden`     | Overlay with `/dev/null` (files only, not directories)       |
+| `overlay`    | Persistent overlayfs (writes saved to sandbox home)          |
+| `tmpoverlay` | Temporary overlayfs (writes discarded on sandbox exit)       |
+
+#### Pattern Syntax
+
+Patterns support glob syntax with home directory expansion:
+
+| Pattern             | Matches                                          |
+|---------------------|--------------------------------------------------|
+| `~/.config/myapp`   | Exact path with home expansion                   |
+| `*.conf`            | Single-level wildcard                            |
+| `**/secrets/**`     | Recursive match (any depth)                      |
+| `/opt/tools`        | Absolute path                                    |
+
+**Note:** The `hidden` mode only works for files. To hide a directory, use `readonly` or `tmpoverlay` instead.
+
 ### Overlay Settings
 
 Global overlayfs settings:
@@ -265,6 +313,15 @@ mode = "readonly"
 writable = true
 # Don't persist changes (safer default)
 persistent = false
+
+# Custom mount rules
+[[sandbox.mounts.rules]]
+pattern = "~/.config/myapp"
+mode = "readonly"
+
+[[sandbox.mounts.rules]]
+pattern = "**/credentials/**"
+mode = "hidden"
 
 [logging]
 # Custom attributes for all log entries

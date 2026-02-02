@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
+	"devsandbox/internal/sandbox/mounts"
 	"devsandbox/internal/sandbox/tools"
 )
 
@@ -565,11 +567,144 @@ func (b *Builder) applyPersistentOverlay(binding tools.Binding, dest string, san
 	b.Overlay(upperDir, workDir, dest)
 }
 
+// AddCustomMounts applies custom mount rules from configuration.
+// This handles mounting additional paths, hiding files, and setting up overlays.
+// Note: Paths inside the project directory are handled by AddProjectBindings() instead.
+func (b *Builder) AddCustomMounts() *Builder {
+	if b.cfg.MountsConfig == nil {
+		return b
+	}
+
+	engine := b.cfg.MountsConfig
+	if len(engine.Rules()) == 0 {
+		return b
+	}
+
+	// Get all expanded paths with their rules and sort for deterministic ordering
+	expandedPaths := engine.ExpandedPaths()
+	paths := make([]string, 0, len(expandedPaths))
+	for path := range expandedPaths {
+		// Skip paths inside project directory - they're handled in AddProjectBindings()
+		if b.isInsideProject(path) {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	sortedPaths := sortPaths(paths)
+
+	// Apply mounts in sorted order
+	for _, path := range sortedPaths {
+		rule := expandedPaths[path]
+		b.applyMountRule(path, rule)
+	}
+
+	return b
+}
+
+// isInsideProject checks if a path is inside the project directory.
+func (b *Builder) isInsideProject(path string) bool {
+	projectDir := filepath.Clean(b.cfg.ProjectDir)
+	cleanPath := filepath.Clean(path)
+
+	// Check if path is the project dir itself or inside it
+	if cleanPath == projectDir {
+		return true
+	}
+
+	// Check if path is a child of project dir
+	return strings.HasPrefix(cleanPath, projectDir+string(filepath.Separator))
+}
+
+// applyMountRule applies a single custom mount rule to a path.
+func (b *Builder) applyMountRule(path string, rule mounts.Rule) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return // Path doesn't exist
+	}
+
+	switch rule.Mode {
+	case mounts.ModeHidden:
+		if info.IsDir() {
+			// Hiding directories is not supported - log and skip
+			log.Printf("mounts: cannot hide directory %q - use 'readonly', 'overlay', or 'tmpoverlay' mode instead (pattern: %s)", path, rule.Pattern)
+			return
+		}
+		// For files within mounted paths, overlay with /dev/null
+		b.ROBind("/dev/null", path)
+
+	case mounts.ModeReadOnly:
+		b.ROBind(path, path)
+
+	case mounts.ModeReadWrite:
+		b.Bind(path, path)
+
+	case mounts.ModeOverlay:
+		b.applyCustomOverlay(path, rule, false)
+
+	case mounts.ModeTmpOverlay:
+		b.applyCustomOverlay(path, rule, true)
+	}
+}
+
+// sortPaths sorts paths so that parent directories come before children.
+// This ensures deterministic mount ordering.
+func sortPaths(paths []string) []string {
+	sorted := make([]string, len(paths))
+	copy(sorted, paths)
+
+	// Sort by path length first (shorter paths = parents), then lexicographically
+	slices.SortFunc(sorted, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(a) - len(b)
+		}
+		return strings.Compare(a, b)
+	})
+	return sorted
+}
+
+// applyCustomOverlay applies an overlay mount for a custom mount rule.
+func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		log.Printf("mounts: overlay only supported for directories: %s (pattern: %s)", path, rule.Pattern)
+		return
+	}
+
+	b.OverlaySrc(path)
+
+	if tmpfs {
+		b.TmpOverlay(path)
+	} else {
+		// Create persistent overlay directories
+		cleanPath := filepath.Clean(path)
+		safePath := strings.ReplaceAll(strings.TrimPrefix(cleanPath, "/"), "/", "_")
+		overlayDir := filepath.Join(b.cfg.SandboxHome, "overlay", "custom", safePath)
+		upperDir := filepath.Join(overlayDir, "upper")
+		workDir := filepath.Join(overlayDir, "work")
+
+		if err := os.MkdirAll(upperDir, 0o755); err != nil {
+			log.Printf("mounts: failed to create overlay upper dir: %v", err)
+			return
+		}
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			log.Printf("mounts: failed to create overlay work dir: %v", err)
+			return
+		}
+
+		b.Overlay(upperDir, workDir, path)
+	}
+}
+
 func (b *Builder) AddProjectBindings() *Builder {
 	b.Bind(b.cfg.ProjectDir, b.cfg.ProjectDir)
 	b.Chdir(b.cfg.ProjectDir)
 
-	// Recursively find and hide all .env files
+	// Apply custom mount rules for paths inside the project directory
+	// This must happen AFTER the project is bound
+	b.applyProjectCustomMounts()
+
+	// Recursively find and hide all .env files in project directory
+	// This runs after custom mounts so custom rules can override .env hiding if needed
 	_ = filepath.WalkDir(b.cfg.ProjectDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip inaccessible paths
@@ -597,6 +732,57 @@ func (b *Builder) AddProjectBindings() *Builder {
 	b.Tmpfs(b.cfg.XDGRuntime)
 
 	return b
+}
+
+// applyProjectCustomMounts applies custom mount rules for paths inside the project directory.
+// Called after the project is bound to avoid mount ordering conflicts.
+func (b *Builder) applyProjectCustomMounts() {
+	if b.cfg.MountsConfig == nil {
+		return
+	}
+
+	engine := b.cfg.MountsConfig
+	if len(engine.Rules()) == 0 {
+		return
+	}
+
+	// Collect paths from two sources:
+	// 1. Absolute paths from ExpandedPaths() that happen to be inside the project
+	// 2. Relative patterns expanded within the project directory
+	expandedPaths := make(map[string]mounts.Rule)
+
+	// Source 1: Absolute paths inside the project
+	globalPaths := engine.ExpandedPaths()
+	for path, rule := range globalPaths {
+		if b.isInsideProject(path) {
+			expandedPaths[path] = rule
+		}
+	}
+
+	// Source 2: Relative patterns expanded in project directory
+	projectPaths := engine.ExpandedPathsInDir(b.cfg.ProjectDir)
+	for path, rule := range projectPaths {
+		if _, exists := expandedPaths[path]; !exists {
+			expandedPaths[path] = rule
+		}
+	}
+
+	if len(expandedPaths) == 0 {
+		return
+	}
+
+	// Sort paths for deterministic ordering
+	paths := make([]string, 0, len(expandedPaths))
+	for path := range expandedPaths {
+		paths = append(paths, path)
+	}
+	sortedPaths := sortPaths(paths)
+
+	// Apply mounts
+	for _, path := range sortedPaths {
+		rule := expandedPaths[path]
+		b.applyMountRule(path, rule)
+	}
 }
 
 func (b *Builder) AddEnvironment() *Builder {
