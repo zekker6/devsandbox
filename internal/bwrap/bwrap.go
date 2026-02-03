@@ -45,6 +45,29 @@ func Exec(bwrapArgs []string, shellCmd []string) error {
 	return syscall.Exec(bwrapPath, args, os.Environ())
 }
 
+// ExecRun runs bwrap using exec.Command instead of syscall.Exec.
+// Unlike Exec, this keeps the parent process alive, which is necessary
+// when background goroutines (like ActiveTool proxies) need to keep running.
+func ExecRun(bwrapArgs []string, shellCmd []string) error {
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		return err
+	}
+
+	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+2)
+	args = append(args, bwrapArgs...)
+	args = append(args, "--")
+	args = append(args, shellCmd...)
+
+	cmd := exec.Command(bwrapPath, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+
+	return cmd.Run()
+}
+
 // ExecWithPasta wraps bwrap execution inside pasta for network namespace isolation.
 // This creates an isolated network namespace where all traffic must go through
 // pasta's gateway, which we configure to route through our proxy.

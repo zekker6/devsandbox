@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 
@@ -11,10 +13,12 @@ import (
 
 	"devsandbox/internal/bwrap"
 	"devsandbox/internal/config"
+	"devsandbox/internal/logging"
 	"devsandbox/internal/network"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/mounts"
+	"devsandbox/internal/sandbox/tools"
 	"devsandbox/internal/version"
 )
 
@@ -257,6 +261,14 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	bwrapArgs := builder.Build()
 	shellCmd := sandbox.BuildShellCommand(cfg, args)
 
+	// Start active tools (e.g., docker proxy)
+	startActiveTools, cleanupActiveTools := createActiveToolsRunner(cfg)
+	defer cleanupActiveTools()
+	hasActiveTools, err := startActiveTools(context.Background())
+	if err != nil {
+		return err
+	}
+
 	debug := os.Getenv("DEVSANDBOX_DEBUG") != ""
 	if debug {
 		fmt.Fprintln(os.Stderr, "=== Sandbox Debug ===")
@@ -276,7 +288,13 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 		return bwrap.ExecWithPasta(bwrapArgs, shellCmd)
 	}
 
-	// Non-proxy mode: use syscall.Exec (replaces current process)
+	// Non-proxy mode
+	if hasActiveTools {
+		// Use ExecRun to keep parent process alive for ActiveTools (e.g., docker proxy)
+		return bwrap.ExecRun(bwrapArgs, shellCmd)
+	}
+
+	// No ActiveTools: use syscall.Exec (replaces current process, more efficient)
 	return bwrap.Exec(bwrapArgs, shellCmd)
 }
 
@@ -422,4 +440,28 @@ func buildFilterConfig(appCfg *config.Config, cmd *cobra.Command, filterDefault 
 	}
 
 	return filterCfg
+}
+
+// createActiveToolsRunner creates an active tools runner with the sandbox configuration.
+// Returns a start function and a cleanup function.
+// The start function returns true if any tools were started.
+func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Context) (bool, error), cleanup func()) {
+	// Create error logger for active tools
+	logDir := filepath.Join(cfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
+	errorLogger, err := logging.NewErrorLogger(filepath.Join(logDir, "tools-errors.log"))
+	if err != nil {
+		// If we can't create the logger, return a no-op runner
+		// The start function will succeed but tools won't have logging
+		errorLogger = nil
+	}
+
+	toolsCfg := tools.ActiveToolsConfig{
+		HomeDir:        cfg.HomeDir,
+		SandboxHome:    cfg.SandboxHome,
+		OverlayEnabled: cfg.OverlayEnabled,
+		ProjectDir:     cfg.ProjectDir,
+		ToolsConfig:    cfg.ToolsConfig,
+	}
+
+	return tools.NewActiveToolsRunner(toolsCfg, errorLogger)
 }

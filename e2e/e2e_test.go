@@ -1877,6 +1877,289 @@ mode = "hidden"
 	})
 }
 
+// Docker proxy tests
+
+func TestSandbox_DockerProxy_ReadOperations(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	if !dockerAvailable() {
+		t.Skip("docker not available")
+	}
+
+	// Create a temp config directory with docker enabled
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-docker-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[tools.docker]
+enabled = true
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create a temp project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-docker-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	t.Run("docker_ps", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "docker", "ps")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker ps should work: %v\nOutput: %s", err, output)
+		}
+		// Should show header at minimum
+		if !strings.Contains(string(output), "CONTAINER ID") {
+			t.Errorf("docker ps should show container list header, got: %s", output)
+		}
+	})
+
+	t.Run("docker_images", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "docker", "images")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker images should work: %v\nOutput: %s", err, output)
+		}
+		// Should show header at minimum (may be "REPOSITORY" or "IMAGE" depending on docker version)
+		outputStr := string(output)
+		if !strings.Contains(outputStr, "REPOSITORY") && !strings.Contains(outputStr, "IMAGE") {
+			t.Errorf("docker images should show image list header, got: %s", output)
+		}
+	})
+
+	t.Run("docker_info", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "docker", "info", "--format", "{{.ServerVersion}}")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker info should work: %v\nOutput: %s", err, output)
+		}
+		// Should return a version string
+		outputStr := strings.TrimSpace(string(output))
+		if len(outputStr) == 0 {
+			t.Error("docker info should return server version")
+		}
+	})
+
+	t.Run("docker_version", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "docker", "version", "--format", "{{.Server.Version}}")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker version should work: %v\nOutput: %s", err, output)
+		}
+		outputStr := strings.TrimSpace(string(output))
+		if len(outputStr) == 0 {
+			t.Error("docker version should return server version")
+		}
+	})
+}
+
+func TestSandbox_DockerProxy_WriteOperationsBlocked(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	if !dockerAvailable() {
+		t.Skip("docker not available")
+	}
+
+	// Create a temp config directory with docker enabled
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-docker-block-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[tools.docker]
+enabled = true
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create a temp project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-docker-block-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	t.Run("docker_run_blocked", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "docker", "run", "--rm", "hello-world")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+
+		// Should fail
+		if err == nil {
+			t.Error("docker run should be blocked, but succeeded")
+		}
+
+		outputStr := string(output)
+		// Should contain 403 or blocked message
+		if !strings.Contains(outputStr, "403") && !strings.Contains(outputStr, "blocked") &&
+			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") {
+			t.Errorf("docker run should show blocked/403 error, got: %s", outputStr)
+		}
+	})
+
+	t.Run("docker_pull_blocked", func(t *testing.T) {
+		cmd := exec.Command(binaryPath, "docker", "pull", "hello-world")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+
+		// Should fail
+		if err == nil {
+			t.Error("docker pull should be blocked, but succeeded")
+		}
+
+		outputStr := string(output)
+		if !strings.Contains(outputStr, "403") && !strings.Contains(outputStr, "blocked") &&
+			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") {
+			t.Errorf("docker pull should show blocked/403 error, got: %s", outputStr)
+		}
+	})
+
+	t.Run("docker_build_blocked", func(t *testing.T) {
+		// Create a simple Dockerfile
+		dockerfile := filepath.Join(tmpDir, "Dockerfile")
+		if err := os.WriteFile(dockerfile, []byte("FROM alpine\n"), 0o644); err != nil {
+			t.Fatalf("failed to create Dockerfile: %v", err)
+		}
+
+		cmd := exec.Command(binaryPath, "docker", "build", "-t", "test-blocked", ".")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+		output, err := cmd.CombinedOutput()
+
+		// Should fail
+		if err == nil {
+			t.Error("docker build should be blocked, but succeeded")
+		}
+
+		outputStr := string(output)
+		if !strings.Contains(outputStr, "403") && !strings.Contains(outputStr, "blocked") &&
+			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") {
+			t.Errorf("docker build should show blocked/403 error, got: %s", outputStr)
+		}
+	})
+}
+
+func TestSandbox_DockerProxy_EnvironmentVariable(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	if !dockerAvailable() {
+		t.Skip("docker not available")
+	}
+
+	// Create a temp config directory with docker enabled
+	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-docker-env-*")
+	if err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpConfigDir) }()
+
+	configPath := filepath.Join(tmpConfigDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	configContent := `[tools.docker]
+enabled = true
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create a temp project directory
+	tmpDir, err := os.MkdirTemp("", "sandbox-docker-env-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	cmd := exec.Command(binaryPath, "printenv", "DOCKER_HOST")
+	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("printenv DOCKER_HOST failed: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := strings.TrimSpace(string(output))
+	// Should point to the proxy socket at $HOME/docker.sock
+	if !strings.HasPrefix(outputStr, "unix://") {
+		t.Errorf("DOCKER_HOST should be unix:// URL, got: %s", outputStr)
+	}
+	if !strings.Contains(outputStr, "docker.sock") {
+		t.Errorf("DOCKER_HOST should point to docker.sock, got: %s", outputStr)
+	}
+}
+
+func TestSandbox_DockerProxy_DisabledByDefault(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	// Create a temp project directory (no special config)
+	tmpDir, err := os.MkdirTemp("", "sandbox-docker-disabled-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Without docker enabled, DOCKER_HOST should not be set to proxy
+	cmd := exec.Command(binaryPath, "printenv", "DOCKER_HOST")
+	cmd.Dir = tmpDir
+	output, _ := cmd.CombinedOutput()
+
+	outputStr := strings.TrimSpace(string(output))
+	// Should either be empty or not contain devsandbox proxy path
+	if strings.Contains(outputStr, "devsandbox-docker") {
+		t.Errorf("DOCKER_HOST should not be set to proxy when disabled, got: %s", outputStr)
+	}
+}
+
+// dockerAvailable checks if Docker daemon is running and accessible.
+func dockerAvailable() bool {
+	// Check if docker CLI is installed
+	if _, err := exec.LookPath("docker"); err != nil {
+		return false
+	}
+
+	// Check if Docker daemon is running
+	cmd := exec.Command("docker", "info")
+	err := cmd.Run()
+	return err == nil
+}
+
 // bwrapAvailable checks if bwrap is installed AND functional.
 // GitHub Actions and some CI environments don't allow user namespaces,
 // so we need to test if bwrap actually works, not just if it's installed.

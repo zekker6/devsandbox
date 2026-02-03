@@ -173,7 +173,7 @@ port = 8080
 - Linux only (uses Linux namespaces)
 - Requires user namespaces enabled
 - MITM proxy may break certificate pinning
-- Docker not supported inside sandbox
+- Docker access is read-only (no container creation/deletion, see [docs/tools.md](docs/tools.md#docker))
 
 ## License
 

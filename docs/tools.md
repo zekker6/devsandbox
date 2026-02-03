@@ -401,12 +401,72 @@ devsandbox source .venv/bin/activate
 
 ## Docker
 
-**Not supported** - Docker requires privileged access not available inside the sandbox.
+Docker is supported via a socket proxy that provides **read-only access** to the host Docker daemon.
 
-For container workflows, consider:
+### Configuration
 
-- Running Docker commands outside the sandbox
-- Using Podman in rootless mode (experimental)
+Enable Docker in your project's `.devsandbox.toml`:
+
+```toml
+[tools.docker]
+enabled = true
+```
+
+Or in the global config `~/.config/devsandbox/config.toml`:
+
+```toml
+[tools.docker]
+enabled = true
+socket = "/run/docker.sock"  # Optional: custom socket path
+```
+
+### Allowed Operations
+
+The Docker proxy allows:
+
+| Operation Type | Allowed | Examples |
+|----------------|---------|----------|
+| Read operations | ✓ | `docker ps`, `docker images`, `docker inspect` |
+| Container logs | ✓ | `docker logs <container>` |
+| Container exec | ✓ | `docker exec -it <container> bash` |
+| Container attach | ✓ | `docker attach <container>` |
+| Create containers | ✗ | `docker run`, `docker create` |
+| Delete containers | ✗ | `docker rm`, `docker kill` |
+| Modify containers | ✗ | `docker stop`, `docker restart` |
+| Build images | ✗ | `docker build` |
+| Push images | ✗ | `docker push` |
+
+This allows debugging and inspecting running containers without the ability to modify the Docker environment.
+
+### How It Works
+
+1. A Unix socket proxy is created at `$HOME/docker.sock` inside the sandbox
+2. The `DOCKER_HOST` environment variable is set to point to this socket
+3. All requests are filtered before being forwarded to the host Docker socket
+4. Write operations are blocked with an HTTP 403 error
+
+### Limitations
+
+- **Only Unix socket access is supported** - TCP connections to Docker daemons are not proxied
+- Exec/attach sessions allow interactive terminal access to existing containers
+
+### Error Logging
+
+Proxy errors are logged to `~/.local/share/devsandbox/<project>/logs/internal/tools-errors.log`
+
+### Checking Docker Status
+
+```bash
+devsandbox tools check docker
+```
+
+Example output:
+
+```
+✓ docker
+    ✓ /run/docker.sock
+    mode: enabled (read-only + exec)
+```
 
 ## Adding Custom Tools
 

@@ -141,6 +141,25 @@ writable = false
 persistent = false
 ```
 
+#### Docker
+
+```toml
+[tools.docker]
+# Enable Docker socket proxy (disabled by default)
+# When enabled, provides read-only access to Docker daemon
+enabled = false
+
+# Path to host Docker socket
+# Defaults to /run/docker.sock
+socket = "/run/docker.sock"
+```
+
+**Note:** Docker access is read-only. You can list/inspect containers, view logs, and exec into
+running containers, but cannot create, delete, or modify containers. Only Unix socket access is
+supported; TCP connections to remote Docker daemons are not proxied.
+
+See [docs/tools.md](tools.md#docker) for full details on allowed operations.
+
 ## Remote Logging
 
 Proxy request logs can be forwarded to remote destinations for centralized logging and monitoring. Multiple receivers

@@ -44,3 +44,9 @@ func (r *CheckResult) AddConfigPaths(paths ...string) {
 func (r *CheckResult) AddIssue(issue string) {
 	r.Issues = append(r.Issues, issue)
 }
+
+// AddInfo adds an informational message to the result.
+// Use this for status information that is not a problem.
+func (r *CheckResult) AddInfo(info string) {
+	r.Info = append(r.Info, info)
+}

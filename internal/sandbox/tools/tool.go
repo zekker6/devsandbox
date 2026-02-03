@@ -3,6 +3,8 @@
 // and shell initialization commands.
 package tools
 
+import "context"
+
 // MountType defines how a binding is mounted in the sandbox.
 type MountType string
 
@@ -87,6 +89,7 @@ type CheckResult struct {
 	BinaryName  string   // Name of the binary to look for
 	ConfigPaths []string // Configuration paths that exist
 	Issues      []string // Any issues or warnings
+	Info        []string // Informational messages (not problems)
 	InstallHint string   // How to install if missing
 }
 
@@ -119,4 +122,34 @@ type ToolWithConfig interface {
 	// toolCfg contains the tool's section from [tools.<name>] in config.toml.
 	// Called before Bindings() to set up tool state.
 	Configure(globalCfg GlobalConfig, toolCfg map[string]any)
+}
+
+// ActiveTool is implemented by tools that run background processes.
+// These tools are started before the sandbox launches and stopped after it exits.
+type ActiveTool interface {
+	Tool
+
+	// Start launches the tool's background process.
+	// ctx can be used for cancellation.
+	// homeDir is the user's home directory.
+	// sandboxHome is the sandbox home directory.
+	// Returns error if startup fails; sandbox launch will be aborted.
+	Start(ctx context.Context, homeDir, sandboxHome string) error
+
+	// Stop gracefully shuts down the background process.
+	// Should wait for cleanup to complete before returning.
+	Stop() error
+}
+
+// ErrorLogger is the interface for logging tool errors.
+// This is compatible with logging.ErrorLogger.
+type ErrorLogger interface {
+	LogErrorf(component, format string, args ...any)
+}
+
+// ToolWithLogger is implemented by tools that can accept an error logger.
+// If set, the tool should log errors to the provided logger.
+type ToolWithLogger interface {
+	// SetLogger sets the logger for tool errors.
+	SetLogger(logger ErrorLogger)
 }
