@@ -32,9 +32,9 @@ func newConfigShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show current configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			cfg, _, _, err := config.LoadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			fmt.Printf("Config file: %s\n\n", config.ConfigPath())
@@ -160,18 +160,15 @@ func newConfigInitCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := config.ConfigPath()
 
-			// Check if config already exists
-			if _, err := os.Stat(configPath); err == nil && !force {
-				return fmt.Errorf("config file already exists at %s\nUse --force to overwrite", configPath)
+			if !force {
+				if _, err := os.Stat(configPath); err == nil {
+					return fmt.Errorf("config file already exists at %s\nUse --force to overwrite", configPath)
+				}
 			}
 
-			// Create config directory
-			configDir := filepath.Dir(configPath)
-			if err := os.MkdirAll(configDir, 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 				return fmt.Errorf("failed to create config directory: %w", err)
 			}
-
-			// Write default config
 			if err := os.WriteFile(configPath, []byte(config.GenerateDefault()), 0o644); err != nil {
 				return fmt.Errorf("failed to write config file: %w", err)
 			}

@@ -74,9 +74,9 @@ func newFilterShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show current filter configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			cfg, _, _, err := config.LoadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			if cfg.Proxy.Filter.DefaultAction == "" {
@@ -115,53 +115,24 @@ type DomainStats struct {
 }
 
 func runFilterGenerate(fromLogs, project string, minRequests int, outputFile, defaultAction string) error {
-	// Find log directory
-	logDir := fromLogs
-	if logDir == "" {
-		// Try to determine from project
-		appCfg, err := config.Load()
-		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
-		}
-
-		basePath := appCfg.Sandbox.BasePath
-		if basePath == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return err
-			}
-			basePath = sandbox.SandboxBasePath(home)
-		}
-
-		if project == "" {
-			// Generate sandbox name from current directory (same as sandbox uses)
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			project = sandbox.GenerateSandboxName(cwd)
-		}
-
-		logDir = filepath.Join(basePath, project, "logs", "proxy")
+	logDir, err := resolveLogDir(fromLogs, project)
+	if err != nil {
+		return err
 	}
 
-	// Check if log directory exists
 	if _, err := os.Stat(logDir); os.IsNotExist(err) {
 		return fmt.Errorf("log directory not found: %s", logDir)
 	}
 
-	// Analyze logs
 	stats, err := analyzeProxyLogs(logDir)
 	if err != nil {
 		return fmt.Errorf("failed to analyze logs: %w", err)
 	}
-
 	if len(stats) == 0 {
 		fmt.Fprintln(os.Stderr, "No requests found in logs.")
 		return nil
 	}
 
-	// Filter by minimum requests
 	var filtered []DomainStats
 	for _, s := range stats {
 		if s.RequestCount >= minRequests {
@@ -169,24 +140,49 @@ func runFilterGenerate(fromLogs, project string, minRequests int, outputFile, de
 		}
 	}
 
-	// Sort by request count
 	sort.Slice(filtered, func(i, j int) bool {
 		return filtered[i].RequestCount > filtered[j].RequestCount
 	})
 
-	// Generate configuration
 	output := generateFilterConfig(filtered, defaultAction)
+	return writeOutput(output, outputFile)
+}
 
-	// Write output
-	if outputFile == "" {
-		fmt.Println(output)
-	} else {
-		if err := os.WriteFile(outputFile, []byte(output), 0o644); err != nil {
-			return fmt.Errorf("failed to write output: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "Filter configuration written to: %s\n", outputFile)
+func resolveLogDir(fromLogs, project string) (string, error) {
+	if fromLogs != "" {
+		return fromLogs, nil
 	}
 
+	appCfg, _, projectDir, err := config.LoadConfig()
+	if err != nil {
+		return "", err
+	}
+
+	basePath := appCfg.Sandbox.BasePath
+	if basePath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		basePath = sandbox.SandboxBasePath(home)
+	}
+
+	if project == "" {
+		project = sandbox.GenerateSandboxName(projectDir)
+	}
+
+	return filepath.Join(basePath, project, "logs", "proxy"), nil
+}
+
+func writeOutput(output, outputFile string) error {
+	if outputFile == "" {
+		fmt.Println(output)
+		return nil
+	}
+	if err := os.WriteFile(outputFile, []byte(output), 0o644); err != nil {
+		return fmt.Errorf("failed to write output: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Filter configuration written to: %s\n", outputFile)
 	return nil
 }
 
@@ -304,7 +300,7 @@ func generateFilterConfig(stats []DomainStats, defaultAction string) string {
 	sb.WriteString("# Generated filter configuration\n")
 	sb.WriteString("# Review and adjust rules as needed\n\n")
 	sb.WriteString("[proxy.filter]\n")
-	sb.WriteString(fmt.Sprintf("default_action = %q\n", defaultAction))
+	fmt.Fprintf(&sb, "default_action = %q\n", defaultAction)
 
 	sb.WriteString("\n# Rules generated from proxy logs\n")
 
@@ -325,14 +321,13 @@ func generateFilterConfig(stats []DomainStats, defaultAction string) string {
 		if len(parts) > 2 {
 			// e.g., api.github.com -> *.github.com
 			pattern = "*." + strings.Join(parts[len(parts)-2:], ".")
-			sb.WriteString(fmt.Sprintf("# Original: %s (%d requests)\n", s.Domain, s.RequestCount))
+			fmt.Fprintf(&sb, "# Original: %s (%d requests)\n", s.Domain, s.RequestCount)
 		} else {
-			sb.WriteString(fmt.Sprintf("# %d requests\n", s.RequestCount))
+			fmt.Fprintf(&sb, "# %d requests\n", s.RequestCount)
 		}
 
-		sb.WriteString(fmt.Sprintf("pattern = %q\n", pattern))
-		sb.WriteString(fmt.Sprintf("action = %q\n", action))
-		// scope defaults to "host", type defaults to "glob"
+		fmt.Fprintf(&sb, "pattern = %q\n", pattern)
+		fmt.Fprintf(&sb, "action = %q\n", action)
 	}
 
 	return sb.String()

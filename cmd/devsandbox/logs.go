@@ -357,8 +357,14 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 	activePattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogSuffix)
 	archivePattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogArchiveSuffix)
 
-	activeFiles, _ := filepath.Glob(activePattern)
-	archiveFiles, _ := filepath.Glob(archivePattern)
+	activeFiles, err := filepath.Glob(activePattern)
+	if err != nil {
+		return fmt.Errorf("invalid log pattern: %w", err)
+	}
+	archiveFiles, err := filepath.Glob(archivePattern)
+	if err != nil {
+		return fmt.Errorf("invalid archive pattern: %w", err)
+	}
 
 	files := append(archiveFiles, activeFiles...)
 	if len(files) == 0 {
@@ -428,7 +434,7 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 		return printProxyLogsCompact(entries, noColor)
 	}
 
-	err := printProxyLogsTable(entries, showBody, noColor)
+	err = printProxyLogsTable(entries, showBody, noColor)
 	if err != nil {
 		return err
 	}
@@ -459,7 +465,11 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, showBody
 				out.RequestBody = nil
 				out.ResponseBody = nil
 			}
-			data, _ := json.Marshal(out)
+			data, err := json.Marshal(out)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to marshal log entry: %v\n", err)
+				return
+			}
 			fmt.Println(string(data))
 		} else if compact {
 			printProxyLogCompactLine(e, noColor)
@@ -481,7 +491,10 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, showBody
 	// Show last 10 entries first (like tail -f)
 	currentFile := findCurrentFile()
 	if currentFile != "" {
-		entries, _ := readUncompressedProxyLogFile(currentFile, 10)
+		entries, err := readUncompressedProxyLogFile(currentFile, 10)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to read recent entries: %v\n", err)
+		}
 		for i := range entries {
 			printEntry(&entries[i])
 		}

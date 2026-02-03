@@ -246,10 +246,17 @@ func checkDirectories() checkResult {
 			message: fmt.Sprintf("%s is not writable: %v", baseDir, err),
 		}
 	}
-	_ = os.Remove(testFile)
+	_ = os.Remove(testFile) // cleanup, best effort
 
-	entries, _ := os.ReadDir(baseDir)
 	sandboxCount := 0
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return checkResult{
+			name:    "sandboxes",
+			status:  "warning",
+			message: fmt.Sprintf("%s exists but cannot list contents: %v", baseDir, err),
+		}
+	}
 	for _, e := range entries {
 		if e.IsDir() {
 			sandboxCount++
@@ -297,18 +304,18 @@ func checkConfigFile() checkResult {
 		}
 	}
 
-	cfg, err := config.Load()
+	cfg, _, _, err := config.LoadConfig()
 	if err != nil {
 		return checkResult{
 			name:    "config",
 			status:  "error",
-			message: fmt.Sprintf("failed to parse: %v", err),
+			message: fmt.Sprintf("failed to load: %v", err),
 		}
 	}
 
 	// Build a summary of non-default settings
 	var settings []string
-	if cfg.Proxy.Enabled {
+	if cfg.Proxy.IsEnabled() {
 		settings = append(settings, "proxy=enabled")
 	}
 	if cfg.Proxy.Port != 8080 {

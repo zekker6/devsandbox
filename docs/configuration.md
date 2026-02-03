@@ -34,6 +34,12 @@ port = 8080
 # Base directory for sandbox data
 # Defaults to ~/.local/share/devsandbox
 # base_path = "~/.local/share/devsandbox"
+
+# Control visibility of .devsandbox.toml inside the sandbox
+# - "hidden" (default): config file is not visible to sandboxed processes
+# - "readonly": config file is visible but read-only
+# - "readwrite": config file is visible and writable
+config_visibility = "hidden"
 ```
 
 ### Custom Mounts
@@ -366,3 +372,104 @@ devsandbox --no-proxy       # Disable even if config has enabled = true
 # Override port
 devsandbox --proxy --proxy-port 9090
 ```
+
+## Per-Project Configuration
+
+devsandbox supports two mechanisms for per-project settings:
+
+### Conditional Includes
+
+Add `[[include]]` blocks to your global config to apply different settings based on project location:
+
+```toml
+# ~/.config/devsandbox/config.toml
+
+# Default settings
+[proxy]
+enabled = false
+
+# Work projects: enable proxy by default
+[[include]]
+if = "dir:~/work/**"
+path = "~/.config/devsandbox/work.toml"
+
+# Client projects: strict filtering
+[[include]]
+if = "dir:~/clients/acme/**"
+path = "~/.config/devsandbox/acme.toml"
+```
+
+**Pattern syntax:**
+- `dir:` prefix required
+- `*` matches any single directory level
+- `**` matches any number of directories (recursive)
+- `~` expands to home directory
+
+**Include file format:**
+- Same structure as main config
+- Nested `[[include]]` blocks are ignored
+- Missing files produce a warning but don't fail
+
+### Local Config Files
+
+Create a `.devsandbox.toml` in your project root:
+
+```toml
+# /path/to/project/.devsandbox.toml
+
+[proxy]
+enabled = true
+
+[tools.git]
+mode = "readwrite"
+```
+
+**Security:** Local configs require trust approval. When you first run devsandbox in a directory with `.devsandbox.toml`, you'll see a prompt:
+
+```
+Local config found: .devsandbox.toml
+
+  [proxy]
+  enabled = true
+
+  [tools.git]
+  mode = "readwrite"
+
+Trust this configuration? [y/N]:
+```
+
+If the file changes, you'll be prompted again.
+
+**Managing trust:**
+
+```bash
+# List trusted directories
+devsandbox trust list
+
+# Trust config in current directory (for CI/scripts)
+devsandbox trust add
+
+# Trust config in a specific directory
+devsandbox trust add /path/to/project
+
+# Remove trust for current directory
+devsandbox trust remove
+
+# Remove trust for a specific directory
+devsandbox trust remove /path/to/project
+```
+
+**Non-interactive mode:** In scripts or CI, local configs are skipped with a warning. Use `devsandbox trust add` to pre-approve configs without interactive prompts.
+
+### Config Priority
+
+Settings are merged in this order (later overrides earlier):
+
+1. Global config (`~/.config/devsandbox/config.toml`)
+2. Matching includes (in order they appear)
+3. Local config (`.devsandbox.toml`)
+
+**Merge rules:**
+- Scalar values: later source wins
+- Maps (`[tools]`): deep merge
+- Arrays (`[[proxy.filter.rules]]`): concatenate (later rules have higher priority)

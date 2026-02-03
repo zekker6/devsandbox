@@ -62,7 +62,10 @@ func newListCmd() *cobra.Command {
 			// Calculate sizes (default: on)
 			if !noSize {
 				for _, s := range sandboxes {
-					size, _ := sandbox.GetSandboxSize(s.SandboxRoot)
+					size, err := sandbox.GetSandboxSize(s.SandboxRoot)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+					}
 					s.SizeBytes = size
 				}
 			}
@@ -150,7 +153,10 @@ directory no longer exists) are removed.`,
 			// Calculate sizes for display
 			var totalSize int64
 			for _, s := range toPrune {
-				size, _ := sandbox.GetSandboxSize(s.SandboxRoot)
+				size, err := sandbox.GetSandboxSize(s.SandboxRoot)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+				}
 				s.SizeBytes = size
 				totalSize += size
 			}

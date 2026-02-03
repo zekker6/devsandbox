@@ -53,16 +53,12 @@ Requests that don't receive a response within 30 seconds are automatically rejec
   devsandbox proxy monitor /path/to/ask.sock`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			socketPath := ""
 			if len(args) > 0 {
-				socketPath = args[0]
-			} else {
-				// Auto-detect from current directory's sandbox
-				var err error
-				socketPath, err = detectAskSocket()
-				if err != nil {
-					return err
-				}
+				return runProxyMonitor(args[0])
+			}
+			socketPath, err := detectAskSocket()
+			if err != nil {
+				return err
 			}
 			return runProxyMonitor(socketPath)
 		},
@@ -71,9 +67,9 @@ Requests that don't receive a response within 30 seconds are automatically rejec
 
 // detectAskSocket finds the ask socket for the current directory's sandbox.
 func detectAskSocket() (string, error) {
-	appCfg, err := config.Load()
+	appCfg, _, projectDir, err := config.LoadConfig()
 	if err != nil {
-		return "", fmt.Errorf("failed to load config: %w", err)
+		return "", err
 	}
 
 	basePath := appCfg.Sandbox.BasePath
@@ -85,12 +81,7 @@ func detectAskSocket() (string, error) {
 		basePath = sandbox.SandboxBasePath(home)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	projectName := sandbox.GenerateSandboxName(cwd)
+	projectName := sandbox.GenerateSandboxName(projectDir)
 	socketPath := filepath.Join(basePath, projectName, "logs", "proxy", ".ask", "ask.sock")
 
 	// Check if socket exists

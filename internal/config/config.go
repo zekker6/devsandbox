@@ -2,6 +2,9 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,18 +39,30 @@ type Config struct {
 
 	// Logging contains remote logging settings.
 	Logging LoggingConfig `toml:"logging"`
+
+	// Include contains conditional config includes.
+	Include []Include `toml:"include"`
 }
 
 // ProxyConfig contains proxy-related configuration.
 type ProxyConfig struct {
 	// Enabled sets whether proxy mode is enabled by default.
-	Enabled bool `toml:"enabled"`
+	// Uses pointer to distinguish between unset (nil) and explicit false.
+	Enabled *bool `toml:"enabled"`
 
 	// Port is the default proxy server port.
 	Port int `toml:"port"`
 
 	// Filter contains HTTP request filtering configuration.
 	Filter ProxyFilterConfig `toml:"filter"`
+}
+
+// IsEnabled returns whether proxy is enabled (defaults to false).
+func (p ProxyConfig) IsEnabled() bool {
+	if p.Enabled == nil {
+		return false
+	}
+	return *p.Enabled
 }
 
 // ProxyFilterConfig contains HTTP filtering settings.
@@ -92,6 +107,18 @@ type ProxyFilterRule struct {
 	Reason string `toml:"reason"`
 }
 
+// ConfigVisibility defines how .devsandbox.toml is exposed to the sandbox.
+type ConfigVisibility string
+
+const (
+	// ConfigVisibilityHidden hides the config file from the sandbox (default).
+	ConfigVisibilityHidden ConfigVisibility = "hidden"
+	// ConfigVisibilityReadOnly exposes the config file as read-only.
+	ConfigVisibilityReadOnly ConfigVisibility = "readonly"
+	// ConfigVisibilityReadWrite exposes the config file as read-write.
+	ConfigVisibilityReadWrite ConfigVisibility = "readwrite"
+)
+
 // SandboxConfig contains sandbox-related configuration.
 type SandboxConfig struct {
 	// BasePath is the directory where sandbox homes are stored.
@@ -100,6 +127,18 @@ type SandboxConfig struct {
 
 	// Mounts contains custom mount rules.
 	Mounts MountsConfig `toml:"mounts"`
+
+	// ConfigVisibility controls how .devsandbox.toml is exposed to the sandbox.
+	// Values: "hidden" (default), "readonly", "readwrite"
+	ConfigVisibility ConfigVisibility `toml:"config_visibility"`
+}
+
+// GetConfigVisibility returns the config visibility (defaults to hidden).
+func (s SandboxConfig) GetConfigVisibility() ConfigVisibility {
+	if s.ConfigVisibility == "" {
+		return ConfigVisibilityHidden
+	}
+	return s.ConfigVisibility
 }
 
 // MountsConfig defines custom mount rules for the sandbox.
@@ -147,12 +186,15 @@ func (c *Config) GetToolConfig(toolName string) map[string]any {
 	if c.Tools == nil {
 		return nil
 	}
-	if toolCfg, ok := c.Tools[toolName]; ok {
-		if m, ok := toolCfg.(map[string]any); ok {
-			return m
-		}
+	toolCfg, ok := c.Tools[toolName]
+	if !ok {
+		return nil
 	}
-	return nil
+	m, ok := toolCfg.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return m
 }
 
 // LoggingConfig contains remote logging configuration.
@@ -203,7 +245,7 @@ type ReceiverConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Proxy: ProxyConfig{
-			Enabled: false,
+			Enabled: nil, // nil means disabled (default false)
 			Port:    8080,
 		},
 		Sandbox: SandboxConfig{
@@ -216,9 +258,9 @@ func DefaultConfig() *Config {
 	}
 }
 
-// ConfigPath returns the path to the config file.
-// Uses XDG_CONFIG_HOME/devsandbox/config.toml or ~/.config/devsandbox/config.toml
-func ConfigPath() string {
+// configDir returns the devsandbox config directory path.
+// Uses XDG_CONFIG_HOME/devsandbox or ~/.config/devsandbox
+func configDir() string {
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
 		home, err := os.UserHomeDir()
@@ -227,13 +269,12 @@ func ConfigPath() string {
 		}
 		configHome = filepath.Join(home, ".config")
 	}
-	return filepath.Join(configHome, "devsandbox", "config.toml")
+	return filepath.Join(configHome, "devsandbox")
 }
 
-// Load reads the configuration from the default path.
-// Returns default config if file doesn't exist.
-func Load() (*Config, error) {
-	return LoadFrom(ConfigPath())
+// ConfigPath returns the path to the config file.
+func ConfigPath() string {
+	return filepath.Join(configDir(), "config.toml")
 }
 
 // LoadFrom reads the configuration from the specified path.
@@ -294,6 +335,14 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate config visibility
+	validVisibilities := map[ConfigVisibility]bool{
+		"": true, ConfigVisibilityHidden: true, ConfigVisibilityReadOnly: true, ConfigVisibilityReadWrite: true,
+	}
+	if !validVisibilities[c.Sandbox.ConfigVisibility] {
+		return fmt.Errorf("sandbox.config_visibility must be 'hidden', 'readonly', or 'readwrite', got %q", c.Sandbox.ConfigVisibility)
+	}
+
 	// Validate filter rules
 	validActions := map[string]bool{"allow": true, "block": true, "ask": true, "": true}
 	if c.Proxy.Filter.DefaultAction != "" && !validActions[c.Proxy.Filter.DefaultAction] {
@@ -350,21 +399,17 @@ func expandHome(path string) string {
 	if len(path) == 0 || path[0] != '~' {
 		return path
 	}
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return path
 	}
-
 	if len(path) == 1 {
 		return home
 	}
-
-	if path[1] == '/' {
-		return filepath.Join(home, path[2:])
+	if path[1] != '/' {
+		return path
 	}
-
-	return path
+	return filepath.Join(home, path[2:])
 }
 
 // GenerateDefault returns the default configuration as a TOML string
@@ -416,6 +461,12 @@ port = 8080
 # Base directory for sandbox homes
 # Defaults to ~/.local/share/devsandbox if not set
 # base_path = "~/.local/share/devsandbox"
+
+# Control visibility of .devsandbox.toml inside the sandbox
+# - "hidden" (default): config file is not visible to sandboxed processes
+# - "readonly": config file is visible but read-only
+# - "readwrite": config file is visible and writable
+# config_visibility = "hidden"
 
 # Custom mount rules - control how paths are mounted in the sandbox
 # Note: Home directory paths (~/.ssh, ~/.aws, etc.) are NOT mounted by default.
@@ -519,4 +570,205 @@ persistent = false
 # batch_size = 100
 # flush_interval = "5s"
 `
+}
+
+// LoadOptions configures the config loading behavior.
+type LoadOptions struct {
+	// TrustStore is used for local config trust verification.
+	// If nil, local configs are skipped.
+	TrustStore *TrustStore
+
+	// SkipLocalConfig disables loading .devsandbox.toml even if trusted.
+	SkipLocalConfig bool
+
+	// OnLocalConfigPrompt is called when a local config needs trust approval.
+	// If nil, PromptTrustStdio is used.
+	// Return true to trust, false to skip.
+	OnLocalConfigPrompt func(projectDir, content string, changed bool) (bool, error)
+}
+
+// LocalConfigFile is the name of the local config file.
+const LocalConfigFile = ".devsandbox.toml"
+
+// LoadConfig loads the full configuration for the current working directory.
+// It loads the trust store and config together, reducing boilerplate.
+// Returns the config, trust store, and the resolved project directory.
+func LoadConfig() (*Config, *TrustStore, string, error) {
+	projectDir, err := os.Getwd()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	trustStore, err := LoadTrustStore(TrustStorePath())
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to load trust store: %w", err)
+	}
+
+	cfg, err := LoadWithProjectDir(ConfigPath(), projectDir, &LoadOptions{
+		TrustStore: trustStore,
+	})
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to load config: %w", err)
+	}
+
+	return cfg, trustStore, projectDir, nil
+}
+
+// LoadWithProjectDir loads configuration with project-specific overrides.
+// It loads: global config -> matching includes -> local .devsandbox.toml (if trusted)
+func LoadWithProjectDir(globalPath, projectDir string, opts *LoadOptions) (*Config, error) {
+	if opts == nil {
+		opts = &LoadOptions{}
+	}
+
+	cfg, err := LoadFrom(globalPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(cfg.Include) > 0 {
+		cfg, err = applyIncludes(cfg, projectDir)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if opts.SkipLocalConfig {
+		return cfg, nil
+	}
+
+	localCfg, err := loadLocalConfig(projectDir, opts)
+	if err != nil {
+		return nil, err
+	}
+	if localCfg != nil {
+		cfg = mergeConfigs(cfg, localCfg)
+	}
+	return cfg, nil
+}
+
+// applyIncludes processes matching include files and merges them into cfg.
+func applyIncludes(cfg *Config, projectDir string) (*Config, error) {
+	matching, err := getMatchingIncludes(cfg.Include, projectDir)
+	if err != nil {
+		return nil, fmt.Errorf("invalid include configuration: %w", err)
+	}
+	for _, inc := range matching {
+		includePath := expandHome(inc.Path)
+		includeCfg, err := loadIncludeFile(includePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load include %s: %w", includePath, err)
+		}
+		cfg = mergeConfigs(cfg, includeCfg)
+	}
+	return cfg, nil
+}
+
+// loadIncludeFile loads a config file for inclusion.
+// Returns error if file doesn't exist or has parse errors.
+func loadIncludeFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("file not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse error: %w", err)
+	}
+
+	// Validate included config
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validation error: %w", err)
+	}
+
+	// Warn if include file has nested includes
+	if len(cfg.Include) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: nested includes in %s are ignored\n", path)
+		cfg.Include = nil
+	}
+
+	return cfg, nil
+}
+
+// loadLocalConfig loads and validates the local .devsandbox.toml file.
+func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
+	localPath := filepath.Join(projectDir, LocalConfigFile)
+
+	data, err := os.ReadFile(localPath)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read local config: %w", err)
+	}
+
+	if opts.TrustStore == nil {
+		return nil, fmt.Errorf("TrustStore is required to load local config")
+	}
+
+	hash := hashBytes(data)
+	if err := ensureTrusted(projectDir, hash, data, opts); err != nil {
+		if errors.Is(err, errConfigNotTrusted) {
+			return nil, nil // Skip untrusted config
+		}
+		return nil, err
+	}
+
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse local config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid local config: %w", err)
+	}
+
+	if len(cfg.Include) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: includes in local config are ignored\n")
+		cfg.Include = nil
+	}
+
+	return cfg, nil
+}
+
+// ensureTrusted verifies trust for a local config, prompting if needed.
+// Returns nil if trusted/approved, error if denied or prompt failed.
+func ensureTrusted(projectDir, hash string, data []byte, opts *LoadOptions) error {
+	existing := opts.TrustStore.GetTrusted(projectDir)
+	if existing != nil && existing.Hash == hash {
+		return nil // Already trusted
+	}
+
+	promptFn := opts.OnLocalConfigPrompt
+	if promptFn == nil {
+		promptFn = PromptTrustStdio
+	}
+
+	changed := existing != nil // Has entry but hash differs
+	approved, err := promptFn(projectDir, string(data), changed)
+	if err != nil {
+		return fmt.Errorf("trust prompt failed: %w", err)
+	}
+	if !approved {
+		fmt.Fprintf(os.Stderr, "Skipping local config (not trusted)\n")
+		return errConfigNotTrusted
+	}
+
+	opts.TrustStore.AddTrust(projectDir, hash)
+	if err := opts.TrustStore.Save(); err != nil {
+		return fmt.Errorf("failed to save trust approval: %w (trust not persisted, you will be prompted again)", err)
+	}
+	return nil
+}
+
+// errConfigNotTrusted is a sentinel error for untrusted configs that should be skipped.
+var errConfigNotTrusted = fmt.Errorf("config not trusted")
+
+// hashBytes computes SHA256 hash of data.
+func hashBytes(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }

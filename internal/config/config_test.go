@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,7 +10,7 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Proxy.Enabled {
+	if cfg.Proxy.IsEnabled() {
 		t.Error("expected proxy to be disabled by default")
 	}
 	if cfg.Proxy.Port != 8080 {
@@ -44,8 +45,35 @@ func TestOverlayIsEnabled(t *testing.T) {
 	}
 }
 
+func TestSandboxGetConfigVisibility(t *testing.T) {
+	tests := []struct {
+		name       string
+		visibility ConfigVisibility
+		expected   ConfigVisibility
+	}{
+		{"empty defaults to hidden", "", ConfigVisibilityHidden},
+		{"explicit hidden", ConfigVisibilityHidden, ConfigVisibilityHidden},
+		{"explicit readonly", ConfigVisibilityReadOnly, ConfigVisibilityReadOnly},
+		{"explicit readwrite", ConfigVisibilityReadWrite, ConfigVisibilityReadWrite},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := SandboxConfig{ConfigVisibility: tt.visibility}
+			if got := sc.GetConfigVisibility(); got != tt.expected {
+				t.Errorf("GetConfigVisibility() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// emptyTrustStore returns an empty trust store for tests that don't involve local configs.
+func emptyTrustStore() *TrustStore {
+	return &TrustStore{}
 }
 
 func TestLoadFromNonExistent(t *testing.T) {
@@ -55,7 +83,7 @@ func TestLoadFromNonExistent(t *testing.T) {
 	}
 
 	// Should return default config
-	if cfg.Proxy.Enabled {
+	if cfg.Proxy.IsEnabled() {
 		t.Error("expected default config with proxy disabled")
 	}
 }
@@ -87,7 +115,7 @@ mode = "readwrite"
 		t.Fatalf("failed to load config: %v", err)
 	}
 
-	if !cfg.Proxy.Enabled {
+	if !cfg.Proxy.IsEnabled() {
 		t.Error("expected proxy to be enabled")
 	}
 	if cfg.Proxy.Port != 9090 {
@@ -114,7 +142,7 @@ func TestLoadFromEmptyPath(t *testing.T) {
 	}
 
 	// Should return default config
-	if cfg.Proxy.Enabled {
+	if cfg.Proxy.IsEnabled() {
 		t.Error("expected default config")
 	}
 }
@@ -405,4 +433,127 @@ func containsAt(s, substr string, start int) bool {
 		}
 	}
 	return false
+}
+
+func TestLoadWithProjectDir_IncludeMatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	projectDir := filepath.Join(tmpDir, "work", "myproject")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+
+	// Main config with include
+	mainConfig := fmt.Sprintf(`
+[proxy]
+port = 8080
+
+[[include]]
+if = "dir:%s/**"
+path = "%s"
+`, filepath.Join(tmpDir, "work"), filepath.Join(configDir, "work.toml"))
+
+	mainPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(mainPath, []byte(mainConfig), 0644); err != nil {
+		t.Fatalf("failed to write main config: %v", err)
+	}
+
+	// Include file
+	includeConfig := `
+[proxy]
+port = 9090
+enabled = true
+`
+	if err := os.WriteFile(filepath.Join(configDir, "work.toml"), []byte(includeConfig), 0644); err != nil {
+		t.Fatalf("failed to write include config: %v", err)
+	}
+
+	cfg, err := LoadWithProjectDir(mainPath, projectDir, &LoadOptions{
+		TrustStore: emptyTrustStore(),
+	})
+	if err != nil {
+		t.Fatalf("failed to load: %v", err)
+	}
+
+	if cfg.Proxy.Port != 9090 {
+		t.Errorf("expected port 9090 from include, got %d", cfg.Proxy.Port)
+	}
+	if !cfg.Proxy.IsEnabled() {
+		t.Error("expected proxy enabled from include")
+	}
+}
+
+func TestLoadWithProjectDir_NoIncludeMatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	projectDir := filepath.Join(tmpDir, "personal", "myproject")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+
+	// Main config with include that won't match
+	mainConfig := fmt.Sprintf(`
+[proxy]
+port = 8080
+
+[[include]]
+if = "dir:%s/**"
+path = "%s"
+`, filepath.Join(tmpDir, "work"), filepath.Join(configDir, "work.toml"))
+
+	mainPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(mainPath, []byte(mainConfig), 0644); err != nil {
+		t.Fatalf("failed to write main config: %v", err)
+	}
+
+	cfg, err := LoadWithProjectDir(mainPath, projectDir, &LoadOptions{
+		TrustStore: emptyTrustStore(),
+	})
+	if err != nil {
+		t.Fatalf("failed to load: %v", err)
+	}
+
+	// Should use base config values since include doesn't match
+	if cfg.Proxy.Port != 8080 {
+		t.Errorf("expected port 8080, got %d", cfg.Proxy.Port)
+	}
+}
+
+func TestLoadWithProjectDir_MissingIncludeFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "work", "project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+
+	mainConfig := fmt.Sprintf(`
+[proxy]
+port = 8080
+
+[[include]]
+if = "dir:%s/**"
+path = "/nonexistent/config.toml"
+`, filepath.Join(tmpDir, "work"))
+
+	mainPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(mainPath, []byte(mainConfig), 0644); err != nil {
+		t.Fatalf("failed to write main config: %v", err)
+	}
+
+	// Missing include file should be an error
+	_, err := LoadWithProjectDir(mainPath, projectDir, &LoadOptions{
+		TrustStore: emptyTrustStore(),
+	})
+	if err == nil {
+		t.Fatal("expected error for missing include file")
+	}
+	if !contains(err.Error(), "failed to load include") {
+		t.Errorf("expected 'failed to load include' error, got: %v", err)
+	}
 }

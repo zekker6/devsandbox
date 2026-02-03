@@ -50,6 +50,10 @@ type Config struct {
 
 	// Custom mount settings
 	MountsConfig *mounts.Engine // Compiled mount rules
+
+	// ConfigVisibility controls how .devsandbox.toml is exposed to the sandbox
+	// Values: "hidden", "readonly", "readwrite"
+	ConfigVisibility string
 }
 
 // Options allows customizing sandbox configuration.

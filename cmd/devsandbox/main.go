@@ -69,6 +69,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newToolsCmd())
 	rootCmd.AddCommand(newProxyCmd())
+	rootCmd.AddCommand(newTrustCmd())
 
 	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date))
 
@@ -86,10 +87,10 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	allowDomains, _ := cmd.Flags().GetStringSlice("allow-domain")
 	blockDomains, _ := cmd.Flags().GetStringSlice("block-domain")
 
-	// Load configuration file
-	appCfg, err := config.Load()
+	// Load configuration file with project-specific overrides
+	appCfg, _, _, err := config.LoadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return err
 	}
 
 	// Create sandbox config with options from config file
@@ -104,7 +105,7 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 
 	// Apply config file defaults, then CLI overrides
 	// Config file defaults
-	if appCfg.Proxy.Enabled {
+	if appCfg.Proxy.IsEnabled() {
 		cfg.ProxyEnabled = true
 	}
 	if appCfg.Proxy.Port != 0 {
@@ -122,6 +123,7 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	// Pass overlay and tools settings to sandbox config
 	cfg.OverlayEnabled = appCfg.Overlay.IsEnabled()
 	cfg.ToolsConfig = appCfg.Tools
+	cfg.ConfigVisibility = string(appCfg.Sandbox.GetConfigVisibility())
 
 	// Initialize custom mounts engine
 	cfg.MountsConfig = mounts.NewEngine(appCfg.Sandbox.Mounts, cfg.HomeDir)
