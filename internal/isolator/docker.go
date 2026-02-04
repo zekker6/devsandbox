@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"devsandbox/internal/sandbox/tools"
 )
@@ -17,6 +18,14 @@ import (
 const (
 	// DefaultImage is the default devsandbox Docker image.
 	DefaultImage = "ghcr.io/zekker6/devsandbox:latest"
+)
+
+// Docker labels for devsandbox containers and volumes
+const (
+	LabelDevsandbox  = "devsandbox"
+	LabelProjectDir  = "devsandbox.project_dir"
+	LabelProjectName = "devsandbox.project_name"
+	LabelCreatedAt   = "devsandbox.created_at"
 )
 
 // DockerConfig contains Docker-specific settings.
@@ -352,4 +361,17 @@ func (d *DockerIsolator) getContainerState(name string) (exists bool, running bo
 
 	isRunning := strings.TrimSpace(string(output)) == "true"
 	return true, isRunning
+}
+
+// buildLabels returns Docker label arguments for a container/volume.
+//
+//nolint:unused // Will be used in persistent container implementation
+func (d *DockerIsolator) buildLabels(projectDir string) []string {
+	projectName := filepath.Base(projectDir)
+	return []string{
+		"--label", LabelDevsandbox + "=true",
+		"--label", LabelProjectDir + "=" + projectDir,
+		"--label", LabelProjectName + "=" + projectName,
+		"--label", LabelCreatedAt + "=" + time.Now().Format(time.RFC3339),
+	}
 }
