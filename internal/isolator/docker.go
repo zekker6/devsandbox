@@ -28,6 +28,24 @@ const (
 	LabelCreatedAt   = "devsandbox.created_at"
 )
 
+// DockerAction represents what docker command to run.
+type DockerAction int
+
+const (
+	DockerActionRun    DockerAction = iota // Run with --rm (old behavior)
+	DockerActionCreate                     // Create new container then start
+	DockerActionStart                      // Start existing stopped container
+	DockerActionExec                       // Exec into running container
+)
+
+// DockerBuildResult contains the command to execute.
+type DockerBuildResult struct {
+	Action        DockerAction
+	BinaryPath    string
+	Args          []string
+	ContainerName string // For create->start flow
+}
+
 // DockerConfig contains Docker-specific settings.
 type DockerConfig struct {
 	// Image is the Docker image to use.
@@ -85,13 +103,90 @@ func (d *DockerIsolator) Available() error {
 	return nil
 }
 
-// Build constructs the docker run command with all necessary arguments.
+// Build implements the Isolator interface but should not be used directly for Docker.
+// Use BuildDocker() instead which returns DockerBuildResult with lifecycle information.
 func (d *DockerIsolator) Build(ctx context.Context, cfg *Config) (string, []string, error) {
+	// For backwards compatibility, delegate to BuildDocker and return run args
+	result, err := d.BuildDocker(ctx, cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	return result.BinaryPath, result.Args, nil
+}
+
+// BuildDocker constructs the docker command based on container state.
+// Returns a DockerBuildResult that indicates what action to take.
+func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerBuildResult, error) {
 	dockerPath, err := exec.LookPath("docker")
 	if err != nil {
-		return "", nil, fmt.Errorf("docker CLI not found: %w", err)
+		return nil, fmt.Errorf("docker CLI not found: %w", err)
 	}
 
+	containerName := d.containerName(cfg.ProjectDir)
+
+	// Check if we should keep containers
+	if !d.config.KeepContainer {
+		// Old behavior: run with --rm
+		args, err := d.buildRunArgs(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return &DockerBuildResult{
+			Action:     DockerActionRun,
+			BinaryPath: dockerPath,
+			Args:       args,
+		}, nil
+	}
+
+	// Check container state
+	exists, running := d.getContainerState(containerName)
+
+	if running {
+		// Container is running - exec into it
+		args := []string{"exec"}
+		if cfg.Interactive {
+			args = append(args, "-it")
+		}
+		args = append(args, containerName)
+		if len(cfg.Command) > 0 {
+			args = append(args, cfg.Command...)
+		} else {
+			args = append(args, cfg.Shell)
+		}
+		return &DockerBuildResult{
+			Action:        DockerActionExec,
+			BinaryPath:    dockerPath,
+			Args:          args,
+			ContainerName: containerName,
+		}, nil
+	}
+
+	if exists {
+		// Container exists but stopped - start it
+		args := []string{"start", "-ai", containerName}
+		return &DockerBuildResult{
+			Action:        DockerActionStart,
+			BinaryPath:    dockerPath,
+			Args:          args,
+			ContainerName: containerName,
+		}, nil
+	}
+
+	// Container doesn't exist - create it
+	args, err := d.buildCreateArgs(cfg, containerName)
+	if err != nil {
+		return nil, err
+	}
+	return &DockerBuildResult{
+		Action:        DockerActionCreate,
+		BinaryPath:    dockerPath,
+		Args:          args,
+		ContainerName: containerName,
+	}, nil
+}
+
+// buildRunArgs builds arguments for docker run with --rm.
+func (d *DockerIsolator) buildRunArgs(cfg *Config) ([]string, error) {
 	args := []string{
 		"run",
 		"--rm",
@@ -106,6 +201,69 @@ func (d *DockerIsolator) Build(ctx context.Context, cfg *Config) (string, []stri
 
 	// Pull policy
 	args = append(args, "--pull", d.config.PullPolicy)
+
+	// Add common args
+	commonArgs, err := d.buildCommonArgs(cfg)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, commonArgs...)
+
+	// Image
+	args = append(args, d.config.Image)
+
+	// Command
+	if len(cfg.Command) > 0 {
+		args = append(args, cfg.Command...)
+	} else {
+		// Interactive shell
+		args = append(args, cfg.Shell)
+	}
+
+	return args, nil
+}
+
+// buildCreateArgs builds arguments for docker create.
+func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]string, error) {
+	args := []string{"create", "--name", containerName}
+
+	// Add labels
+	args = append(args, d.buildLabels(cfg.ProjectDir)...)
+
+	// Interactive mode only if stdin is a TTY
+	if cfg.Interactive {
+		args = append(args, "-it")
+	}
+
+	args = append(args, "--hostname", "sandbox")
+
+	// Pull policy
+	args = append(args, "--pull", d.config.PullPolicy)
+
+	// Add common args
+	commonArgs, err := d.buildCommonArgs(cfg)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, commonArgs...)
+
+	// Image
+	args = append(args, d.config.Image)
+
+	// Command
+	if len(cfg.Command) > 0 {
+		args = append(args, cfg.Command...)
+	} else {
+		// Interactive shell
+		args = append(args, cfg.Shell)
+	}
+
+	return args, nil
+}
+
+// buildCommonArgs builds arguments common to both run and create.
+func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
+	var args []string
 
 	// User mapping - pass host UID/GID for entrypoint to use
 	args = append(args,
@@ -195,7 +353,7 @@ func (d *DockerIsolator) Build(ctx context.Context, cfg *Config) (string, []stri
 			if b.Optional {
 				continue
 			}
-			return "", nil, fmt.Errorf("binding source does not exist: %s", b.Source)
+			return nil, fmt.Errorf("binding source does not exist: %s", b.Source)
 		}
 		mount := b.Source + ":" + b.Dest
 		if b.ReadOnly {
@@ -204,18 +362,7 @@ func (d *DockerIsolator) Build(ctx context.Context, cfg *Config) (string, []stri
 		args = append(args, "-v", mount)
 	}
 
-	// Image
-	args = append(args, d.config.Image)
-
-	// Command
-	if len(cfg.Command) > 0 {
-		args = append(args, cfg.Command...)
-	} else {
-		// Interactive shell
-		args = append(args, cfg.Shell)
-	}
-
-	return dockerPath, args, nil
+	return args, nil
 }
 
 // Cleanup performs any post-sandbox cleanup.
@@ -364,8 +511,6 @@ func (d *DockerIsolator) getContainerState(name string) (exists bool, running bo
 }
 
 // buildLabels returns Docker label arguments for a container/volume.
-//
-//nolint:unused // Will be used in persistent container implementation
 func (d *DockerIsolator) buildLabels(projectDir string) []string {
 	projectName := filepath.Base(projectDir)
 	return []string{

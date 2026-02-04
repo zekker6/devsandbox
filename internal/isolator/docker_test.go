@@ -71,7 +71,7 @@ func TestDockerIsolator_Available(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest"})
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -81,7 +81,7 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 		Environment: map[string]string{"FOO": "bar"},
 	}
 
-	_, args, err := iso.Build(context.Background(), cfg)
+	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
 		// Docker might not be installed in test environment
 		_, lookErr := exec.LookPath("docker")
@@ -91,8 +91,13 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 		t.Fatalf("Build failed: %v", err)
 	}
 
+	// Verify action is DockerActionRun for KeepContainer=false
+	if result.Action != DockerActionRun {
+		t.Errorf("Expected DockerActionRun, got %v", result.Action)
+	}
+
 	// Verify key arguments are present
-	argsStr := strings.Join(args, " ")
+	argsStr := strings.Join(result.Args, " ")
 
 	if !strings.Contains(argsStr, "test-image:latest") {
 		t.Error("Build args missing image")
@@ -113,10 +118,14 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 	if !strings.Contains(argsStr, "HOST_GID=") {
 		t.Error("Build args missing HOST_GID")
 	}
+	// Should have --rm for non-persistent containers
+	if !strings.Contains(argsStr, "--rm") {
+		t.Error("Build args missing --rm for non-persistent container")
+	}
 }
 
 func TestDockerIsolator_Build_WithProxy(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest"})
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:   "/tmp/test-project",
@@ -127,7 +136,7 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 		ProxyPort:    8080,
 	}
 
-	_, args, err := iso.Build(context.Background(), cfg)
+	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
 		_, lookErr := exec.LookPath("docker")
 		if lookErr != nil {
@@ -136,7 +145,7 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 		t.Fatalf("Build failed: %v", err)
 	}
 
-	argsStr := strings.Join(args, " ")
+	argsStr := strings.Join(result.Args, " ")
 
 	if !strings.Contains(argsStr, "PROXY_MODE=true") {
 		t.Error("Build args missing PROXY_MODE")
@@ -151,9 +160,10 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 
 func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 	iso := NewDockerIsolator(DockerConfig{
-		Image:       "test-image:latest",
-		MemoryLimit: "4g",
-		CPULimit:    "2",
+		Image:         "test-image:latest",
+		MemoryLimit:   "4g",
+		CPULimit:      "2",
+		KeepContainer: false,
 	})
 
 	cfg := &Config{
@@ -163,7 +173,7 @@ func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 		Shell:       "/bin/bash",
 	}
 
-	_, args, err := iso.Build(context.Background(), cfg)
+	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
 		_, lookErr := exec.LookPath("docker")
 		if lookErr != nil {
@@ -172,7 +182,7 @@ func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 		t.Fatalf("Build failed: %v", err)
 	}
 
-	argsStr := strings.Join(args, " ")
+	argsStr := strings.Join(result.Args, " ")
 
 	if !strings.Contains(argsStr, "--memory 4g") {
 		t.Error("Build args missing memory limit")
@@ -183,7 +193,7 @@ func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest"})
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:   "/tmp/test-project",
@@ -193,7 +203,7 @@ func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
 		HideEnvFiles: true,
 	}
 
-	_, args, err := iso.Build(context.Background(), cfg)
+	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
 		_, lookErr := exec.LookPath("docker")
 		if lookErr != nil {
@@ -202,7 +212,7 @@ func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
 		t.Fatalf("Build failed: %v", err)
 	}
 
-	argsStr := strings.Join(args, " ")
+	argsStr := strings.Join(result.Args, " ")
 
 	if !strings.Contains(argsStr, "HIDE_ENV_FILES=true") {
 		t.Error("Build args missing HIDE_ENV_FILES")
@@ -210,7 +220,7 @@ func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithCommand(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest"})
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -220,7 +230,7 @@ func TestDockerIsolator_Build_WithCommand(t *testing.T) {
 		Command:     []string{"echo", "hello"},
 	}
 
-	_, args, err := iso.Build(context.Background(), cfg)
+	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
 		_, lookErr := exec.LookPath("docker")
 		if lookErr != nil {
@@ -230,14 +240,14 @@ func TestDockerIsolator_Build_WithCommand(t *testing.T) {
 	}
 
 	// Command should be at the end after the image
-	argsStr := strings.Join(args, " ")
+	argsStr := strings.Join(result.Args, " ")
 	if !strings.Contains(argsStr, "test-image:latest echo hello") {
 		t.Error("Build args missing or misplaced command")
 	}
 }
 
 func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest"})
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -258,7 +268,7 @@ func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	_, _, err := iso.Build(context.Background(), cfg)
+	_, err := iso.BuildDocker(context.Background(), cfg)
 	if err == nil {
 		t.Error("Build should fail with non-existent required binding")
 	}
@@ -268,7 +278,7 @@ func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_OptionalBindingNotExists(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest"})
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -284,7 +294,7 @@ func TestDockerIsolator_Build_OptionalBindingNotExists(t *testing.T) {
 		},
 	}
 
-	_, _, err := iso.Build(context.Background(), cfg)
+	_, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
 		_, lookErr := exec.LookPath("docker")
 		if lookErr != nil {
@@ -402,5 +412,138 @@ func TestDockerIsolator_getContainerState(t *testing.T) {
 	}
 	if running {
 		t.Error("Non-existent container should not be running")
+	}
+}
+
+func TestDockerIsolator_BuildDocker_KeepContainer_Create(t *testing.T) {
+	// Test that with KeepContainer=true and no existing container,
+	// the result is DockerActionCreate
+	iso := NewDockerIsolator(DockerConfig{
+		Image:         "test-image:latest",
+		KeepContainer: true,
+	})
+
+	cfg := &Config{
+		ProjectDir:  "/tmp/test-project-unique-12345",
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+
+	result, err := iso.BuildDocker(context.Background(), cfg)
+	if err != nil {
+		_, lookErr := exec.LookPath("docker")
+		if lookErr != nil {
+			t.Skip("Docker not installed")
+		}
+		t.Fatalf("BuildDocker failed: %v", err)
+	}
+
+	// Should return DockerActionCreate since container doesn't exist
+	if result.Action != DockerActionCreate {
+		t.Errorf("Expected DockerActionCreate, got %v", result.Action)
+	}
+
+	// Container name should be set
+	if result.ContainerName == "" {
+		t.Error("ContainerName should be set for create action")
+	}
+
+	// Args should start with "create"
+	if len(result.Args) == 0 || result.Args[0] != "create" {
+		t.Error("Args should start with 'create'")
+	}
+
+	argsStr := strings.Join(result.Args, " ")
+
+	// Should have --name with container name
+	if !strings.Contains(argsStr, "--name") {
+		t.Error("Args should have --name for persistent container")
+	}
+
+	// Should have labels
+	if !strings.Contains(argsStr, "--label") {
+		t.Error("Args should have labels for persistent container")
+	}
+
+	// Should NOT have --rm
+	if strings.Contains(argsStr, "--rm") {
+		t.Error("Args should NOT have --rm for persistent container")
+	}
+}
+
+func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{
+		Image:         "test-image:latest",
+		KeepContainer: true,
+	})
+
+	cfg := &Config{
+		ProjectDir:  "/tmp/test-label-project",
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+
+	result, err := iso.BuildDocker(context.Background(), cfg)
+	if err != nil {
+		_, lookErr := exec.LookPath("docker")
+		if lookErr != nil {
+			t.Skip("Docker not installed")
+		}
+		t.Fatalf("BuildDocker failed: %v", err)
+	}
+
+	argsStr := strings.Join(result.Args, " ")
+
+	// Check all required labels are present
+	if !strings.Contains(argsStr, LabelDevsandbox+"=true") {
+		t.Error("Args missing devsandbox label")
+	}
+	if !strings.Contains(argsStr, LabelProjectDir+"=") {
+		t.Error("Args missing project_dir label")
+	}
+	if !strings.Contains(argsStr, LabelProjectName+"=") {
+		t.Error("Args missing project_name label")
+	}
+	if !strings.Contains(argsStr, LabelCreatedAt+"=") {
+		t.Error("Args missing created_at label")
+	}
+}
+
+func TestDockerIsolator_Build_InterfaceCompatibility(t *testing.T) {
+	// Test that the interface-compliant Build() method works
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+
+	cfg := &Config{
+		ProjectDir:  "/tmp/test-project",
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+
+	binaryPath, args, err := iso.Build(context.Background(), cfg)
+	if err != nil {
+		_, lookErr := exec.LookPath("docker")
+		if lookErr != nil {
+			t.Skip("Docker not installed")
+		}
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should return docker path
+	if binaryPath == "" {
+		t.Error("BinaryPath should not be empty")
+	}
+
+	// Should return args
+	if len(args) == 0 {
+		t.Error("Args should not be empty")
+	}
+
+	// Args should contain "run" for non-persistent mode
+	argsStr := strings.Join(args, " ")
+	if !strings.Contains(argsStr, "run") {
+		t.Error("Args should contain 'run' for non-persistent mode")
 	}
 }

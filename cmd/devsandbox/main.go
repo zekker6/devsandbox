@@ -548,16 +548,45 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 	}
 
 	// Build command
-	dockerPath, dockerArgs, err := iso.Build(context.Background(), isoCfg)
+	result, err := iso.BuildDocker(context.Background(), isoCfg)
 	if err != nil {
 		return err
 	}
 
-	// Execute
-	cmd := exec.Command(dockerPath, dockerArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Handle different actions
+	switch result.Action {
+	case isolator.DockerActionRun:
+		// Fresh container with --rm, just run
+		cmd := exec.Command(result.BinaryPath, result.Args...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
 
-	return cmd.Run()
+	case isolator.DockerActionCreate:
+		// Create container first, then start it
+		createCmd := exec.Command(result.BinaryPath, result.Args...)
+		createCmd.Stdout = os.Stdout
+		createCmd.Stderr = os.Stderr
+		if err := createCmd.Run(); err != nil {
+			return fmt.Errorf("failed to create container: %w", err)
+		}
+
+		// Then start it
+		startCmd := exec.Command(result.BinaryPath, "start", "-ai", result.ContainerName)
+		startCmd.Stdin = os.Stdin
+		startCmd.Stdout = os.Stdout
+		startCmd.Stderr = os.Stderr
+		return startCmd.Run()
+
+	case isolator.DockerActionStart, isolator.DockerActionExec:
+		// Start existing stopped container or exec into running container
+		cmd := exec.Command(result.BinaryPath, result.Args...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	return nil
 }
