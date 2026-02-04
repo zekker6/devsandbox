@@ -36,11 +36,9 @@ func (f *Fish) Bindings(homeDir, sandboxHome string) []Binding {
 			ReadOnly: true,
 			Optional: true,
 		},
-		{
-			Source:   filepath.Join(homeDir, ".local", "share", "fish", "vendor_completions.d"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		// Note: .local/share/fish is NOT mounted read-only because fish needs
+		// to write universal variables to fish_variables. Let fish use the
+		// sandbox home's copy which is writable.
 	}
 }
 

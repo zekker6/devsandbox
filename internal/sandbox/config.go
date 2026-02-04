@@ -37,6 +37,9 @@ type Config struct {
 	Shell       Shell  // Detected shell (fish, bash, zsh)
 	ShellPath   string // Full path to shell binary
 
+	// Isolation backend ("bwrap" or "docker")
+	Isolation IsolationType
+
 	// Proxy settings
 	ProxyEnabled bool
 	ProxyPort    int

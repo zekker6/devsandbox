@@ -122,6 +122,52 @@ const (
 	ConfigVisibilityReadWrite ConfigVisibility = "readwrite"
 )
 
+// IsolationBackend defines the isolation backend type.
+type IsolationBackend string
+
+const (
+	// IsolationAuto automatically selects the best available backend.
+	IsolationAuto IsolationBackend = "auto"
+	// IsolationBwrap uses bubblewrap for isolation (Linux only).
+	IsolationBwrap IsolationBackend = "bwrap"
+	// IsolationDocker uses Docker containers for isolation (cross-platform).
+	IsolationDocker IsolationBackend = "docker"
+)
+
+// DockerConfig contains Docker-specific sandbox settings.
+type DockerConfig struct {
+	// Image is the Docker image to use for the sandbox.
+	// Defaults to the official devsandbox image.
+	Image string `toml:"image"`
+
+	// HideEnvFiles enables .env file hiding inside the container.
+	// Defaults to true.
+	HideEnvFiles *bool `toml:"hide_env_files"`
+
+	// PullPolicy controls when to pull the image.
+	// Values: "always", "missing" (default), "never"
+	PullPolicy string `toml:"pull_policy"`
+
+	// Resources contains container resource limits.
+	Resources DockerResourcesConfig `toml:"resources"`
+}
+
+// DockerResourcesConfig contains Docker container resource limits.
+type DockerResourcesConfig struct {
+	// Memory limit (e.g., "4g", "512m").
+	Memory string `toml:"memory"`
+	// CPU limit (e.g., "2", "0.5").
+	CPUs string `toml:"cpus"`
+}
+
+// IsHideEnvFilesEnabled returns whether .env hiding is enabled (defaults to true).
+func (d DockerConfig) IsHideEnvFilesEnabled() bool {
+	if d.HideEnvFiles == nil {
+		return true
+	}
+	return *d.HideEnvFiles
+}
+
 // SandboxConfig contains sandbox-related configuration.
 type SandboxConfig struct {
 	// BasePath is the directory where sandbox homes are stored.
@@ -134,6 +180,13 @@ type SandboxConfig struct {
 	// ConfigVisibility controls how .devsandbox.toml is exposed to the sandbox.
 	// Values: "hidden" (default), "readonly", "readwrite"
 	ConfigVisibility ConfigVisibility `toml:"config_visibility"`
+
+	// Isolation specifies the isolation backend.
+	// Values: "auto" (default), "bwrap", "docker"
+	Isolation IsolationBackend `toml:"isolation"`
+
+	// Docker contains Docker-specific settings.
+	Docker DockerConfig `toml:"docker"`
 }
 
 // GetConfigVisibility returns the config visibility (defaults to hidden).
@@ -142,6 +195,14 @@ func (s SandboxConfig) GetConfigVisibility() ConfigVisibility {
 		return ConfigVisibilityHidden
 	}
 	return s.ConfigVisibility
+}
+
+// GetIsolation returns the isolation backend (defaults to auto).
+func (s SandboxConfig) GetIsolation() IsolationBackend {
+	if s.Isolation == "" {
+		return IsolationAuto
+	}
+	return s.Isolation
 }
 
 // MountsConfig defines custom mount rules for the sandbox.

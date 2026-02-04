@@ -27,6 +27,33 @@ enabled = false
 port = 8080
 ```
 
+### Isolation Backend
+
+```toml
+[sandbox]
+# Isolation backend: "auto", "bwrap", or "docker"
+# - "auto" (default): bwrap on Linux, docker on macOS
+# - "bwrap": bubblewrap (Linux only)
+# - "docker": Docker containers (Linux, macOS)
+isolation = "auto"
+
+# Docker-specific settings (only used when isolation = "docker")
+[sandbox.docker]
+# Docker image to use
+image = "ghcr.io/zekker6/devsandbox:latest"
+
+# Pull policy: "always", "missing", "never"
+pull_policy = "missing"
+
+# Hide .env files inside container (requires --privileged or CAP_SYS_ADMIN)
+hide_env_files = true
+
+# Resource limits (optional)
+[sandbox.docker.resources]
+memory = "4g"
+cpus = "2"
+```
+
 ### Sandbox Settings
 
 ```toml
@@ -388,6 +415,20 @@ devsandbox logs internal --type logging
 
 ```toml
 # ~/.config/devsandbox/config.toml
+
+[sandbox]
+# Use auto-detection (bwrap on Linux, docker on macOS)
+isolation = "auto"
+
+# Docker settings (used when isolation = "docker")
+[sandbox.docker]
+image = "ghcr.io/zekker6/devsandbox:latest"
+pull_policy = "missing"
+hide_env_files = true
+
+[sandbox.docker.resources]
+memory = "4g"
+cpus = "2"
 
 [proxy]
 # Enable proxy mode by default for this machine

@@ -78,3 +78,15 @@ tasks:
   prune-local:
     cmds:
       - rm -rf ~/.local/share/devsandbox/
+
+  docker:build:
+    desc: Build the devsandbox Docker image
+    dir: docker
+    cmds:
+      - docker build -t devsandbox:local .
+
+  docker:test:
+    desc: Test the devsandbox Docker image
+    deps: [docker:build]
+    cmds:
+      - docker run --rm -v "{{.PWD}}:/workspace" -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) devsandbox:local bash -c "whoami && mise --version"

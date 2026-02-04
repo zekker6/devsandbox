@@ -13,13 +13,22 @@ import (
 
 const MetadataFile = "metadata.json"
 
+// IsolationType represents the isolation backend used for a sandbox
+type IsolationType string
+
+const (
+	IsolationBwrap  IsolationType = "bwrap"
+	IsolationDocker IsolationType = "docker"
+)
+
 // Metadata stores information about a sandbox instance
 type Metadata struct {
-	Name       string    `json:"name"`
-	ProjectDir string    `json:"project_dir"`
-	CreatedAt  time.Time `json:"created_at"`
-	LastUsed   time.Time `json:"last_used"`
-	Shell      Shell     `json:"shell"`
+	Name       string        `json:"name"`
+	ProjectDir string        `json:"project_dir"`
+	CreatedAt  time.Time     `json:"created_at"`
+	LastUsed   time.Time     `json:"last_used"`
+	Shell      Shell         `json:"shell"`
+	Isolation  IsolationType `json:"isolation,omitempty"` // "bwrap" or "docker"
 	// Computed fields (not persisted)
 	SandboxRoot string `json:"-"`
 	SizeBytes   int64  `json:"-"`
@@ -70,12 +79,17 @@ func LoadMetadata(sandboxRoot string) (*Metadata, error) {
 // CreateMetadata creates initial metadata for a new sandbox
 func CreateMetadata(cfg *Config) *Metadata {
 	now := time.Now()
+	isolation := cfg.Isolation
+	if isolation == "" {
+		isolation = IsolationBwrap // Default
+	}
 	return &Metadata{
 		Name:        cfg.ProjectName,
 		ProjectDir:  cfg.ProjectDir,
 		CreatedAt:   now,
 		LastUsed:    now,
 		Shell:       cfg.Shell,
+		Isolation:   isolation,
 		SandboxRoot: cfg.SandboxRoot,
 	}
 }
@@ -263,4 +277,29 @@ func FormatSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// ListAllSandboxes returns all sandboxes (both bwrap and docker)
+func ListAllSandboxes(baseDir string) ([]*Metadata, error) {
+	// Get bwrap sandboxes
+	bwrapSandboxes, err := ListSandboxes(baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set isolation type for bwrap sandboxes
+	for _, m := range bwrapSandboxes {
+		if m.Isolation == "" {
+			m.Isolation = IsolationBwrap
+		}
+	}
+
+	// Get docker sandboxes
+	dockerSandboxes, err := ListDockerSandboxes()
+	if err != nil {
+		// Don't fail if docker is not available, just skip
+		return bwrapSandboxes, nil
+	}
+
+	return append(bwrapSandboxes, dockerSandboxes...), nil
 }

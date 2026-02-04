@@ -1,7 +1,41 @@
 # Sandboxing
 
-devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) to create isolated environments for running
-untrusted code.
+devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux or Docker containers on macOS to create
+isolated environments for running untrusted code.
+
+## Isolation Backends
+
+devsandbox supports two isolation backends:
+
+| Backend | Platform | Description |
+|---------|----------|-------------|
+| `bwrap` | Linux only | Uses bubblewrap for namespace-based isolation. Preferred on Linux. |
+| `docker` | Linux, macOS | Uses Docker containers. Required for macOS, optional on Linux. |
+
+### Automatic Selection
+
+By default (`--isolation=auto`), devsandbox selects the best backend for your platform:
+- **Linux**: Uses `bwrap` (bubblewrap)
+- **macOS**: Uses `docker`
+
+### Manual Override
+
+Force a specific backend with the `--isolation` flag:
+
+```bash
+# Use Docker on Linux
+devsandbox --isolation=docker
+
+# Explicitly use bwrap (Linux only)
+devsandbox --isolation=bwrap
+```
+
+Or configure in `~/.config/devsandbox/config.toml`:
+
+```toml
+[sandbox]
+isolation = "docker"  # "auto", "bwrap", or "docker"
+```
 
 ## Security Model
 
@@ -341,10 +375,107 @@ devsandbox --info
 
 Output includes a "Custom Mounts" section if rules are configured.
 
+## Docker Backend
+
+The Docker backend provides isolation via containers, enabling macOS support and simplified distribution.
+
+### Docker-Specific Configuration
+
+Configure Docker settings in `~/.config/devsandbox/config.toml`:
+
+```toml
+[sandbox]
+isolation = "docker"
+
+[sandbox.docker]
+# Custom Docker image (default: ghcr.io/zekker6/devsandbox:latest)
+image = "ghcr.io/zekker6/devsandbox:latest"
+
+# Pull policy: "always", "missing", "never"
+pull_policy = "missing"
+
+# Hide .env files in container (requires --privileged or CAP_SYS_ADMIN)
+hide_env_files = true
+
+# Resource limits
+[sandbox.docker.resources]
+memory = "4g"
+cpus = "2"
+```
+
+### How Docker Backend Works
+
+The Docker backend:
+
+1. **UID/GID Mapping**: Creates a container user matching your host UID/GID for proper file ownership
+2. **Project Mount**: Mounts your project directory at `/workspace` (read/write)
+3. **Sandbox Home**:
+   - **Linux**: Bind mount for consistency with bwrap
+   - **macOS**: Named volume for better performance
+4. **Tool Configs**: Mounts nvim, tmux, starship configs read-only from host
+5. **Proxy Support**: Uses `host.docker.internal` for proxy connections
+
+### Docker Image
+
+The default image (`ghcr.io/zekker6/devsandbox:latest`) includes:
+- Debian slim base
+- mise for tool management
+- Common development tools (git, curl, bash, zsh)
+- gosu for privilege dropping
+- passt/pasta for network isolation (if needed)
+
+### Building Custom Images
+
+Extend the base image for project-specific needs:
+
+```dockerfile
+FROM ghcr.io/zekker6/devsandbox:latest
+
+# Add project-specific tools
+RUN apt-get update && apt-get install -y postgresql-client
+
+# Pre-install mise tools
+RUN mise install node@20 python@3.12
+```
+
+Then configure:
+
+```toml
+[sandbox.docker]
+image = "my-custom-image:latest"
+pull_policy = "never"
+```
+
+### Platform Differences
+
+| Feature | Linux (bwrap) | Linux (docker) | macOS (docker) |
+|---------|---------------|----------------|----------------|
+| Sandbox home | Bind mount | Bind mount | Named volume |
+| File performance | Native | Near-native | Slower (volume) |
+| .env hiding | Overlay | Entrypoint | Entrypoint |
+| Network isolation | pasta | HTTP_PROXY | HTTP_PROXY |
+| Host integration | Full | Via mounts | Via mounts |
+
+### Known Limitations (Docker)
+
+- **No pasta network**: Network isolation uses HTTP_PROXY instead of pasta
+- **Proxy filtering not supported**: The proxy server and request filtering features are not available with the Docker backend
+- **.env hiding requires privileges**: The `hide_env_files` feature requires `--privileged` or `CAP_SYS_ADMIN`; without these, .env files remain visible (with a warning)
+- **macOS file performance**: Named volumes are slower than native filesystem
+- **inotify limitations**: File watching may be less reliable on macOS
+- **No nested Docker**: Cannot run Docker commands inside the sandbox
+
 ## Limitations
 
+### Bwrap Backend (Linux)
 - **Linux only** - Uses Linux-specific namespaces and capabilities
 - **User namespaces required** - Most modern distros have this enabled
 - **No nested containers** - Running Docker inside the sandbox is not supported
 - **Some tools may break** - Tools that require specific system access may fail
 - **Overlay requires kernel support** - Most modern kernels (3.18+) support overlayfs
+
+### Docker Backend (All Platforms)
+- **Docker required** - Docker Desktop or Docker Engine must be installed and running
+- **No pasta network** - Uses HTTP_PROXY for network isolation instead
+- **Performance on macOS** - File operations may be slower due to volume mounts
+- **Image pull** - First run requires downloading the base image (~200MB)

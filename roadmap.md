@@ -1,5 +1,10 @@
 # Roadma
 
+review feedback:
+- $PWD should be forwarded as is
+- configuration for tools should be forwarded into the sandbox (e.g. nvim, mise, git etc)
+- set up claude code, opencode, codex, copilot in provided container image
+
 - forward specific unix sockets into the sandbox
     - allow read only docker access
         - use proxy for docker socket?

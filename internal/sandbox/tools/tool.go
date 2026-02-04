@@ -154,3 +154,21 @@ type ToolWithLogger interface {
 	// SetLogger sets the logger for tool errors.
 	SetLogger(logger ErrorLogger)
 }
+
+// DockerMount represents a Docker volume mount.
+type DockerMount struct {
+	Source   string // Host path or volume name
+	Dest     string // Container path
+	ReadOnly bool
+	Type     string // "bind" or "volume"
+}
+
+// ToolWithDocker extends Tool with Docker-specific bindings.
+// Tools that need different behavior in Docker mode should implement this.
+type ToolWithDocker interface {
+	Tool
+
+	// DockerBindings returns Docker-specific mounts.
+	// If not implemented, regular Bindings are converted to Docker mounts.
+	DockerBindings(homeDir, sandboxHome string) []DockerMount
+}

@@ -612,6 +612,47 @@ sandbox_port = 5432
 	}
 }
 
+func TestDockerConfig_Defaults(t *testing.T) {
+	cfg := DockerConfig{}
+
+	if !cfg.IsHideEnvFilesEnabled() {
+		t.Error("HideEnvFiles should default to true")
+	}
+
+	// Test explicit false
+	falseVal := false
+	cfg.HideEnvFiles = &falseVal
+	if cfg.IsHideEnvFilesEnabled() {
+		t.Error("HideEnvFiles should be false when explicitly set")
+	}
+
+	// Test explicit true
+	trueVal := true
+	cfg.HideEnvFiles = &trueVal
+	if !cfg.IsHideEnvFilesEnabled() {
+		t.Error("HideEnvFiles should be true when explicitly set")
+	}
+}
+
+func TestSandboxConfig_GetIsolation(t *testing.T) {
+	tests := []struct {
+		isolation IsolationBackend
+		expected  IsolationBackend
+	}{
+		{"", IsolationAuto},
+		{IsolationAuto, IsolationAuto},
+		{IsolationBwrap, IsolationBwrap},
+		{IsolationDocker, IsolationDocker},
+	}
+
+	for _, tt := range tests {
+		cfg := SandboxConfig{Isolation: tt.isolation}
+		if got := cfg.GetIsolation(); got != tt.expected {
+			t.Errorf("GetIsolation() = %s, want %s", got, tt.expected)
+		}
+	}
+}
+
 func TestConfig_PortForwarding_Validation(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -64,6 +64,9 @@ func runDoctor() error {
 
 	results = append(results, checkRecentLogs())
 
+	results = append(results, checkDocker())
+	results = append(results, checkDockerImage(""))
+
 	printDoctorResults(results)
 
 	// Print detected tools
@@ -128,6 +131,8 @@ func getBinaryVersion(name string) string {
 	case "bash":
 		cmd = exec.Command(name, "--version")
 	case "zsh":
+		cmd = exec.Command(name, "--version")
+	case "docker":
 		cmd = exec.Command(name, "--version")
 	default:
 		return ""
@@ -604,5 +609,64 @@ func checkRecentLogs() checkResult {
 		name:    "logs",
 		status:  status,
 		message: msg,
+	}
+}
+
+func checkDocker() checkResult {
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		return checkResult{
+			name:    "docker",
+			status:  "warn",
+			message: "not found - required for Docker isolation backend",
+		}
+	}
+
+	// Check if daemon is running
+	cmd := exec.Command("docker", "info")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		return checkResult{
+			name:    "docker",
+			status:  "warn",
+			message: fmt.Sprintf("found at %s but daemon not running", path),
+		}
+	}
+
+	// Get version
+	version := getBinaryVersion("docker")
+	msg := fmt.Sprintf("found at %s", path)
+	if version != "" {
+		msg = fmt.Sprintf("%s (%s)", version, path)
+	}
+
+	return checkResult{
+		name:    "docker",
+		status:  "ok",
+		message: msg,
+	}
+}
+
+func checkDockerImage(image string) checkResult {
+	if image == "" {
+		image = "ghcr.io/zekker6/devsandbox:latest"
+	}
+
+	cmd := exec.Command("docker", "image", "inspect", image)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		return checkResult{
+			name:    "docker-image",
+			status:  "warn",
+			message: fmt.Sprintf("%s not found locally (will pull on first use)", image),
+		}
+	}
+
+	return checkResult{
+		name:    "docker-image",
+		status:  "ok",
+		message: fmt.Sprintf("%s available", image),
 	}
 }

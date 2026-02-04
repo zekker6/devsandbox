@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"devsandbox/internal/bwrap"
 	"devsandbox/internal/config"
+	"devsandbox/internal/isolator"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/network"
 	"devsandbox/internal/proxy"
@@ -66,6 +69,9 @@ Proxy Mode (--proxy):
 	rootCmd.Flags().StringSlice("allow-domain", nil, "Allow domain pattern (can be repeated)")
 	rootCmd.Flags().StringSlice("block-domain", nil, "Block domain pattern (can be repeated)")
 
+	// Isolation backend flag
+	rootCmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker")
+
 	// Add subcommands
 	rootCmd.AddCommand(newSandboxesCmd())
 	rootCmd.AddCommand(newDoctorCmd())
@@ -93,6 +99,27 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 
 	// Load configuration file with project-specific overrides
 	appCfg, _, _, err := config.LoadConfig()
+	if err != nil {
+		return err
+	}
+
+	// Determine isolation backend
+	isolationFlag, _ := cmd.Flags().GetString("isolation")
+	isolation := appCfg.Sandbox.GetIsolation()
+	if cmd.Flags().Changed("isolation") {
+		isolation = config.IsolationBackend(isolationFlag)
+	}
+
+	// Create isolator
+	dockerCfg := isolator.DockerConfig{
+		Image:        appCfg.Sandbox.Docker.Image,
+		PullPolicy:   appCfg.Sandbox.Docker.PullPolicy,
+		HideEnvFiles: appCfg.Sandbox.Docker.IsHideEnvFilesEnabled(),
+		MemoryLimit:  appCfg.Sandbox.Docker.Resources.Memory,
+		CPULimit:     appCfg.Sandbox.Docker.Resources.CPUs,
+	}
+
+	iso, err := isolator.MustNew(isolator.Backend(isolation), dockerCfg)
 	if err != nil {
 		return err
 	}
@@ -132,16 +159,29 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	// Initialize custom mounts engine
 	cfg.MountsConfig = mounts.NewEngine(appCfg.Sandbox.Mounts, cfg.HomeDir)
 
+	// Set isolation type for metadata tracking
+	if iso.Name() == isolator.BackendDocker {
+		cfg.Isolation = sandbox.IsolationDocker
+	} else {
+		cfg.Isolation = sandbox.IsolationBwrap
+	}
+
 	if showInfo {
 		printInfo(cfg)
 		return nil
 	}
 
-	if err := bwrap.CheckInstalled(); err != nil {
+	if err := cfg.EnsureSandboxDirs(); err != nil {
 		return err
 	}
 
-	if err := cfg.EnsureSandboxDirs(); err != nil {
+	// Branch based on backend
+	if iso.Name() == isolator.BackendDocker {
+		return runDockerSandbox(cfg, iso.(*isolator.DockerIsolator), args)
+	}
+
+	// Continue with existing bwrap logic...
+	if err := bwrap.CheckInstalled(); err != nil {
 		return err
 	}
 
@@ -486,4 +526,38 @@ func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Contex
 	}
 
 	return tools.NewActiveToolsRunner(toolsCfg, errorLogger)
+}
+
+// runDockerSandbox executes the sandbox using Docker isolation.
+func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []string) error {
+	// Build isolator config
+	isoCfg := &isolator.Config{
+		ProjectDir:     cfg.ProjectDir,
+		SandboxHome:    cfg.SandboxHome,
+		HomeDir:        cfg.HomeDir,
+		Shell:          string(cfg.Shell),
+		ShellPath:      cfg.ShellPath,
+		Command:        args,
+		Interactive:    term.IsTerminal(int(os.Stdin.Fd())),
+		ProxyEnabled:   cfg.ProxyEnabled,
+		ProxyPort:      cfg.ProxyPort,
+		Environment:    make(map[string]string),
+		HideEnvFiles:   true,
+		ToolsConfig:    cfg.ToolsConfig,
+		OverlayEnabled: cfg.OverlayEnabled,
+	}
+
+	// Build command
+	dockerPath, dockerArgs, err := iso.Build(context.Background(), isoCfg)
+	if err != nil {
+		return err
+	}
+
+	// Execute
+	cmd := exec.Command(dockerPath, dockerArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }
