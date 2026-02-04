@@ -72,6 +72,9 @@ Proxy Mode (--proxy):
 	// Isolation backend flag
 	rootCmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker")
 
+	// Docker container lifecycle flag
+	rootCmd.Flags().Bool("no-keep", false, "Don't keep Docker container after exit (fresh container each run)")
+
 	// Add subcommands
 	rootCmd.AddCommand(newSandboxesCmd())
 	rootCmd.AddCommand(newDoctorCmd())
@@ -111,12 +114,19 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create isolator
+	noKeepContainer, _ := cmd.Flags().GetBool("no-keep")
+	keepContainer := appCfg.Sandbox.Docker.IsKeepContainerEnabled()
+	if cmd.Flags().Changed("no-keep") && noKeepContainer {
+		keepContainer = false
+	}
+
 	dockerCfg := isolator.DockerConfig{
-		Image:        appCfg.Sandbox.Docker.Image,
-		PullPolicy:   appCfg.Sandbox.Docker.PullPolicy,
-		HideEnvFiles: appCfg.Sandbox.Docker.IsHideEnvFilesEnabled(),
-		MemoryLimit:  appCfg.Sandbox.Docker.Resources.Memory,
-		CPULimit:     appCfg.Sandbox.Docker.Resources.CPUs,
+		Image:         appCfg.Sandbox.Docker.Image,
+		PullPolicy:    appCfg.Sandbox.Docker.PullPolicy,
+		HideEnvFiles:  appCfg.Sandbox.Docker.IsHideEnvFilesEnabled(),
+		MemoryLimit:   appCfg.Sandbox.Docker.Resources.Memory,
+		CPULimit:      appCfg.Sandbox.Docker.Resources.CPUs,
+		KeepContainer: keepContainer,
 	}
 
 	iso, err := isolator.MustNew(isolator.Backend(isolation), dockerCfg)
