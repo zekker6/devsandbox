@@ -364,3 +364,43 @@ func TestDockerIsolator_remapToContainerHome(t *testing.T) {
 		}
 	}
 }
+
+func TestDockerIsolator_containerName(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+
+	// Same input should produce same output
+	name1 := iso.containerName("/home/user/project")
+	name2 := iso.containerName("/home/user/project")
+	if name1 != name2 {
+		t.Error("containerName should be deterministic")
+	}
+
+	// Different inputs should produce different outputs
+	name3 := iso.containerName("/home/user/other")
+	if name1 == name3 {
+		t.Error("containerName should produce different names for different paths")
+	}
+
+	// Should have devsandbox prefix
+	if !strings.HasPrefix(name1, "devsandbox-") {
+		t.Errorf("Container name should have devsandbox prefix: %s", name1)
+	}
+
+	// Should include project name
+	if !strings.Contains(name1, "project") {
+		t.Errorf("Container name should include project name: %s", name1)
+	}
+}
+
+func TestDockerIsolator_getContainerState(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+
+	// Non-existent container should return not exists
+	exists, running := iso.getContainerState("nonexistent-container-xyz-123456")
+	if exists {
+		t.Error("Non-existent container should not exist")
+	}
+	if running {
+		t.Error("Non-existent container should not be running")
+	}
+}

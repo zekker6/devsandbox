@@ -333,3 +333,23 @@ func getToolConfig(toolsConfig map[string]any, toolName string) map[string]any {
 	}
 	return nil
 }
+
+// containerName generates a Docker container name for the sandbox.
+// Format: devsandbox-<project>-<hash>
+func (d *DockerIsolator) containerName(projectDir string) string {
+	projectName := filepath.Base(projectDir)
+	hash := sha256.Sum256([]byte(projectDir))
+	return fmt.Sprintf("devsandbox-%s-%x", projectName, hash[:4])
+}
+
+// getContainerState checks if a container exists and its state.
+func (d *DockerIsolator) getContainerState(name string) (exists bool, running bool) {
+	cmd := exec.Command("docker", "inspect", "--format", "{{.State.Running}}", name)
+	output, err := cmd.Output()
+	if err != nil {
+		return false, false // Container doesn't exist
+	}
+
+	isRunning := strings.TrimSpace(string(output)) == "true"
+	return true, isRunning
+}
