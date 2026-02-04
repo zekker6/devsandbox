@@ -187,6 +187,9 @@ directory no longer exists) are removed.`,
 				if s.Orphaned {
 					status = " [orphaned]"
 				}
+				if s.Isolation == sandbox.IsolationDocker && s.State != "" {
+					status = status + " [" + s.State + "]"
+				}
 				isoType := string(s.Isolation)
 				if isoType == "" {
 					isoType = "bwrap"
@@ -278,6 +281,14 @@ func printTable(sandboxes []*sandbox.Metadata, showSize bool) error {
 				status = status + ", active"
 			} else {
 				status = "active"
+			}
+		}
+		// For Docker containers, show the container state
+		if s.Isolation == sandbox.IsolationDocker && s.State != "" {
+			if status != "" {
+				status = status + ", " + s.State
+			} else {
+				status = s.State
 			}
 		}
 
