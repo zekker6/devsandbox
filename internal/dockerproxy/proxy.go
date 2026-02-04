@@ -14,10 +14,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Logger is an interface for logging proxy errors.
+// Logger is an interface for logging proxy events.
 // This is compatible with logging.ErrorLogger.
 type Logger interface {
 	LogErrorf(component, format string, args ...any)
+	LogInfof(component, format string, args ...any)
 }
 
 // Proxy is a filtering proxy for the Docker socket.
@@ -50,6 +51,13 @@ func (p *Proxy) SetLogger(logger Logger) {
 func (p *Proxy) logError(format string, args ...any) {
 	if p.logger != nil {
 		p.logger.LogErrorf("docker-proxy", format, args...)
+	}
+}
+
+// logInfo logs an info message if a logger is configured.
+func (p *Proxy) logInfo(format string, args ...any) {
+	if p.logger != nil {
+		p.logger.LogInfof("docker-proxy", format, args...)
 	}
 }
 
@@ -140,11 +148,13 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 	// Check if allowed
 	if !IsAllowed(req.Method, req.URL.Path) {
 		reason := DenyReason(req.Method, req.URL.Path)
+		p.logInfo("request denied: %s %s - %s", req.Method, req.URL.Path, reason)
 		p.sendError(conn, http.StatusForbidden, reason)
 		return
 	}
 
-	// Forward to Docker daemon
+	// Log and forward to Docker daemon
+	p.logInfo("request allowed: %s %s", req.Method, req.URL.Path)
 	p.forwardRequest(conn, req, reader)
 }
 

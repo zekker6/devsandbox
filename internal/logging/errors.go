@@ -56,7 +56,22 @@ func (l *ErrorLogger) LogErrorf(component, format string, args ...any) {
 
 	timestamp := time.Now().Format(time.RFC3339)
 	msg := fmt.Sprintf(format, args...)
-	line := fmt.Sprintf("%s [%s] %s\n", timestamp, component, msg)
+	line := fmt.Sprintf("%s [%s] ERROR %s\n", timestamp, component, msg)
+	_, _ = l.file.WriteString(line)
+}
+
+// LogInfof writes a formatted info entry to the log file.
+func (l *ErrorLogger) LogInfof(component, format string, args ...any) {
+	if l == nil || l.file == nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	timestamp := time.Now().Format(time.RFC3339)
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s [%s] INFO %s\n", timestamp, component, msg)
 	_, _ = l.file.WriteString(line)
 }
 

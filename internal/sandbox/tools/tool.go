@@ -141,10 +141,11 @@ type ActiveTool interface {
 	Stop() error
 }
 
-// ErrorLogger is the interface for logging tool errors.
+// ErrorLogger is the interface for logging tool events.
 // This is compatible with logging.ErrorLogger.
 type ErrorLogger interface {
 	LogErrorf(component, format string, args ...any)
+	LogInfof(component, format string, args ...any)
 }
 
 // ToolWithLogger is implemented by tools that can accept an error logger.
