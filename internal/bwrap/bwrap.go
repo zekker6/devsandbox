@@ -72,9 +72,12 @@ func ExecRun(bwrapArgs []string, shellCmd []string) error {
 // This creates an isolated network namespace where all traffic must go through
 // pasta's gateway, which we configure to route through our proxy.
 //
+// The portForwardArgs parameter accepts pasta port forwarding arguments (e.g., -t, -u, -T, -U).
+// Pass nil if no port forwarding is needed.
+//
 // Unlike the regular Exec function, this uses exec.Command instead of syscall.Exec
 // so that the calling process (and its proxy server goroutine) stays alive.
-func ExecWithPasta(bwrapArgs []string, shellCmd []string) error {
+func ExecWithPasta(bwrapArgs []string, shellCmd []string, portForwardArgs []string) error {
 	pastaPath, err := exec.LookPath("pasta")
 	if err != nil {
 		return errors.New("pasta is not installed (required for proxy mode)\nRun 'devsandbox doctor' for installation instructions")
@@ -104,7 +107,7 @@ func ExecWithPasta(bwrapArgs []string, shellCmd []string) error {
 		exec "$@"
 	`, network.PastaGatewayIP)
 
-	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+16)
+	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+len(portForwardArgs)+16)
 	args = append(args, "--config-net") // Configure network interface
 
 	// Use --map-host-loopback if available (newer pasta versions)
@@ -112,6 +115,9 @@ func ExecWithPasta(bwrapArgs []string, shellCmd []string) error {
 	if pastaSupportsMapHostLoopback() {
 		args = append(args, "--map-host-loopback", network.PastaGatewayIP)
 	}
+
+	// Add port forwarding arguments
+	args = append(args, portForwardArgs...)
 
 	args = append(args, "-f") // Foreground mode
 	args = append(args, "--")

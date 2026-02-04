@@ -280,12 +280,27 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "===================")
 	}
 
+	// Validate port forwarding requirements
+	if appCfg.PortForwarding.IsEnabled() && len(appCfg.PortForwarding.Rules) > 0 {
+		if !cfg.NetworkIsolated {
+			return fmt.Errorf("port forwarding requires network isolation (pasta), but network is not isolated; " +
+				"without network isolation, the sandbox already has direct network access to the host; " +
+				"either enable proxy mode (--proxy) or remove port_forwarding configuration")
+		}
+	}
+
+	// Build port forwarding args for pasta
+	var portForwardArgs []string
+	if appCfg.PortForwarding.IsEnabled() {
+		portForwardArgs = sandbox.BuildPastaPortArgs(appCfg.PortForwarding.Rules)
+	}
+
 	// Execute the sandbox
 	if cfg.ProxyEnabled {
 		// Use pasta to create isolated network namespace
 		// pasta wraps bwrap and provides network connectivity via gateway IP
 		// All traffic must go through pasta's virtual interface -> our proxy
-		return bwrap.ExecWithPasta(bwrapArgs, shellCmd)
+		return bwrap.ExecWithPasta(bwrapArgs, shellCmd, portForwardArgs)
 	}
 
 	// Non-proxy mode

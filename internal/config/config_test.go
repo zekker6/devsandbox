@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -555,5 +556,204 @@ path = "/nonexistent/config.toml"
 	}
 	if !contains(err.Error(), "failed to load include") {
 		t.Errorf("expected 'failed to load include' error, got: %v", err)
+	}
+}
+
+func TestConfig_PortForwarding(t *testing.T) {
+	content := `
+[port_forwarding]
+enabled = true
+
+[[port_forwarding.rules]]
+name = "devserver"
+direction = "inbound"
+protocol = "tcp"
+host_port = 3000
+sandbox_port = 3000
+
+[[port_forwarding.rules]]
+direction = "outbound"
+host_port = 5432
+sandbox_port = 5432
+`
+	tmpFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(tmpFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFrom(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadFrom failed: %v", err)
+	}
+
+	if !cfg.PortForwarding.IsEnabled() {
+		t.Error("PortForwarding should be enabled")
+	}
+	if len(cfg.PortForwarding.Rules) != 2 {
+		t.Errorf("expected 2 rules, got %d", len(cfg.PortForwarding.Rules))
+	}
+
+	// First rule: explicit name
+	r1 := cfg.PortForwarding.Rules[0]
+	if r1.Name != "devserver" {
+		t.Errorf("expected name 'devserver', got %q", r1.Name)
+	}
+	if r1.Direction != "inbound" {
+		t.Errorf("expected direction 'inbound', got %q", r1.Direction)
+	}
+	if r1.Protocol != "tcp" {
+		t.Errorf("expected protocol 'tcp', got %q", r1.Protocol)
+	}
+
+	// Second rule: no name (will be auto-generated during validation)
+	r2 := cfg.PortForwarding.Rules[1]
+	if r2.Direction != "outbound" {
+		t.Errorf("expected direction 'outbound', got %q", r2.Direction)
+	}
+}
+
+func TestConfig_PortForwarding_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{
+			name: "invalid_direction",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+direction = "invalid"
+host_port = 3000
+sandbox_port = 3000
+`,
+			wantErr: "direction must be",
+		},
+		{
+			name: "invalid_protocol",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+direction = "inbound"
+protocol = "http"
+host_port = 3000
+sandbox_port = 3000
+`,
+			wantErr: "protocol must be",
+		},
+		{
+			name: "invalid_host_port_zero",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+direction = "inbound"
+host_port = 0
+sandbox_port = 3000
+`,
+			wantErr: "host_port must be",
+		},
+		{
+			name: "invalid_host_port_too_high",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+direction = "inbound"
+host_port = 70000
+sandbox_port = 3000
+`,
+			wantErr: "host_port must be",
+		},
+		{
+			name: "duplicate_inbound_host_port",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+name = "first"
+direction = "inbound"
+host_port = 3000
+sandbox_port = 3000
+[[port_forwarding.rules]]
+name = "second"
+direction = "inbound"
+host_port = 3000
+sandbox_port = 4000
+`,
+			wantErr: "conflict",
+		},
+		{
+			name: "duplicate_outbound_sandbox_port",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+name = "first"
+direction = "outbound"
+host_port = 5432
+sandbox_port = 5432
+[[port_forwarding.rules]]
+name = "second"
+direction = "outbound"
+host_port = 5433
+sandbox_port = 5432
+`,
+			wantErr: "conflict",
+		},
+		{
+			name: "valid_same_port_different_protocol",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+direction = "inbound"
+protocol = "tcp"
+host_port = 3000
+sandbox_port = 3000
+[[port_forwarding.rules]]
+direction = "inbound"
+protocol = "udp"
+host_port = 3000
+sandbox_port = 3000
+`,
+			wantErr: "",
+		},
+		{
+			name: "auto_generated_name",
+			content: `
+[port_forwarding]
+enabled = true
+[[port_forwarding.rules]]
+direction = "inbound"
+host_port = 8080
+sandbox_port = 8080
+`,
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(tmpFile, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := LoadFrom(tmpFile)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.wantErr)
+				} else if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("expected error containing %q, got: %v", tt.wantErr, err)
+				}
+			}
+		})
 	}
 }

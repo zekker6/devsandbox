@@ -40,6 +40,9 @@ type Config struct {
 	// Logging contains remote logging settings.
 	Logging LoggingConfig `toml:"logging"`
 
+	// PortForwarding contains port forwarding settings.
+	PortForwarding PortForwardingConfig `toml:"port_forwarding"`
+
 	// Include contains conditional config includes.
 	Include []Include `toml:"include"`
 }
@@ -241,6 +244,42 @@ type ReceiverConfig struct {
 	Insecure bool `toml:"insecure"`
 }
 
+// PortForwardingConfig contains port forwarding settings.
+type PortForwardingConfig struct {
+	// Enabled enables port forwarding.
+	Enabled *bool `toml:"enabled"`
+
+	// Rules is the list of port forwarding rules.
+	Rules []PortForwardingRule `toml:"rules"`
+}
+
+// IsEnabled returns whether port forwarding is enabled (defaults to false).
+func (p PortForwardingConfig) IsEnabled() bool {
+	if p.Enabled == nil {
+		return false
+	}
+	return *p.Enabled
+}
+
+// PortForwardingRule defines a single port forwarding rule.
+type PortForwardingRule struct {
+	// Name is an optional identifier for this rule.
+	// If empty, auto-generated as "{direction}-{protocol}-{sandbox_port}".
+	Name string `toml:"name"`
+
+	// Direction is "inbound" (host→sandbox) or "outbound" (sandbox→host).
+	Direction string `toml:"direction"`
+
+	// Protocol is "tcp" or "udp". Defaults to "tcp".
+	Protocol string `toml:"protocol"`
+
+	// HostPort is the port on the host side.
+	HostPort int `toml:"host_port"`
+
+	// SandboxPort is the port on the sandbox side.
+	SandboxPort int `toml:"sandbox_port"`
+}
+
 // DefaultConfig returns a Config with default values.
 func DefaultConfig() *Config {
 	return &Config{
@@ -369,6 +408,75 @@ func (c *Config) Validate() error {
 		}
 		if !validMountModes[rule.Mode] {
 			return fmt.Errorf("sandbox.mounts.rules[%d].mode must be 'hidden', 'readonly', 'readwrite', 'overlay', or 'tmpoverlay', got %q", i, rule.Mode)
+		}
+	}
+
+	// Validate port forwarding rules
+	if err := c.validatePortForwarding(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validatePortForwarding validates port forwarding configuration.
+func (c *Config) validatePortForwarding() error {
+	if !c.PortForwarding.IsEnabled() {
+		return nil
+	}
+
+	validDirections := map[string]bool{"inbound": true, "outbound": true}
+	validProtocols := map[string]bool{"tcp": true, "udp": true, "": true}
+
+	// Track ports for duplicate detection
+	// Key: "inbound-tcp-3000" for inbound host_port, "outbound-tcp-5432" for outbound sandbox_port
+	inboundPorts := make(map[string]string)  // port key -> rule name
+	outboundPorts := make(map[string]string) // port key -> rule name
+
+	for i := range c.PortForwarding.Rules {
+		rule := &c.PortForwarding.Rules[i]
+
+		// Validate direction
+		if !validDirections[rule.Direction] {
+			return fmt.Errorf("port_forwarding.rules[%d]: direction must be 'inbound' or 'outbound', got %q", i, rule.Direction)
+		}
+
+		// Validate protocol (default to tcp)
+		if rule.Protocol == "" {
+			rule.Protocol = "tcp"
+		}
+		if !validProtocols[rule.Protocol] {
+			return fmt.Errorf("port_forwarding.rules[%d]: protocol must be 'tcp' or 'udp', got %q", i, rule.Protocol)
+		}
+
+		// Validate ports
+		if rule.HostPort < MinPort || rule.HostPort > MaxPort {
+			return fmt.Errorf("port_forwarding.rules[%d]: host_port must be %d-%d, got %d", i, MinPort, MaxPort, rule.HostPort)
+		}
+		if rule.SandboxPort < MinPort || rule.SandboxPort > MaxPort {
+			return fmt.Errorf("port_forwarding.rules[%d]: sandbox_port must be %d-%d, got %d", i, MinPort, MaxPort, rule.SandboxPort)
+		}
+
+		// Auto-generate name if empty
+		if rule.Name == "" {
+			rule.Name = fmt.Sprintf("%s-%s-%d", rule.Direction, rule.Protocol, rule.SandboxPort)
+		}
+
+		// Check for duplicates
+		if rule.Direction == "inbound" {
+			key := fmt.Sprintf("%s-%d", rule.Protocol, rule.HostPort)
+			if existing, ok := inboundPorts[key]; ok {
+				return fmt.Errorf("port forwarding conflict: inbound %s port %d used by both %q and %q",
+					rule.Protocol, rule.HostPort, existing, rule.Name)
+			}
+			inboundPorts[key] = rule.Name
+		} else {
+			key := fmt.Sprintf("%s-%d", rule.Protocol, rule.SandboxPort)
+			if existing, ok := outboundPorts[key]; ok {
+				return fmt.Errorf("port forwarding conflict: outbound %s port %d used by both %q and %q",
+					rule.Protocol, rule.SandboxPort, existing, rule.Name)
+			}
+			outboundPorts[key] = rule.Name
 		}
 	}
 
@@ -569,6 +677,28 @@ persistent = false
 # insecure = true  # disable TLS for local testing
 # batch_size = 100
 # flush_interval = "5s"
+
+# Port forwarding (requires network isolation)
+# Forward TCP/UDP ports between host and sandbox.
+# Requires proxy mode or pasta for network isolation.
+#
+# [port_forwarding]
+# enabled = true
+#
+# Inbound: host can connect to services inside sandbox
+# [[port_forwarding.rules]]
+# name = "devserver"
+# direction = "inbound"
+# protocol = "tcp"  # or "udp", defaults to "tcp"
+# host_port = 3000
+# sandbox_port = 3000
+#
+# Outbound: sandbox can connect to host services
+# [[port_forwarding.rules]]
+# name = "database"
+# direction = "outbound"
+# host_port = 5432
+# sandbox_port = 5432
 `
 }
 

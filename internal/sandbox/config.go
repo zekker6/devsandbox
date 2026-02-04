@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/sandbox/mounts"
 )
 
@@ -43,6 +44,9 @@ type Config struct {
 	GatewayIP    string
 	// True if network namespace is isolated (pasta)
 	NetworkIsolated bool
+
+	// PortForwardingRules contains validated port forwarding rules.
+	PortForwardingRules []config.PortForwardingRule
 
 	// Overlay settings
 	OverlayEnabled bool           // Global overlay enable/disable

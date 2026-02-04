@@ -90,6 +90,79 @@ Patterns support glob syntax with home directory expansion:
 
 **Note:** The `hidden` mode only works for files. To hide a directory, use `readonly` or `tmpoverlay` instead.
 
+### Port Forwarding
+
+Forward TCP/UDP ports between host and sandbox. Requires network isolation (proxy mode).
+
+```toml
+[port_forwarding]
+enabled = true
+
+# Inbound: host can connect to services running inside sandbox
+[[port_forwarding.rules]]
+name = "devserver"
+direction = "inbound"
+protocol = "tcp"
+host_port = 3000
+sandbox_port = 3000
+
+# Outbound: sandbox can connect to services on host
+[[port_forwarding.rules]]
+name = "database"
+direction = "outbound"
+host_port = 5432
+sandbox_port = 5432
+```
+
+#### Directions
+
+| Direction  | Description                                           | Example Use Case                    |
+|------------|-------------------------------------------------------|-------------------------------------|
+| `inbound`  | Host connects to sandbox (host:port → sandbox:port)   | Access dev server from browser      |
+| `outbound` | Sandbox connects to host (via gateway IP 10.0.2.2)    | Connect to database in Docker       |
+
+#### Fields
+
+| Field         | Required | Default | Description                              |
+|---------------|----------|---------|------------------------------------------|
+| `name`        | No       | Auto    | Identifier for the rule                  |
+| `direction`   | Yes      | -       | `inbound` or `outbound`                  |
+| `protocol`    | No       | `tcp`   | `tcp` or `udp`                           |
+| `host_port`   | Yes      | -       | Port on host side (1-65535)              |
+| `sandbox_port`| Yes      | -       | Port on sandbox side (1-65535)           |
+
+**Note:** Port forwarding requires network isolation. Enable proxy mode (`--proxy`) or port forwarding will fail with an error.
+
+#### Examples
+
+**Development Server (inbound)**
+
+Access a web server running inside the sandbox from your host browser:
+
+```toml
+[[port_forwarding.rules]]
+name = "nextjs"
+direction = "inbound"
+host_port = 3000
+sandbox_port = 3000
+```
+
+Then run `devsandbox --proxy npm run dev` and open `http://localhost:3000` on host.
+
+**Database Access (outbound)**
+
+Connect to PostgreSQL running on the host from inside the sandbox:
+
+```toml
+[[port_forwarding.rules]]
+name = "postgres"
+direction = "outbound"
+host_port = 5432
+sandbox_port = 5432
+```
+
+Inside sandbox, connect to `10.0.2.2:5432` (pasta gateway IP).
+
 ### Overlay Settings
 
 Global overlayfs settings:
@@ -338,6 +411,17 @@ mode = "readonly"
 writable = true
 # Don't persist changes (safer default)
 persistent = false
+
+[port_forwarding]
+# Enable port forwarding for dev server access
+enabled = true
+
+# Forward dev server for browser access
+[[port_forwarding.rules]]
+name = "devserver"
+direction = "inbound"
+host_port = 3000
+sandbox_port = 3000
 
 # Custom mount rules
 [[sandbox.mounts.rules]]
