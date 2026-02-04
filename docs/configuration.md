@@ -48,6 +48,11 @@ pull_policy = "missing"
 # Hide .env files inside container (requires --privileged or CAP_SYS_ADMIN)
 hide_env_files = true
 
+# Keep container after exit for fast restarts (default: true)
+# When true: containers are reused, startup ~1-2s
+# When false: containers are removed on exit (--rm behavior)
+keep_container = true
+
 # Resource limits (optional)
 [sandbox.docker.resources]
 memory = "4g"
@@ -425,6 +430,7 @@ isolation = "auto"
 image = "ghcr.io/zekker6/devsandbox:latest"
 pull_policy = "missing"
 hide_env_files = true
+keep_container = true  # Keep containers for fast restarts
 
 [sandbox.docker.resources]
 memory = "4g"
@@ -515,6 +521,9 @@ devsandbox --no-proxy       # Disable even if config has enabled = true
 
 # Override port
 devsandbox --proxy --proxy-port 9090
+
+# Override Docker container persistence
+devsandbox --no-keep        # Remove container on exit (fresh container next time)
 ```
 
 ## Per-Project Configuration

@@ -397,11 +397,63 @@ pull_policy = "missing"
 # Hide .env files in container (requires --privileged or CAP_SYS_ADMIN)
 hide_env_files = true
 
+# Keep container after exit for fast restarts (default: true)
+keep_container = true
+
 # Resource limits
 [sandbox.docker.resources]
 memory = "4g"
 cpus = "2"
 ```
+
+### Container Persistence
+
+By default, Docker containers are kept after exit to enable fast restarts. This significantly improves startup time from ~5-10 seconds to ~1-2 seconds.
+
+**Container Lifecycle:**
+
+| State | Behavior |
+|-------|----------|
+| Container doesn't exist | Creates new container, then starts it |
+| Container stopped | Starts existing container (~1-2s) |
+| Container running | Exec into running container (instant) |
+
+**Container Naming:**
+
+Containers are named `devsandbox-<project>-<hash>` where hash is derived from the project path:
+- Same project directory always gets the same container
+- Different directories with same project name get different containers
+
+**Configuration:**
+
+```toml
+[sandbox.docker]
+keep_container = true   # Keep container after exit (default)
+keep_container = false  # Remove container on exit (--rm behavior)
+```
+
+**One-off Fresh Containers:**
+
+Use `--no-keep` flag to run with a fresh container that's removed after exit:
+
+```bash
+devsandbox --no-keep
+```
+
+**Managing Containers:**
+
+```bash
+# List all sandboxes including Docker container state
+devsandbox sandboxes list
+
+# Prune stopped Docker containers
+devsandbox sandboxes prune
+
+# Force remove specific container
+docker rm -f devsandbox-myproject-abc123
+```
+
+The `sandboxes list` command shows container state (running/stopped/exited) in the STATUS column.
 
 ### How Docker Backend Works
 
