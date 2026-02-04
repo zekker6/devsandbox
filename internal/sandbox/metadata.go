@@ -34,6 +34,7 @@ type Metadata struct {
 	SizeBytes   int64  `json:"-"`
 	Orphaned    bool   `json:"-"` // True if project_dir no longer exists
 	Active      bool   `json:"-"` // Session currently running (lock held)
+	State       string `json:"-"` // For Docker: "running", "stopped", "exited"
 }
 
 // SaveMetadata writes metadata to the sandbox directory

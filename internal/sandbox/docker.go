@@ -3,6 +3,7 @@ package sandbox
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -11,81 +12,97 @@ import (
 // DockerVolumePrefix is the prefix used for devsandbox Docker volumes
 const DockerVolumePrefix = "devsandbox-"
 
-// dockerVolume represents a Docker volume from `docker volume ls`
-type dockerVolume struct {
-	Name       string            `json:"Name"`
-	CreatedAt  string            `json:"CreatedAt"`
-	Labels     map[string]string `json:"Labels"`
-	Mountpoint string            `json:"Mountpoint"`
-}
-
-// ListDockerSandboxes returns metadata for all devsandbox Docker volumes
+// ListDockerSandboxes returns metadata for all devsandbox Docker containers.
 func ListDockerSandboxes() ([]*Metadata, error) {
-	// Check if docker is available
 	_, err := exec.LookPath("docker")
 	if err != nil {
-		return nil, nil // Docker not installed, return empty
+		return nil, nil
 	}
 
-	// List volumes with devsandbox prefix
-	cmd := exec.Command("docker", "volume", "ls",
-		"--filter", "name="+DockerVolumePrefix,
+	// List containers with devsandbox label
+	cmd := exec.Command("docker", "ps", "-a",
+		"--filter", "label=devsandbox=true",
 		"--format", "{{json .}}")
 
 	output, err := cmd.Output()
 	if err != nil {
-		// Docker daemon not running or other error
 		return nil, nil
 	}
 
 	var sandboxes []*Metadata
 
-	// Parse JSON lines output
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
 
-		var vol dockerVolume
-		if err := json.Unmarshal([]byte(line), &vol); err != nil {
+		var container struct {
+			ID      string `json:"ID"`
+			Names   string `json:"Names"`
+			State   string `json:"State"`
+			Status  string `json:"Status"`
+			Labels  string `json:"Labels"`
+			Created string `json:"CreatedAt"`
+		}
+		if err := json.Unmarshal([]byte(line), &container); err != nil {
 			continue
 		}
 
-		// Get volume details for creation time
-		createdAt := time.Now() // Default
-		inspectCmd := exec.Command("docker", "volume", "inspect", vol.Name,
-			"--format", "{{.CreatedAt}}")
-		if inspectOutput, err := inspectCmd.Output(); err == nil {
-			if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(inspectOutput))); err == nil {
-				createdAt = t
-			}
+		// Parse labels
+		labels := parseLabels(container.Labels)
+
+		projectDir := labels["devsandbox.project_dir"]
+		if projectDir == "" {
+			projectDir = "(unknown)"
+		}
+		projectName := labels["devsandbox.project_name"]
+		if projectName == "" {
+			projectName = container.Names
 		}
 
-		// Extract project info from labels if available
-		projectDir := "(docker volume)"
-		projectName := vol.Name
-		if dir, ok := vol.Labels["devsandbox.project_dir"]; ok {
-			projectDir = dir
+		// Parse creation time
+		createdAt := time.Now()
+		if t, err := time.Parse("2006-01-02 15:04:05 -0700 MST", container.Created); err == nil {
+			createdAt = t
 		}
-		if name, ok := vol.Labels["devsandbox.project_name"]; ok {
-			projectName = name
+
+		// Check if orphaned
+		orphaned := false
+		if projectDir != "(unknown)" {
+			if _, err := os.Stat(projectDir); os.IsNotExist(err) {
+				orphaned = true
+			}
 		}
 
 		m := &Metadata{
 			Name:        projectName,
 			ProjectDir:  projectDir,
 			CreatedAt:   createdAt,
-			LastUsed:    createdAt, // Docker volumes don't track last used
+			LastUsed:    createdAt,
 			Shell:       ShellBash,
 			Isolation:   IsolationDocker,
-			SandboxRoot: vol.Name, // Use volume name as identifier
+			SandboxRoot: container.Names, // Container name for removal
+			State:       container.State,
+			Orphaned:    orphaned,
 		}
 
 		sandboxes = append(sandboxes, m)
 	}
 
 	return sandboxes, nil
+}
+
+// parseLabels parses Docker label string into map.
+func parseLabels(labelStr string) map[string]string {
+	labels := make(map[string]string)
+	for _, pair := range strings.Split(labelStr, ",") {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			labels[parts[0]] = parts[1]
+		}
+	}
+	return labels
 }
 
 // GetDockerVolumeSize returns the size of a Docker volume
@@ -113,10 +130,25 @@ func RemoveDockerVolume(volumeName string) error {
 	return nil
 }
 
+// RemoveDockerContainer stops and removes a Docker container.
+func RemoveDockerContainer(containerName string) error {
+	// Stop if running
+	stopCmd := exec.Command("docker", "stop", containerName)
+	_ = stopCmd.Run() // Ignore error if already stopped
+
+	// Remove container
+	rmCmd := exec.Command("docker", "rm", containerName)
+	output, err := rmCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to remove container %s: %s", containerName, string(output))
+	}
+	return nil
+}
+
 // RemoveSandboxByType removes a sandbox based on its isolation type
 func RemoveSandboxByType(m *Metadata) error {
 	if m.Isolation == IsolationDocker {
-		return RemoveDockerVolume(m.SandboxRoot)
+		return RemoveDockerContainer(m.SandboxRoot)
 	}
 	return RemoveSandbox(m.SandboxRoot)
 }
