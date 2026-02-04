@@ -31,6 +31,8 @@ type DockerConfig struct {
 	MemoryLimit string
 	// CPULimit is the CPU limit (e.g., "2").
 	CPULimit string
+	// KeepContainer keeps the container after exit for fast restarts.
+	KeepContainer bool
 }
 
 // DockerIsolator implements Isolator using Docker containers.

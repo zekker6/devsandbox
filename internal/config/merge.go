@@ -63,6 +63,9 @@ func mergeConfigs(base, overlay *Config) *Config {
 	if overlay.Sandbox.Docker.HideEnvFiles != nil {
 		result.Sandbox.Docker.HideEnvFiles = overlay.Sandbox.Docker.HideEnvFiles
 	}
+	if overlay.Sandbox.Docker.KeepContainer != nil {
+		result.Sandbox.Docker.KeepContainer = overlay.Sandbox.Docker.KeepContainer
+	}
 	if overlay.Sandbox.Docker.Resources.Memory != "" {
 		result.Sandbox.Docker.Resources.Memory = overlay.Sandbox.Docker.Resources.Memory
 	}

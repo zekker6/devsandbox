@@ -148,6 +148,10 @@ type DockerConfig struct {
 	// Values: "always", "missing" (default), "never"
 	PullPolicy string `toml:"pull_policy"`
 
+	// KeepContainer keeps the container after exit for fast restarts.
+	// Defaults to true.
+	KeepContainer *bool `toml:"keep_container"`
+
 	// Resources contains container resource limits.
 	Resources DockerResourcesConfig `toml:"resources"`
 }
@@ -166,6 +170,14 @@ func (d DockerConfig) IsHideEnvFilesEnabled() bool {
 		return true
 	}
 	return *d.HideEnvFiles
+}
+
+// IsKeepContainerEnabled returns whether container persistence is enabled (defaults to true).
+func (d DockerConfig) IsKeepContainerEnabled() bool {
+	if d.KeepContainer == nil {
+		return true
+	}
+	return *d.KeepContainer
 }
 
 // SandboxConfig contains sandbox-related configuration.
