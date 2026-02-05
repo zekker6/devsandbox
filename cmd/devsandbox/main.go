@@ -577,21 +577,26 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 
 	case isolator.DockerActionCreate:
 		// Create container first
+		fmt.Fprint(os.Stderr, "Creating container...")
 		createCmd := exec.Command(result.BinaryPath, result.Args...)
-		createCmd.Stdout = os.Stdout
-		createCmd.Stderr = os.Stderr
 		if err := createCmd.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, " failed")
 			return fmt.Errorf("failed to create container: %w", err)
 		}
+		fmt.Fprintln(os.Stderr, " done")
 
 		// Start the container in the background (the shell will wait for input)
+		fmt.Fprint(os.Stderr, "Starting container...")
 		startCmd := exec.Command(result.BinaryPath, "start", result.ContainerName)
 		if err := startCmd.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, " failed")
 			return fmt.Errorf("failed to start container: %w", err)
 		}
+		fmt.Fprintln(os.Stderr, " done")
 
 		// Wait for entrypoint to complete setup by checking if cache dirs exist
 		// This avoids a race condition where docker exec runs before entrypoint finishes
+		fmt.Fprint(os.Stderr, "Waiting for setup...")
 		for i := 0; i < 50; i++ { // Up to 5 seconds
 			checkCmd := exec.Command(result.BinaryPath, "exec", result.ContainerName, "test", "-d", "/cache/mise")
 			if checkCmd.Run() == nil {
@@ -599,6 +604,7 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+		fmt.Fprintln(os.Stderr, " ready")
 
 		// Exec into the running container with the actual command
 		execArgs := []string{"exec"}
