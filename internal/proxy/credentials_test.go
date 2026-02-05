@@ -30,6 +30,36 @@ func TestGitHubCredentialInjector_Match(t *testing.T) {
 	}
 }
 
+func TestGitHubCredentialInjector_Match_WithPort(t *testing.T) {
+	// When the proxy sees HTTPS requests, the Host often includes the port
+	// e.g., "api.github.com:443" instead of just "api.github.com"
+	injector := &GitHubCredentialInjector{token: "test-token"}
+
+	tests := []struct {
+		name     string
+		host     string
+		expected bool
+	}{
+		{"api.github.com no port", "api.github.com", true},
+		{"api.github.com with 443", "api.github.com:443", true},
+		{"api.github.com with 8080", "api.github.com:8080", true},
+		{"github.com no port", "github.com", false},
+		{"github.com with 443", "github.com:443", false},
+		{"other host", "example.com", false},
+		{"other host with port", "example.com:443", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", "https://placeholder/path", nil)
+			req.URL.Host = tt.host // Override with explicit host (simulating proxy)
+			if got := injector.Match(req); got != tt.expected {
+				t.Errorf("Match() = %v, want %v for host %q", got, tt.expected, tt.host)
+			}
+		})
+	}
+}
+
 func TestGitHubCredentialInjector_Inject(t *testing.T) {
 	t.Run("injects token when not present", func(t *testing.T) {
 		injector := &GitHubCredentialInjector{token: "my-secret-token"}

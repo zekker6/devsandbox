@@ -16,5 +16,3 @@ Backlog:
 
 
 # WIP followup 
-
-1. do not share mise cache with host if current OS is macOS - this will lead to picking up mac binaries which will not run in linux sandbox. instead, create a shared cache volume for docker and bind mount it to the container. This will allow to have a shared cache between different runs, but without picking up host binaries.
