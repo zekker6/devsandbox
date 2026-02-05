@@ -50,8 +50,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
 
 # Install opencode
-RUN curl -fsSL https://opencode.ai/install | sh && \
-    mv /root/.local/bin/opencode /usr/local/bin/opencode 2>/dev/null || true
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path && \
+    mv /root/.opencode/bin/opencode /usr/local/bin/opencode && \
+    rm -rf /root/.opencode
 
 # Install codex (OpenAI Codex CLI)
 RUN npm install -g @openai/codex 2>/dev/null || echo "codex package not found, skipping"
