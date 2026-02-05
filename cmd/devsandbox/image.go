@@ -70,7 +70,7 @@ func newImagePullCmd() *cobra.Command {
 				fmt.Println("Already up to date")
 			} else {
 				age := time.Since(beforeInfo.CreatedAt)
-				fmt.Printf("Updated: previous image was %s old\n", formatAge(age))
+				fmt.Printf("Updated: image was %s old\n", formatAge(age))
 			}
 
 			return nil
@@ -87,14 +87,19 @@ type ImageInfo struct {
 }
 
 // getImageInfo returns info about a local Docker image.
-// Returns nil if the image doesn't exist locally.
+// Returns (nil, nil) if the image doesn't exist locally.
+// Returns (nil, error) for other failures (e.g., docker daemon not running).
 func getImageInfo(image string) (*ImageInfo, error) {
 	cmd := exec.Command("docker", "image", "inspect", image,
 		"--format", "{{json .}}")
 	output, err := cmd.Output()
 	if err != nil {
-		// Image doesn't exist locally
-		return nil, nil
+		// Docker returns exit code 1 when image is not found
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		// Other errors (daemon not running, permissions, etc.)
+		return nil, err
 	}
 
 	// Parse the first element of the array
@@ -144,8 +149,11 @@ func formatAge(d time.Duration) string {
 		return fmt.Sprintf("%d hours", hours)
 	}
 	minutes := int(d.Minutes())
+	if minutes > 1 {
+		return fmt.Sprintf("%d minutes", minutes)
+	}
 	if minutes == 1 {
 		return "1 minute"
 	}
-	return fmt.Sprintf("%d minutes", minutes)
+	return "less than a minute"
 }

@@ -64,7 +64,10 @@ func TestFormatAge(t *testing.T) {
 		duration time.Duration
 		expected string
 	}{
+		{30 * time.Second, "less than a minute"},
+		{0, "less than a minute"},
 		{30 * time.Minute, "30 minutes"},
+		{2 * time.Minute, "2 minutes"},
 		{1 * time.Minute, "1 minute"},
 		{2 * time.Hour, "2 hours"},
 		{1 * time.Hour, "1 hour"},
