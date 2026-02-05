@@ -98,14 +98,15 @@ export MISE_DATA_DIR=/home/sandboxuser/.local/share/mise
 export MISE_CACHE_DIR=/home/sandboxuser/.cache/mise
 export MISE_STATE_DIR=/home/sandboxuser/.local/state/mise
 
-# Create directories if they don't exist (mise, fish, etc.)
+# Create directories if they don't exist (mise, fish, ssh, etc.)
 # Note: Some of these may be overwritten by read-only mounts from the host,
 # but we create them anyway so tools have valid paths to work with
 mkdir -p "$MISE_DATA_DIR" "$MISE_CACHE_DIR" "$MISE_STATE_DIR" \
     "$XDG_DATA_HOME/fish" \
     "$XDG_STATE_HOME" \
     "$XDG_CONFIG_HOME" \
-    "$XDG_CACHE_HOME" 2>/dev/null || true
+    "$XDG_CACHE_HOME" \
+    /home/sandboxuser/.ssh 2>/dev/null || true
 
 # Always create a fresh fish_variables file
 # This ensures universal variables from previous sessions (which may contain
@@ -113,7 +114,12 @@ mkdir -p "$MISE_DATA_DIR" "$MISE_CACHE_DIR" "$MISE_STATE_DIR" \
 # Fish conf.d scripts like z.fish use set -U which requires this file.
 : > "$XDG_DATA_HOME/fish/fish_variables" 2>/dev/null || true
 
-chown -R "$HOST_UID:$HOST_GID" /home/sandboxuser/.local /home/sandboxuser/.cache /home/sandboxuser/.config 2>/dev/null || true
+# Create empty ssh environment file for fish-ssh-agent and similar scripts
+# that expect this file to exist even when SSH is not configured
+: > /home/sandboxuser/.ssh/environment 2>/dev/null || true
+chmod 600 /home/sandboxuser/.ssh/environment 2>/dev/null || true
+
+chown -R "$HOST_UID:$HOST_GID" /home/sandboxuser/.local /home/sandboxuser/.cache /home/sandboxuser/.config /home/sandboxuser/.ssh 2>/dev/null || true
 
 # Ensure mise and tools are in PATH for the user
 # Order: /usr/local/bin (claude, nvim, gh) -> user mise shims -> container mise shims
