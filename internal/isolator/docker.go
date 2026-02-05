@@ -20,6 +20,13 @@ const (
 	DefaultImage = "ghcr.io/zekker6/devsandbox:latest"
 )
 
+const (
+	// CacheVolumeName is the shared cache volume name
+	CacheVolumeName = "devsandbox-cache"
+	// CacheMountPath is where the cache volume is mounted
+	CacheMountPath = "/cache"
+)
+
 // Docker labels for devsandbox containers and volumes
 const (
 	LabelDevsandbox  = "devsandbox"
@@ -314,6 +321,15 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	}
 	for _, env := range toolEnvVars {
 		args = append(args, "-e", env)
+	}
+
+	// Shared cache volume for tools (mise, go, etc.)
+	cacheMounts := tools.CollectCacheMounts(cfg.HomeDir)
+	if len(cacheMounts) > 0 {
+		args = append(args, "-v", CacheVolumeName+":"+CacheMountPath)
+		for _, cm := range cacheMounts {
+			args = append(args, "-e", cm.EnvVar+"="+cm.FullPath())
+		}
 	}
 
 	// Standard devsandbox environment variables

@@ -511,6 +511,49 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
 	}
 }
 
+func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+
+	cfg := &Config{
+		ProjectDir:  "/tmp/test-project",
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+
+	result, err := iso.BuildDocker(context.Background(), cfg)
+	if err != nil {
+		_, lookErr := exec.LookPath("docker")
+		if lookErr != nil {
+			t.Skip("Docker not installed")
+		}
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	argsStr := strings.Join(result.Args, " ")
+
+	// Should have cache volume mount
+	if !strings.Contains(argsStr, "-v devsandbox-cache:/cache") {
+		t.Error("Build args missing cache volume mount")
+	}
+
+	// Should have mise cache env vars
+	if !strings.Contains(argsStr, "MISE_DATA_DIR=/cache/mise") {
+		t.Error("Build args missing MISE_DATA_DIR")
+	}
+	if !strings.Contains(argsStr, "MISE_CACHE_DIR=/cache/mise/cache") {
+		t.Error("Build args missing MISE_CACHE_DIR")
+	}
+
+	// Should have go cache env vars
+	if !strings.Contains(argsStr, "GOMODCACHE=/cache/go/mod") {
+		t.Error("Build args missing GOMODCACHE")
+	}
+	if !strings.Contains(argsStr, "GOCACHE=/cache/go/build") {
+		t.Error("Build args missing GOCACHE")
+	}
+}
+
 func TestDockerIsolator_Build_InterfaceCompatibility(t *testing.T) {
 	// Test that the interface-compliant Build() method works
 	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
