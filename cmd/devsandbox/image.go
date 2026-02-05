@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -30,7 +32,48 @@ func newImagePullCmd() *cobra.Command {
 		Long:    "Pull the configured Docker image and report what changed.",
 		Example: `  devsandbox image pull`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil // Placeholder
+			image := getConfiguredImage()
+
+			// Check if docker is available
+			if _, err := exec.LookPath("docker"); err != nil {
+				return fmt.Errorf("docker CLI not found: %w", err)
+			}
+
+			// Get current image info (if exists)
+			beforeInfo, err := getImageInfo(image)
+			if err != nil {
+				return fmt.Errorf("failed to inspect image: %w", err)
+			}
+
+			// Pull the image
+			fmt.Printf("Pulling %s...\n", image)
+			pullCmd := exec.Command("docker", "pull", image)
+			pullCmd.Stdout = os.Stdout
+			pullCmd.Stderr = os.Stderr
+			if err := pullCmd.Run(); err != nil {
+				return fmt.Errorf("failed to pull image: %w", err)
+			}
+
+			// Get new image info
+			afterInfo, err := getImageInfo(image)
+			if err != nil {
+				return fmt.Errorf("failed to inspect pulled image: %w", err)
+			}
+			if afterInfo == nil {
+				return fmt.Errorf("image not found after pull")
+			}
+
+			// Report result
+			if beforeInfo == nil {
+				fmt.Println("Downloaded: image was not present locally")
+			} else if beforeInfo.ID == afterInfo.ID {
+				fmt.Println("Already up to date")
+			} else {
+				age := time.Since(beforeInfo.CreatedAt)
+				fmt.Printf("Updated: previous image was %s old\n", formatAge(age))
+			}
+
+			return nil
 		},
 	}
 
@@ -82,4 +125,27 @@ func getConfiguredImage() string {
 		return cfg.Sandbox.Docker.Image
 	}
 	return isolator.DefaultImage
+}
+
+// formatAge formats a duration as a human-readable age string.
+func formatAge(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	if days > 0 {
+		if days == 1 {
+			return "1 day"
+		}
+		return fmt.Sprintf("%d days", days)
+	}
+	hours := int(d.Hours())
+	if hours > 0 {
+		if hours == 1 {
+			return "1 hour"
+		}
+		return fmt.Sprintf("%d hours", hours)
+	}
+	minutes := int(d.Minutes())
+	if minutes == 1 {
+		return "1 minute"
+	}
+	return fmt.Sprintf("%d minutes", minutes)
 }
