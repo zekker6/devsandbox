@@ -8,6 +8,8 @@ After completing the task always run:
 - `task lint` - to run lint
 
 Always prefer reasonable defaults if that it possible. Reduce amount of work for the user to do when this is possible.
+All defaults must be secure by default, and not cause any security issues if used without modification.
+Never bind to all interfaces by default, and do not expose any ports by default.
 
 Errors must always be handled and reported when present. Silent failures are not acceptable.
 

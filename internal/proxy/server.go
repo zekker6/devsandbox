@@ -253,8 +253,9 @@ func (s *Server) Start() error {
 	var err error
 	port := s.config.Port
 
+	bindAddr := s.config.GetBindAddress()
 	for i := 0; i < MaxPortRetries; i++ {
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		addr := fmt.Sprintf("%s:%d", bindAddr, port)
 		listener, err = net.Listen("tcp", addr)
 		if err == nil {
 			break
@@ -421,6 +422,10 @@ func (s *Server) Addr() string {
 
 func (s *Server) Port() int {
 	return s.config.Port
+}
+
+func (s *Server) Config() *Config {
+	return s.config
 }
 
 func (s *Server) CA() *CA {

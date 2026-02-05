@@ -41,6 +41,8 @@ type Config struct {
 	ProxyPort int
 	// ProxyHost is the proxy server host (for Docker: host.docker.internal on macOS).
 	ProxyHost string
+	// ProxyCAPath is the path to the proxy CA certificate (for HTTPS MITM).
+	ProxyCAPath string
 	// Environment variables to set.
 	Environment map[string]string
 	// Bindings are filesystem mounts (translated per-backend).

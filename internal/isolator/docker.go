@@ -378,6 +378,24 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		}
 		args = append(args, "-e", fmt.Sprintf("PROXY_HOST=%s", proxyHost))
 		args = append(args, "-e", fmt.Sprintf("PROXY_PORT=%d", cfg.ProxyPort))
+
+		// Set HTTP_PROXY env vars directly so they're available in all processes
+		// (not just the entrypoint shell). This ensures curl, mise, etc. use the proxy.
+		proxyURL := fmt.Sprintf("http://%s:%d", proxyHost, cfg.ProxyPort)
+		args = append(args, "-e", fmt.Sprintf("HTTP_PROXY=%s", proxyURL))
+		args = append(args, "-e", fmt.Sprintf("HTTPS_PROXY=%s", proxyURL))
+		args = append(args, "-e", fmt.Sprintf("http_proxy=%s", proxyURL))
+		args = append(args, "-e", fmt.Sprintf("https_proxy=%s", proxyURL))
+		args = append(args, "-e", "no_proxy=localhost,127.0.0.1")
+
+		// Mount CA certificate for HTTPS MITM and set SSL_CERT_FILE
+		if cfg.ProxyCAPath != "" {
+			caDest := "/etc/ssl/certs/devsandbox-ca.crt"
+			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", cfg.ProxyCAPath, caDest))
+			args = append(args, "-e", fmt.Sprintf("SSL_CERT_FILE=%s", caDest))
+			// Also set for Node.js which uses its own env var
+			args = append(args, "-e", fmt.Sprintf("NODE_EXTRA_CA_CERTS=%s", caDest))
+		}
 	}
 
 	// Resource limits

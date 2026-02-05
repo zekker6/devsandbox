@@ -569,6 +569,11 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		pCfg.LogReceivers = proxyCfg.appCfg.Logging.Receivers
 		pCfg.LogAttributes = proxyCfg.appCfg.Logging.Attributes
 
+		// For Docker mode, bind to Docker bridge IP so containers can reach the proxy
+		if bridgeIP := proxy.DockerBridgeIP(); bridgeIP != "" {
+			pCfg.BindAddress = bridgeIP
+		}
+
 		// Build filter configuration
 		pCfg.Filter = buildFilterConfig(proxyCfg.appCfg, proxyCfg.cmd, proxyCfg.filterDefault, proxyCfg.allowDomains, proxyCfg.blockDomains)
 
@@ -617,7 +622,7 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		actualPort := proxyServer.Port()
 		cfg.ProxyPort = actualPort
 
-		fmt.Fprintf(os.Stderr, "Proxy server started on 127.0.0.1:%d\n", actualPort)
+		fmt.Fprintf(os.Stderr, "Proxy server started on %s:%d\n", pCfg.GetBindAddress(), actualPort)
 		if actualPort != proxyCfg.appCfg.Proxy.Port && proxyCfg.appCfg.Proxy.Port != 0 {
 			fmt.Fprintf(os.Stderr, "Note: Using port %d (requested port was busy)\n", actualPort)
 		}
@@ -639,6 +644,11 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		HideEnvFiles:   true,
 		ToolsConfig:    cfg.ToolsConfig,
 		OverlayEnabled: cfg.OverlayEnabled,
+	}
+
+	// Add CA path if proxy is enabled
+	if cfg.ProxyEnabled && proxyServer != nil {
+		isoCfg.ProxyCAPath = proxyServer.Config().CACertPath
 	}
 
 	// Build command

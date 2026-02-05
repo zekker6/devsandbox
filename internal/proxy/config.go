@@ -1,10 +1,18 @@
 package proxy
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 
 	"devsandbox/internal/config"
+)
+
+const (
+	// DefaultBindAddress is used for bwrap mode (localhost only).
+	DefaultBindAddress = "127.0.0.1"
+	// DockerBridgeInterface is the default Docker bridge network interface.
+	DockerBridgeInterface = "docker0"
 )
 
 const (
@@ -21,6 +29,7 @@ const (
 type Config struct {
 	Enabled        bool
 	Port           int
+	BindAddress    string // IP to bind to (default "127.0.0.1"). For Docker, use DockerBridgeIP().
 	CADir          string
 	CACertPath     string
 	CAKeyPath      string
@@ -63,4 +72,37 @@ func (c *Config) CAExists() bool {
 	_, certErr := os.Stat(c.CACertPath)
 	_, keyErr := os.Stat(c.CAKeyPath)
 	return certErr == nil && keyErr == nil
+}
+
+// GetBindAddress returns the bind address, defaulting to 127.0.0.1.
+func (c *Config) GetBindAddress() string {
+	if c.BindAddress != "" {
+		return c.BindAddress
+	}
+	return DefaultBindAddress
+}
+
+// DockerBridgeIP returns the IP address of the Docker bridge interface (docker0).
+// This is used when running in Docker mode so containers can reach the proxy.
+// Returns empty string if the interface doesn't exist or has no IP.
+func DockerBridgeIP() string {
+	iface, err := net.InterfaceByName(DockerBridgeInterface)
+	if err != nil {
+		return ""
+	}
+
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return ""
+	}
+
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok {
+			if ipv4 := ipNet.IP.To4(); ipv4 != nil {
+				return ipv4.String()
+			}
+		}
+	}
+
+	return ""
 }
