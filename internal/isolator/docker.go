@@ -147,6 +147,8 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 		if cfg.Interactive {
 			args = append(args, "-it")
 		}
+		// Run as the host user's UID:GID to match file permissions
+		args = append(args, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 		args = append(args, containerName)
 		if len(cfg.Command) > 0 {
 			args = append(args, cfg.Command...)
@@ -162,10 +164,30 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 	}
 
 	if exists {
-		// Container exists but stopped - start it
-		args := []string{"start", "-ai", containerName}
+		// Container exists but stopped - start it in background, then exec into it.
+		// We can't use "docker start -ai" because it would run the original command
+		// that was used when creating the container, not the current command.
+		// Instead, start the container (which runs the shell), then exec into it.
+		startCmd := exec.Command(dockerPath, "start", containerName)
+		if err := startCmd.Run(); err != nil {
+			return nil, fmt.Errorf("failed to start container: %w", err)
+		}
+
+		// Now exec into the running container
+		args := []string{"exec"}
+		if cfg.Interactive {
+			args = append(args, "-it")
+		}
+		// Run as the host user's UID:GID to match file permissions
+		args = append(args, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+		args = append(args, containerName)
+		if len(cfg.Command) > 0 {
+			args = append(args, cfg.Command...)
+		} else {
+			args = append(args, cfg.Shell)
+		}
 		return &DockerBuildResult{
-			Action:        DockerActionStart,
+			Action:        DockerActionExec,
 			BinaryPath:    dockerPath,
 			Args:          args,
 			ContainerName: containerName,
@@ -230,10 +252,11 @@ func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]s
 	// Add labels
 	args = append(args, d.buildLabels(cfg.ProjectDir)...)
 
-	// Interactive mode only if stdin is a TTY
-	if cfg.Interactive {
-		args = append(args, "-it")
-	}
+	// Always create with -it to support both interactive and non-interactive use.
+	// The container may be reused later for interactive sessions even if initially
+	// created for a non-interactive command. TTY allocation at creation time is
+	// required for interactive shells to work properly.
+	args = append(args, "-it")
 
 	args = append(args, "--hostname", "sandbox")
 
@@ -250,13 +273,10 @@ func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]s
 	// Image
 	args = append(args, d.config.Image)
 
-	// Command
-	if len(cfg.Command) > 0 {
-		args = append(args, cfg.Command...)
-	} else {
-		// Interactive shell
-		args = append(args, cfg.Shell)
-	}
+	// Always create with just the shell (no command arguments).
+	// This ensures the container stays running and can be reused for any command.
+	// Actual commands are executed via "docker exec" after the container is started.
+	args = append(args, cfg.Shell)
 
 	return args, nil
 }
@@ -311,6 +331,11 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	args = append(args, "-e", "XDG_CONFIG_HOME=/home/sandboxuser/.config")
 	args = append(args, "-e", "XDG_DATA_HOME=/home/sandboxuser/.local/share")
 	args = append(args, "-e", "XDG_CACHE_HOME=/home/sandboxuser/.cache")
+	args = append(args, "-e", "XDG_STATE_HOME=/home/sandboxuser/.local/state")
+
+	// Fish shell data directory - must be set before fish starts
+	// to ensure universal variables are stored in the right location
+	args = append(args, "-e", "__fish_user_data_dir=/home/sandboxuser/.local/share/fish")
 
 	// User-provided environment variables
 	for k, v := range cfg.Environment {
@@ -423,6 +448,8 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		// Get Docker-specific bindings if available
 		var toolBindings []tools.Binding
 		if dockerTool, ok := tool.(tools.ToolWithDocker); ok {
+			// DEBUG: log which tools have DockerBindings
+			debugLog("/tmp/devsandbox-debug.log", "Tool %s using DockerBindings", tool.Name())
 			dockerMounts := dockerTool.DockerBindings(cfg.HomeDir, cfg.SandboxHome)
 			for _, m := range dockerMounts {
 				if m.Source == "" {
@@ -439,6 +466,8 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 			}
 		} else {
 			// Convert regular bindings to Docker mounts
+			// DEBUG: log which tools use regular Bindings
+			debugLog("/tmp/devsandbox-debug.log", "Tool %s using regular Bindings", tool.Name())
 			toolBindings = tool.Bindings(cfg.HomeDir, cfg.SandboxHome)
 			for _, b := range toolBindings {
 				if b.Source == "" {
@@ -488,6 +517,19 @@ func getToolConfig(toolsConfig map[string]any, toolName string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// debugLog writes a debug message to the specified log file.
+// This is a temporary helper for debugging tool binding issues.
+func debugLog(path, format string, args ...any) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	msg := fmt.Sprintf(format, args...)
+	timestamp := time.Now().Format(time.RFC3339)
+	_, _ = fmt.Fprintf(f, "%s DEBUG %s\n", timestamp, msg)
 }
 
 // containerName generates a Docker container name for the sandbox.

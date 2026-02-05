@@ -5,5 +5,5 @@ enabled = true
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
+image = "devsandbox:test"
 pull_policy = "never"

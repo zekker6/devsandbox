@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     unzip \
     libatomic1 \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install mise

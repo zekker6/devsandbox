@@ -574,7 +574,7 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		return cmd.Run()
 
 	case isolator.DockerActionCreate:
-		// Create container first, then start it
+		// Create container first
 		createCmd := exec.Command(result.BinaryPath, result.Args...)
 		createCmd.Stdout = os.Stdout
 		createCmd.Stderr = os.Stderr
@@ -582,12 +582,31 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 			return fmt.Errorf("failed to create container: %w", err)
 		}
 
-		// Then start it
-		startCmd := exec.Command(result.BinaryPath, "start", "-ai", result.ContainerName)
-		startCmd.Stdin = os.Stdin
-		startCmd.Stdout = os.Stdout
-		startCmd.Stderr = os.Stderr
-		return startCmd.Run()
+		// Start the container in the background (the shell will wait for input)
+		startCmd := exec.Command(result.BinaryPath, "start", result.ContainerName)
+		if err := startCmd.Run(); err != nil {
+			return fmt.Errorf("failed to start container: %w", err)
+		}
+
+		// Exec into the running container with the actual command
+		execArgs := []string{"exec"}
+		if isoCfg.Interactive {
+			execArgs = append(execArgs, "-it")
+		} else {
+			execArgs = append(execArgs, "-i")
+		}
+		// Run as the host user's UID:GID to match file permissions
+		execArgs = append(execArgs, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+		execArgs = append(execArgs, result.ContainerName)
+		execArgs = append(execArgs, args...)
+		if len(args) == 0 {
+			execArgs = append(execArgs, isoCfg.Shell)
+		}
+		execCmd := exec.Command(result.BinaryPath, execArgs...)
+		execCmd.Stdin = os.Stdin
+		execCmd.Stdout = os.Stdout
+		execCmd.Stderr = os.Stderr
+		return execCmd.Run()
 
 	case isolator.DockerActionStart, isolator.DockerActionExec:
 		// Start existing stopped container or exec into running container

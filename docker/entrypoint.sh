@@ -74,6 +74,18 @@ fi
 export HOME=/home/sandboxuser
 export USER=sandboxuser
 
+# XDG directories - ensure these are set before any shell initialization
+# These may be passed from Docker -e flags, but we set defaults to ensure
+# fish and other tools can find their data directories
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/home/sandboxuser/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-/home/sandboxuser/.local/share}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/home/sandboxuser/.cache}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-/home/sandboxuser/.local/state}"
+
+# Fish shell data directory - explicitly set to avoid path resolution issues
+# Fish uses this for universal variables (fish_variables file)
+export __fish_user_data_dir="$XDG_DATA_HOME/fish"
+
 # Mise directories in sandbox home for persistence across container runs
 # This caches both downloads and installed tools
 export MISE_DATA_DIR=/home/sandboxuser/.local/share/mise
@@ -81,9 +93,20 @@ export MISE_CACHE_DIR=/home/sandboxuser/.cache/mise
 export MISE_STATE_DIR=/home/sandboxuser/.local/state/mise
 
 # Create directories if they don't exist (mise, fish, etc.)
+# Note: Some of these may be overwritten by read-only mounts from the host,
+# but we create them anyway so tools have valid paths to work with
 mkdir -p "$MISE_DATA_DIR" "$MISE_CACHE_DIR" "$MISE_STATE_DIR" \
-    /home/sandboxuser/.local/share/fish \
-    /home/sandboxuser/.config 2>/dev/null || true
+    "$XDG_DATA_HOME/fish" \
+    "$XDG_STATE_HOME" \
+    "$XDG_CONFIG_HOME" \
+    "$XDG_CACHE_HOME" 2>/dev/null || true
+
+# Always create a fresh fish_variables file
+# This ensures universal variables from previous sessions (which may contain
+# incorrect paths like /home/zekker instead of /home/sandboxuser) are cleared.
+# Fish conf.d scripts like z.fish use set -U which requires this file.
+: > "$XDG_DATA_HOME/fish/fish_variables" 2>/dev/null || true
+
 chown -R "$HOST_UID:$HOST_GID" /home/sandboxuser/.local /home/sandboxuser/.cache /home/sandboxuser/.config 2>/dev/null || true
 
 # Ensure mise and tools are in PATH for the user
