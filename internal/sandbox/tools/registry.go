@@ -38,3 +38,15 @@ func Available(homeDir string) []Tool {
 	}
 	return available
 }
+
+// CollectCacheMounts returns all cache mounts from available tools.
+// Only tools that implement ToolWithCache are included.
+func CollectCacheMounts(homeDir string) []CacheMount {
+	var mounts []CacheMount
+	for _, tool := range Available(homeDir) {
+		if cacheTool, ok := tool.(ToolWithCache); ok {
+			mounts = append(mounts, cacheTool.CacheMounts()...)
+		}
+	}
+	return mounts
+}
