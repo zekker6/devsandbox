@@ -17,12 +17,10 @@ Backlog:
 
 # WIP followup 
 
-1. create an flock file if session is running to prevent env from pruning while session is active. Remove it when session is closed.
-
-2. how is docker image distributed?
+1. how is docker image distributed?
 can we use a localy built image with periodic pull to reduce amount of work
 I'm aiming to have the latest versions of the tools most of the time, but not necessarily on every run. User must have control over this
 
-3. seems like running a single command is not possible for docker mode, it always starts the shell
+1. seems like running a single command is not possible for docker mode, it always starts the shell
 
-4. do not share mise cache with host if current OS is macOS - this will lead to picking up mac binaries which will not run in linux sandbox. instead, create a shared cache volume for docker and bind mount it to the container. This will allow to have a shared cache between different runs, but without picking up host binaries.
+1do not share mise cache with host if current OS is macOS - this will lead to picking up mac binaries which will not run in linux sandbox. instead, create a shared cache volume for docker and bind mount it to the container. This will allow to have a shared cache between different runs, but without picking up host binaries.
