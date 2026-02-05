@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func TestNewImageCmd(t *testing.T) {
@@ -55,5 +56,29 @@ func TestGetConfiguredImage_Default(t *testing.T) {
 	expected := "ghcr.io/zekker6/devsandbox:latest"
 	if image != expected {
 		t.Errorf("expected %q, got %q", expected, image)
+	}
+}
+
+func TestFormatAge(t *testing.T) {
+	tests := []struct {
+		duration time.Duration
+		expected string
+	}{
+		{30 * time.Minute, "30 minutes"},
+		{1 * time.Minute, "1 minute"},
+		{2 * time.Hour, "2 hours"},
+		{1 * time.Hour, "1 hour"},
+		{24 * time.Hour, "1 day"},
+		{72 * time.Hour, "3 days"},
+		{7 * 24 * time.Hour, "7 days"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			got := formatAge(tt.duration)
+			if got != tt.expected {
+				t.Errorf("formatAge(%v) = %q, want %q", tt.duration, got, tt.expected)
+			}
+		})
 	}
 }
