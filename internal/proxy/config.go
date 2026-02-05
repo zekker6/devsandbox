@@ -35,6 +35,10 @@ type Config struct {
 
 	// Filter contains HTTP request filtering configuration.
 	Filter *FilterConfig
+
+	// CredentialInjectors add authentication to requests for specific domains.
+	// If nil, DefaultCredentialInjectors() is used.
+	CredentialInjectors []CredentialInjector
 }
 
 func NewConfig(sandboxBase string, port int) *Config {
