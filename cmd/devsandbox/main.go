@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -606,6 +607,12 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		}
 		fmt.Fprintln(os.Stderr, " ready")
 
+		// Install mise tools if project has .mise.toml or .tool-versions
+		if err := installMiseTools(result.BinaryPath, result.ContainerName, isoCfg); err != nil {
+			// Non-fatal: warn but continue
+			fmt.Fprintf(os.Stderr, "Warning: failed to install tools: %v\n", err)
+		}
+
 		// Exec into the running container with the actual command
 		execArgs := []string{"exec"}
 		if isoCfg.Interactive {
@@ -633,6 +640,66 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
+	}
+
+	return nil
+}
+
+// installMiseTools installs mise tools if the project has a mise config file.
+// This runs `mise install` inside the container with output visible to the user.
+func installMiseTools(dockerBinary, containerName string, cfg *isolator.Config) error {
+	// Check if project has mise config
+	miseToml := filepath.Join(cfg.ProjectDir, ".mise.toml")
+	toolVersions := filepath.Join(cfg.ProjectDir, ".tool-versions")
+
+	hasMiseConfig := false
+	if _, err := os.Stat(miseToml); err == nil {
+		hasMiseConfig = true
+	}
+	if _, err := os.Stat(toolVersions); err == nil {
+		hasMiseConfig = true
+	}
+
+	if !hasMiseConfig {
+		return nil
+	}
+
+	// Check if tools are already installed by running mise ls
+	// Disable global config to only install project-specific tools
+	userSpec := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	checkArgs := []string{
+		"exec",
+		"-u", userSpec,
+		"-e", "MISE_GLOBAL_CONFIG_FILE=/dev/null",
+		"--workdir", cfg.ProjectDir,
+		containerName,
+		"mise", "ls", "--missing",
+	}
+	checkCmd := exec.Command(dockerBinary, checkArgs...)
+	output, err := checkCmd.Output()
+	if err == nil && len(strings.TrimSpace(string(output))) == 0 {
+		// No missing tools
+		return nil
+	}
+
+	// Install tools with progress visible
+	fmt.Fprintln(os.Stderr, "Installing tools...")
+	installArgs := []string{
+		"exec",
+		"-u", userSpec,
+		"-e", "MISE_GLOBAL_CONFIG_FILE=/dev/null",
+		"--workdir", cfg.ProjectDir,
+		containerName,
+		"mise", "install", "-y",
+	}
+
+	// Connect to terminal for interactive progress
+	installCmd := exec.Command(dockerBinary, installArgs...)
+	installCmd.Stdout = os.Stderr // Use stderr for status messages
+	installCmd.Stderr = os.Stderr
+
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("mise install failed: %w", err)
 	}
 
 	return nil
