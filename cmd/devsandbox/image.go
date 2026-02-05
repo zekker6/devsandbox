@@ -5,6 +5,9 @@ import (
 	"os/exec"
 	"time"
 
+	"devsandbox/internal/config"
+	"devsandbox/internal/isolator"
+
 	"github.com/spf13/cobra"
 )
 
@@ -67,4 +70,16 @@ func getImageInfo(image string) (*ImageInfo, error) {
 		ID:        inspectData[0].ID,
 		CreatedAt: inspectData[0].Created,
 	}, nil
+}
+
+// getConfiguredImage returns the Docker image from config or the default.
+func getConfiguredImage() string {
+	cfg, _, _, err := config.LoadConfig()
+	if err != nil {
+		return isolator.DefaultImage
+	}
+	if cfg.Sandbox.Docker.Image != "" {
+		return cfg.Sandbox.Docker.Image
+	}
+	return isolator.DefaultImage
 }
