@@ -149,6 +149,15 @@ func (m *Mise) Check(homeDir string) CheckResult {
 	return result
 }
 
+// CacheMounts implements ToolWithCache.
+// Returns cache directories for mise's installed tools and download cache.
+func (m *Mise) CacheMounts() []CacheMount {
+	return []CacheMount{
+		{Name: "mise", EnvVar: "MISE_DATA_DIR"},
+		{Name: "mise/cache", EnvVar: "MISE_CACHE_DIR"},
+	}
+}
+
 // DockerBindings returns Docker-specific mounts for mise.
 // In Docker mode, we only mount config and shims read-only.
 // The data/cache/state directories are NOT mounted - the container uses its own
