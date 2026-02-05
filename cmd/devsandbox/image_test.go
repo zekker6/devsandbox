@@ -19,3 +19,13 @@ func TestNewImageCmd(t *testing.T) {
 		t.Errorf("expected pull subcommand, got %q", pullCmd.Use)
 	}
 }
+
+func TestGetImageInfo_NotExists(t *testing.T) {
+	info, err := getImageInfo("nonexistent-image:v999")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info != nil {
+		t.Error("expected nil info for non-existent image")
+	}
+}
