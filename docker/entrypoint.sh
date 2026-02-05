@@ -50,7 +50,13 @@ if [ -f "$WORK_DIR/.mise.toml" ] || [ -f "$WORK_DIR/.tool-versions" ]; then
     gosu sandboxuser bash -c "cd '$WORK_DIR' && mise trust 2>/dev/null || true"
 fi
 
-# 4. Setup network isolation (if proxy mode enabled)
+# 4. Create cache directories if cache volume is mounted
+if [ -d /cache ]; then
+    mkdir -p /cache/mise /cache/mise/cache /cache/go/mod /cache/go/build 2>/dev/null || true
+    chown -R "$HOST_UID:$HOST_GID" /cache 2>/dev/null || true
+fi
+
+# 5. Setup network isolation (if proxy mode enabled)
 if [ "$PROXY_MODE" = "true" ]; then
     PROXY_HOST=${PROXY_HOST:-host.docker.internal}
     PROXY_PORT=${PROXY_PORT:-8080}
@@ -70,7 +76,7 @@ if [ "$PROXY_MODE" = "true" ]; then
     export no_proxy="localhost,127.0.0.1"
 fi
 
-# 5. Set up environment for sandboxuser
+# 6. Set up environment for sandboxuser
 export HOME=/home/sandboxuser
 export USER=sandboxuser
 
@@ -115,5 +121,5 @@ export PATH="/usr/local/bin:$MISE_DATA_DIR/shims:/opt/mise/shims:$PATH"
 # Use system config as fallback for container-installed tools
 export MISE_SYSTEM_CONFIG_FILE=/etc/mise/config.toml
 
-# 6. Drop privileges and exec user command
+# 7. Drop privileges and exec user command
 exec gosu sandboxuser "$@"
