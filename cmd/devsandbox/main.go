@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -587,6 +588,16 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		startCmd := exec.Command(result.BinaryPath, "start", result.ContainerName)
 		if err := startCmd.Run(); err != nil {
 			return fmt.Errorf("failed to start container: %w", err)
+		}
+
+		// Wait for entrypoint to complete setup by checking if cache dirs exist
+		// This avoids a race condition where docker exec runs before entrypoint finishes
+		for i := 0; i < 50; i++ { // Up to 5 seconds
+			checkCmd := exec.Command(result.BinaryPath, "exec", result.ContainerName, "test", "-d", "/cache/mise")
+			if checkCmd.Run() == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
 
 		// Exec into the running container with the actual command
