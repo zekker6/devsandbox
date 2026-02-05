@@ -54,11 +54,8 @@ func mergeConfigs(base, overlay *Config) *Config {
 	}
 
 	// Sandbox Docker settings
-	if overlay.Sandbox.Docker.Image != "" {
-		result.Sandbox.Docker.Image = overlay.Sandbox.Docker.Image
-	}
-	if overlay.Sandbox.Docker.PullPolicy != "" {
-		result.Sandbox.Docker.PullPolicy = overlay.Sandbox.Docker.PullPolicy
+	if overlay.Sandbox.Docker.Dockerfile != "" {
+		result.Sandbox.Docker.Dockerfile = overlay.Sandbox.Docker.Dockerfile
 	}
 	if overlay.Sandbox.Docker.HideEnvFiles != nil {
 		result.Sandbox.Docker.HideEnvFiles = overlay.Sandbox.Docker.HideEnvFiles

@@ -136,17 +136,13 @@ const (
 
 // DockerConfig contains Docker-specific sandbox settings.
 type DockerConfig struct {
-	// Image is the Docker image to use for the sandbox.
-	// Defaults to the official devsandbox image.
-	Image string `toml:"image"`
+	// Dockerfile is the path to the Dockerfile used to build the sandbox image.
+	// Defaults to ~/.config/devsandbox/Dockerfile if not set.
+	Dockerfile string `toml:"dockerfile"`
 
 	// HideEnvFiles enables .env file hiding inside the container.
 	// Defaults to true.
 	HideEnvFiles *bool `toml:"hide_env_files"`
-
-	// PullPolicy controls when to pull the image.
-	// Values: "always", "missing" (default), "never"
-	PullPolicy string `toml:"pull_policy"`
 
 	// KeepContainer keeps the container after exit for fast restarts.
 	// Defaults to true.
@@ -681,6 +677,14 @@ port = 8080
 # [[sandbox.mounts.rules]]
 # pattern = "~/.cache/myapp"
 # mode = "overlay"
+
+# Docker-specific settings
+# [sandbox.docker]
+# Path to Dockerfile for building the sandbox image.
+# Defaults to ~/.config/devsandbox/Dockerfile
+# The default Dockerfile contains: FROM ghcr.io/zekker6/devsandbox:latest
+# Edit it to add custom tools or configuration.
+# dockerfile = "/path/to/Dockerfile"
 
 # Overlay filesystem settings (global)
 [overlay]

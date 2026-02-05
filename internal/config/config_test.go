@@ -634,6 +634,26 @@ func TestDockerConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestDockerConfig_Dockerfile(t *testing.T) {
+	content := `
+[sandbox.docker]
+dockerfile = "/custom/Dockerfile"
+`
+	tmpFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(tmpFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFrom(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Sandbox.Docker.Dockerfile != "/custom/Dockerfile" {
+		t.Errorf("expected dockerfile '/custom/Dockerfile', got %q", cfg.Sandbox.Docker.Dockerfile)
+	}
+}
+
 func TestSandboxConfig_GetIsolation(t *testing.T) {
 	tests := []struct {
 		isolation IsolationBackend
