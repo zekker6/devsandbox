@@ -150,3 +150,43 @@ func Test_mergeConfigs_NilValuesNotOverride(t *testing.T) {
 		t.Error("zero value should not override non-zero port")
 	}
 }
+
+func Test_mergeConfigs_DockerDockerfile(t *testing.T) {
+	base := &Config{
+		Sandbox: SandboxConfig{
+			Docker: DockerConfig{
+				Dockerfile: "/global/Dockerfile",
+			},
+		},
+	}
+	overlay := &Config{
+		Sandbox: SandboxConfig{
+			Docker: DockerConfig{
+				Dockerfile: "/project/Dockerfile",
+			},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	if result.Sandbox.Docker.Dockerfile != "/project/Dockerfile" {
+		t.Errorf("expected dockerfile '/project/Dockerfile', got %q", result.Sandbox.Docker.Dockerfile)
+	}
+}
+
+func Test_mergeConfigs_DockerDockerfileNotOverriddenByEmpty(t *testing.T) {
+	base := &Config{
+		Sandbox: SandboxConfig{
+			Docker: DockerConfig{
+				Dockerfile: "/global/Dockerfile",
+			},
+		},
+	}
+	overlay := &Config{}
+
+	result := mergeConfigs(base, overlay)
+
+	if result.Sandbox.Docker.Dockerfile != "/global/Dockerfile" {
+		t.Errorf("expected dockerfile preserved from base, got %q", result.Sandbox.Docker.Dockerfile)
+	}
+}
