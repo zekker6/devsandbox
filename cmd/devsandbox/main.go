@@ -190,7 +190,14 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 
 	// Branch based on backend
 	if iso.Name() == isolator.BackendDocker {
-		return runDockerSandbox(cfg, iso.(*isolator.DockerIsolator), args)
+		dockerProxyCfg := &dockerProxyConfig{
+			appCfg:        appCfg,
+			cmd:           cmd,
+			filterDefault: filterDefault,
+			allowDomains:  allowDomains,
+			blockDomains:  blockDomains,
+		}
+		return runDockerSandbox(cfg, iso.(*isolator.DockerIsolator), args, dockerProxyCfg)
 	}
 
 	// Continue with existing bwrap logic...
@@ -541,8 +548,82 @@ func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Contex
 	return tools.NewActiveToolsRunner(toolsCfg, errorLogger)
 }
 
+// dockerProxyConfig holds configuration needed to start the proxy in Docker mode.
+type dockerProxyConfig struct {
+	appCfg        *config.Config
+	cmd           *cobra.Command
+	filterDefault string
+	allowDomains  []string
+	blockDomains  []string
+}
+
 // runDockerSandbox executes the sandbox using Docker isolation.
-func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []string) error {
+func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []string, proxyCfg *dockerProxyConfig) error {
+	// Start proxy server if proxy mode is enabled
+	var proxyServer *proxy.Server
+	var cleanup func()
+
+	if cfg.ProxyEnabled {
+		// Set up proxy
+		pCfg := proxy.NewConfig(cfg.SandboxRoot, cfg.ProxyPort)
+		pCfg.LogReceivers = proxyCfg.appCfg.Logging.Receivers
+		pCfg.LogAttributes = proxyCfg.appCfg.Logging.Attributes
+
+		// Build filter configuration
+		pCfg.Filter = buildFilterConfig(proxyCfg.appCfg, proxyCfg.cmd, proxyCfg.filterDefault, proxyCfg.allowDomains, proxyCfg.blockDomains)
+
+		var err error
+		proxyServer, err = proxy.NewServer(pCfg)
+		if err != nil {
+			return fmt.Errorf("failed to create proxy server: %w", err)
+		}
+
+		// Start proxy server
+		if err := proxyServer.Start(); err != nil {
+			return fmt.Errorf("failed to start proxy server: %w", err)
+		}
+
+		// Set up cleanup with proper synchronization
+		var cleanupOnce sync.Once
+		cleanup = func() {
+			cleanupOnce.Do(func() {
+				_ = proxyServer.Stop()
+			})
+		}
+
+		// Ensure cleanup on normal exit
+		defer cleanup()
+
+		// Handle signals for graceful shutdown
+		sigChan := make(chan os.Signal, 1)
+		doneChan := make(chan struct{})
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			cleanup()
+			close(doneChan)
+		}()
+
+		// Check for signal-initiated shutdown after sandbox exits
+		defer func() {
+			select {
+			case <-doneChan:
+				os.Exit(0)
+			default:
+			}
+		}()
+
+		// Get actual port (may differ from requested if port was busy)
+		actualPort := proxyServer.Port()
+		cfg.ProxyPort = actualPort
+
+		fmt.Fprintf(os.Stderr, "Proxy server started on 127.0.0.1:%d\n", actualPort)
+		if actualPort != proxyCfg.appCfg.Proxy.Port && proxyCfg.appCfg.Proxy.Port != 0 {
+			fmt.Fprintf(os.Stderr, "Note: Using port %d (requested port was busy)\n", actualPort)
+		}
+		fmt.Fprintf(os.Stderr, "CA certificate: %s\n", pCfg.CACertPath)
+	}
+
 	// Build isolator config
 	isoCfg := &isolator.Config{
 		ProjectDir:     cfg.ProjectDir,
