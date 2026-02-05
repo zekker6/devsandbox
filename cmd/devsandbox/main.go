@@ -83,6 +83,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newToolsCmd())
 	rootCmd.AddCommand(newProxyCmd())
 	rootCmd.AddCommand(newTrustCmd())
+	rootCmd.AddCommand(newImageCmd())
 
 	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date))
 
