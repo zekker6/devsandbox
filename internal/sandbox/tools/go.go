@@ -68,3 +68,12 @@ func (g *Go) Check(homeDir string) CheckResult {
 
 	return result
 }
+
+// CacheMounts implements ToolWithCache.
+// Returns cache directories for Go's module and build caches.
+func (g *Go) CacheMounts() []CacheMount {
+	return []CacheMount{
+		{Name: "go/mod", EnvVar: "GOMODCACHE"},
+		{Name: "go/build", EnvVar: "GOCACHE"},
+	}
+}
