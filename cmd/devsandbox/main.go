@@ -633,8 +633,46 @@ func runDockerSandbox(cfg *sandbox.Config, iso *isolator.DockerIsolator, args []
 		execCmd.Stderr = os.Stderr
 		return execCmd.Run()
 
-	case isolator.DockerActionStart, isolator.DockerActionExec:
-		// Start existing stopped container or exec into running container
+	case isolator.DockerActionStart:
+		// Start existing stopped container
+		fmt.Fprint(os.Stderr, "Starting container...")
+		startCmd := exec.Command(result.BinaryPath, result.Args...)
+		if err := startCmd.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, " failed")
+			return fmt.Errorf("failed to start container: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, " done")
+
+		// Install mise tools if needed
+		if err := installMiseTools(result.BinaryPath, result.ContainerName, isoCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to install tools: %v\n", err)
+		}
+
+		// Exec into the running container
+		execArgs := []string{"exec"}
+		if isoCfg.Interactive {
+			execArgs = append(execArgs, "-it")
+		} else {
+			execArgs = append(execArgs, "-i")
+		}
+		execArgs = append(execArgs, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+		execArgs = append(execArgs, result.ContainerName)
+		execArgs = append(execArgs, args...)
+		if len(args) == 0 {
+			execArgs = append(execArgs, isoCfg.Shell)
+		}
+		execCmd := exec.Command(result.BinaryPath, execArgs...)
+		execCmd.Stdin = os.Stdin
+		execCmd.Stdout = os.Stdout
+		execCmd.Stderr = os.Stderr
+		return execCmd.Run()
+
+	case isolator.DockerActionExec:
+		// Exec into already running container - install tools first if needed
+		if err := installMiseTools(result.BinaryPath, result.ContainerName, isoCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to install tools: %v\n", err)
+		}
+
 		cmd := exec.Command(result.BinaryPath, result.Args...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
