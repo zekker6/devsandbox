@@ -31,3 +31,39 @@ func TestGo_CacheMounts(t *testing.T) {
 func TestGo_ImplementsToolWithCache(t *testing.T) {
 	var _ ToolWithCache = (*Go)(nil)
 }
+
+func TestGo_Environment_NoCacheVars(t *testing.T) {
+	g := &Go{}
+
+	envVars := g.Environment("/home/testuser", "/tmp/sandbox")
+
+	// Environment should NOT include GOMODCACHE or GOCACHE
+	// (those are set by CacheMounts in Docker mode)
+	for _, env := range envVars {
+		if env.Name == "GOMODCACHE" {
+			t.Error("Environment() should not include GOMODCACHE (handled by CacheMounts)")
+		}
+		if env.Name == "GOCACHE" {
+			t.Error("Environment() should not include GOCACHE (handled by CacheMounts)")
+		}
+	}
+
+	// Should still have GOPATH and GOTOOLCHAIN
+	foundGopath := false
+	foundToolchain := false
+	for _, env := range envVars {
+		if env.Name == "GOPATH" {
+			foundGopath = true
+		}
+		if env.Name == "GOTOOLCHAIN" {
+			foundToolchain = true
+		}
+	}
+
+	if !foundGopath {
+		t.Error("Environment() missing GOPATH")
+	}
+	if !foundToolchain {
+		t.Error("Environment() missing GOTOOLCHAIN")
+	}
+}

@@ -10,7 +10,8 @@ func init() {
 }
 
 // Go provides Go language environment isolation.
-// Creates isolated GOPATH, GOCACHE, and GOMODCACHE in the sandbox.
+// Creates isolated GOPATH in the sandbox. GOCACHE and GOMODCACHE
+// are handled by CacheMounts() for shared cache volumes.
 type Go struct{}
 
 func (g *Go) Name() string {
@@ -36,14 +37,12 @@ func (g *Go) Bindings(homeDir, sandboxHome string) []Binding {
 
 func (g *Go) Environment(homeDir, sandboxHome string) []EnvVar {
 	return []EnvVar{
-		// Isolated Go workspace
+		// Isolated Go workspace (per-project)
 		{Name: "GOPATH", Value: filepath.Join(sandboxHome, "go")},
-		// Isolated build cache
-		{Name: "GOCACHE", Value: filepath.Join(sandboxHome, ".cache", "go-build")},
-		// Isolated module cache
-		{Name: "GOMODCACHE", Value: filepath.Join(sandboxHome, ".cache", "go-mod")},
 		// Prevent auto-downloading different toolchains (causes version conflicts)
 		{Name: "GOTOOLCHAIN", Value: "local"},
+		// Note: GOMODCACHE and GOCACHE are set by CacheMounts() for Docker mode
+		// and by the sandbox builder for bwrap mode
 	}
 }
 
