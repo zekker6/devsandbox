@@ -172,3 +172,25 @@ type ToolWithDocker interface {
 	// If not implemented, regular Bindings are converted to Docker mounts.
 	DockerBindings(homeDir, sandboxHome string) []DockerMount
 }
+
+// CacheMount describes a cache directory a tool needs in Docker mode.
+// Cache directories are shared across all projects via a single volume.
+type CacheMount struct {
+	Name   string // Subdirectory under /cache (e.g., "mise", "go/mod")
+	EnvVar string // Environment variable to set (e.g., "MISE_DATA_DIR")
+}
+
+// FullPath returns the full container path for this cache mount.
+func (c CacheMount) FullPath() string {
+	return "/cache/" + c.Name
+}
+
+// ToolWithCache is implemented by tools that use shared caches in Docker mode.
+// These caches are shared across all projects to avoid re-downloading tools.
+type ToolWithCache interface {
+	Tool
+
+	// CacheMounts returns cache directories this tool needs.
+	// Each mount creates a subdirectory under /cache and sets an env var.
+	CacheMounts() []CacheMount
+}
