@@ -55,10 +55,10 @@ type DockerBuildResult struct {
 
 // DockerConfig contains Docker-specific settings.
 type DockerConfig struct {
-	// Image is the Docker image to use.
-	Image string
-	// PullPolicy controls when to pull the image: "always", "missing", "never".
-	PullPolicy string
+	// Dockerfile is the path to the Dockerfile to build.
+	Dockerfile string
+	// ConfigDir is the devsandbox config directory (for default Dockerfile).
+	ConfigDir string
 	// HideEnvFiles enables .env file hiding in the container.
 	HideEnvFiles bool
 	// MemoryLimit is the memory limit (e.g., "4g").
@@ -71,18 +71,85 @@ type DockerConfig struct {
 
 // DockerIsolator implements Isolator using Docker containers.
 type DockerIsolator struct {
-	config DockerConfig
+	config   DockerConfig
+	imageTag string // set after buildImage
 }
 
-// NewDockerIsolator creates a new Docker isolator with sensible defaults.
+// NewDockerIsolator creates a new Docker isolator.
 func NewDockerIsolator(cfg DockerConfig) *DockerIsolator {
-	if cfg.Image == "" {
-		cfg.Image = DefaultImage
-	}
-	if cfg.PullPolicy == "" {
-		cfg.PullPolicy = "missing"
-	}
 	return &DockerIsolator{config: cfg}
+}
+
+// resolveDockerfile determines the Dockerfile path to use.
+// Priority: config.Dockerfile (absolute or relative to projectDir) -> default in configDir.
+// If the default doesn't exist, it auto-creates it with the default FROM line.
+func (d *DockerIsolator) resolveDockerfile(projectDir, configDir string) (string, error) {
+	if d.config.Dockerfile != "" {
+		path := d.config.Dockerfile
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(projectDir, path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("dockerfile not found: %s", path)
+		}
+		return path, nil
+	}
+
+	// Default: configDir/Dockerfile
+	defaultPath := filepath.Join(configDir, "Dockerfile")
+	if _, err := os.Stat(defaultPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			return "", fmt.Errorf("failed to create config dir: %w", err)
+		}
+		content := fmt.Sprintf("FROM %s\n", DefaultImage)
+		if err := os.WriteFile(defaultPath, []byte(content), 0o644); err != nil {
+			return "", fmt.Errorf("failed to create default Dockerfile: %w", err)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("failed to check Dockerfile: %w", err)
+	}
+
+	return defaultPath, nil
+}
+
+// determineImageTag returns the Docker image tag for the build.
+func (d *DockerIsolator) determineImageTag(dockerfilePath, configDir, projectDir string) string {
+	if strings.HasPrefix(dockerfilePath, configDir) {
+		return "devsandbox:local"
+	}
+	projectName := filepath.Base(projectDir)
+	hash := sha256.Sum256([]byte(projectDir))
+	return fmt.Sprintf("devsandbox:%s-%x", projectName, hash[:4])
+}
+
+// buildImage builds a Docker image from the resolved Dockerfile.
+func (d *DockerIsolator) buildImage(dockerfilePath, imageTag string) error {
+	buildContext := filepath.Dir(dockerfilePath)
+	cmd := exec.Command("docker", "build",
+		"-t", imageTag,
+		"-f", dockerfilePath,
+		buildContext,
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to build Docker image: %w", err)
+	}
+	return nil
+}
+
+// ResolveAndBuild resolves the Dockerfile and builds the image. Returns the image tag.
+func (d *DockerIsolator) ResolveAndBuild(projectDir string) (string, error) {
+	dockerfilePath, err := d.resolveDockerfile(projectDir, d.config.ConfigDir)
+	if err != nil {
+		return "", err
+	}
+	imageTag := d.determineImageTag(dockerfilePath, d.config.ConfigDir, projectDir)
+	fmt.Fprintf(os.Stderr, "Building image %s...\n", imageTag)
+	if err := d.buildImage(dockerfilePath, imageTag); err != nil {
+		return "", err
+	}
+	return imageTag, nil
 }
 
 // Name returns the backend name.
@@ -128,6 +195,18 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 	if err != nil {
 		return nil, fmt.Errorf("docker CLI not found: %w", err)
 	}
+
+	// Resolve Dockerfile and build image
+	dockerfilePath, err := d.resolveDockerfile(cfg.ProjectDir, d.config.ConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	imageTag := d.determineImageTag(dockerfilePath, d.config.ConfigDir, cfg.ProjectDir)
+	fmt.Fprintf(os.Stderr, "Building image %s...\n", imageTag)
+	if err := d.buildImage(dockerfilePath, imageTag); err != nil {
+		return nil, err
+	}
+	d.imageTag = imageTag
 
 	containerName := d.containerName(cfg.ProjectDir)
 
@@ -228,9 +307,6 @@ func (d *DockerIsolator) buildRunArgs(cfg *Config) ([]string, error) {
 
 	args = append(args, "--hostname", "sandbox")
 
-	// Pull policy
-	args = append(args, "--pull", d.config.PullPolicy)
-
 	// Add common args
 	commonArgs, err := d.buildCommonArgs(cfg)
 	if err != nil {
@@ -239,7 +315,7 @@ func (d *DockerIsolator) buildRunArgs(cfg *Config) ([]string, error) {
 	args = append(args, commonArgs...)
 
 	// Image
-	args = append(args, d.config.Image)
+	args = append(args, d.imageTag)
 
 	// Command
 	if len(cfg.Command) > 0 {
@@ -267,9 +343,6 @@ func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]s
 
 	args = append(args, "--hostname", "sandbox")
 
-	// Pull policy
-	args = append(args, "--pull", d.config.PullPolicy)
-
 	// Add common args
 	commonArgs, err := d.buildCommonArgs(cfg)
 	if err != nil {
@@ -278,7 +351,7 @@ func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]s
 	args = append(args, commonArgs...)
 
 	// Image
-	args = append(args, d.config.Image)
+	args = append(args, d.imageTag)
 
 	// Always create with just the shell (no command arguments).
 	// This ensures the container stays running and can be reused for any command.

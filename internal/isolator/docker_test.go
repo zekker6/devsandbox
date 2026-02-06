@@ -2,7 +2,9 @@ package isolator
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -16,29 +18,29 @@ func TestDockerIsolator_Name(t *testing.T) {
 
 func TestDockerIsolator_DefaultConfig(t *testing.T) {
 	iso := NewDockerIsolator(DockerConfig{})
-	if iso.config.Image != DefaultImage {
-		t.Errorf("Default image = %s, want %s", iso.config.Image, DefaultImage)
+	if iso.config.Dockerfile != "" {
+		t.Errorf("Default Dockerfile = %s, want empty", iso.config.Dockerfile)
 	}
-	if iso.config.PullPolicy != "missing" {
-		t.Errorf("Default pull policy = %s, want missing", iso.config.PullPolicy)
+	if iso.config.ConfigDir != "" {
+		t.Errorf("Default ConfigDir = %s, want empty", iso.config.ConfigDir)
 	}
 }
 
 func TestDockerIsolator_CustomConfig(t *testing.T) {
 	cfg := DockerConfig{
-		Image:        "custom-image:v1",
-		PullPolicy:   "always",
+		Dockerfile:   "/custom/Dockerfile",
+		ConfigDir:    "/custom/config",
 		HideEnvFiles: true,
 		MemoryLimit:  "2g",
 		CPULimit:     "1.5",
 	}
 	iso := NewDockerIsolator(cfg)
 
-	if iso.config.Image != "custom-image:v1" {
-		t.Errorf("Image = %s, want custom-image:v1", iso.config.Image)
+	if iso.config.Dockerfile != "/custom/Dockerfile" {
+		t.Errorf("Dockerfile = %s, want /custom/Dockerfile", iso.config.Dockerfile)
 	}
-	if iso.config.PullPolicy != "always" {
-		t.Errorf("PullPolicy = %s, want always", iso.config.PullPolicy)
+	if iso.config.ConfigDir != "/custom/config" {
+		t.Errorf("ConfigDir = %s, want /custom/config", iso.config.ConfigDir)
 	}
 	if !iso.config.HideEnvFiles {
 		t.Error("HideEnvFiles should be true")
@@ -71,7 +73,13 @@ func TestDockerIsolator_Available(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -83,11 +91,6 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		// Docker might not be installed in test environment
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build failed: %v", err)
 	}
 
@@ -99,8 +102,8 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 	// Verify key arguments are present
 	argsStr := strings.Join(result.Args, " ")
 
-	if !strings.Contains(argsStr, "test-image:latest") {
-		t.Error("Build args missing image")
+	if !strings.Contains(argsStr, "devsandbox:local") {
+		t.Error("Build args missing image tag")
 	}
 	// Working directory should match project directory (PWD consistency)
 	if !strings.Contains(argsStr, "-w /tmp/test-project") {
@@ -108,9 +111,6 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 	}
 	if !strings.Contains(argsStr, "FOO=bar") {
 		t.Error("Build args missing environment variable")
-	}
-	if !strings.Contains(argsStr, "--pull missing") {
-		t.Error("Build args missing pull policy")
 	}
 	if !strings.Contains(argsStr, "HOST_UID=") {
 		t.Error("Build args missing HOST_UID")
@@ -125,7 +125,13 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithProxy(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:   "/tmp/test-project",
@@ -138,10 +144,6 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build failed: %v", err)
 	}
 
@@ -159,8 +161,14 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
 	iso := NewDockerIsolator(DockerConfig{
-		Image:         "test-image:latest",
+		ConfigDir:     configDir,
 		MemoryLimit:   "4g",
 		CPULimit:      "2",
 		KeepContainer: false,
@@ -175,10 +183,6 @@ func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build failed: %v", err)
 	}
 
@@ -193,7 +197,13 @@ func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:   "/tmp/test-project",
@@ -205,10 +215,6 @@ func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build failed: %v", err)
 	}
 
@@ -220,7 +226,13 @@ func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithCommand(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -232,22 +244,24 @@ func TestDockerIsolator_Build_WithCommand(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build failed: %v", err)
 	}
 
-	// Command should be at the end after the image
+	// Command should be at the end after the image tag
 	argsStr := strings.Join(result.Args, " ")
-	if !strings.Contains(argsStr, "test-image:latest echo hello") {
+	if !strings.Contains(argsStr, "devsandbox:local echo hello") {
 		t.Error("Build args missing or misplaced command")
 	}
 }
 
 func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -263,11 +277,6 @@ func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
 		},
 	}
 
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
-
 	_, err := iso.BuildDocker(context.Background(), cfg)
 	if err == nil {
 		t.Error("Build should fail with non-existent required binding")
@@ -278,7 +287,13 @@ func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_OptionalBindingNotExists(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -296,10 +311,6 @@ func TestDockerIsolator_Build_OptionalBindingNotExists(t *testing.T) {
 
 	_, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build should not fail with non-existent optional binding: %v", err)
 	}
 }
@@ -416,10 +427,16 @@ func TestDockerIsolator_getContainerState(t *testing.T) {
 }
 
 func TestDockerIsolator_BuildDocker_KeepContainer_Create(t *testing.T) {
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
 	// Test that with KeepContainer=true and no existing container,
 	// the result is DockerActionCreate
+	configDir := t.TempDir()
 	iso := NewDockerIsolator(DockerConfig{
-		Image:         "test-image:latest",
+		ConfigDir:     configDir,
 		KeepContainer: true,
 	})
 
@@ -432,10 +449,6 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Create(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("BuildDocker failed: %v", err)
 	}
 
@@ -473,8 +486,14 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Create(t *testing.T) {
 }
 
 func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
 	iso := NewDockerIsolator(DockerConfig{
-		Image:         "test-image:latest",
+		ConfigDir:     configDir,
 		KeepContainer: true,
 	})
 
@@ -487,10 +506,6 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("BuildDocker failed: %v", err)
 	}
 
@@ -512,7 +527,13 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -523,10 +544,6 @@ func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build failed: %v", err)
 	}
 
@@ -555,8 +572,14 @@ func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_InterfaceCompatibility(t *testing.T) {
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
 	// Test that the interface-compliant Build() method works
-	iso := NewDockerIsolator(DockerConfig{Image: "test-image:latest", KeepContainer: false})
+	configDir := t.TempDir()
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
 		ProjectDir:  "/tmp/test-project",
@@ -567,10 +590,6 @@ func TestDockerIsolator_Build_InterfaceCompatibility(t *testing.T) {
 
 	binaryPath, args, err := iso.Build(context.Background(), cfg)
 	if err != nil {
-		_, lookErr := exec.LookPath("docker")
-		if lookErr != nil {
-			t.Skip("Docker not installed")
-		}
 		t.Fatalf("Build failed: %v", err)
 	}
 
@@ -588,5 +607,103 @@ func TestDockerIsolator_Build_InterfaceCompatibility(t *testing.T) {
 	argsStr := strings.Join(args, " ")
 	if !strings.Contains(argsStr, "run") {
 		t.Error("Args should contain 'run' for non-persistent mode")
+	}
+}
+
+func TestResolveDockerfile_Default(t *testing.T) {
+	tmpDir := t.TempDir()
+	d := &DockerIsolator{config: DockerConfig{}}
+
+	path, err := d.resolveDockerfile("", tmpDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := filepath.Join(tmpDir, "Dockerfile")
+	if path != expected {
+		t.Errorf("expected %q, got %q", expected, path)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read created Dockerfile: %v", err)
+	}
+	if !strings.Contains(string(content), "FROM ghcr.io/zekker6/devsandbox:latest") {
+		t.Errorf("expected default FROM line, got %q", string(content))
+	}
+}
+
+func TestResolveDockerfile_ConfigOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	customDockerfile := filepath.Join(tmpDir, "custom", "Dockerfile")
+	if err := os.MkdirAll(filepath.Dir(customDockerfile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(customDockerfile, []byte("FROM ubuntu:22.04\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &DockerIsolator{config: DockerConfig{Dockerfile: customDockerfile}}
+
+	path, err := d.resolveDockerfile("", tmpDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if path != customDockerfile {
+		t.Errorf("expected %q, got %q", customDockerfile, path)
+	}
+}
+
+func TestResolveDockerfile_RelativePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	dockerfilePath := filepath.Join(tmpDir, "docker", "Dockerfile")
+	if err := os.MkdirAll(filepath.Dir(dockerfilePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dockerfilePath, []byte("FROM ubuntu:22.04\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &DockerIsolator{config: DockerConfig{Dockerfile: "docker/Dockerfile"}}
+
+	path, err := d.resolveDockerfile(tmpDir, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if path != dockerfilePath {
+		t.Errorf("expected %q, got %q", dockerfilePath, path)
+	}
+}
+
+func TestResolveDockerfile_NotFound(t *testing.T) {
+	d := &DockerIsolator{config: DockerConfig{Dockerfile: "/nonexistent/Dockerfile"}}
+
+	_, err := d.resolveDockerfile("", t.TempDir())
+	if err == nil {
+		t.Error("expected error for non-existent Dockerfile")
+	}
+}
+
+func TestDetermineImageTag_Global(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	dockerfilePath := filepath.Join(configDir, "Dockerfile")
+
+	d := &DockerIsolator{config: DockerConfig{}}
+	tag := d.determineImageTag(dockerfilePath, configDir, "/some/project")
+
+	if tag != "devsandbox:local" {
+		t.Errorf("expected 'devsandbox:local', got %q", tag)
+	}
+}
+
+func TestDetermineImageTag_PerProject(t *testing.T) {
+	d := &DockerIsolator{config: DockerConfig{}}
+	tag := d.determineImageTag("/project/.docker/Dockerfile", "/global/config", "/home/user/myproject")
+
+	if !strings.HasPrefix(tag, "devsandbox:myproject-") {
+		t.Errorf("expected tag starting with 'devsandbox:myproject-', got %q", tag)
 	}
 }
