@@ -27,7 +27,7 @@ type TrustStore struct {
 
 // TrustStorePath returns the default path to the trust store.
 func TrustStorePath() string {
-	return filepath.Join(configDir(), "trusted-configs.toml")
+	return filepath.Join(ConfigDir(), "trusted-configs.toml")
 }
 
 // LoadTrustStore loads the trust store from the given path.

@@ -368,7 +368,7 @@ func DefaultConfig() *Config {
 
 // configDir returns the devsandbox config directory path.
 // Uses XDG_CONFIG_HOME/devsandbox or ~/.config/devsandbox
-func configDir() string {
+func ConfigDir() string {
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
 		home, err := os.UserHomeDir()
@@ -382,7 +382,12 @@ func configDir() string {
 
 // ConfigPath returns the path to the config file.
 func ConfigPath() string {
-	return filepath.Join(configDir(), "config.toml")
+	return filepath.Join(ConfigDir(), "config.toml")
+}
+
+// DefaultDockerfilePath returns the default Dockerfile path in the config directory.
+func DefaultDockerfilePath() string {
+	return filepath.Join(ConfigDir(), "Dockerfile")
 }
 
 // LoadFrom reads the configuration from the specified path.

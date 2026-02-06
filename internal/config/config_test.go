@@ -654,6 +654,36 @@ dockerfile = "/custom/Dockerfile"
 	}
 }
 
+func TestConfigDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	origXDG := os.Getenv("XDG_CONFIG_HOME")
+	if err := os.Setenv("XDG_CONFIG_HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set XDG_CONFIG_HOME: %v", err)
+	}
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", origXDG) }()
+
+	dir := ConfigDir()
+	expected := filepath.Join(tmpDir, "devsandbox")
+	if dir != expected {
+		t.Errorf("ConfigDir() = %q, want %q", dir, expected)
+	}
+}
+
+func TestDefaultDockerfilePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	origXDG := os.Getenv("XDG_CONFIG_HOME")
+	if err := os.Setenv("XDG_CONFIG_HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set XDG_CONFIG_HOME: %v", err)
+	}
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", origXDG) }()
+
+	path := DefaultDockerfilePath()
+	expected := filepath.Join(tmpDir, "devsandbox", "Dockerfile")
+	if path != expected {
+		t.Errorf("DefaultDockerfilePath() = %q, want %q", path, expected)
+	}
+}
+
 func TestSandboxConfig_GetIsolation(t *testing.T) {
 	tests := []struct {
 		isolation IsolationBackend
