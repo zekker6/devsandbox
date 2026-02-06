@@ -124,8 +124,8 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	}
 
 	dockerCfg := isolator.DockerConfig{
-		Image:         appCfg.Sandbox.Docker.Image,
-		PullPolicy:    appCfg.Sandbox.Docker.PullPolicy,
+		Dockerfile:    appCfg.Sandbox.Docker.Dockerfile,
+		ConfigDir:     config.ConfigDir(),
 		HideEnvFiles:  appCfg.Sandbox.Docker.IsHideEnvFilesEnabled(),
 		MemoryLimit:   appCfg.Sandbox.Docker.Resources.Memory,
 		CPULimit:      appCfg.Sandbox.Docker.Resources.CPUs,

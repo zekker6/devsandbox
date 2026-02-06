@@ -49,8 +49,6 @@ func TestDockerBackend_BasicExecution(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -108,8 +106,6 @@ func TestDockerBackend_UIDMapping(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -170,8 +166,6 @@ func TestDockerBackend_GIDMapping(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -232,8 +226,6 @@ func TestDockerBackend_ProjectDirWritable(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -294,8 +286,6 @@ func TestDockerBackend_EnvironmentVariables(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -382,8 +372,6 @@ func TestDockerBackend_HideEnvFiles(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 hide_env_files = true
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
@@ -442,8 +430,6 @@ func TestDockerBackend_MiseAvailable(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -508,8 +494,6 @@ func TestDockerBackend_WorkspaceMount(t *testing.T) {
 isolation = "docker"
 
 [sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -579,8 +563,6 @@ func TestDockerBackend_IsolationFlag(t *testing.T) {
 
 	// Config with docker image but no isolation setting
 	configContent := `[sandbox.docker]
-image = "devsandbox:local"
-pull_policy = "never"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)

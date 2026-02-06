@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"testing"
-	"time"
 )
 
 func TestNewImageCmd(t *testing.T) {
@@ -12,29 +11,17 @@ func TestNewImageCmd(t *testing.T) {
 		t.Errorf("expected Use='image', got %q", cmd.Use)
 	}
 
-	// Should have pull subcommand
-	pullCmd, _, err := cmd.Find([]string{"pull"})
+	// Should have build subcommand
+	buildCmd, _, err := cmd.Find([]string{"build"})
 	if err != nil {
-		t.Fatalf("pull subcommand not found: %v", err)
+		t.Fatalf("build subcommand not found: %v", err)
 	}
-	if pullCmd.Use != "pull" {
-		t.Errorf("expected pull subcommand, got %q", pullCmd.Use)
+	if buildCmd.Use != "build" {
+		t.Errorf("expected build subcommand, got %q", buildCmd.Use)
 	}
 }
 
-func TestGetImageInfo_NotExists(t *testing.T) {
-	info, err := getImageInfo("nonexistent-image:v999")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if info != nil {
-		t.Error("expected nil info for non-existent image")
-	}
-}
-
-func TestGetConfiguredImage_Default(t *testing.T) {
-	// When no config exists, should return default image
-	// Change to a temp directory and set XDG_CONFIG_HOME to avoid picking up global config
+func TestGetConfiguredDockerfile_Default(t *testing.T) {
 	tmpDir := t.TempDir()
 	origDir, err := os.Getwd()
 	if err != nil {
@@ -45,43 +32,15 @@ func TestGetConfiguredImage_Default(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(origDir) }()
 
-	// Set XDG_CONFIG_HOME to temp dir to avoid global config
 	origXDG := os.Getenv("XDG_CONFIG_HOME")
 	if err := os.Setenv("XDG_CONFIG_HOME", tmpDir); err != nil {
 		t.Fatalf("failed to set XDG_CONFIG_HOME: %v", err)
 	}
 	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", origXDG) }()
 
-	image := getConfiguredImage()
-	expected := "ghcr.io/zekker6/devsandbox:latest"
-	if image != expected {
-		t.Errorf("expected %q, got %q", expected, image)
-	}
-}
-
-func TestFormatAge(t *testing.T) {
-	tests := []struct {
-		duration time.Duration
-		expected string
-	}{
-		{30 * time.Second, "less than a minute"},
-		{0, "less than a minute"},
-		{30 * time.Minute, "30 minutes"},
-		{2 * time.Minute, "2 minutes"},
-		{1 * time.Minute, "1 minute"},
-		{2 * time.Hour, "2 hours"},
-		{1 * time.Hour, "1 hour"},
-		{24 * time.Hour, "1 day"},
-		{72 * time.Hour, "3 days"},
-		{7 * 24 * time.Hour, "7 days"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			got := formatAge(tt.duration)
-			if got != tt.expected {
-				t.Errorf("formatAge(%v) = %q, want %q", tt.duration, got, tt.expected)
-			}
-		})
+	df := getConfiguredDockerfile()
+	// Should return empty (meaning use default)
+	if df != "" {
+		t.Errorf("expected empty string (default), got %q", df)
 	}
 }
