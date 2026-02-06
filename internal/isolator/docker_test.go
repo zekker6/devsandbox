@@ -72,13 +72,25 @@ func TestDockerIsolator_Available(t *testing.T) {
 	}
 }
 
+// setupTestDockerfile creates a Dockerfile with a locally-available base image
+// for integration tests that call BuildDocker() (which triggers docker build).
+func setupTestDockerfile(t *testing.T) string {
+	t.Helper()
+	configDir := t.TempDir()
+	dockerfilePath := filepath.Join(configDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine:latest\n"), 0o644); err != nil {
+		t.Fatalf("failed to create test Dockerfile: %v", err)
+	}
+	return configDir
+}
+
 func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 	_, lookErr := exec.LookPath("docker")
 	if lookErr != nil {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
@@ -130,7 +142,7 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
@@ -166,7 +178,7 @@ func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{
 		ConfigDir:     configDir,
 		MemoryLimit:   "4g",
@@ -202,7 +214,7 @@ func TestDockerIsolator_Build_WithHideEnvFiles(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
@@ -231,7 +243,7 @@ func TestDockerIsolator_Build_WithCommand(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
@@ -260,7 +272,7 @@ func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
@@ -292,7 +304,7 @@ func TestDockerIsolator_Build_OptionalBindingNotExists(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
@@ -434,7 +446,7 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Create(t *testing.T) {
 
 	// Test that with KeepContainer=true and no existing container,
 	// the result is DockerActionCreate
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{
 		ConfigDir:     configDir,
 		KeepContainer: true,
@@ -491,7 +503,7 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{
 		ConfigDir:     configDir,
 		KeepContainer: true,
@@ -532,7 +544,7 @@ func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
@@ -578,7 +590,7 @@ func TestDockerIsolator_Build_InterfaceCompatibility(t *testing.T) {
 	}
 
 	// Test that the interface-compliant Build() method works
-	configDir := t.TempDir()
+	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
