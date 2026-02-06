@@ -127,5 +127,16 @@ export PATH="/usr/local/bin:$MISE_DATA_DIR/shims:/opt/mise/shims:$PATH"
 # Use system config as fallback for container-installed tools
 export MISE_SYSTEM_CONFIG_FILE=/etc/mise/config.toml
 
-# 7. Drop privileges and exec user command
+# 7. Suppress ssh-agent when SSH is not forwarded
+# Shell plugins (e.g. fish-ssh-agent) auto-start ssh-agent on every shell launch.
+# When SSH_AUTH_SOCK is not forwarded, shadow the binary with a no-op wrapper.
+if [ -z "$SSH_AUTH_SOCK" ]; then
+    cat > /usr/local/bin/ssh-agent <<'WRAPPER'
+#!/bin/sh
+exit 0
+WRAPPER
+    chmod +x /usr/local/bin/ssh-agent
+fi
+
+# 8. Drop privileges and exec user command
 exec gosu sandboxuser "$@"
