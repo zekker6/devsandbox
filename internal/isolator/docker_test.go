@@ -375,6 +375,7 @@ func TestDockerIsolator_sandboxVolumeName(t *testing.T) {
 func TestDockerIsolator_remapToContainerHome(t *testing.T) {
 	iso := NewDockerIsolator(DockerConfig{})
 	homeDir := "/home/testuser"
+	projectDir := "/home/testuser/projects/myapp"
 
 	tests := []struct {
 		hostPath string
@@ -388,10 +389,14 @@ func TestDockerIsolator_remapToContainerHome(t *testing.T) {
 		{"/etc/hosts", "/etc/hosts"},
 		{"/tmp/project", "/tmp/project"},
 		{"/usr/local/bin", "/usr/local/bin"},
+		// Paths under project directory should stay the same (project mounted at host path)
+		{"/home/testuser/projects/myapp/.git", "/home/testuser/projects/myapp/.git"},
+		{"/home/testuser/projects/myapp/.git/config", "/home/testuser/projects/myapp/.git/config"},
+		{"/home/testuser/projects/myapp/src/main.go", "/home/testuser/projects/myapp/src/main.go"},
 	}
 
 	for _, tt := range tests {
-		result := iso.remapToContainerHome(tt.hostPath, homeDir)
+		result := iso.remapToContainerHome(tt.hostPath, homeDir, projectDir)
 		if result != tt.expected {
 			t.Errorf("remapToContainerHome(%q) = %q, want %q", tt.hostPath, result, tt.expected)
 		}

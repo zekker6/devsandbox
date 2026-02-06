@@ -520,8 +520,14 @@ func (d *DockerIsolator) sandboxVolumeName(sandboxHome string) string {
 const containerHome = "/home/sandboxuser"
 
 // remapToContainerHome converts a host path to its equivalent container path.
-// Paths under homeDir are remapped to /home/sandboxuser.
-func (d *DockerIsolator) remapToContainerHome(hostPath, homeDir string) string {
+// Paths under the project directory keep their original path (project is mounted
+// at its host path for PWD consistency). Other paths under homeDir are remapped
+// to /home/sandboxuser.
+func (d *DockerIsolator) remapToContainerHome(hostPath, homeDir, projectDir string) string {
+	// Paths under project directory stay the same - project is mounted at host path
+	if projectDir != "" && strings.HasPrefix(hostPath, projectDir+"/") {
+		return hostPath
+	}
 	// Check if path is under home directory
 	if strings.HasPrefix(hostPath, homeDir) {
 		// Replace home prefix with container home
@@ -588,7 +594,8 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 				dest := b.Dest
 				if dest == "" {
 					// Remap home directory paths to /home/sandboxuser
-					dest = d.remapToContainerHome(b.Source, cfg.HomeDir)
+					// Paths under project dir stay unchanged (project mounted at host path)
+					dest = d.remapToContainerHome(b.Source, cfg.HomeDir, cfg.ProjectDir)
 				}
 				mount := b.Source + ":" + dest
 				if b.ReadOnly {
