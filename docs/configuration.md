@@ -39,11 +39,10 @@ isolation = "auto"
 
 # Docker-specific settings (only used when isolation = "docker")
 [sandbox.docker]
-# Docker image to use
-image = "ghcr.io/zekker6/devsandbox:latest"
-
-# Pull policy: "always", "missing", "never"
-pull_policy = "missing"
+# Path to Dockerfile used to build the sandbox image.
+# Defaults to ~/.config/devsandbox/Dockerfile (auto-created with FROM ghcr.io/zekker6/devsandbox:latest)
+# Can be an absolute path or relative to project directory.
+# dockerfile = "/path/to/custom/Dockerfile"
 
 # Hide .env files inside container (requires --privileged or CAP_SYS_ADMIN)
 hide_env_files = true
@@ -427,8 +426,9 @@ isolation = "auto"
 
 # Docker settings (used when isolation = "docker")
 [sandbox.docker]
-image = "ghcr.io/zekker6/devsandbox:latest"
-pull_policy = "missing"
+# Uses default Dockerfile at ~/.config/devsandbox/Dockerfile
+# Uncomment to use a custom Dockerfile:
+# dockerfile = "/path/to/custom/Dockerfile"
 hide_env_files = true
 keep_container = true  # Keep containers for fast restarts
 

@@ -388,11 +388,8 @@ Configure Docker settings in `~/.config/devsandbox/config.toml`:
 isolation = "docker"
 
 [sandbox.docker]
-# Custom Docker image (default: ghcr.io/zekker6/devsandbox:latest)
-image = "ghcr.io/zekker6/devsandbox:latest"
-
-# Pull policy: "always", "missing", "never"
-pull_policy = "missing"
+# Path to Dockerfile (default: ~/.config/devsandbox/Dockerfile, auto-created)
+# dockerfile = "/path/to/custom/Dockerfile"
 
 # Hide .env files in container (requires --privileged or CAP_SYS_ADMIN)
 hide_env_files = true
@@ -469,16 +466,26 @@ The Docker backend:
 
 ### Docker Image
 
-The default image (`ghcr.io/zekker6/devsandbox:latest`) includes:
+devsandbox uses a Dockerfile-based workflow. On first run, a default Dockerfile is created at
+`~/.config/devsandbox/Dockerfile` with:
+
+```dockerfile
+FROM ghcr.io/zekker6/devsandbox:latest
+```
+
+The image is rebuilt on every sandbox start. Docker layer caching keeps this fast when the Dockerfile
+hasn't changed.
+
+The base image (`ghcr.io/zekker6/devsandbox:latest`) includes:
 - Debian slim base
 - mise for tool management
 - Common development tools (git, curl, bash, zsh)
 - gosu for privilege dropping
 - passt/pasta for network isolation (if needed)
 
-### Building Custom Images
+### Customizing the Image
 
-Extend the base image for project-specific needs:
+Edit the default Dockerfile at `~/.config/devsandbox/Dockerfile` to add tools globally:
 
 ```dockerfile
 FROM ghcr.io/zekker6/devsandbox:latest
@@ -490,12 +497,25 @@ RUN apt-get update && apt-get install -y postgresql-client
 RUN mise install node@20 python@3.12
 ```
 
-Then configure:
+The global Dockerfile produces a `devsandbox:local` image tag.
+
+### Per-Project Dockerfiles
+
+For project-specific customizations, point to a different Dockerfile in `.devsandbox.toml`:
 
 ```toml
 [sandbox.docker]
-image = "my-custom-image:latest"
-pull_policy = "never"
+dockerfile = "Dockerfile.devsandbox"
+```
+
+Per-project Dockerfiles produce a `devsandbox:<project-name>-<hash>` image tag.
+
+### Manual Image Build
+
+Build the image without starting a sandbox:
+
+```bash
+devsandbox image build
 ```
 
 ### Platform Differences
@@ -530,4 +550,4 @@ pull_policy = "never"
 - **Docker required** - Docker Desktop or Docker Engine must be installed and running
 - **No pasta network** - Uses HTTP_PROXY for network isolation instead
 - **Performance on macOS** - File operations may be slower due to volume mounts
-- **Image pull** - First run requires downloading the base image (~200MB)
+- **Image build** - First run builds the image from a Dockerfile (requires downloading the base image ~200MB)
