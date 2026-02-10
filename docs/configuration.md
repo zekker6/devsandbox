@@ -19,13 +19,45 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 ```toml
 [proxy]
 # Enable proxy mode by default
-# Can be overridden with --proxy / --no-proxy flags
+# Can be overridden with --proxy flag
 enabled = false
 
 # Default proxy server port
 # Can be overridden with --proxy-port flag
 port = 8080
 ```
+
+### Proxy Credentials
+
+The proxy can inject authentication credentials into requests for specific domains, keeping tokens out of the sandbox environment. Credentials are read from host environment variables and added to matching requests transparently.
+
+```toml
+[proxy.credentials.github]
+# Inject GitHub API token into requests to api.github.com.
+# Reads from GITHUB_TOKEN or GH_TOKEN environment variable on the host.
+# The token is added as a Bearer Authorization header if not already present.
+enabled = true
+```
+
+**How it works:**
+
+1. The proxy intercepts outgoing requests from the sandbox.
+2. For each registered credential injector, it checks if the request matches (e.g., host is `api.github.com`).
+3. If matched and no `Authorization` header is already present, the injector adds the credential header.
+4. The sandbox process never sees the token -- it stays on the host side.
+
+**Available injectors:**
+
+| Name     | Matches              | Environment Variable          | Header                        |
+|----------|----------------------|-------------------------------|-------------------------------|
+| `github` | `api.github.com`     | `GITHUB_TOKEN` or `GH_TOKEN`  | `Authorization: Bearer <token>` |
+
+**Notes:**
+
+- Credential injection requires proxy mode (`--proxy`).
+- Injectors are only active when explicitly `enabled = true` and the corresponding environment variable is set on the host.
+- Unknown injector names in the config produce a warning and are skipped.
+- The injector never overwrites an existing `Authorization` header on the request.
 
 ### Sandbox Settings
 
@@ -394,6 +426,10 @@ devsandbox logs internal --type logging
 enabled = true
 port = 8080
 
+# Inject GitHub token into API requests (keeps token out of sandbox)
+[proxy.credentials.github]
+enabled = true
+
 [sandbox]
 # Use custom location for sandbox data
 # base_path = "/data/devsandbox"
@@ -470,7 +506,6 @@ Command line flags take precedence over configuration file settings:
 ```bash
 # Override proxy setting from config
 devsandbox --proxy          # Enable even if config has enabled = false
-devsandbox --no-proxy       # Disable even if config has enabled = true
 
 # Override port
 devsandbox --proxy --proxy-port 9090
