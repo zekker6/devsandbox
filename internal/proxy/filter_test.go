@@ -389,9 +389,9 @@ func TestNormalizeHost(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := normalizeHost(tt.input)
+			got := NormalizeHost(tt.input)
 			if got != tt.expected {
-				t.Errorf("normalizeHost(%q) = %q, want %q", tt.input, got, tt.expected)
+				t.Errorf("NormalizeHost(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}

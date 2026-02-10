@@ -254,11 +254,7 @@ func processLogFile(path string, domainMap map[string]*DomainStats) error {
 			continue
 		}
 
-		domain := parsedURL.Host
-		// Remove port
-		if idx := strings.LastIndex(domain, ":"); idx > 0 {
-			domain = domain[:idx]
-		}
+		domain := proxy.NormalizeHost(parsedURL.Host)
 
 		// Update stats
 		stats, ok := domainMap[domain]

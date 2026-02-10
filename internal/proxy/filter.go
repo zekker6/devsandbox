@@ -155,7 +155,7 @@ func (e *FilterEngine) Match(req *http.Request) FilterDecision {
 func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) string {
 	switch scope {
 	case FilterScopeHost:
-		return normalizeHost(req.Host)
+		return NormalizeHost(req.Host)
 
 	case FilterScopePath:
 		return req.URL.Path
@@ -164,12 +164,12 @@ func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) stri
 		return req.URL.String()
 
 	default:
-		return normalizeHost(req.Host)
+		return NormalizeHost(req.Host)
 	}
 }
 
-// normalizeHost extracts the hostname without port, handling IPv6 addresses correctly.
-func normalizeHost(hostport string) string {
+// NormalizeHost extracts the hostname without port, handling IPv6 addresses correctly.
+func NormalizeHost(hostport string) string {
 	// Use net.SplitHostPort for robust parsing
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
@@ -191,7 +191,7 @@ func (e *FilterEngine) CacheDecision(host string, action FilterAction) {
 
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
-	e.decisionCache[normalizeHost(host)] = action
+	e.decisionCache[NormalizeHost(host)] = action
 }
 
 // getCachedDecision retrieves a cached decision for a host.
@@ -199,7 +199,7 @@ func (e *FilterEngine) CacheDecision(host string, action FilterAction) {
 func (e *FilterEngine) getCachedDecision(host string) FilterAction {
 	e.cacheMu.RLock()
 	defer e.cacheMu.RUnlock()
-	return e.decisionCache[normalizeHost(host)]
+	return e.decisionCache[NormalizeHost(host)]
 }
 
 // ClearCache clears all cached decisions.

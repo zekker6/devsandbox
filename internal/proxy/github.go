@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"net"
 	"net/http"
 	"os"
 )
@@ -49,12 +48,7 @@ func (g *GitHubCredentialInjector) Enabled() bool {
 
 // Match returns true for requests to api.github.com.
 func (g *GitHubCredentialInjector) Match(req *http.Request) bool {
-	// Host may include port (e.g., "api.github.com:443")
-	host := req.URL.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	return host == "api.github.com"
+	return NormalizeHost(req.URL.Host) == "api.github.com"
 }
 
 // Inject adds the Authorization header if not already present.
