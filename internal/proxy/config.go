@@ -35,6 +35,11 @@ type Config struct {
 
 	// Filter contains HTTP request filtering configuration.
 	Filter *FilterConfig
+
+	// CredentialInjectors add authentication to requests for specific domains.
+	// Built by BuildCredentialInjectors() from [proxy.credentials] config.
+	// If nil/empty, no credential injection is performed.
+	CredentialInjectors []CredentialInjector
 }
 
 func NewConfig(sandboxBase string, port int) *Config {

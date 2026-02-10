@@ -150,3 +150,63 @@ func Test_mergeConfigs_NilValuesNotOverride(t *testing.T) {
 		t.Error("zero value should not override non-zero port")
 	}
 }
+
+func Test_mergeConfigs_CredentialsDeepMerge(t *testing.T) {
+	base := &Config{
+		Proxy: ProxyConfig{
+			Credentials: map[string]any{
+				"github": map[string]any{"enabled": true},
+				"gitlab": map[string]any{"enabled": false},
+			},
+		},
+	}
+	overlay := &Config{
+		Proxy: ProxyConfig{
+			Credentials: map[string]any{
+				"github": map[string]any{"enabled": false},
+			},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	ghCfg, ok := result.Proxy.Credentials["github"].(map[string]any)
+	if !ok {
+		t.Fatal("expected github credentials config")
+	}
+	if ghCfg["enabled"] != false {
+		t.Errorf("expected github enabled=false from overlay, got %v", ghCfg["enabled"])
+	}
+
+	glCfg, ok := result.Proxy.Credentials["gitlab"].(map[string]any)
+	if !ok {
+		t.Fatal("expected gitlab credentials config preserved from base")
+	}
+	if glCfg["enabled"] != false {
+		t.Errorf("expected gitlab enabled=false preserved, got %v", glCfg["enabled"])
+	}
+}
+
+func Test_mergeConfigs_CredentialsNilBase(t *testing.T) {
+	base := &Config{}
+	overlay := &Config{
+		Proxy: ProxyConfig{
+			Credentials: map[string]any{
+				"github": map[string]any{"enabled": true},
+			},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	if result.Proxy.Credentials == nil {
+		t.Fatal("expected credentials from overlay")
+	}
+	ghCfg, ok := result.Proxy.Credentials["github"].(map[string]any)
+	if !ok {
+		t.Fatal("expected github credentials config")
+	}
+	if ghCfg["enabled"] != true {
+		t.Errorf("expected github enabled=true, got %v", ghCfg["enabled"])
+	}
+}

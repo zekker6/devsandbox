@@ -24,20 +24,21 @@ const (
 )
 
 type Server struct {
-	config       *Config
-	ca           *CA
-	proxy        *goproxy.ProxyHttpServer
-	listener     net.Listener
-	server       *http.Server
-	reqLogger    *RequestLogger
-	proxyLogger  *RotatingFileWriter
-	filterEngine *FilterEngine
-	askServer    *AskServer
-	askQueue     *AskQueue
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	running      bool
-	requestID    uint64
+	config              *Config
+	ca                  *CA
+	proxy               *goproxy.ProxyHttpServer
+	listener            net.Listener
+	server              *http.Server
+	reqLogger           *RequestLogger
+	proxyLogger         *RotatingFileWriter
+	filterEngine        *FilterEngine
+	askServer           *AskServer
+	askQueue            *AskQueue
+	credentialInjectors []CredentialInjector
+	wg                  sync.WaitGroup
+	mu                  sync.Mutex
+	running             bool
+	requestID           uint64
 }
 
 func NewServer(cfg *Config) (*Server, error) {
@@ -114,14 +115,15 @@ func NewServer(cfg *Config) (*Server, error) {
 	}
 
 	s := &Server{
-		config:       cfg,
-		ca:           ca,
-		proxy:        proxy,
-		reqLogger:    reqLogger,
-		proxyLogger:  proxyLogger,
-		filterEngine: filterEngine,
-		askServer:    askServer,
-		askQueue:     askQueue,
+		config:              cfg,
+		ca:                  ca,
+		proxy:               proxy,
+		reqLogger:           reqLogger,
+		proxyLogger:         proxyLogger,
+		filterEngine:        filterEngine,
+		askServer:           askServer,
+		askQueue:            askQueue,
+		credentialInjectors: cfg.CredentialInjectors,
 	}
 
 	s.setupMITM()
@@ -151,9 +153,18 @@ func (s *Server) setupMITM() {
 func (s *Server) setupLogging() {
 	// Set up request logging and filtering
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		// Capture request for logging
+		// Capture request for logging (before credential injection to avoid logging tokens)
 		entry, reqBody := s.reqLogger.LogRequest(req)
 		ctx.UserData = entry
+
+		// Inject credentials for matching domains
+		for _, injector := range s.credentialInjectors {
+			if injector.Match(req) {
+				injector.Inject(req)
+				break // first match wins
+			}
+		}
+
 		if s.filterEngine == nil || !s.filterEngine.IsEnabled() {
 			return req, nil
 		}

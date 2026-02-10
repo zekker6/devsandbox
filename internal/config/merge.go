@@ -55,6 +55,9 @@ func mergeConfigs(base, overlay *Config) *Config {
 		result.Overlay.Enabled = overlay.Overlay.Enabled
 	}
 
+	// Proxy credentials: deep merge (same pattern as tools)
+	result.Proxy.Credentials = mergeToolsConfig(base.Proxy.Credentials, overlay.Proxy.Credentials)
+
 	// Tools: deep merge
 	result.Tools = mergeToolsConfig(base.Tools, overlay.Tools)
 

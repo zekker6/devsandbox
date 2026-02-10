@@ -170,6 +170,7 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 		proxyCfg := proxy.NewConfig(cfg.SandboxRoot, proxyPort)
 		proxyCfg.LogReceivers = appCfg.Logging.Receivers
 		proxyCfg.LogAttributes = appCfg.Logging.Attributes
+		proxyCfg.CredentialInjectors = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
 
 		// Build filter configuration
 		proxyCfg.Filter = buildFilterConfig(appCfg, cmd, filterDefault, allowDomains, blockDomains)

@@ -58,6 +58,12 @@ type ProxyConfig struct {
 
 	// Filter contains HTTP request filtering configuration.
 	Filter ProxyFilterConfig `toml:"filter"`
+
+	// Credentials contains per-injector credential injection configuration.
+	// Each key is an injector name (e.g., "github"), and the value is
+	// a map of injector-specific settings. Each injector parses its own config.
+	// All injectors are disabled by default.
+	Credentials map[string]any `toml:"credentials"`
 }
 
 // IsEnabled returns whether proxy is enabled (defaults to false).
@@ -563,6 +569,15 @@ port = 8080
 # pattern = "*.tracking.io"
 # action = "block"
 # reason = "Tracking domain blocked"
+
+# Credential injection (requires proxy mode)
+# Injects authentication tokens into outbound requests for specific domains.
+# Tokens are read from host environment and never exposed to the sandbox.
+# All injectors are disabled by default.
+
+# GitHub API token injection (reads GITHUB_TOKEN or GH_TOKEN from host)
+# [proxy.credentials.github]
+# enabled = true
 
 # Sandbox settings
 [sandbox]
