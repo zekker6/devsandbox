@@ -36,7 +36,7 @@ func newProxyMonitorCmd() *cobra.Command {
 		Short: "Monitor and approve HTTP requests in ask mode",
 		Long: `Interactive terminal for approving/denying HTTP requests when proxy is running in ask mode.
 
-Run this command in a separate terminal while the sandbox is running with --filter-mode=ask.
+Run this command in a separate terminal while the sandbox is running with --filter-default=ask.
 If no socket path is provided, it will be auto-detected from the current directory's sandbox.
 
 Keys (instant response, no Enter needed):
@@ -86,7 +86,7 @@ func detectAskSocket() (string, error) {
 
 	// Check if socket exists
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("no ask socket found at %s\nMake sure the sandbox is running with --filter-mode=ask", socketPath)
+		return "", fmt.Errorf("no ask socket found at %s\nMake sure the sandbox is running with --filter-default=ask", socketPath)
 	}
 
 	return socketPath, nil
@@ -96,7 +96,7 @@ func runProxyMonitor(socketPath string) error {
 	// Connect to the ask server
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("failed to connect to ask server at %s: %w\nMake sure the sandbox is running with --filter-mode=ask", socketPath, err)
+		return fmt.Errorf("failed to connect to ask server at %s: %w\nMake sure the sandbox is running with --filter-default=ask", socketPath, err)
 	}
 	defer func() { _ = conn.Close() }()
 

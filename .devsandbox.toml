@@ -1,3 +1,6 @@
+[proxy]
+default_action = "ask"
+
 [tools.docker]
 enabled = true
 
@@ -6,3 +9,6 @@ isolation = "docker"
 
 [sandbox.docker]
 image = "devsandbox:local"
+
+[tools.git]
+mode = "readwrite"
