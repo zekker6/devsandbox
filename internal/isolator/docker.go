@@ -38,6 +38,7 @@ const (
 	LabelProjectName = "devsandbox.project_name"
 	LabelCreatedAt   = "devsandbox.created_at"
 	LabelNetworkName = "devsandbox.network_name"
+	LabelConfigHash  = "devsandbox.config_hash"
 )
 
 // DockerAction represents what docker command to run.
@@ -278,6 +279,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		return err
 	}
 
+	readinessTimeout := 90 * time.Second
 	// Handle different actions
 	switch result.Action {
 	case DockerActionRun:
@@ -290,24 +292,24 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	case DockerActionCreate:
 		fmt.Fprint(os.Stderr, "Creating container...")
 		createCmd := exec.Command(result.BinaryPath, result.Args...)
-		if err := createCmd.Run(); err != nil {
+		if out, err := createCmd.CombinedOutput(); err != nil {
 			fmt.Fprintln(os.Stderr, " failed")
-			return fmt.Errorf("failed to create container: %w", err)
+			return fmt.Errorf("failed to create container: %s", strings.TrimSpace(string(out)))
 		}
 		fmt.Fprintln(os.Stderr, " done")
 
 		fmt.Fprint(os.Stderr, "Starting container...")
 		startCmd := exec.Command(result.BinaryPath, "start", result.ContainerName)
-		if err := startCmd.Run(); err != nil {
+		if out, err := startCmd.CombinedOutput(); err != nil {
 			fmt.Fprintln(os.Stderr, " failed")
-			return fmt.Errorf("failed to start container: %w", err)
+			return fmt.Errorf("failed to start container: %s", strings.TrimSpace(string(out)))
 		}
 		fmt.Fprintln(os.Stderr, " done")
 
 		fmt.Fprint(os.Stderr, "Waiting for setup...")
-		if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, 30*time.Second); err != nil {
+		if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
 			fmt.Fprintln(os.Stderr, " timeout")
-			return fmt.Errorf("container setup timed out after 30s")
+			return fmt.Errorf("container setup timed out after %s", readinessTimeout)
 		}
 		fmt.Fprintln(os.Stderr, " ready")
 
@@ -320,7 +322,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	case DockerActionExec:
 		if result.ContainerJustStarted {
 			fmt.Fprint(os.Stderr, "Waiting for container setup...")
-			if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, 30*time.Second); err != nil {
+			if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
 				fmt.Fprintln(os.Stderr, " timeout")
 				return fmt.Errorf("container startup failed: %w", err)
 			}
@@ -457,21 +459,44 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 		exists, running := d.getContainerState(ctx, containerName)
 
 		if exists {
-			if !running {
-				// Container exists but stopped — start it.
-				startCmd := exec.CommandContext(ctx, dockerPath, "start", containerName)
-				if err := startCmd.Run(); err != nil {
-					return nil, fmt.Errorf("failed to start container: %w", err)
+			// Check if the container's config still matches what we need.
+			// Settings like proxy, network, and resource limits are baked at
+			// creation time and cannot be changed via docker exec.
+			wantHash := d.configHash(cfg)
+			haveHash := d.getContainerConfigHash(ctx, containerName)
+
+			if haveHash != wantHash {
+				d.logInfo("Container config changed (have=%s want=%s), recreating...", haveHash, wantHash)
+				d.removeContainer(ctx, containerName)
+				// Fall through to image build + create path below.
+			} else {
+				if !running {
+					// Container exists but stopped — start it.
+					// If start fails (e.g., its Docker network was removed),
+					// remove the stale container and fall through to recreate.
+					startCmd := exec.CommandContext(ctx, dockerPath, "start", containerName)
+					if out, err := startCmd.CombinedOutput(); err != nil {
+						d.logWarn("failed to restart container, recreating: %s", strings.TrimSpace(string(out)))
+						d.removeContainer(ctx, containerName)
+						// Fall through to image build + create below.
+					} else {
+						return &DockerBuildResult{
+							Action:               DockerActionExec,
+							BinaryPath:           dockerPath,
+							Args:                 buildExecArgs(cfg, containerName),
+							ContainerName:        containerName,
+							ContainerJustStarted: true,
+						}, nil
+					}
+				} else {
+					return &DockerBuildResult{
+						Action:        DockerActionExec,
+						BinaryPath:    dockerPath,
+						Args:          buildExecArgs(cfg, containerName),
+						ContainerName: containerName,
+					}, nil
 				}
 			}
-
-			return &DockerBuildResult{
-				Action:               DockerActionExec,
-				BinaryPath:           dockerPath,
-				Args:                 buildExecArgs(cfg, containerName),
-				ContainerName:        containerName,
-				ContainerJustStarted: !running,
-			}, nil
 		}
 	}
 
@@ -546,11 +571,12 @@ func (d *DockerIsolator) buildRunArgs(cfg *Config) ([]string, error) {
 	// Image
 	args = append(args, d.imageTag)
 
-	// Command
+	// Command — use shell name (not host path) so the container's PATH
+	// resolves it. Host path (e.g., /bin/fish on Arch) may not match the
+	// container path (e.g., /usr/bin/fish on Debian).
 	if len(cfg.Command) > 0 {
 		args = append(args, cfg.Command...)
 	} else {
-		// Interactive shell
 		args = append(args, cfg.Shell)
 	}
 
@@ -561,8 +587,10 @@ func (d *DockerIsolator) buildRunArgs(cfg *Config) ([]string, error) {
 func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]string, error) {
 	args := []string{"create", "--name", containerName}
 
-	// Add labels
-	args = append(args, d.buildLabels(cfg.ProjectDir)...)
+	// Add labels (include config hash for stale-container detection on reuse)
+	args = append(args, d.buildLabels(cfg.ProjectDir,
+		"--label", LabelConfigHash+"="+d.configHash(cfg),
+	)...)
 
 	// Always create with -it to support both interactive and non-interactive use.
 	// The container may be reused later for interactive sessions even if initially
@@ -582,10 +610,10 @@ func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]s
 	// Image
 	args = append(args, d.imageTag)
 
-	// Always create with just the shell (no command arguments).
-	// This ensures the container stays running and can be reused for any command.
-	// Actual commands are executed via "docker exec" after the container is started.
-	args = append(args, cfg.Shell)
+	// Use /bin/sh as the keep-alive process. The user's preferred shell is
+	// started via "docker exec" — using the host shell here would fail if it
+	// isn't installed in the image (e.g., fish on a minimal base image).
+	args = append(args, "/bin/sh")
 
 	return args, nil
 }
@@ -934,8 +962,41 @@ func (d *DockerIsolator) getContainerState(ctx context.Context, name string) (ex
 	return true, isRunning
 }
 
+// configHash computes a hash of the container-creation-time settings that cannot
+// be changed after `docker create`. When any of these change, the container must
+// be recreated.
+func (d *DockerIsolator) configHash(cfg *Config) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "proxy=%t\n", cfg.ProxyEnabled)
+	_, _ = fmt.Fprintf(h, "proxy_port=%d\n", cfg.ProxyPort)
+	_, _ = fmt.Fprintf(h, "proxy_ca=%s\n", cfg.ProxyCAPath)
+	_, _ = fmt.Fprintf(h, "network=%s\n", d.networkName)
+	_, _ = fmt.Fprintf(h, "gateway=%s\n", d.gatewayIP)
+	_, _ = fmt.Fprintf(h, "image=%s\n", d.imageTag)
+	_, _ = fmt.Fprintf(h, "mem=%s\n", d.config.MemoryLimit)
+	_, _ = fmt.Fprintf(h, "cpu=%s\n", d.config.CPULimit)
+	return fmt.Sprintf("%x", h.Sum(nil)[:8])
+}
+
+// getContainerConfigHash reads the config hash label from an existing container.
+func (d *DockerIsolator) getContainerConfigHash(ctx context.Context, name string) string {
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format",
+		fmt.Sprintf("{{index .Config.Labels %q}}", LabelConfigHash), name)
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// removeContainer stops and removes a container by name.
+func (d *DockerIsolator) removeContainer(ctx context.Context, name string) {
+	rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", name)
+	_ = rmCmd.Run()
+}
+
 // buildLabels returns Docker label arguments for a container/volume.
-func (d *DockerIsolator) buildLabels(projectDir string) []string {
+func (d *DockerIsolator) buildLabels(projectDir string, extraLabels ...string) []string {
 	projectName := filepath.Base(projectDir)
 	labels := []string{
 		"--label", LabelDevsandbox + "=true",
@@ -946,5 +1007,6 @@ func (d *DockerIsolator) buildLabels(projectDir string) []string {
 	if d.networkName != "" {
 		labels = append(labels, "--label", LabelNetworkName+"="+d.networkName)
 	}
+	labels = append(labels, extraLabels...)
 	return labels
 }

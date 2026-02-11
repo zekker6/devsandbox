@@ -589,6 +589,97 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
 	}
 }
 
+func TestDockerIsolator_ConfigHash_Deterministic(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{
+		ProxyEnabled: true,
+		ProxyPort:    8080,
+		ProxyCAPath:  "/tmp/ca.crt",
+	}
+	iso.imageTag = "devsandbox:local"
+	iso.networkName = "devsandbox-net-abc"
+	iso.gatewayIP = "172.18.0.1"
+
+	hash1 := iso.configHash(cfg)
+	hash2 := iso.configHash(cfg)
+	if hash1 != hash2 {
+		t.Error("configHash should be deterministic for same input")
+	}
+	if hash1 == "" {
+		t.Error("configHash should not be empty")
+	}
+}
+
+func TestDockerIsolator_ConfigHash_ChangesOnProxyToggle(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	cfgNoProxy := &Config{ProxyEnabled: false}
+	cfgProxy := &Config{ProxyEnabled: true, ProxyPort: 8080}
+
+	hashNoProxy := iso.configHash(cfgNoProxy)
+	hashProxy := iso.configHash(cfgProxy)
+	if hashNoProxy == hashProxy {
+		t.Error("configHash should differ when proxy is toggled")
+	}
+}
+
+func TestDockerIsolator_ConfigHash_ChangesOnPortChange(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	cfg1 := &Config{ProxyEnabled: true, ProxyPort: 8080}
+	cfg2 := &Config{ProxyEnabled: true, ProxyPort: 9090}
+
+	if iso.configHash(cfg1) == iso.configHash(cfg2) {
+		t.Error("configHash should differ when proxy port changes")
+	}
+}
+
+func TestDockerIsolator_ConfigHash_ChangesOnResourceLimits(t *testing.T) {
+	iso1 := NewDockerIsolator(DockerConfig{MemoryLimit: "4g"})
+	iso2 := NewDockerIsolator(DockerConfig{MemoryLimit: "8g"})
+	iso1.imageTag = "devsandbox:local"
+	iso2.imageTag = "devsandbox:local"
+
+	cfg := &Config{}
+	if iso1.configHash(cfg) == iso2.configHash(cfg) {
+		t.Error("configHash should differ when memory limit changes")
+	}
+}
+
+func TestDockerIsolator_BuildDocker_KeepContainer_ConfigHashLabel(t *testing.T) {
+	_, lookErr := exec.LookPath("docker")
+	if lookErr != nil {
+		t.Skip("Docker not installed")
+	}
+
+	configDir := setupTestDockerfile(t)
+	iso := NewDockerIsolator(DockerConfig{
+		ConfigDir:     configDir,
+		KeepContainer: true,
+	})
+
+	cfg := &Config{
+		ProjectDir:   "/tmp/test-hash-project",
+		SandboxHome:  "/tmp/test-sandbox",
+		HomeDir:      "/home/testuser",
+		Shell:        "/bin/bash",
+		ProxyEnabled: true,
+		ProxyPort:    8080,
+	}
+
+	result, err := iso.BuildDocker(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("BuildDocker failed: %v", err)
+	}
+
+	argsStr := strings.Join(result.Args, " ")
+	if !strings.Contains(argsStr, LabelConfigHash+"=") {
+		t.Error("Args missing config_hash label on created container")
+	}
+}
+
 func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
 	_, lookErr := exec.LookPath("docker")
 	if lookErr != nil {
