@@ -1,0 +1,7 @@
+bin/
+.git/
+e2e/
+docs/
+.claude/
+.serena/
+*.md
