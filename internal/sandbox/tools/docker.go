@@ -150,8 +150,8 @@ func (d *Docker) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		return nil
 	}
 
-	fmt.Fprintln(os.Stderr, "WARNING: Docker socket proxy enabled. The sandbox can access ALL Docker containers on this host.")
-	fmt.Fprintln(os.Stderr, "         This is equivalent to root access on the host. Only enable for trusted code.")
+	fmt.Fprintln(os.Stderr, "WARNING: Docker socket proxy enabled. The sandbox can access ALL existing Docker containers on this host.")
+	fmt.Fprintln(os.Stderr, "         This might allow accessing host resources. Ensure you trust the sandbox content.")
 
 	listenPath := d.socketPath(sandboxHome)
 	d.proxy = dockerproxy.New(d.hostSocket, listenPath)
