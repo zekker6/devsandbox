@@ -56,6 +56,11 @@ tasks:
     cmds:
       - go test -v ./...
 
+  deps:update:
+    cmds:
+      - go get -u ./...
+      - go mod tidy
+
   build:
     desc: Build binary for local development
     cmds:
