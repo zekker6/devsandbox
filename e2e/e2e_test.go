@@ -50,7 +50,7 @@ func TestSandbox_Help(t *testing.T) {
 	outputStr := string(output)
 	expectedStrings := []string{
 		"devsandbox",
-		"Bubblewrap sandbox",
+		"Secure sandbox",
 		"SSH: BLOCKED",
 		".env files: BLOCKED",
 	}
@@ -2020,9 +2020,10 @@ enabled = true
 		}
 
 		outputStr := string(output)
-		// Should contain 403 or blocked message
+		// Should contain 403/blocked message or connection reset (proxy rejecting the request)
 		if !strings.Contains(outputStr, "403") && !strings.Contains(outputStr, "blocked") &&
-			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") {
+			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") &&
+			!strings.Contains(outputStr, "connection reset by peer") {
 			t.Errorf("docker run should show blocked/403 error, got: %s", outputStr)
 		}
 	})
@@ -2039,8 +2040,10 @@ enabled = true
 		}
 
 		outputStr := string(output)
+		// Should contain 403/blocked message or connection reset (proxy rejecting the request)
 		if !strings.Contains(outputStr, "403") && !strings.Contains(outputStr, "blocked") &&
-			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") {
+			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") &&
+			!strings.Contains(outputStr, "connection reset by peer") {
 			t.Errorf("docker pull should show blocked/403 error, got: %s", outputStr)
 		}
 	})
@@ -2063,8 +2066,10 @@ enabled = true
 		}
 
 		outputStr := string(output)
+		// Should contain 403/blocked message or connection reset (proxy rejecting the request)
 		if !strings.Contains(outputStr, "403") && !strings.Contains(outputStr, "blocked") &&
-			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") {
+			!strings.Contains(outputStr, "Forbidden") && !strings.Contains(outputStr, "forbidden") &&
+			!strings.Contains(outputStr, "connection reset by peer") {
 			t.Errorf("docker build should show blocked/403 error, got: %s", outputStr)
 		}
 	})
