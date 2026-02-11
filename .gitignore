@@ -6,3 +6,5 @@ dist
 /devsandbox
 coverage.out
 claudedocs/
+docs/plans/
+devsandbox-shim
