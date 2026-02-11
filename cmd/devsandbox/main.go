@@ -61,6 +61,9 @@ Proxy Mode (--proxy):
 	rootCmd.Flags().Bool("proxy", false, "Enable proxy mode (route traffic through MITM proxy)")
 	rootCmd.Flags().Int("proxy-port", proxy.DefaultProxyPort, "Proxy server port")
 
+	// Tool flags
+	rootCmd.Flags().String("git-mode", "", "Override git tool mode for this session (readonly, readwrite, disabled)")
+
 	// Filter flags
 	rootCmd.Flags().String("filter-default", "", "Default filter action for unmatched requests: allow, block, or ask")
 	rootCmd.Flags().StringSlice("allow-domain", nil, "Allow domain pattern (can be repeated)")
@@ -122,6 +125,23 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 	}
 	if cmd.Flags().Changed("proxy-port") {
 		cfg.ProxyPort = proxyPort
+	}
+
+	// CLI override for git mode
+	if cmd.Flags().Changed("git-mode") {
+		gitMode, _ := cmd.Flags().GetString("git-mode")
+		if !tools.ValidGitMode(gitMode) {
+			return fmt.Errorf("invalid --git-mode value %q: must be readonly, readwrite, or disabled", gitMode)
+		}
+		if appCfg.Tools == nil {
+			appCfg.Tools = make(map[string]any)
+		}
+		gitCfg, ok := appCfg.Tools["git"].(map[string]any)
+		if !ok {
+			gitCfg = make(map[string]any)
+		}
+		gitCfg["mode"] = gitMode
+		appCfg.Tools["git"] = gitCfg
 	}
 
 	// Pass overlay and tools settings to sandbox config

@@ -31,6 +31,16 @@ const (
 	GitModeDisabled GitMode = "disabled"
 )
 
+// ValidGitMode returns true if the given string is a valid git mode value.
+func ValidGitMode(mode string) bool {
+	switch strings.ToLower(mode) {
+	case "readonly", "readwrite", "disabled":
+		return true
+	default:
+		return false
+	}
+}
+
 // Git provides configurable git configuration.
 // Supports three modes: readonly (default), readwrite, and disabled.
 type Git struct {
