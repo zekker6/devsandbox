@@ -25,6 +25,8 @@ func (g *GitHubCredentialInjector) Name() string {
 
 // Configure reads the injector config from the raw TOML map.
 // Expects: enabled = true/false (required, defaults to false).
+// Optional: [proxy.credentials.github.source] with env = "VAR_NAME".
+// When source is configured, it takes precedence over default env vars.
 func (g *GitHubCredentialInjector) Configure(cfg map[string]any) {
 	g.enabled = false
 
@@ -33,9 +35,13 @@ func (g *GitHubCredentialInjector) Configure(cfg map[string]any) {
 	}
 
 	if enabled, ok := cfg["enabled"].(bool); ok && enabled {
-		g.token = os.Getenv("GITHUB_TOKEN")
-		if g.token == "" {
-			g.token = os.Getenv("GH_TOKEN")
+		if src := ParseCredentialSource(cfg); src != nil {
+			g.token = src.Resolve()
+		} else {
+			g.token = os.Getenv("GITHUB_TOKEN")
+			if g.token == "" {
+				g.token = os.Getenv("GH_TOKEN")
+			}
 		}
 		g.enabled = g.token != ""
 	}

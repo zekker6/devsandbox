@@ -37,6 +37,15 @@ The proxy can inject authentication credentials into requests for specific domai
 # Reads from GITHUB_TOKEN or GH_TOKEN environment variable on the host.
 # The token is added as a Bearer Authorization header if not already present.
 enabled = true
+
+# Optional: override the default token source.
+# When configured, this takes precedence over the default environment variables.
+# Exactly one of env, file, or value should be set.
+#
+# [proxy.credentials.github.source]
+# env = "DEVSANDBOX_GITHUB_TOKEN"    # Read from a custom environment variable
+# file = "~/.config/devsandbox/github-token"  # Read from a file (~ expanded)
+# value = "github_pat_..."           # Static value (use env or file instead when possible)
 ```
 
 **How it works:**
@@ -48,16 +57,81 @@ enabled = true
 
 **Available injectors:**
 
-| Name     | Matches              | Environment Variable          | Header                        |
+| Name     | Matches              | Default Environment Variable  | Header                        |
 |----------|----------------------|-------------------------------|-------------------------------|
 | `github` | `api.github.com`     | `GITHUB_TOKEN` or `GH_TOKEN`  | `Authorization: Bearer <token>` |
+
+Default environment variables are used when no `[proxy.credentials.<name>.source]` is configured. When a source is configured, it takes precedence and defaults are ignored.
+
+**Source types:**
+
+| Field   | Description                                | Example                                      |
+|---------|--------------------------------------------|----------------------------------------------|
+| `env`   | Read from an environment variable          | `env = "DEVSANDBOX_GITHUB_TOKEN"`            |
+| `file`  | Read from a file (supports `~` expansion, whitespace trimmed) | `file = "~/.config/devsandbox/github-token"` |
+| `value` | Static value in config                     | `value = "github_pat_..."`                   |
+
+When multiple fields are set, priority is: `value` > `env` > `file`. Set exactly one for clarity.
 
 **Notes:**
 
 - Credential injection requires proxy mode (`--proxy`).
-- Injectors are only active when explicitly `enabled = true` and the corresponding environment variable is set on the host.
+- Injectors are only active when explicitly `enabled = true` and the credential resolves to a non-empty value.
 - Unknown injector names in the config produce a warning and are skipped.
 - The injector never overwrites an existing `Authorization` header on the request.
+
+### Avoiding GitHub Rate Limits (Recommended for macOS)
+
+On macOS, devsandbox uses the Docker backend. When [mise](tools.md#tool-management-with-mise) installs or updates tools inside the sandbox, it downloads releases from GitHub. Unauthenticated GitHub API requests are limited to **60 per hour** — easily exhausted when populating the tool cache for the first time.
+
+Enabling credential injection with a **read-only** GitHub token raises this limit to **5,000 requests per hour**. A token with no permissions granted is sufficient — it only needs to authenticate requests, not access private resources.
+
+**Step 1: Create a fine-grained personal access token**
+
+1. Go to [GitHub Settings → Fine-grained tokens](https://github.com/settings/personal-access-tokens/new)
+2. Set a descriptive name (e.g., `devsandbox-mise`)
+3. Set expiration as desired
+4. Under **Repository access**, select "Public Repositories (read-only)"
+5. Under **Permissions**, grant nothing — leave all permissions at "No access"
+6. Click **Generate token**
+
+**Step 2: Set the environment variable**
+
+Add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
+
+```bash
+export GITHUB_TOKEN="github_pat_..."
+```
+
+**Step 3: Enable credential injection**
+
+In `~/.config/devsandbox/config.toml`:
+
+```toml
+[proxy]
+enabled = true
+
+[proxy.credentials.github]
+enabled = true
+```
+
+The proxy injects the token into GitHub API requests automatically. The token never enters the sandbox environment — it stays on the host side and is added to matching requests by the proxy.
+
+> **Tip:** To avoid conflicts with `gh` CLI or other tools that read `GITHUB_TOKEN`, use a dedicated environment variable:
+>
+> ```bash
+> export DEVSANDBOX_GITHUB_TOKEN="github_pat_..."
+> ```
+>
+> ```toml
+> [proxy.credentials.github]
+> enabled = true
+>
+> [proxy.credentials.github.source]
+> env = "DEVSANDBOX_GITHUB_TOKEN"
+> ```
+
+> **Security note:** A fine-grained token with no permissions granted provides only public read access. This is the minimum needed to avoid rate limits. Do not use tokens with write permissions for this purpose.
 
 ### Isolation Backend
 

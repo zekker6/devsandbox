@@ -1,8 +1,2 @@
 [tools.docker]
 enabled = true
-
-[sandbox]
-isolation = "docker"
-
-[sandbox.docker]
-image = "devsandbox:local"

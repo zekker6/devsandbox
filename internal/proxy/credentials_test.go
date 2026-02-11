@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -168,6 +170,289 @@ func TestGitHubCredentialInjector_Configure(t *testing.T) {
 
 		if injector.Enabled() {
 			t.Error("expected disabled when enabled not set")
+		}
+	})
+}
+
+func TestGitHubCredentialInjector_Configure_WithSource(t *testing.T) {
+	t.Run("uses custom env var from source", func(t *testing.T) {
+		t.Setenv("CUSTOM_GH_TOKEN", "custom-token")
+		t.Setenv("GITHUB_TOKEN", "default-token")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled": true,
+			"source":  map[string]any{"env": "CUSTOM_GH_TOKEN"},
+		})
+
+		if !injector.Enabled() {
+			t.Error("expected enabled")
+		}
+		if injector.token != "custom-token" {
+			t.Errorf("token = %q, want %q", injector.token, "custom-token")
+		}
+	})
+
+	t.Run("source overrides defaults even when default vars set", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "default-token")
+		t.Setenv("GH_TOKEN", "gh-token")
+		t.Setenv("MY_TOKEN", "my-token")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled": true,
+			"source":  map[string]any{"env": "MY_TOKEN"},
+		})
+
+		if injector.token != "my-token" {
+			t.Errorf("token = %q, want %q (source should override defaults)", injector.token, "my-token")
+		}
+	})
+
+	t.Run("disabled when source env var is unset", func(t *testing.T) {
+		t.Setenv("MISSING_VAR", "")
+		t.Setenv("GITHUB_TOKEN", "default-token")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled": true,
+			"source":  map[string]any{"env": "MISSING_VAR"},
+		})
+
+		if injector.Enabled() {
+			t.Error("expected disabled when source env var is empty")
+		}
+	})
+
+	t.Run("falls back to defaults when source not configured", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "default-token")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{"enabled": true})
+
+		if !injector.Enabled() {
+			t.Error("expected enabled")
+		}
+		if injector.token != "default-token" {
+			t.Errorf("token = %q, want %q", injector.token, "default-token")
+		}
+	})
+
+	t.Run("uses static value from source", func(t *testing.T) {
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled": true,
+			"source":  map[string]any{"value": "static-github-token"},
+		})
+
+		if !injector.Enabled() {
+			t.Error("expected enabled")
+		}
+		if injector.token != "static-github-token" {
+			t.Errorf("token = %q, want %q", injector.token, "static-github-token")
+		}
+	})
+
+	t.Run("uses file from source", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "gh-token")
+		if err := os.WriteFile(path, []byte("file-github-token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled": true,
+			"source":  map[string]any{"file": path},
+		})
+
+		if !injector.Enabled() {
+			t.Error("expected enabled")
+		}
+		if injector.token != "file-github-token" {
+			t.Errorf("token = %q, want %q", injector.token, "file-github-token")
+		}
+	})
+}
+
+func TestParseCredentialSource(t *testing.T) {
+	t.Run("nil config returns nil", func(t *testing.T) {
+		src := ParseCredentialSource(nil)
+		if src != nil {
+			t.Errorf("expected nil, got %+v", src)
+		}
+	})
+
+	t.Run("no source key returns nil", func(t *testing.T) {
+		src := ParseCredentialSource(map[string]any{"enabled": true})
+		if src != nil {
+			t.Errorf("expected nil, got %+v", src)
+		}
+	})
+
+	t.Run("source with env", func(t *testing.T) {
+		src := ParseCredentialSource(map[string]any{
+			"source": map[string]any{"env": "MY_TOKEN"},
+		})
+		if src == nil {
+			t.Fatal("expected non-nil source")
+		}
+		if src.Env != "MY_TOKEN" {
+			t.Errorf("Env = %q, want %q", src.Env, "MY_TOKEN")
+		}
+	})
+
+	t.Run("source with value", func(t *testing.T) {
+		src := ParseCredentialSource(map[string]any{
+			"source": map[string]any{"value": "static-secret"},
+		})
+		if src == nil {
+			t.Fatal("expected non-nil source")
+		}
+		if src.Value != "static-secret" {
+			t.Errorf("Value = %q, want %q", src.Value, "static-secret")
+		}
+	})
+
+	t.Run("source with file", func(t *testing.T) {
+		src := ParseCredentialSource(map[string]any{
+			"source": map[string]any{"file": "~/.config/devsandbox/github-token"},
+		})
+		if src == nil {
+			t.Fatal("expected non-nil source")
+		}
+		if src.File != "~/.config/devsandbox/github-token" {
+			t.Errorf("File = %q, want %q", src.File, "~/.config/devsandbox/github-token")
+		}
+	})
+
+	t.Run("empty source returns non-nil with empty fields", func(t *testing.T) {
+		src := ParseCredentialSource(map[string]any{
+			"source": map[string]any{},
+		})
+		if src == nil {
+			t.Fatal("expected non-nil source (explicit empty source)")
+		}
+		if src.Env != "" {
+			t.Errorf("Env = %q, want empty", src.Env)
+		}
+	})
+
+	t.Run("source with wrong type is ignored", func(t *testing.T) {
+		src := ParseCredentialSource(map[string]any{
+			"source": "not-a-map",
+		})
+		if src != nil {
+			t.Errorf("expected nil for wrong type, got %+v", src)
+		}
+	})
+}
+
+func TestCredentialSource_Resolve(t *testing.T) {
+	t.Run("resolves env var", func(t *testing.T) {
+		t.Setenv("TEST_CRED_TOKEN", "resolved-value")
+
+		src := &CredentialSource{Env: "TEST_CRED_TOKEN"}
+		if got := src.Resolve(); got != "resolved-value" {
+			t.Errorf("Resolve() = %q, want %q", got, "resolved-value")
+		}
+	})
+
+	t.Run("returns empty when env var missing", func(t *testing.T) {
+		t.Setenv("TEST_CRED_MISSING", "")
+
+		src := &CredentialSource{Env: "TEST_CRED_MISSING"}
+		if got := src.Resolve(); got != "" {
+			t.Errorf("Resolve() = %q, want empty", got)
+		}
+	})
+
+	t.Run("returns empty when all fields empty", func(t *testing.T) {
+		src := &CredentialSource{}
+		if got := src.Resolve(); got != "" {
+			t.Errorf("Resolve() = %q, want empty", got)
+		}
+	})
+
+	t.Run("resolves static value", func(t *testing.T) {
+		src := &CredentialSource{Value: "static-secret"}
+		if got := src.Resolve(); got != "static-secret" {
+			t.Errorf("Resolve() = %q, want %q", got, "static-secret")
+		}
+	})
+
+	t.Run("resolves file contents", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "token")
+		if err := os.WriteFile(path, []byte("file-secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		src := &CredentialSource{File: path}
+		if got := src.Resolve(); got != "file-secret" {
+			t.Errorf("Resolve() = %q, want %q (should trim whitespace)", got, "file-secret")
+		}
+	})
+
+	t.Run("returns empty when file does not exist", func(t *testing.T) {
+		src := &CredentialSource{File: "/nonexistent/path/to/token"}
+		if got := src.Resolve(); got != "" {
+			t.Errorf("Resolve() = %q, want empty", got)
+		}
+	})
+
+	t.Run("value takes priority over env", func(t *testing.T) {
+		t.Setenv("TEST_CRED_PRIORITY", "from-env")
+
+		src := &CredentialSource{Value: "from-value", Env: "TEST_CRED_PRIORITY"}
+		if got := src.Resolve(); got != "from-value" {
+			t.Errorf("Resolve() = %q, want %q (value should take priority)", got, "from-value")
+		}
+	})
+
+	t.Run("env takes priority over file", func(t *testing.T) {
+		t.Setenv("TEST_CRED_ENV_PRIO", "from-env")
+		dir := t.TempDir()
+		path := filepath.Join(dir, "token")
+		if err := os.WriteFile(path, []byte("from-file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		src := &CredentialSource{Env: "TEST_CRED_ENV_PRIO", File: path}
+		if got := src.Resolve(); got != "from-env" {
+			t.Errorf("Resolve() = %q, want %q (env should take priority over file)", got, "from-env")
+		}
+	})
+
+	t.Run("file with tilde expansion", func(t *testing.T) {
+		// Write to a temp file under home to test ~ expansion
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Skip("cannot determine home directory")
+		}
+		dir := t.TempDir()
+		// TempDir is not under ~, so test absolute path with expandHome logic
+		path := filepath.Join(dir, "token")
+		if err := os.WriteFile(path, []byte("  token-with-spaces  \n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Test absolute path works (no expansion needed)
+		src := &CredentialSource{File: path}
+		if got := src.Resolve(); got != "token-with-spaces" {
+			t.Errorf("Resolve() = %q, want %q", got, "token-with-spaces")
+		}
+
+		// Test ~ expansion with a known path under home
+		testFile := filepath.Join(home, ".devsandbox-test-cred-resolve")
+		if err := os.WriteFile(testFile, []byte("home-token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(testFile) })
+
+		src = &CredentialSource{File: "~/.devsandbox-test-cred-resolve"}
+		if got := src.Resolve(); got != "home-token" {
+			t.Errorf("Resolve() = %q, want %q (tilde should expand)", got, "home-token")
 		}
 	})
 }
