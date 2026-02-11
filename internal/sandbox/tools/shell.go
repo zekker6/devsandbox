@@ -30,17 +30,47 @@ func (f *Fish) Available(homeDir string) bool {
 }
 
 func (f *Fish) Bindings(homeDir, sandboxHome string) []Binding {
+	// Mount specific fish config files/directories, but NOT fish_variables.
+	// fish_variables contains host-specific paths (like /home/username/...)
+	// and fish needs to write to it for universal variables (set -U).
+	// Mounting the whole ~/.config/fish would include fish_variables read-only,
+	// causing "Unable to open universal variable file '/'" errors when fish
+	// tries to write universal variables.
+	fishConfig := filepath.Join(homeDir, ".config", "fish")
 	return []Binding{
 		{
-			Source:   filepath.Join(homeDir, ".config", "fish"),
+			Source:   filepath.Join(fishConfig, "config.fish"),
 			ReadOnly: true,
 			Optional: true,
 		},
 		{
-			Source:   filepath.Join(homeDir, ".local", "share", "fish", "vendor_completions.d"),
+			Source:   filepath.Join(fishConfig, "functions"),
 			ReadOnly: true,
 			Optional: true,
 		},
+		{
+			Source:   filepath.Join(fishConfig, "completions"),
+			ReadOnly: true,
+			Optional: true,
+		},
+		{
+			Source:   filepath.Join(fishConfig, "conf.d"),
+			ReadOnly: true,
+			Optional: true,
+		},
+		{
+			Source:   filepath.Join(fishConfig, "themes"),
+			ReadOnly: true,
+			Optional: true,
+		},
+		{
+			Source:   filepath.Join(fishConfig, "fish_plugins"),
+			ReadOnly: true,
+			Optional: true,
+		},
+		// Note: .local/share/fish is NOT mounted read-only because fish needs
+		// to write universal variables to fish_variables. Let fish use the
+		// sandbox home's copy which is writable.
 	}
 }
 

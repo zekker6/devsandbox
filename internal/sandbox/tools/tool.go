@@ -110,6 +110,9 @@ type GlobalConfig struct {
 
 	// ProjectDir is the current project directory (where .git may reside).
 	ProjectDir string
+
+	// HomeDir is the user's home directory on the host.
+	HomeDir string
 }
 
 // ToolWithConfig extends Tool with configuration support.
@@ -153,4 +156,44 @@ type ErrorLogger interface {
 type ToolWithLogger interface {
 	// SetLogger sets the logger for tool errors.
 	SetLogger(logger ErrorLogger)
+}
+
+// DockerMount represents a Docker volume mount.
+type DockerMount struct {
+	Source   string // Host path or volume name
+	Dest     string // Container path
+	ReadOnly bool
+	Type     string // "bind" or "volume"
+}
+
+// ToolWithDocker extends Tool with Docker-specific bindings.
+// Tools that need different behavior in Docker mode should implement this.
+type ToolWithDocker interface {
+	Tool
+
+	// DockerBindings returns Docker-specific mounts.
+	// If not implemented, regular Bindings are converted to Docker mounts.
+	DockerBindings(homeDir, sandboxHome string) []DockerMount
+}
+
+// CacheMount describes a cache directory a tool needs in Docker mode.
+// Cache directories are shared across all projects via a single volume.
+type CacheMount struct {
+	Name   string // Subdirectory under /cache (e.g., "mise", "go/mod")
+	EnvVar string // Environment variable to set (e.g., "MISE_DATA_DIR")
+}
+
+// FullPath returns the full container path for this cache mount.
+func (c CacheMount) FullPath() string {
+	return "/cache/" + c.Name
+}
+
+// ToolWithCache is implemented by tools that use shared caches in Docker mode.
+// These caches are shared across all projects to avoid re-downloading tools.
+type ToolWithCache interface {
+	Tool
+
+	// CacheMounts returns cache directories this tool needs.
+	// Each mount creates a subdirectory under /cache and sets an env var.
+	CacheMounts() []CacheMount
 }

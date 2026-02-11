@@ -54,6 +54,7 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 			globalCfg := GlobalConfig{
 				OverlayEnabled: r.cfg.OverlayEnabled,
 				ProjectDir:     r.cfg.ProjectDir,
+				HomeDir:        r.cfg.HomeDir,
 			}
 			var toolCfg map[string]any
 			if r.cfg.ToolsConfig != nil {

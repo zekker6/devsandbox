@@ -38,3 +38,17 @@ func Available(homeDir string) []Tool {
 	}
 	return available
 }
+
+// CollectCacheMounts returns all cache mounts from registered tools.
+// Uses All() instead of Available() because Docker containers provide their
+// own tool binaries — host availability is irrelevant for cache mounts.
+// Only tools that implement ToolWithCache are included.
+func CollectCacheMounts() []CacheMount {
+	var mounts []CacheMount
+	for _, tool := range All() {
+		if cacheTool, ok := tool.(ToolWithCache); ok {
+			mounts = append(mounts, cacheTool.CacheMounts()...)
+		}
+	}
+	return mounts
+}

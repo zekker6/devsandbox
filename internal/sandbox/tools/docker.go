@@ -2,8 +2,11 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"devsandbox/internal/dockerproxy"
 )
@@ -13,9 +16,46 @@ func init() {
 }
 
 const (
-	defaultDockerSocket = "/run/docker.sock"
-	dockerSocketName    = "docker.sock"
+	defaultLinuxDockerSocket = "/run/docker.sock"
+	dockerSocketName         = "docker.sock"
 )
+
+// macOSDockerSocketCandidates returns ordered candidate paths for the Docker
+// socket on macOS. The order reflects popularity: Docker Desktop, OrbStack
+// (symlinks /var/run/docker.sock), then Colima.
+func macOSDockerSocketCandidates(homeDir string) []string {
+	return []string{
+		filepath.Join(homeDir, ".docker", "run", "docker.sock"), // Docker Desktop
+		"/var/run/docker.sock", // OrbStack, symlinks
+		filepath.Join(homeDir, ".colima", "default", "docker.sock"), // Colima
+	}
+}
+
+// resolveDockerSocket determines the Docker socket path to use.
+// If userSocket is non-empty it is returned as-is (explicit user override).
+// On macOS (goos == "darwin"), candidate paths are probed in order and the
+// first existing socket is returned. On Linux the default /run/docker.sock
+// is returned.
+func resolveDockerSocket(goos, homeDir, userSocket string) string {
+	if userSocket != "" {
+		return userSocket
+	}
+
+	if goos == "darwin" {
+		for _, candidate := range macOSDockerSocketCandidates(homeDir) {
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+		// None found — return first candidate so error messages are clear.
+		candidates := macOSDockerSocketCandidates(homeDir)
+		if len(candidates) > 0 {
+			return candidates[0]
+		}
+	}
+
+	return defaultLinuxDockerSocket
+}
 
 // Docker provides filtered access to the Docker socket.
 // Only read operations and exec/attach are allowed.
@@ -46,7 +86,7 @@ func (d *Docker) Description() string {
 func (d *Docker) Available(homeDir string) bool {
 	socket := d.hostSocket
 	if socket == "" {
-		socket = defaultDockerSocket
+		socket = resolveDockerSocket(runtime.GOOS, homeDir, "")
 	}
 	_, err := os.Stat(socket)
 	return err == nil
@@ -61,25 +101,24 @@ func (d *Docker) socketPath(sandboxHome string) string {
 // Configure implements ToolWithConfig.
 func (d *Docker) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	d.enabled = false
-	d.hostSocket = defaultDockerSocket
+	d.hostSocket = ""
 
-	if toolCfg == nil {
-		return
-	}
-
-	// Check enabled
-	if enabled, ok := toolCfg["enabled"]; ok {
-		if b, ok := enabled.(bool); ok {
-			d.enabled = b
+	// Parse user-provided socket first.
+	var userSocket string
+	if toolCfg != nil {
+		if enabled, ok := toolCfg["enabled"]; ok {
+			if b, ok := enabled.(bool); ok {
+				d.enabled = b
+			}
+		}
+		if socket, ok := toolCfg["socket"]; ok {
+			if s, ok := socket.(string); ok && s != "" {
+				userSocket = s
+			}
 		}
 	}
 
-	// Custom socket path
-	if socket, ok := toolCfg["socket"]; ok {
-		if s, ok := socket.(string); ok && s != "" {
-			d.hostSocket = s
-		}
-	}
+	d.hostSocket = resolveDockerSocket(runtime.GOOS, globalCfg.HomeDir, userSocket)
 }
 
 func (d *Docker) Bindings(homeDir, sandboxHome string) []Binding {
@@ -111,6 +150,9 @@ func (d *Docker) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		return nil
 	}
 
+	fmt.Fprintln(os.Stderr, "WARNING: Docker socket proxy enabled. The sandbox can access ALL Docker containers on this host.")
+	fmt.Fprintln(os.Stderr, "         This is equivalent to root access on the host. Only enable for trusted code.")
+
 	listenPath := d.socketPath(sandboxHome)
 	d.proxy = dockerproxy.New(d.hostSocket, listenPath)
 	if d.logger != nil {
@@ -134,19 +176,27 @@ func (d *Docker) Check(homeDir string) CheckResult {
 		InstallHint: "Docker socket not found. Ensure Docker is installed and running.",
 	}
 
-	// Check if socket exists
-	if d.hostSocket == "" {
-		d.hostSocket = defaultDockerSocket
+	// Resolve socket if not yet configured.
+	socket := d.hostSocket
+	if socket == "" {
+		socket = resolveDockerSocket(runtime.GOOS, homeDir, "")
 	}
 
-	if _, err := os.Stat(d.hostSocket); err != nil {
+	if _, err := os.Stat(socket); err != nil {
 		result.Available = false
-		result.AddIssue("Docker socket not found at " + d.hostSocket)
+		result.AddIssue("Docker socket not found at " + socket)
+
+		// On macOS, list all searched candidate paths.
+		if runtime.GOOS == "darwin" {
+			searched := macOSDockerSocketCandidates(homeDir)
+			result.AddIssue("Searched macOS candidates: " + strings.Join(searched, ", "))
+		}
+
 		return result
 	}
 
 	result.Available = true
-	result.ConfigPaths = []string{d.hostSocket}
+	result.ConfigPaths = []string{socket}
 
 	// Add mode info
 	if d.enabled {
