@@ -17,6 +17,16 @@ var ErrNoMonitor = errors.New("no monitor connected")
 // ErrTimeout indicates the request timed out waiting for user response.
 var ErrTimeout = errors.New("request timed out waiting for user response")
 
+// AskMode represents how the AskServer operates.
+type AskMode string
+
+const (
+	// AskModeServer means AskServer owns the socket and listens for monitor connections.
+	AskModeServer AskMode = "server"
+	// AskModeClient means AskServer connects to a pre-existing monitor socket as a client.
+	AskModeClient AskMode = "client"
+)
+
 // AskRequest is sent from the proxy to the monitor for user approval.
 type AskRequest struct {
 	ID      string            `json:"id"`
@@ -45,14 +55,21 @@ type monitorConn struct {
 
 // AskServer manages connections from monitor clients and routes approval requests.
 type AskServer struct {
+	mode       AskMode
 	socketPath string
-	listener   net.Listener
 
-	// Connected monitors
+	// Server mode fields
+	listener   net.Listener
 	monitors   []*monitorConn
 	monitorsMu sync.RWMutex
 
-	// Pending requests waiting for response
+	// Client mode fields
+	conn     net.Conn
+	encoder  *json.Encoder
+	decoder  *json.Decoder
+	clientMu sync.Mutex
+
+	// Shared fields
 	pending   map[string]chan AskResponse
 	pendingMu sync.Mutex
 
@@ -61,6 +78,8 @@ type AskServer struct {
 }
 
 // NewAskServer creates a new ask mode server.
+// If an existing monitor socket is detected and responsive, connects as a client.
+// Otherwise, creates its own socket and listens for monitor connections (server mode).
 func NewAskServer(sandboxRoot string) (*AskServer, error) {
 	socketDir := AskSocketDir(sandboxRoot)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
@@ -69,15 +88,34 @@ func NewAskServer(sandboxRoot string) (*AskServer, error) {
 
 	socketPath := AskSocketPath(sandboxRoot)
 
-	// Remove stale socket
-	_ = os.Remove(socketPath)
+	// Check if a monitor is already listening on the socket
+	if _, err := os.Stat(socketPath); err == nil {
+		conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+		if err == nil {
+			// Socket is live — connect as client
+			server := &AskServer{
+				mode:       AskModeClient,
+				socketPath: socketPath,
+				conn:       conn,
+				encoder:    json.NewEncoder(conn),
+				decoder:    json.NewDecoder(conn),
+				pending:    make(map[string]chan AskResponse),
+			}
+			go server.handleClientResponses()
+			return server, nil
+		}
+		// Stale socket — remove and fall through to server mode
+		_ = os.Remove(socketPath)
+	}
 
+	// Server mode: create socket and listen
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on socket: %w", err)
 	}
 
 	server := &AskServer{
+		mode:       AskModeServer,
 		socketPath: socketPath,
 		listener:   listener,
 		pending:    make(map[string]chan AskResponse),
@@ -88,13 +126,24 @@ func NewAskServer(sandboxRoot string) (*AskServer, error) {
 	return server, nil
 }
 
+// Mode returns the operating mode of the AskServer.
+func (s *AskServer) Mode() AskMode {
+	return s.mode
+}
+
 // SocketPath returns the path to the Unix socket.
 func (s *AskServer) SocketPath() string {
 	return s.socketPath
 }
 
-// HasMonitor returns true if at least one monitor is connected.
+// HasMonitor returns true if at least one monitor is connected (server mode)
+// or the client connection is still alive (client mode).
 func (s *AskServer) HasMonitor() bool {
+	if s.mode == AskModeClient {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.conn != nil && !s.closed
+	}
 	s.monitorsMu.RLock()
 	defer s.monitorsMu.RUnlock()
 	return len(s.monitors) > 0
@@ -160,6 +209,44 @@ func (s *AskServer) handleMonitor(monitor *monitorConn) {
 	}
 }
 
+// handleClientResponses reads responses from the monitor in client mode.
+func (s *AskServer) handleClientResponses() {
+	for {
+		var resp AskResponse
+		if err := s.decoder.Decode(&resp); err != nil {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
+				return
+			}
+			// Monitor disconnected — cancel all pending requests
+			s.pendingMu.Lock()
+			for id, ch := range s.pending {
+				close(ch)
+				delete(s.pending, id)
+			}
+			s.pendingMu.Unlock()
+			return
+		}
+
+		s.pendingMu.Lock()
+		ch, ok := s.pending[resp.ID]
+		if ok {
+			delete(s.pending, resp.ID)
+		}
+		s.pendingMu.Unlock()
+
+		if ok {
+			select {
+			case ch <- resp:
+			default:
+			}
+			close(ch)
+		}
+	}
+}
+
 // removeMonitor removes a disconnected monitor from the list.
 func (s *AskServer) removeMonitor(monitor *monitorConn) {
 	s.monitorsMu.Lock()
@@ -175,19 +262,22 @@ func (s *AskServer) removeMonitor(monitor *monitorConn) {
 
 // Ask sends a request to connected monitors and waits for a response.
 func (s *AskServer) Ask(ctx context.Context, req *AskRequest) (AskResponse, error) {
-	// Check if any monitor is connected
-	s.monitorsMu.RLock()
-	monitors := make([]*monitorConn, len(s.monitors))
-	copy(monitors, s.monitors)
-	s.monitorsMu.RUnlock()
+	if s.mode == AskModeClient {
+		return s.askClient(ctx, req)
+	}
+	return s.askServer(ctx, req)
+}
 
-	if len(monitors) == 0 {
+// askClient sends a request to the monitor over the client connection and waits for a response.
+func (s *AskServer) askClient(ctx context.Context, req *AskRequest) (AskResponse, error) {
+	s.mu.Lock()
+	if s.closed || s.conn == nil {
+		s.mu.Unlock()
 		return AskResponse{}, ErrNoMonitor
 	}
+	s.mu.Unlock()
 
-	// Create response channel
 	ch := make(chan AskResponse, 1)
-
 	s.pendingMu.Lock()
 	s.pending[req.ID] = ch
 	s.pendingMu.Unlock()
@@ -198,15 +288,55 @@ func (s *AskServer) Ask(ctx context.Context, req *AskRequest) (AskResponse, erro
 		s.pendingMu.Unlock()
 	}()
 
-	// Send request to all connected monitors
+	s.clientMu.Lock()
+	err := s.encoder.Encode(req)
+	s.clientMu.Unlock()
+	if err != nil {
+		return AskResponse{}, ErrNoMonitor
+	}
+
+	select {
+	case resp, ok := <-ch:
+		if !ok {
+			return AskResponse{}, ErrNoMonitor
+		}
+		return resp, nil
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return AskResponse{}, ErrTimeout
+		}
+		return AskResponse{}, ctx.Err()
+	}
+}
+
+// askServer is the original Ask logic for server mode.
+func (s *AskServer) askServer(ctx context.Context, req *AskRequest) (AskResponse, error) {
+	s.monitorsMu.RLock()
+	monitors := make([]*monitorConn, len(s.monitors))
+	copy(monitors, s.monitors)
+	s.monitorsMu.RUnlock()
+
+	if len(monitors) == 0 {
+		return AskResponse{}, ErrNoMonitor
+	}
+
+	ch := make(chan AskResponse, 1)
+	s.pendingMu.Lock()
+	s.pending[req.ID] = ch
+	s.pendingMu.Unlock()
+
+	defer func() {
+		s.pendingMu.Lock()
+		delete(s.pending, req.ID)
+		s.pendingMu.Unlock()
+	}()
+
 	for _, monitor := range monitors {
 		if err := monitor.encoder.Encode(req); err != nil {
-			// Monitor disconnected, will be cleaned up by handleMonitor
 			continue
 		}
 	}
 
-	// Wait for response or timeout
 	select {
 	case resp := <-ch:
 		return resp, nil
@@ -224,7 +354,15 @@ func (s *AskServer) Close() error {
 	s.closed = true
 	s.mu.Unlock()
 
-	// Close all monitor connections
+	if s.mode == AskModeClient {
+		if s.conn != nil {
+			_ = s.conn.Close()
+		}
+		// Don't remove socket — monitor owns it
+		return nil
+	}
+
+	// Server mode cleanup
 	s.monitorsMu.Lock()
 	for _, monitor := range s.monitors {
 		_ = monitor.conn.Close()
