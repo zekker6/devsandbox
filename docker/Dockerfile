@@ -1,5 +1,5 @@
 # ---- Stage 1: Build Go shim ----
-FROM golang:1.25-bookworm AS shim-builder
+FROM golang:1.26-bookworm AS shim-builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
