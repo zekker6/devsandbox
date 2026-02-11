@@ -2119,12 +2119,21 @@ enabled = true
 	}
 
 	outputStr := strings.TrimSpace(string(output))
-	// Should point to the proxy socket at $HOME/docker.sock
-	if !strings.HasPrefix(outputStr, "unix://") {
-		t.Errorf("DOCKER_HOST should be unix:// URL, got: %s", outputStr)
+
+	// Find the unix:// line (stderr warnings may precede it)
+	var dockerHost string
+	for line := range strings.SplitSeq(outputStr, "\n") {
+		if strings.HasPrefix(line, "unix://") {
+			dockerHost = line
+			break
+		}
 	}
-	if !strings.Contains(outputStr, "docker.sock") {
-		t.Errorf("DOCKER_HOST should point to docker.sock, got: %s", outputStr)
+
+	if dockerHost == "" {
+		t.Fatalf("DOCKER_HOST should contain unix:// URL, got: %s", outputStr)
+	}
+	if !strings.Contains(dockerHost, "docker.sock") {
+		t.Errorf("DOCKER_HOST should point to docker.sock, got: %s", dockerHost)
 	}
 }
 
