@@ -1,4 +1,16 @@
 // Package dockerproxy provides a filtering proxy for the Docker socket.
+//
+// SECURITY WARNING: Even with filtering, Docker socket access grants significant
+// privileges. The proxy allows:
+//   - GET/HEAD: Read access to ALL Docker state (containers, images, volumes, networks)
+//   - POST exec/attach: Execute commands in ANY container on the host
+//
+// This is by design — the sandbox needs Docker access for container workflows.
+// However, users must understand that enabling Docker socket forwarding effectively
+// grants the sandbox access equivalent to the Docker group (often root-equivalent).
+//
+// The proxy blocks container creation, deletion, image manipulation, and other
+// write operations. But exec into existing containers is intentionally allowed.
 package dockerproxy
 
 import (

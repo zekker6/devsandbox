@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,13 +30,19 @@ func newDoctorCmd() *cobra.Command {
 		Short: "Check installation and dependencies",
 		Long: `Verify that all required dependencies are installed and configured correctly.
 
-Checks:
-  - Required binaries (bwrap, shell)
+Checks (all platforms):
+  - Shell detection
+  - Directory permissions
+  - Configuration file
+  - Recent error logs
+  - Docker and Docker image availability
+
+Checks (Linux only):
+  - Required binaries (bwrap)
   - Optional binaries (pasta for proxy mode)
   - User namespace support
-  - Directory permissions
-  - Overlayfs support (for tool writable layers)
-  - Recent errors in internal logs`,
+  - Kernel version
+  - Overlayfs support`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor()
 		},
@@ -47,22 +54,26 @@ Checks:
 func runDoctor() error {
 	var results []checkResult
 
-	results = append(results, checkBinary("bwrap", true, "bubblewrap - required for sandboxing"))
+	// Platform-specific checks (Linux only)
+	if runtime.GOOS == "linux" {
+		results = append(results, checkBinary("bwrap", true, "bubblewrap - required for sandbox isolation on Linux"))
+		results = append(results, checkUserNamespaces())
+		results = append(results, checkKernelVersion())
+		results = append(results, checkOverlayfs())
+	}
+
+	// Universal checks
 	results = append(results, checkShell())
-
-	results = append(results, checkBinary("pasta", false, "passt - required for proxy mode"))
-
-	results = append(results, checkUserNamespaces())
-
+	if runtime.GOOS == "linux" {
+		results = append(results, checkBinary("pasta", false, "passt - required for proxy mode"))
+	}
 	results = append(results, checkDirectories())
-
-	results = append(results, checkKernelVersion())
-
 	results = append(results, checkConfigFile())
-
-	results = append(results, checkOverlayfs())
-
 	results = append(results, checkRecentLogs())
+
+	// Docker checks (both platforms)
+	results = append(results, checkDocker())
+	results = append(results, checkDockerImage(""))
 
 	printDoctorResults(results)
 
@@ -128,6 +139,8 @@ func getBinaryVersion(name string) string {
 	case "bash":
 		cmd = exec.Command(name, "--version")
 	case "zsh":
+		cmd = exec.Command(name, "--version")
+	case "docker":
 		cmd = exec.Command(name, "--version")
 	default:
 		return ""
@@ -604,5 +617,64 @@ func checkRecentLogs() checkResult {
 		name:    "logs",
 		status:  status,
 		message: msg,
+	}
+}
+
+func checkDocker() checkResult {
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		return checkResult{
+			name:    "docker",
+			status:  "warn",
+			message: "not found - required for Docker isolation backend",
+		}
+	}
+
+	// Check if daemon is running
+	cmd := exec.Command("docker", "info")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		return checkResult{
+			name:    "docker",
+			status:  "warn",
+			message: fmt.Sprintf("found at %s but daemon not running", path),
+		}
+	}
+
+	// Get version
+	version := getBinaryVersion("docker")
+	msg := fmt.Sprintf("found at %s", path)
+	if version != "" {
+		msg = fmt.Sprintf("%s (%s)", version, path)
+	}
+
+	return checkResult{
+		name:    "docker",
+		status:  "ok",
+		message: msg,
+	}
+}
+
+func checkDockerImage(image string) checkResult {
+	if image == "" {
+		image = "ghcr.io/zekker6/devsandbox:latest"
+	}
+
+	cmd := exec.Command("docker", "image", "inspect", image)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		return checkResult{
+			name:    "docker-image",
+			status:  "warn",
+			message: fmt.Sprintf("%s not found locally (will pull on first use)", image),
+		}
+	}
+
+	return checkResult{
+		name:    "docker-image",
+		status:  "ok",
+		message: fmt.Sprintf("%s available", image),
 	}
 }

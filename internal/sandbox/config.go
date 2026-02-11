@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"devsandbox/internal/config"
@@ -37,6 +38,9 @@ type Config struct {
 	Shell       Shell  // Detected shell (fish, bash, zsh)
 	ShellPath   string // Full path to shell binary
 
+	// Isolation backend ("bwrap" or "docker")
+	Isolation IsolationType
+
 	// Proxy settings
 	ProxyEnabled bool
 	ProxyPort    int
@@ -58,6 +62,10 @@ type Config struct {
 	// ConfigVisibility controls how .devsandbox.toml is exposed to the sandbox
 	// Values: "hidden", "readonly", "readwrite"
 	ConfigVisibility string
+
+	// Logger for reporting warnings and errors during sandbox setup.
+	// If nil, log messages are silently dropped.
+	Logger Logger
 }
 
 // Options allows customizing sandbox configuration.
@@ -89,7 +97,7 @@ func NewConfig(opts *Options) (*Config, error) {
 
 	xdgRuntime := os.Getenv("XDG_RUNTIME_DIR")
 	if xdgRuntime == "" {
-		xdgRuntime = filepath.Join("/run/user", string(rune(os.Getuid())))
+		xdgRuntime = filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
 	}
 
 	shell, shellPath := DetectShell()

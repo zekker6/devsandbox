@@ -37,14 +37,16 @@ type RequestLog struct {
 // RequestLogger writes HTTP request/response logs to rotating gzip-compressed files
 // and optionally forwards them to remote destinations.
 type RequestLogger struct {
-	writer     *RotatingFileWriter
-	dispatcher *logging.Dispatcher
-	mu         sync.Mutex
+	writer         *RotatingFileWriter
+	dispatcher     *logging.Dispatcher
+	ownsDispatcher bool // true if this logger created/owns the dispatcher
+	mu             sync.Mutex
 }
 
 // NewRequestLogger creates a new request logger.
 // If dispatcher is provided, logs will also be forwarded to remote destinations.
-func NewRequestLogger(dir string, dispatcher *logging.Dispatcher) (*RequestLogger, error) {
+// If ownsDispatcher is true, the dispatcher will be closed when the logger is closed.
+func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher bool) (*RequestLogger, error) {
 	writer, err := NewRotatingFileWriter(RotatingFileWriterConfig{
 		Dir:           dir,
 		Prefix:        RequestLogPrefix,
@@ -56,8 +58,9 @@ func NewRequestLogger(dir string, dispatcher *logging.Dispatcher) (*RequestLogge
 	}
 
 	return &RequestLogger{
-		writer:     writer,
-		dispatcher: dispatcher,
+		writer:         writer,
+		dispatcher:     dispatcher,
+		ownsDispatcher: ownsDispatcher,
 	}, nil
 }
 
@@ -125,7 +128,7 @@ func (rl *RequestLogger) LogRequest(req *http.Request) (*RequestLog, []byte) {
 		Timestamp:      time.Now(),
 		Method:         req.Method,
 		URL:            req.URL.String(),
-		RequestHeaders: cloneHeaders(req.Header),
+		RequestHeaders: redactHeaders(cloneHeaders(req.Header)),
 	}
 
 	// Read and restore request body
@@ -150,7 +153,7 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 	}
 
 	entry.StatusCode = resp.StatusCode
-	entry.ResponseHeaders = cloneHeaders(resp.Header)
+	entry.ResponseHeaders = redactHeaders(cloneHeaders(resp.Header))
 
 	// Read and restore response body
 	var respBody []byte
@@ -165,11 +168,36 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 }
 
 // Close closes the logger and flushes remote destinations.
+// The dispatcher is only closed if this logger owns it.
 func (rl *RequestLogger) Close() error {
-	if rl.dispatcher != nil {
+	if rl.dispatcher != nil && rl.ownsDispatcher {
 		_ = rl.dispatcher.Close()
 	}
 	return rl.writer.Close()
+}
+
+var sensitiveHeaders = map[string]bool{
+	"Authorization":       true,
+	"Cookie":              true,
+	"Set-Cookie":          true,
+	"X-Api-Key":           true,
+	"X-Auth-Token":        true,
+	"Proxy-Authorization": true,
+}
+
+func redactHeaders(headers map[string][]string) map[string][]string {
+	if headers == nil {
+		return nil
+	}
+	redacted := make(map[string][]string, len(headers))
+	for k, v := range headers {
+		if sensitiveHeaders[http.CanonicalHeaderKey(k)] {
+			redacted[k] = []string{"[REDACTED]"}
+		} else {
+			redacted[k] = v
+		}
+	}
+	return redacted
 }
 
 func cloneHeaders(h http.Header) map[string][]string {

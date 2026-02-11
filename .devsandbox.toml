@@ -1,2 +1,7 @@
 [tools.docker]
 enabled = true
+
+[sandbox]
+isolation = "bwrap"
+
+[sandbox.docker]

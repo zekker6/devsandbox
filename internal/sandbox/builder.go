@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -60,6 +59,13 @@ func NewBuilder(cfg *Config) *Builder {
 		cfg:    cfg,
 		args:   make([]string, 0, initialArgsCapacity),
 		mounts: make([]mountInfo, 0, initialMountsCapacity),
+	}
+}
+
+// logWarnf logs a warning via the configured logger, if any.
+func (b *Builder) logWarnf(format string, args ...any) {
+	if b.cfg.Logger != nil {
+		b.cfg.Logger.Warnf(format, args...)
 	}
 }
 
@@ -156,6 +162,16 @@ func (b *Builder) UnshareUser() *Builder {
 
 func (b *Builder) UnsharePID() *Builder {
 	b.add("--unshare-pid")
+	return b
+}
+
+func (b *Builder) UnshareIPC() *Builder {
+	b.add("--unshare-ipc")
+	return b
+}
+
+func (b *Builder) UnshareUTS() *Builder {
+	b.add("--unshare-uts")
 	return b
 }
 
@@ -301,6 +317,8 @@ func (b *Builder) AddBaseArgs() *Builder {
 	b.ClearEnv().
 		UnshareUser().
 		UnsharePID().
+		UnshareIPC().
+		UnshareUTS().
 		DieWithParent().
 		Proc("/proc").
 		Dev("/dev").
@@ -449,6 +467,7 @@ func (b *Builder) configureTool(tool tools.ToolWithConfig, toolName string) {
 	globalCfg := tools.GlobalConfig{
 		OverlayEnabled: b.cfg.OverlayEnabled,
 		ProjectDir:     b.cfg.ProjectDir,
+		HomeDir:        b.cfg.HomeDir,
 	}
 
 	// Get tool's config section from ToolsConfig
@@ -528,7 +547,7 @@ func (b *Builder) applyPersistentOverlay(binding tools.Binding, dest string, san
 
 	upperDir, workDir, err := createOverlayDirs(sandboxHome, dest, "")
 	if err != nil {
-		log.Printf("warning: %v", err)
+		b.logWarnf("overlay dirs: %v", err)
 		return
 	}
 
@@ -605,7 +624,7 @@ func (b *Builder) applyMountRule(path string, rule mounts.Rule) {
 	case mounts.ModeHidden:
 		if info.IsDir() {
 			// Hiding directories is not supported - log and skip
-			log.Printf("mounts: cannot hide directory %q - use 'readonly', 'overlay', or 'tmpoverlay' mode instead (pattern: %s)", path, rule.Pattern)
+			b.logWarnf("mounts: cannot hide directory %q - use 'readonly', 'overlay', or 'tmpoverlay' mode instead (pattern: %s)", path, rule.Pattern)
 			return
 		}
 		// For files within mounted paths, overlay with /dev/null
@@ -645,7 +664,7 @@ func sortPaths(paths []string) []string {
 func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) {
 	info, err := os.Stat(path)
 	if err != nil || !info.IsDir() {
-		log.Printf("mounts: overlay only supported for directories: %s (pattern: %s)", path, rule.Pattern)
+		b.logWarnf("mounts: overlay only supported for directories: %s (pattern: %s)", path, rule.Pattern)
 		return
 	}
 
@@ -658,7 +677,7 @@ func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) 
 
 	upperDir, workDir, err := createOverlayDirs(b.cfg.SandboxHome, path, "custom")
 	if err != nil {
-		log.Printf("mounts: %v", err)
+		b.logWarnf("mounts: %v", err)
 		return
 	}
 
@@ -688,31 +707,10 @@ func (b *Builder) AddProjectBindings() *Builder {
 	// This must happen AFTER the project is bound
 	b.applyProjectCustomMounts()
 
-	// Recursively find and hide all .env files in project directory
-	// This runs after custom mounts so custom rules can override .env hiding if needed
-	_ = filepath.WalkDir(b.cfg.ProjectDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil // Skip inaccessible paths
-		}
-
-		// Skip directories
-		if d.IsDir() {
-			// Skip common large directories that won't have env files
-			name := d.Name()
-			if name == "node_modules" || name == ".git" || name == "vendor" || name == ".venv" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Check if file is an env file (.env or .env.*)
-		name := d.Name()
-		if name == ".env" || (len(name) > 5 && name[:5] == ".env.") {
-			b.ROBind("/dev/null", path)
-		}
-
-		return nil
-	})
+	// Hide .env files in project directory
+	for _, path := range FindEnvFiles(b.cfg.ProjectDir, 3) {
+		b.ROBind("/dev/null", path)
+	}
 
 	b.Tmpfs(b.cfg.XDGRuntime)
 
@@ -819,6 +817,64 @@ func (b *Builder) AddEnvironment() *Builder {
 	// Add proxy environment if enabled
 	if b.cfg.ProxyEnabled {
 		b.AddProxyEnvironment()
+	}
+
+	return b
+}
+
+// SuppressSSHAgent prevents shell plugins (e.g. fish-ssh-agent) from producing
+// warnings or starting unnecessary ssh-agent processes when SSH is not enabled.
+//
+// When SSH is not mounted by any tool:
+//   - Creates an empty ~/.ssh/environment file so shell plugins don't error on missing file
+//   - Places a no-op ssh-agent wrapper in ~/.local/bin/ which shadows /usr/bin/ssh-agent
+//     (PATH includes ~/.local/bin before /usr/bin)
+//
+// When SSH IS mounted, any leftover wrapper from previous runs is cleaned up.
+//
+// Must be called after AddTools() so mount information is available.
+func (b *Builder) SuppressSSHAgent() *Builder {
+	sshDir := filepath.Join(b.cfg.HomeDir, ".ssh")
+
+	// Check if .ssh is already mounted (SSH is enabled via a tool)
+	sshEnabled := false
+	for _, m := range b.mounts {
+		if filepath.Clean(m.dest) == filepath.Clean(sshDir) {
+			sshEnabled = true
+			break
+		}
+	}
+
+	wrapperPath := filepath.Join(b.cfg.SandboxHome, ".local", "bin", "ssh-agent")
+
+	if sshEnabled {
+		// Remove leftover wrapper from previous runs without SSH
+		_ = os.Remove(wrapperPath)
+		return b
+	}
+
+	// Create .ssh/environment in sandbox home to prevent "file not found" errors
+	hostSSHDir := filepath.Join(b.cfg.SandboxHome, ".ssh")
+	if err := os.MkdirAll(hostSSHDir, 0o700); err != nil {
+		b.logWarnf("failed to create .ssh dir in sandbox home: %v", err)
+		return b
+	}
+
+	envFile := filepath.Join(hostSSHDir, "environment")
+	if err := os.WriteFile(envFile, nil, 0o600); err != nil {
+		b.logWarnf("failed to create .ssh/environment: %v", err)
+	}
+
+	// Create no-op ssh-agent wrapper in ~/.local/bin/ to shadow the real binary.
+	// PATH includes ~/.local/bin before /usr/bin, so this takes precedence.
+	hostLocalBin := filepath.Join(b.cfg.SandboxHome, ".local", "bin")
+	if err := os.MkdirAll(hostLocalBin, 0o755); err != nil {
+		b.logWarnf("failed to create .local/bin in sandbox home: %v", err)
+		return b
+	}
+
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		b.logWarnf("failed to create ssh-agent wrapper: %v", err)
 	}
 
 	return b

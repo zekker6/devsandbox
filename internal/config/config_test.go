@@ -378,6 +378,79 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "action must be",
 		},
+		{
+			name: "invalid isolation backend",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Isolation: "podman"},
+			},
+			wantErr: true,
+			errMsg:  "invalid isolation backend",
+		},
+		{
+			name: "valid isolation backends",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Isolation: IsolationDocker},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid docker memory",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Docker: DockerConfig{
+						Resources: DockerResourcesConfig{Memory: "not-a-number"},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid docker memory limit",
+		},
+		{
+			name: "valid docker memory",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Docker: DockerConfig{
+						Resources: DockerResourcesConfig{Memory: "4g"},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid docker cpus",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Docker: DockerConfig{
+						Resources: DockerResourcesConfig{CPUs: "abc"},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid docker cpu limit",
+		},
+		{
+			name: "valid docker cpus",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Docker: DockerConfig{
+						Resources: DockerResourcesConfig{CPUs: "2.5"},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "zero docker cpus invalid",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Docker: DockerConfig{
+						Resources: DockerResourcesConfig{CPUs: "0"},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid docker cpu limit",
+		},
 	}
 
 	for _, tt := range tests {
@@ -547,15 +620,19 @@ path = "/nonexistent/config.toml"
 		t.Fatalf("failed to write main config: %v", err)
 	}
 
-	// Missing include file should be an error
-	_, err := LoadWithProjectDir(mainPath, projectDir, &LoadOptions{
+	// Missing include file should produce a warning and succeed
+	cfg, err := LoadWithProjectDir(mainPath, projectDir, &LoadOptions{
 		TrustStore: emptyTrustStore(),
 	})
-	if err == nil {
-		t.Fatal("expected error for missing include file")
+	if err != nil {
+		t.Fatalf("missing include should warn, not error: %v", err)
 	}
-	if !contains(err.Error(), "failed to load include") {
-		t.Errorf("expected 'failed to load include' error, got: %v", err)
+	if cfg == nil {
+		t.Fatal("expected config to be returned even with missing include")
+	}
+	// Verify the main config was still loaded correctly
+	if cfg.Proxy.Port != 8080 {
+		t.Errorf("expected proxy port 8080, got %d", cfg.Proxy.Port)
 	}
 }
 
@@ -609,6 +686,83 @@ sandbox_port = 5432
 	r2 := cfg.PortForwarding.Rules[1]
 	if r2.Direction != "outbound" {
 		t.Errorf("expected direction 'outbound', got %q", r2.Direction)
+	}
+}
+
+func TestDockerConfig_Defaults(t *testing.T) {
+	cfg := DockerConfig{}
+
+	if !cfg.IsKeepContainerEnabled() {
+		t.Error("KeepContainer should default to true")
+	}
+}
+
+func TestDockerConfig_Dockerfile(t *testing.T) {
+	content := `
+[sandbox.docker]
+dockerfile = "/custom/Dockerfile"
+`
+	tmpFile := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(tmpFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFrom(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Sandbox.Docker.Dockerfile != "/custom/Dockerfile" {
+		t.Errorf("expected dockerfile '/custom/Dockerfile', got %q", cfg.Sandbox.Docker.Dockerfile)
+	}
+}
+
+func TestConfigDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	origXDG := os.Getenv("XDG_CONFIG_HOME")
+	if err := os.Setenv("XDG_CONFIG_HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set XDG_CONFIG_HOME: %v", err)
+	}
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", origXDG) }()
+
+	dir := ConfigDir()
+	expected := filepath.Join(tmpDir, "devsandbox")
+	if dir != expected {
+		t.Errorf("ConfigDir() = %q, want %q", dir, expected)
+	}
+}
+
+func TestDefaultDockerfilePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	origXDG := os.Getenv("XDG_CONFIG_HOME")
+	if err := os.Setenv("XDG_CONFIG_HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set XDG_CONFIG_HOME: %v", err)
+	}
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", origXDG) }()
+
+	path := DefaultDockerfilePath()
+	expected := filepath.Join(tmpDir, "devsandbox", "Dockerfile")
+	if path != expected {
+		t.Errorf("DefaultDockerfilePath() = %q, want %q", path, expected)
+	}
+}
+
+func TestSandboxConfig_GetIsolation(t *testing.T) {
+	tests := []struct {
+		isolation IsolationBackend
+		expected  IsolationBackend
+	}{
+		{"", IsolationAuto},
+		{IsolationAuto, IsolationAuto},
+		{IsolationBwrap, IsolationBwrap},
+		{IsolationDocker, IsolationDocker},
+	}
+
+	for _, tt := range tests {
+		cfg := SandboxConfig{Isolation: tt.isolation}
+		if got := cfg.GetIsolation(); got != tt.expected {
+			t.Errorf("GetIsolation() = %s, want %s", got, tt.expected)
+		}
 	}
 }
 
@@ -755,5 +909,21 @@ sandbox_port = 8080
 				}
 			}
 		})
+	}
+}
+
+func TestApplyIncludes_MissingFileWarns(t *testing.T) {
+	projectDir := t.TempDir()
+	cfg := &Config{
+		Include: []Include{
+			{If: "dir:" + projectDir, Path: "/nonexistent/path/config.toml"},
+		},
+	}
+	result, err := applyIncludes(cfg, projectDir)
+	if err != nil {
+		t.Errorf("missing include should warn, not error: %v", err)
+	}
+	if result == nil {
+		t.Error("should return config even with missing include")
 	}
 }

@@ -1,8 +1,25 @@
 package sandbox
 
 import (
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 )
+
+func TestNewConfig_XDGRuntime(t *testing.T) {
+	// When XDG_RUNTIME_DIR is unset, it should use /run/user/<uid> with numeric UID
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	cfg, err := NewConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := os.Getuid()
+	expected := filepath.Join("/run/user", strconv.Itoa(uid))
+	if cfg.XDGRuntime != expected {
+		t.Errorf("XDGRuntime = %q, want %q", cfg.XDGRuntime, expected)
+	}
+}
 
 func TestSanitizeProjectName(t *testing.T) {
 	tests := []struct {

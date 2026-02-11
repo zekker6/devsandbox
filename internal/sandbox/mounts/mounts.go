@@ -3,7 +3,6 @@
 package mounts
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +11,11 @@ import (
 
 	"devsandbox/internal/config"
 )
+
+// Logger is used by the mounts engine to report warnings.
+type Logger interface {
+	Warnf(format string, args ...any)
+}
 
 // Mode defines how a path should be mounted.
 type Mode string
@@ -40,6 +44,19 @@ type Rule struct {
 type Engine struct {
 	rules   []Rule
 	homeDir string
+	logger  Logger
+}
+
+// SetLogger sets the logger for the mounts engine.
+func (e *Engine) SetLogger(l Logger) {
+	e.logger = l
+}
+
+// logWarnf logs a warning via the configured logger, if any.
+func (e *Engine) logWarnf(format string, args ...any) {
+	if e.logger != nil {
+		e.logger.Warnf(format, args...)
+	}
 }
 
 // NewEngine creates a mount engine from configuration.
@@ -109,7 +126,7 @@ func (e *Engine) ExpandedPaths() map[string]Rule {
 		// Expand glob pattern to files
 		matches, err := e.ExpandPattern(rule.Pattern)
 		if err != nil {
-			log.Printf("mounts: failed to expand pattern %q: %v", rule.Pattern, err)
+			e.logWarnf("failed to expand pattern %q: %v", rule.Pattern, err)
 			continue
 		}
 
@@ -158,7 +175,7 @@ func (e *Engine) ExpandedPathsInDir(baseDir string) map[string]Rule {
 		fsys := os.DirFS(baseDir)
 		matches, err := doublestar.Glob(fsys, rule.Expanded)
 		if err != nil {
-			log.Printf("mounts: failed to expand pattern %q in %s: %v", rule.Pattern, baseDir, err)
+			e.logWarnf("failed to expand pattern %q in %s: %v", rule.Pattern, baseDir, err)
 			continue
 		}
 

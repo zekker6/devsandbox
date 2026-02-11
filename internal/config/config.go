@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -128,6 +130,48 @@ const (
 	ConfigVisibilityReadWrite ConfigVisibility = "readwrite"
 )
 
+// IsolationBackend defines the isolation backend type.
+type IsolationBackend string
+
+const (
+	// IsolationAuto automatically selects the best available backend.
+	IsolationAuto IsolationBackend = "auto"
+	// IsolationBwrap uses bubblewrap for isolation (Linux only).
+	IsolationBwrap IsolationBackend = "bwrap"
+	// IsolationDocker uses Docker containers for isolation (cross-platform).
+	IsolationDocker IsolationBackend = "docker"
+)
+
+// DockerConfig contains Docker-specific sandbox settings.
+type DockerConfig struct {
+	// Dockerfile is the path to the Dockerfile used to build the sandbox image.
+	// Defaults to ~/.config/devsandbox/Dockerfile if not set.
+	Dockerfile string `toml:"dockerfile"`
+
+	// KeepContainer keeps the container after exit for fast restarts.
+	// Defaults to true.
+	KeepContainer *bool `toml:"keep_container"`
+
+	// Resources contains container resource limits.
+	Resources DockerResourcesConfig `toml:"resources"`
+}
+
+// DockerResourcesConfig contains Docker container resource limits.
+type DockerResourcesConfig struct {
+	// Memory limit (e.g., "4g", "512m").
+	Memory string `toml:"memory"`
+	// CPU limit (e.g., "2", "0.5").
+	CPUs string `toml:"cpus"`
+}
+
+// IsKeepContainerEnabled returns whether container persistence is enabled (defaults to true).
+func (d DockerConfig) IsKeepContainerEnabled() bool {
+	if d.KeepContainer == nil {
+		return true
+	}
+	return *d.KeepContainer
+}
+
 // SandboxConfig contains sandbox-related configuration.
 type SandboxConfig struct {
 	// BasePath is the directory where sandbox homes are stored.
@@ -140,6 +184,13 @@ type SandboxConfig struct {
 	// ConfigVisibility controls how .devsandbox.toml is exposed to the sandbox.
 	// Values: "hidden" (default), "readonly", "readwrite"
 	ConfigVisibility ConfigVisibility `toml:"config_visibility"`
+
+	// Isolation specifies the isolation backend.
+	// Values: "auto" (default), "bwrap", "docker"
+	Isolation IsolationBackend `toml:"isolation"`
+
+	// Docker contains Docker-specific settings.
+	Docker DockerConfig `toml:"docker"`
 }
 
 // GetConfigVisibility returns the config visibility (defaults to hidden).
@@ -148,6 +199,14 @@ func (s SandboxConfig) GetConfigVisibility() ConfigVisibility {
 		return ConfigVisibilityHidden
 	}
 	return s.ConfigVisibility
+}
+
+// GetIsolation returns the isolation backend (defaults to auto).
+func (s SandboxConfig) GetIsolation() IsolationBackend {
+	if s.Isolation == "" {
+		return IsolationAuto
+	}
+	return s.Isolation
 }
 
 // MountsConfig defines custom mount rules for the sandbox.
@@ -305,7 +364,7 @@ func DefaultConfig() *Config {
 
 // configDir returns the devsandbox config directory path.
 // Uses XDG_CONFIG_HOME/devsandbox or ~/.config/devsandbox
-func configDir() string {
+func ConfigDir() string {
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
 		home, err := os.UserHomeDir()
@@ -319,7 +378,12 @@ func configDir() string {
 
 // ConfigPath returns the path to the config file.
 func ConfigPath() string {
-	return filepath.Join(configDir(), "config.toml")
+	return filepath.Join(ConfigDir(), "config.toml")
+}
+
+// DefaultDockerfilePath returns the default Dockerfile path in the config directory.
+func DefaultDockerfilePath() string {
+	return filepath.Join(ConfigDir(), "Dockerfile")
 }
 
 // LoadFrom reads the configuration from the specified path.
@@ -420,6 +484,29 @@ func (c *Config) Validate() error {
 	// Validate port forwarding rules
 	if err := c.validatePortForwarding(); err != nil {
 		return err
+	}
+
+	// Validate isolation backend
+	if c.Sandbox.Isolation != "" {
+		switch c.Sandbox.Isolation {
+		case IsolationAuto, IsolationBwrap, IsolationDocker:
+			// valid
+		default:
+			return fmt.Errorf("invalid isolation backend %q: must be one of: auto, bwrap, docker", c.Sandbox.Isolation)
+		}
+	}
+
+	// Validate Docker resource limits
+	if mem := c.Sandbox.Docker.Resources.Memory; mem != "" {
+		matched, _ := regexp.MatchString(`^\d+[bkmgBKMG]?$`, mem)
+		if !matched {
+			return fmt.Errorf("invalid docker memory limit %q: use format like '512m', '2g'", mem)
+		}
+	}
+	if cpus := c.Sandbox.Docker.Resources.CPUs; cpus != "" {
+		if v, err := strconv.ParseFloat(cpus, 64); err != nil || v <= 0 {
+			return fmt.Errorf("invalid docker cpu limit %q: must be a positive number like '0.5', '2'", cpus)
+		}
 	}
 
 	return nil
@@ -624,6 +711,14 @@ port = 8080
 # pattern = "~/.cache/myapp"
 # mode = "overlay"
 
+# Docker-specific settings
+# [sandbox.docker]
+# Path to Dockerfile for building the sandbox image.
+# Defaults to ~/.config/devsandbox/Dockerfile
+# The default Dockerfile contains: FROM ghcr.io/zekker6/devsandbox:latest
+# Edit it to add custom tools or configuration.
+# dockerfile = "/path/to/Dockerfile"
+
 # Overlay filesystem settings (global)
 [overlay]
 # Master switch for overlay filesystem support
@@ -802,6 +897,10 @@ func applyIncludes(cfg *Config, projectDir string) (*Config, error) {
 		includePath := expandHome(inc.Path)
 		includeCfg, err := loadIncludeFile(includePath)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "Warning: include file %s not found, skipping\n", includePath)
+				continue
+			}
 			return nil, fmt.Errorf("failed to load include %s: %w", includePath, err)
 		}
 		cfg = mergeConfigs(cfg, includeCfg)
@@ -814,7 +913,7 @@ func applyIncludes(cfg *Config, projectDir string) (*Config, error) {
 func loadIncludeFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("file not found")
+		return nil, fmt.Errorf("file not found: %w", err)
 	}
 	if err != nil {
 		return nil, err

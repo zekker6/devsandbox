@@ -49,7 +49,7 @@ func newListCmd() *cobra.Command {
 			}
 
 			baseDir := sandbox.SandboxBasePath(homeDir)
-			sandboxes, err := sandbox.ListSandboxes(baseDir)
+			sandboxes, err := sandbox.ListAllSandboxes(baseDir)
 			if err != nil {
 				return err
 			}
@@ -67,11 +67,16 @@ func newListCmd() *cobra.Command {
 			// Calculate sizes (default: on)
 			if !noSize {
 				for _, s := range sandboxes {
-					size, err := sandbox.GetSandboxSize(s.SandboxRoot)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+					if s.Isolation == sandbox.IsolationDocker {
+						// Docker volumes don't have easy size calculation
+						s.SizeBytes = 0
+					} else {
+						size, err := sandbox.GetSandboxSize(s.SandboxRoot)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+						}
+						s.SizeBytes = size
 					}
-					s.SizeBytes = size
 				}
 			}
 
@@ -121,7 +126,7 @@ directory no longer exists) are removed.`,
 			}
 
 			baseDir := sandbox.SandboxBasePath(homeDir)
-			sandboxes, err := sandbox.ListSandboxes(baseDir)
+			sandboxes, err := sandbox.ListAllSandboxes(baseDir)
 			if err != nil {
 				return err
 			}
@@ -163,12 +168,16 @@ directory no longer exists) are removed.`,
 			// Calculate sizes for display
 			var totalSize int64
 			for _, s := range toPrune {
-				size, err := sandbox.GetSandboxSize(s.SandboxRoot)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+				if s.Isolation == sandbox.IsolationDocker {
+					s.SizeBytes = 0
+				} else {
+					size, err := sandbox.GetSandboxSize(s.SandboxRoot)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+					}
+					s.SizeBytes = size
+					totalSize += size
 				}
-				s.SizeBytes = size
-				totalSize += size
 			}
 
 			// Show what will be removed
@@ -178,13 +187,24 @@ directory no longer exists) are removed.`,
 				if s.Orphaned {
 					status = " [orphaned]"
 				}
-				fmt.Printf("  %s%s\n", s.Name, status)
+				if s.Isolation == sandbox.IsolationDocker && s.State != "" {
+					status = status + " [" + s.State + "]"
+				}
+				isoType := string(s.Isolation)
+				if isoType == "" {
+					isoType = "bwrap"
+				}
+				fmt.Printf("  %s (%s)%s\n", s.Name, isoType, status)
 				fmt.Printf("    Project: %s\n", s.ProjectDir)
 				fmt.Printf("    Last used: %s\n", s.LastUsed.Format("2006-01-02 15:04"))
-				fmt.Printf("    Size: %s\n", sandbox.FormatSize(s.SizeBytes))
+				if s.Isolation != sandbox.IsolationDocker {
+					fmt.Printf("    Size: %s\n", sandbox.FormatSize(s.SizeBytes))
+				}
 				fmt.Println()
 			}
-			fmt.Printf("Total: %s\n\n", sandbox.FormatSize(totalSize))
+			if totalSize > 0 {
+				fmt.Printf("Total: %s\n\n", sandbox.FormatSize(totalSize))
+			}
 
 			if dryRun {
 				fmt.Println("Dry run - no sandboxes were removed.")
@@ -206,10 +226,10 @@ directory no longer exists) are removed.`,
 				}
 			}
 
-			// Remove sandboxes
+			// Remove sandboxes (handles both bwrap and docker)
 			var removed, failed int
 			for _, s := range toPrune {
-				if err := sandbox.RemoveSandbox(s.SandboxRoot); err != nil {
+				if err := sandbox.RemoveSandboxByType(s); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to remove %s: %v\n", s.Name, err)
 					failed++
 				} else {
@@ -246,9 +266,9 @@ func printTable(sandboxes []*sandbox.Metadata, showSize bool) error {
 	table := tablewriter.NewWriter(os.Stdout)
 
 	if showSize {
-		table.Header("NAME", "PROJECT DIR", "CREATED", "LAST USED", "SIZE", "STATUS")
+		table.Header("NAME", "TYPE", "PROJECT DIR", "CREATED", "LAST USED", "SIZE", "STATUS")
 	} else {
-		table.Header("NAME", "PROJECT DIR", "CREATED", "LAST USED", "STATUS")
+		table.Header("NAME", "TYPE", "PROJECT DIR", "CREATED", "LAST USED", "STATUS")
 	}
 
 	for _, s := range sandboxes {
@@ -263,24 +283,44 @@ func printTable(sandboxes []*sandbox.Metadata, showSize bool) error {
 				status = "active"
 			}
 		}
+		// For Docker containers, show the container state
+		if s.Isolation == sandbox.IsolationDocker && s.State != "" {
+			if status != "" {
+				status = status + ", " + s.State
+			} else {
+				status = s.State
+			}
+		}
 
 		projectDir := s.ProjectDir
 		if len(projectDir) > 40 {
 			projectDir = "..." + projectDir[len(projectDir)-37:]
 		}
 
+		isoType := string(s.Isolation)
+		if isoType == "" {
+			isoType = "bwrap"
+		}
+
+		sizeStr := sandbox.FormatSize(s.SizeBytes)
+		if s.Isolation == sandbox.IsolationDocker {
+			sizeStr = "-" // Docker volumes don't have easy size
+		}
+
 		if showSize {
 			_ = table.Append(
 				s.Name,
+				isoType,
 				projectDir,
 				s.CreatedAt.Format("2006-01-02"),
 				s.LastUsed.Format("2006-01-02"),
-				sandbox.FormatSize(s.SizeBytes),
+				sizeStr,
 				status,
 			)
 		} else {
 			_ = table.Append(
 				s.Name,
+				isoType,
 				projectDir,
 				s.CreatedAt.Format("2006-01-02"),
 				s.LastUsed.Format("2006-01-02"),

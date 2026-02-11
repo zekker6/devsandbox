@@ -62,21 +62,24 @@ func NewServer(cfg *Config) (*Server, error) {
 	// Route goproxy's internal warnings to rotating file
 	proxy.Logger = log.New(proxyLogger, "", log.LstdFlags)
 
-	// Create log dispatcher for remote forwarding (if configured)
-	var dispatcher *logging.Dispatcher
-	if len(cfg.LogReceivers) > 0 {
+	// Use shared dispatcher if provided, otherwise create one from config.
+	// Track ownership so we know who is responsible for closing it.
+	dispatcher := cfg.Dispatcher
+	ownsDispatcher := false
+	if dispatcher == nil && len(cfg.LogReceivers) > 0 {
 		dispatcher, err = logging.NewDispatcherFromConfig(cfg.LogReceivers, cfg.LogAttributes, cfg.InternalLogDir)
 		if err != nil {
 			_ = proxyLogger.Close()
 			return nil, fmt.Errorf("failed to create log dispatcher: %w", err)
 		}
+		ownsDispatcher = true
 	}
 
 	// Create request logger for persisting full request/response data
-	reqLogger, err := NewRequestLogger(cfg.LogDir, dispatcher)
+	reqLogger, err := NewRequestLogger(cfg.LogDir, dispatcher, ownsDispatcher)
 	if err != nil {
 		_ = proxyLogger.Close()
-		if dispatcher != nil {
+		if ownsDispatcher && dispatcher != nil {
 			_ = dispatcher.Close()
 		}
 		return nil, fmt.Errorf("failed to create request logger: %w", err)
@@ -89,9 +92,6 @@ func NewServer(cfg *Config) (*Server, error) {
 		if err != nil {
 			_ = proxyLogger.Close()
 			_ = reqLogger.Close()
-			if dispatcher != nil {
-				_ = dispatcher.Close()
-			}
 			return nil, fmt.Errorf("failed to create filter engine: %w", err)
 		}
 	}
@@ -104,9 +104,6 @@ func NewServer(cfg *Config) (*Server, error) {
 		if err != nil {
 			_ = proxyLogger.Close()
 			_ = reqLogger.Close()
-			if dispatcher != nil {
-				_ = dispatcher.Close()
-			}
 			return nil, fmt.Errorf("failed to create ask server: %w", err)
 		}
 
@@ -247,8 +244,12 @@ func (s *Server) Start() error {
 	var err error
 	port := s.config.Port
 
+	bindAddr := s.config.GetBindAddress()
 	for i := 0; i < MaxPortRetries; i++ {
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		if port > 65535 {
+			break
+		}
+		addr := fmt.Sprintf("%s:%d", bindAddr, port)
 		listener, err = net.Listen("tcp", addr)
 		if err == nil {
 			break
@@ -281,8 +282,9 @@ func (s *Server) Start() error {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		// Server errors are silently ignored - logs are written to files
-		_ = s.server.Serve(listener)
+		if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			log.Printf("proxy server error: %v", err)
+		}
 	}()
 
 	return nil
@@ -415,6 +417,10 @@ func (s *Server) Addr() string {
 
 func (s *Server) Port() int {
 	return s.config.Port
+}
+
+func (s *Server) Config() *Config {
+	return s.config
 }
 
 func (s *Server) CA() *CA {

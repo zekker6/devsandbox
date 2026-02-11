@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -103,6 +105,8 @@ func TestBuilder_AddBaseArgs(t *testing.T) {
 		"--clearenv",
 		"--unshare-user",
 		"--unshare-pid",
+		"--unshare-ipc",
+		"--unshare-uts",
 		"--die-with-parent",
 		"--proc", "/proc",
 		"--dev", "/dev",
@@ -374,6 +378,80 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestBuilder_SuppressSSHAgent_NoSSH(t *testing.T) {
+	sandboxHome := t.TempDir()
+
+	cfg := &Config{
+		HomeDir:     "/home/test",
+		SandboxHome: sandboxHome,
+	}
+
+	b := NewBuilder(cfg)
+	// No .ssh mount — SSH is not enabled
+	b.SuppressSSHAgent()
+
+	// Check that .ssh/environment was created
+	envFile := filepath.Join(sandboxHome, ".ssh", "environment")
+	info, err := os.Stat(envFile)
+	if err != nil {
+		t.Fatalf("expected .ssh/environment to exist, got error: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Errorf("expected empty .ssh/environment, got size %d", info.Size())
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("expected .ssh/environment permissions 0600, got %o", info.Mode().Perm())
+	}
+
+	// Check that no-op ssh-agent wrapper was created
+	wrapperPath := filepath.Join(sandboxHome, ".local", "bin", "ssh-agent")
+	wrapperInfo, err := os.Stat(wrapperPath)
+	if err != nil {
+		t.Fatalf("expected ssh-agent wrapper to exist, got error: %v", err)
+	}
+	if wrapperInfo.Mode().Perm()&0o111 == 0 {
+		t.Error("expected ssh-agent wrapper to be executable")
+	}
+
+	content, err := os.ReadFile(wrapperPath)
+	if err != nil {
+		t.Fatalf("failed to read ssh-agent wrapper: %v", err)
+	}
+	if string(content) != "#!/bin/sh\nexit 0\n" {
+		t.Errorf("unexpected ssh-agent wrapper content: %q", string(content))
+	}
+}
+
+func TestBuilder_SuppressSSHAgent_SSHEnabled(t *testing.T) {
+	sandboxHome := t.TempDir()
+
+	cfg := &Config{
+		HomeDir:     "/home/test",
+		SandboxHome: sandboxHome,
+	}
+
+	// Pre-create a leftover wrapper from a previous run
+	localBin := filepath.Join(sandboxHome, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapperPath := filepath.Join(localBin, "ssh-agent")
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewBuilder(cfg)
+	// Simulate SSH being enabled by mounting .ssh
+	b.Bind(sandboxHome, "/home/test")
+	b.ROBind("/home/test/.ssh", "/home/test/.ssh")
+	b.SuppressSSHAgent()
+
+	// Leftover wrapper should be removed
+	if _, err := os.Stat(wrapperPath); !os.IsNotExist(err) {
+		t.Error("expected ssh-agent wrapper to be removed when SSH is enabled")
+	}
 }
 
 func TestBuilderErr(t *testing.T) {

@@ -49,6 +49,42 @@ func mergeConfigs(base, overlay *Config) *Config {
 	if overlay.Sandbox.ConfigVisibility != "" {
 		result.Sandbox.ConfigVisibility = overlay.Sandbox.ConfigVisibility
 	}
+	if overlay.Sandbox.Isolation != "" {
+		result.Sandbox.Isolation = overlay.Sandbox.Isolation
+	}
+
+	// Sandbox Docker settings
+	if overlay.Sandbox.Docker.Dockerfile != "" {
+		result.Sandbox.Docker.Dockerfile = overlay.Sandbox.Docker.Dockerfile
+	}
+	if overlay.Sandbox.Docker.KeepContainer != nil {
+		result.Sandbox.Docker.KeepContainer = overlay.Sandbox.Docker.KeepContainer
+	}
+	if overlay.Sandbox.Docker.Resources.Memory != "" {
+		result.Sandbox.Docker.Resources.Memory = overlay.Sandbox.Docker.Resources.Memory
+	}
+	if overlay.Sandbox.Docker.Resources.CPUs != "" {
+		result.Sandbox.Docker.Resources.CPUs = overlay.Sandbox.Docker.Resources.CPUs
+	}
+
+	// Sandbox mount rules: prepend overlay rules (higher priority)
+	if len(overlay.Sandbox.Mounts.Rules) > 0 {
+		result.Sandbox.Mounts.Rules = append(
+			overlay.Sandbox.Mounts.Rules,
+			result.Sandbox.Mounts.Rules...,
+		)
+	}
+
+	// Port forwarding settings
+	if overlay.PortForwarding.Enabled != nil {
+		result.PortForwarding.Enabled = overlay.PortForwarding.Enabled
+	}
+	if len(overlay.PortForwarding.Rules) > 0 {
+		result.PortForwarding.Rules = append(
+			overlay.PortForwarding.Rules,
+			result.PortForwarding.Rules...,
+		)
+	}
 
 	// Overlay settings
 	if overlay.Overlay.Enabled != nil {

@@ -7,14 +7,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
-	"devsandbox/internal/bwrap"
 	"devsandbox/internal/config"
+	"devsandbox/internal/isolator"
 	"devsandbox/internal/logging"
-	"devsandbox/internal/network"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/mounts"
@@ -26,7 +27,7 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "devsandbox [command...]",
 		Short: "Secure sandbox for development tools",
-		Long: `devsandbox - Bubblewrap sandbox for running untrusted dev tools
+		Long: `devsandbox - Secure sandbox for running untrusted dev tools (bwrap and Docker backends)
 
 Security Model:
   - Current directory: read/write
@@ -40,11 +41,13 @@ Security Model:
 Proxy Mode (--proxy):
   - All HTTP/HTTPS traffic routed through local proxy
   - MITM proxy with auto-generated CA certificate
-  - Network isolated via pasta (requires passt package)
+  - bwrap: network isolated via pasta (requires passt package)
+  - docker: proxy bound to per-session Docker network
   - Request logs: ~/.local/share/devsandbox/<project>/logs/proxy/`,
 		Example: `  devsandbox                      # Interactive shell
   devsandbox npm install          # Install packages
   devsandbox --proxy npm install  # With proxy (traffic inspection)
+  devsandbox --rm npm install     # Ephemeral: remove sandbox state after exit
   devsandbox claude --dangerously-skip-permissions
   devsandbox bun run dev`,
 		Version:               version.Version,
@@ -69,6 +72,12 @@ Proxy Mode (--proxy):
 	rootCmd.Flags().StringSlice("allow-domain", nil, "Allow domain pattern (can be repeated)")
 	rootCmd.Flags().StringSlice("block-domain", nil, "Block domain pattern (can be repeated)")
 
+	// Isolation backend flag
+	rootCmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker")
+
+	// Sandbox lifecycle flag
+	rootCmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
+
 	// Add subcommands
 	rootCmd.AddCommand(newSandboxesCmd())
 	rootCmd.AddCommand(newDoctorCmd())
@@ -77,6 +86,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newToolsCmd())
 	rootCmd.AddCommand(newProxyCmd())
 	rootCmd.AddCommand(newTrustCmd())
+	rootCmd.AddCommand(newImageCmd())
 
 	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date))
 
@@ -86,7 +96,16 @@ Proxy Mode (--proxy):
 	}
 }
 
-func runSandbox(cmd *cobra.Command, args []string) error {
+func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
+	// Track proxy result at function scope so the deferred signal check
+	// can suppress errors from signaled child processes.
+	var proxyRes *proxyResult
+	defer func() {
+		if proxyRes != nil && proxyRes.signaled.Load() {
+			retErr = nil
+		}
+	}()
+
 	showInfo, _ := cmd.Flags().GetBool("info")
 	proxyEnabled, _ := cmd.Flags().GetBool("proxy")
 	proxyPort, _ := cmd.Flags().GetInt("proxy-port")
@@ -100,26 +119,47 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Create sandbox config with options from config file
-	opts := &sandbox.Options{
-		BasePath: appCfg.Sandbox.BasePath,
+	// Determine isolation backend
+	isolationFlag, _ := cmd.Flags().GetString("isolation")
+	isolation := appCfg.Sandbox.GetIsolation()
+	if cmd.Flags().Changed("isolation") {
+		isolation = config.IsolationBackend(isolationFlag)
 	}
 
-	cfg, err := sandbox.NewConfig(opts)
+	// Sandbox lifecycle
+	rmFlag, _ := cmd.Flags().GetBool("rm")
+	keepContainer := appCfg.Sandbox.Docker.IsKeepContainerEnabled()
+	if cmd.Flags().Changed("rm") && rmFlag {
+		keepContainer = false
+	}
+
+	// Build isolator with functional options
+	iso, err := isolator.MustNew(isolator.Backend(isolation),
+		isolator.WithDockerConfig(
+			appCfg.Sandbox.Docker.Dockerfile,
+			config.ConfigDir(),
+			appCfg.Sandbox.Docker.Resources.Memory,
+			appCfg.Sandbox.Docker.Resources.CPUs,
+			keepContainer,
+		),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Create sandbox config
+	cfg, err := sandbox.NewConfig(&sandbox.Options{BasePath: appCfg.Sandbox.BasePath})
 	if err != nil {
 		return err
 	}
 
 	// Apply config file defaults, then CLI overrides
-	// Config file defaults
 	if appCfg.Proxy.IsEnabled() {
 		cfg.ProxyEnabled = true
 	}
 	if appCfg.Proxy.Port != 0 {
 		cfg.ProxyPort = appCfg.Proxy.Port
 	}
-
-	// CLI flags override config file (check if flag was explicitly set)
 	if cmd.Flags().Changed("proxy") {
 		cfg.ProxyEnabled = proxyEnabled
 	}
@@ -144,201 +184,135 @@ func runSandbox(cmd *cobra.Command, args []string) error {
 		appCfg.Tools["git"] = gitCfg
 	}
 
-	// Pass overlay and tools settings to sandbox config
 	cfg.OverlayEnabled = appCfg.Overlay.IsEnabled()
 	cfg.ToolsConfig = appCfg.Tools
 	cfg.ConfigVisibility = string(appCfg.Sandbox.GetConfigVisibility())
-
-	// Initialize custom mounts engine
 	cfg.MountsConfig = mounts.NewEngine(appCfg.Sandbox.Mounts, cfg.HomeDir)
+	cfg.Isolation = iso.IsolationType()
 
 	if showInfo {
 		printInfo(cfg)
 		return nil
 	}
 
-	if err := bwrap.CheckInstalled(); err != nil {
-		return err
-	}
-
 	if err := cfg.EnsureSandboxDirs(); err != nil {
 		return err
 	}
 
-	// Acquire session lock (released automatically on exit)
+	// When --rm is set, remove sandbox state after exit (both backends).
+	if rmFlag {
+		defer func() {
+			if err := sandbox.RemoveSandbox(cfg.SandboxRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to remove sandbox: %v\n", err)
+			}
+		}()
+	}
+
+	// PrepareNetwork: backend-specific network setup before proxy starts
+	var netInfo *isolator.NetworkInfo
+	if cfg.ProxyEnabled {
+		netInfo, err = iso.PrepareNetwork(cmd.Context(), cfg.ProjectDir)
+		if err != nil {
+			return err
+		}
+	}
+	defer func() { _ = iso.Cleanup() }()
+
+	// Set up logging infrastructure (shared between proxy and sandbox)
+	logDir := filepath.Join(cfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
+	sandboxLogger, err := logging.NewErrorLogger(filepath.Join(logDir, "sandbox.log"))
+	if err != nil {
+		sandboxLogger = nil
+	}
+
+	var logDispatcher *logging.Dispatcher
+	if len(appCfg.Logging.Receivers) > 0 {
+		logDispatcher, err = logging.NewDispatcherFromConfig(
+			appCfg.Logging.Receivers, appCfg.Logging.Attributes, logDir,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create log dispatcher: %w", err)
+		}
+		defer func() { _ = logDispatcher.Close() }()
+	}
+
+	// Start proxy if enabled
+	var proxyServer *proxy.Server
+	if cfg.ProxyEnabled {
+		pCfg := proxy.NewConfig(cfg.SandboxRoot, proxyPort)
+		pCfg.Dispatcher = logDispatcher
+		pCfg.LogReceivers = appCfg.Logging.Receivers
+		pCfg.LogAttributes = appCfg.Logging.Attributes
+		pCfg.CredentialInjectors = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
+		pCfg.Filter = buildFilterConfig(appCfg, cmd, filterDefault, allowDomains, blockDomains)
+
+		if netInfo != nil {
+			pCfg.BindAddress = netInfo.BindAddress
+		}
+
+		proxyRes, err = startProxyServer(pCfg)
+		if err != nil {
+			return err
+		}
+		defer deferProxyCleanup(proxyRes)
+
+		cfg.ProxyPort = proxyRes.port
+		proxyServer = proxyRes.server
+
+		fmt.Fprintf(os.Stderr, "Proxy server started on %s:%d\n", pCfg.GetBindAddress(), proxyRes.port)
+		if proxyRes.port != proxyPort {
+			fmt.Fprintf(os.Stderr, "Note: Using port %d (requested port %d was busy)\n", proxyRes.port, proxyPort)
+		}
+		fmt.Fprintf(os.Stderr, "CA certificate: %s\n", proxyRes.caPath)
+
+		if pCfg.Filter != nil && pCfg.Filter.IsEnabled() {
+			if pCfg.Filter.DefaultAction == proxy.FilterActionAsk {
+				fmt.Fprintf(os.Stderr, "Filter: ask mode (default action for unmatched requests)\n")
+				fmt.Fprintf(os.Stderr, "\nRun in another terminal to approve/deny requests:\n")
+				fmt.Fprintf(os.Stderr, "  devsandbox proxy monitor\n\n")
+				fmt.Fprintf(os.Stderr, "Requests without response within 30s will be rejected.\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "Filter: %d rules, default action: %s\n", len(pCfg.Filter.Rules), pCfg.Filter.DefaultAction)
+			}
+		}
+	}
+
+	// Start active tools (e.g., docker proxy)
+	startActiveTools, cleanupActiveTools := createActiveToolsRunner(cfg)
+	defer cleanupActiveTools()
+	hasActiveTools, err := startActiveTools(cmd.Context())
+	if err != nil {
+		return err
+	}
+
+	// Acquire session lock
 	lockFile, err := sandbox.AcquireSessionLock(cfg.SandboxRoot)
 	if err != nil {
 		return fmt.Errorf("failed to acquire session lock: %w", err)
 	}
 	defer func() { _ = lockFile.Close() }()
 
-	// Handle proxy mode
-	var proxyServer *proxy.Server
-	var netProvider network.Provider
-
-	if cfg.ProxyEnabled {
-		// Proxy mode requires pasta for network isolation and traffic enforcement.
-		// Without pasta, applications could bypass the proxy entirely.
-		netProvider, err = network.SelectProvider()
-		if err != nil {
-			return fmt.Errorf("proxy mode requires pasta: %w\nRun 'devsandbox doctor' for installation instructions", err)
-		}
-
-		cfg.NetworkIsolated = netProvider.NetworkIsolated()
-
-		// Set up proxy
-		proxyCfg := proxy.NewConfig(cfg.SandboxRoot, proxyPort)
-		proxyCfg.LogReceivers = appCfg.Logging.Receivers
-		proxyCfg.LogAttributes = appCfg.Logging.Attributes
-		proxyCfg.CredentialInjectors = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
-
-		// Build filter configuration
-		proxyCfg.Filter = buildFilterConfig(appCfg, cmd, filterDefault, allowDomains, blockDomains)
-
-		proxyServer, err = proxy.NewServer(proxyCfg)
-		if err != nil {
-			return fmt.Errorf("failed to create proxy server: %w", err)
-		}
-
-		// Start proxy server
-		if err := proxyServer.Start(); err != nil {
-			return fmt.Errorf("failed to start proxy server: %w", err)
-		}
-
-		// Set up cleanup with proper synchronization
-		var cleanupOnce sync.Once
-		cleanup := func() {
-			cleanupOnce.Do(func() {
-				_ = proxyServer.Stop()
-			})
-		}
-
-		// Ensure cleanup on normal exit
-		defer cleanup()
-
-		// Handle signals for graceful shutdown
-		// We use a done channel to signal the main goroutine to exit after cleanup
-		sigChan := make(chan os.Signal, 1)
-		doneChan := make(chan struct{})
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		go func() {
-			<-sigChan
-			cleanup()
-			close(doneChan)
-		}()
-
-		// Check for signal-initiated shutdown after sandbox exits
-		defer func() {
-			select {
-			case <-doneChan:
-				// Signal received, exit cleanly (cleanup already done)
-				os.Exit(0)
-			default:
-				// Normal exit, cleanup handled by defer
-			}
-		}()
-
-		// Get actual port (may differ from requested if port was busy)
-		actualPort := proxyServer.Port()
-		cfg.ProxyPort = actualPort
-
-		// Set gateway IP - pasta maps 10.0.2.2 to host's 127.0.0.1
-		cfg.GatewayIP = netProvider.GatewayIP()
-		cfg.ProxyCAPath = proxyCfg.CACertPath
-
-		fmt.Fprintf(os.Stderr, "Proxy server started on 127.0.0.1:%d (provider: %s, gateway: %s)\n", actualPort, netProvider.Name(), cfg.GatewayIP)
-		if actualPort != proxyPort {
-			fmt.Fprintf(os.Stderr, "Note: Using port %d (requested port %d was busy)\n", actualPort, proxyPort)
-		}
-		fmt.Fprintf(os.Stderr, "CA certificate: %s\n", proxyCfg.CACertPath)
-
-		// Show filter status
-		if proxyCfg.Filter != nil && proxyCfg.Filter.IsEnabled() {
-			if proxyCfg.Filter.DefaultAction == proxy.FilterActionAsk {
-				fmt.Fprintf(os.Stderr, "Filter: ask mode (default action for unmatched requests)\n")
-				fmt.Fprintf(os.Stderr, "\nRun in another terminal to approve/deny requests:\n")
-				fmt.Fprintf(os.Stderr, "  devsandbox proxy monitor\n\n")
-				fmt.Fprintf(os.Stderr, "Requests without response within 30s will be rejected.\n")
-			} else {
-				fmt.Fprintf(os.Stderr, "Filter: %d rules, default action: %s\n", len(proxyCfg.Filter.Rules), proxyCfg.Filter.DefaultAction)
-			}
-		}
+	// Build RunConfig and delegate to the isolator
+	var proxyCAPath string
+	if proxyRes != nil {
+		proxyCAPath = proxyRes.caPath
 	}
 
-	builder := sandbox.NewBuilder(cfg)
-
-	// Build sandbox arguments
-	// Note: Order matters - later bindings override earlier ones for the same path
-	builder.AddBaseArgs() // Creates /tmp as tmpfs
-	builder.AddSystemBindings()
-	builder.AddNetworkBindings()
-	builder.AddLocaleBindings()
-	builder.AddCABindings()
-	builder.AddCustomMounts() // Custom mounts BEFORE sandbox home (for home paths)
-	builder.AddSandboxHome()
-	builder.AddProjectBindings()
-	builder.AddTools()              // After project bindings so tools can override (e.g., .git read-only)
-	builder.AddProxyCACertificate() // Must come after AddBaseArgs (needs /tmp tmpfs)
-	builder.AddEnvironment()
-
-	// Check for errors from building (e.g., critical tool setup failures)
-	if err := builder.Err(); err != nil {
-		return fmt.Errorf("failed to build sandbox: %w", err)
+	runCfg := &isolator.RunConfig{
+		SandboxCfg:     cfg,
+		AppCfg:         appCfg,
+		Command:        args,
+		Interactive:    term.IsTerminal(int(os.Stdin.Fd())),
+		RemoveOnExit:   rmFlag,
+		HasActiveTools: hasActiveTools,
+		ProxyServer:    proxyServer,
+		ProxyCAPath:    proxyCAPath,
+		ProxyPort:      cfg.ProxyPort,
+		SandboxLogger:  sandboxLogger,
+		LogDispatcher:  logDispatcher,
 	}
 
-	bwrapArgs := builder.Build()
-	shellCmd := sandbox.BuildShellCommand(cfg, args)
-
-	// Start active tools (e.g., docker proxy)
-	startActiveTools, cleanupActiveTools := createActiveToolsRunner(cfg)
-	defer cleanupActiveTools()
-	hasActiveTools, err := startActiveTools(context.Background())
-	if err != nil {
-		return err
-	}
-
-	debug := os.Getenv("DEVSANDBOX_DEBUG") != ""
-	if debug {
-		fmt.Fprintln(os.Stderr, "=== Sandbox Debug ===")
-		fmt.Fprintln(os.Stderr, "bwrap \\")
-		for _, arg := range bwrapArgs {
-			fmt.Fprintf(os.Stderr, "    %s \\\n", arg)
-		}
-		fmt.Fprintf(os.Stderr, "    -- %v\n", shellCmd)
-		fmt.Fprintln(os.Stderr, "===================")
-	}
-
-	// Validate port forwarding requirements
-	if appCfg.PortForwarding.IsEnabled() && len(appCfg.PortForwarding.Rules) > 0 {
-		if !cfg.NetworkIsolated {
-			return fmt.Errorf("port forwarding requires network isolation (pasta), but network is not isolated; " +
-				"without network isolation, the sandbox already has direct network access to the host; " +
-				"either enable proxy mode (--proxy) or remove port_forwarding configuration")
-		}
-	}
-
-	// Build port forwarding args for pasta
-	var portForwardArgs []string
-	if appCfg.PortForwarding.IsEnabled() {
-		portForwardArgs = sandbox.BuildPastaPortArgs(appCfg.PortForwarding.Rules)
-	}
-
-	// Execute the sandbox
-	if cfg.ProxyEnabled {
-		// Use pasta to create isolated network namespace
-		// pasta wraps bwrap and provides network connectivity via gateway IP
-		// All traffic must go through pasta's virtual interface -> our proxy
-		return bwrap.ExecWithPasta(bwrapArgs, shellCmd, portForwardArgs)
-	}
-
-	// Non-proxy mode
-	if hasActiveTools {
-		// Use ExecRun to keep parent process alive for ActiveTools (e.g., docker proxy)
-		return bwrap.ExecRun(bwrapArgs, shellCmd)
-	}
-
-	// No ActiveTools: use syscall.Exec (replaces current process, more efficient)
-	return bwrap.Exec(bwrapArgs, shellCmd)
+	return iso.Run(cmd.Context(), runCfg)
 }
 
 func printInfo(cfg *sandbox.Config) {
@@ -483,6 +457,60 @@ func buildFilterConfig(appCfg *config.Config, cmd *cobra.Command, filterDefault 
 	}
 
 	return filterCfg
+}
+
+// proxyResult holds the running proxy server and its cleanup/signal handling.
+type proxyResult struct {
+	server  *proxy.Server
+	cleanup func()
+	port    int
+	caPath  string
+	// signaled is set when a signal triggered shutdown (accessed from goroutine).
+	signaled atomic.Bool
+}
+
+// startProxyServer creates, starts, and returns a proxy server with signal-based cleanup.
+func startProxyServer(pCfg *proxy.Config) (*proxyResult, error) {
+	server, err := proxy.NewServer(pCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create proxy server: %w", err)
+	}
+
+	if err := server.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start proxy server: %w", err)
+	}
+
+	result := &proxyResult{
+		server: server,
+		port:   server.Port(),
+		caPath: pCfg.CACertPath,
+	}
+
+	var cleanupOnce sync.Once
+	result.cleanup = func() {
+		cleanupOnce.Do(func() {
+			_ = server.Stop()
+		})
+	}
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		signal.Stop(sigChan)
+		result.signaled.Store(true)
+		result.cleanup()
+	}()
+
+	return result, nil
+}
+
+// deferProxyCleanup stops the proxy server. If shutdown was triggered by a
+// signal, it sets an exit code that the caller should check after all other
+// defers have run (via proxyResult.signaled).
+// Call as: defer deferProxyCleanup(result)
+func deferProxyCleanup(result *proxyResult) {
+	result.cleanup()
 }
 
 // createActiveToolsRunner creates an active tools runner with the sandbox configuration.
