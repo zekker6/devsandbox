@@ -100,7 +100,7 @@ func NewServer(cfg *Config) (*Server, error) {
 	var askServer *AskServer
 	var askQueue *AskQueue
 	if cfg.Filter != nil && cfg.Filter.DefaultAction == FilterActionAsk {
-		askServer, err = NewAskServer(cfg.LogDir)
+		askServer, err = NewAskServer(cfg.SandboxBase)
 		if err != nil {
 			_ = proxyLogger.Close()
 			_ = reqLogger.Close()

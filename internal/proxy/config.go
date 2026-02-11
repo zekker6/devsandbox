@@ -31,6 +31,7 @@ type Config struct {
 	Enabled        bool
 	Port           int
 	BindAddress    string // IP to bind to (default "127.0.0.1"). For Docker, use DockerBridgeIP().
+	SandboxBase    string // Root directory for this sandbox instance
 	CADir          string
 	CACertPath     string
 	CAKeyPath      string
@@ -62,12 +63,28 @@ func NewConfig(sandboxBase string, port int) *Config {
 	return &Config{
 		Enabled:        true,
 		Port:           port,
+		SandboxBase:    sandboxBase,
 		CADir:          caDir,
 		CACertPath:     filepath.Join(caDir, CACertFile),
 		CAKeyPath:      filepath.Join(caDir, CAKeyFile),
 		LogDir:         filepath.Join(logBase, ProxyLogDirName),
 		InternalLogDir: filepath.Join(logBase, InternalLogDirName),
 	}
+}
+
+// AskSocketDir returns the directory for the ask mode socket.
+func AskSocketDir(sandboxBase string) string {
+	return filepath.Join(sandboxBase, LogBaseDirName, ProxyLogDirName, ".ask")
+}
+
+// AskSocketPath returns the full path to the ask mode Unix socket.
+func AskSocketPath(sandboxBase string) string {
+	return filepath.Join(AskSocketDir(sandboxBase), "ask.sock")
+}
+
+// AskLockPath returns the path to the ask mode lock file.
+func AskLockPath(sandboxBase string) string {
+	return filepath.Join(AskSocketDir(sandboxBase), "ask.lock")
 }
 
 func (c *Config) EnsureCADir() error {

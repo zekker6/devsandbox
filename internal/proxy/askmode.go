@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -63,13 +62,12 @@ type AskServer struct {
 
 // NewAskServer creates a new ask mode server.
 func NewAskServer(sandboxRoot string) (*AskServer, error) {
-	// Create socket in sandbox root directory
-	socketDir := filepath.Join(sandboxRoot, ".ask")
+	socketDir := AskSocketDir(sandboxRoot)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create socket directory: %w", err)
 	}
 
-	socketPath := filepath.Join(socketDir, "ask.sock")
+	socketPath := AskSocketPath(sandboxRoot)
 
 	// Remove stale socket
 	_ = os.Remove(socketPath)

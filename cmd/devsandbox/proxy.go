@@ -65,8 +65,8 @@ Requests that don't receive a response within 30 seconds are automatically rejec
 	}
 }
 
-// detectAskSocket finds the ask socket for the current directory's sandbox.
-func detectAskSocket() (string, error) {
+// resolveSandboxBase returns the sandbox base path for the current directory's project.
+func resolveSandboxBase() (string, error) {
 	appCfg, _, projectDir, err := config.LoadConfig()
 	if err != nil {
 		return "", err
@@ -82,9 +82,17 @@ func detectAskSocket() (string, error) {
 	}
 
 	projectName := sandbox.GenerateSandboxName(projectDir)
-	socketPath := filepath.Join(basePath, projectName, "logs", "proxy", ".ask", "ask.sock")
+	return filepath.Join(basePath, projectName), nil
+}
 
-	// Check if socket exists
+// detectAskSocket finds the ask socket for the current directory's sandbox.
+func detectAskSocket() (string, error) {
+	sandboxBase, err := resolveSandboxBase()
+	if err != nil {
+		return "", err
+	}
+
+	socketPath := proxy.AskSocketPath(sandboxBase)
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
 		return "", fmt.Errorf("no ask socket found at %s\nMake sure the sandbox is running with --filter-default=ask", socketPath)
 	}
