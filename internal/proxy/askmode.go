@@ -220,7 +220,11 @@ func (s *AskServer) handleClientResponses() {
 			if closed {
 				return
 			}
-			// Monitor disconnected — cancel all pending requests
+			// Monitor disconnected — mark connection dead and cancel all pending requests
+			s.mu.Lock()
+			s.conn = nil
+			s.mu.Unlock()
+
 			s.pendingMu.Lock()
 			for id, ch := range s.pending {
 				close(ch)

@@ -114,8 +114,14 @@ func TestAskServer_ClientMode_Ask(t *testing.T) {
 	}
 	defer func() { _ = server.Close() }()
 
-	// Give client time to connect
-	time.Sleep(100 * time.Millisecond)
+	// Wait for client to connect
+	deadline := time.Now().Add(2 * time.Second)
+	for !server.HasMonitor() {
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for monitor connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

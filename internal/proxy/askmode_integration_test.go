@@ -61,8 +61,14 @@ func TestIntegration_MonitorFirst(t *testing.T) {
 		t.Fatalf("expected client mode, got %s", server.Mode())
 	}
 
-	// Give client time to connect
-	time.Sleep(100 * time.Millisecond)
+	// Wait for client to connect
+	deadline := time.Now().Add(5 * time.Second)
+	for !server.HasMonitor() {
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for monitor connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Step 3: Send a request — should be approved by monitor
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -95,7 +101,14 @@ func TestIntegration_MonitorFirst(t *testing.T) {
 		t.Fatalf("expected client mode after restart, got %s", server2.Mode())
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait for client to reconnect
+	deadline2 := time.Now().Add(5 * time.Second)
+	for !server2.HasMonitor() {
+		if time.Now().After(deadline2) {
+			t.Fatal("timeout waiting for monitor reconnection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -83,13 +84,14 @@ func removeStaleLock(path string) error {
 		return err
 	}
 
-	pid, err := strconv.Atoi(string(data))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		// Corrupt lock file, remove it
 		_ = os.Remove(path)
 		return nil
 	}
 
+	// FindProcess never errors on Unix, but we handle it for portability.
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		_ = os.Remove(path)
