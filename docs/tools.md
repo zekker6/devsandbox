@@ -438,6 +438,26 @@ The Docker proxy allows:
 
 This allows debugging and inspecting running containers without the ability to modify the Docker environment.
 
+### Socket Auto-Detection
+
+On **Linux**, the Docker socket defaults to `/run/docker.sock`.
+
+On **macOS**, the socket location varies by Docker runtime. devsandbox probes these paths in order and uses the first one found:
+
+| Priority | Path | Runtime |
+|----------|------|---------|
+| 1 | `~/.docker/run/docker.sock` | Docker Desktop |
+| 2 | `/var/run/docker.sock` | OrbStack (symlink) |
+| 3 | `~/.colima/default/docker.sock` | Colima |
+
+To override auto-detection, set the socket path explicitly:
+
+```toml
+[tools.docker]
+enabled = true
+socket = "/path/to/docker.sock"
+```
+
 ### How It Works
 
 1. A Unix socket proxy is created at `$HOME/docker.sock` inside the sandbox

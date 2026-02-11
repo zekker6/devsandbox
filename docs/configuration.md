@@ -59,6 +59,34 @@ enabled = true
 - Unknown injector names in the config produce a warning and are skipped.
 - The injector never overwrites an existing `Authorization` header on the request.
 
+### Isolation Backend
+
+```toml
+[sandbox]
+# Isolation backend: "auto", "bwrap", or "docker"
+# - "auto" (default): bwrap on Linux, docker on macOS
+# - "bwrap": bubblewrap (Linux only)
+# - "docker": Docker containers (Linux, macOS)
+isolation = "auto"
+
+# Docker-specific settings (only used when isolation = "docker")
+[sandbox.docker]
+# Path to Dockerfile used to build the sandbox image.
+# Defaults to ~/.config/devsandbox/Dockerfile (auto-created with FROM ghcr.io/zekker6/devsandbox:latest)
+# Can be an absolute path or relative to project directory.
+# dockerfile = "/path/to/custom/Dockerfile"
+
+# Keep container after exit for fast restarts (default: true)
+# When true: containers are reused, startup ~1-2s
+# When false: containers are removed on exit
+keep_container = true
+
+# Resource limits (optional)
+[sandbox.docker.resources]
+memory = "4g"
+cpus = "2"
+```
+
 ### Sandbox Settings
 
 ```toml
@@ -254,14 +282,20 @@ persistent = false
 # When enabled, provides read-only access to Docker daemon
 enabled = false
 
-# Path to host Docker socket
-# Defaults to /run/docker.sock
-socket = "/run/docker.sock"
+# Path to host Docker socket (optional)
+# On Linux: defaults to /run/docker.sock
+# On macOS: auto-detected (Docker Desktop, OrbStack, Colima)
+# Set explicitly to override auto-detection:
+# socket = "/path/to/docker.sock"
 ```
 
 **Note:** Docker access is read-only. You can list/inspect containers, view logs, and exec into
 running containers, but cannot create, delete, or modify containers. Only Unix socket access is
 supported; TCP connections to remote Docker daemons are not proxied.
+
+> **Security Warning**: Enabling Docker socket forwarding grants the sandbox read access
+> to all Docker state and the ability to exec into any container on the host.
+> See [Docker Socket Forwarding](sandboxing.md#docker-socket-forwarding--security-warning) for details.
 
 See [docs/tools.md](tools.md#docker) for full details on allowed operations.
 
@@ -421,6 +455,23 @@ devsandbox logs internal --type logging
 ```toml
 # ~/.config/devsandbox/config.toml
 
+[sandbox]
+# Use auto-detection (bwrap on Linux, docker on macOS)
+isolation = "auto"
+# Use custom location for sandbox data
+# base_path = "/data/devsandbox"
+
+# Docker settings (used when isolation = "docker")
+[sandbox.docker]
+# Uses default Dockerfile at ~/.config/devsandbox/Dockerfile
+# Uncomment to use a custom Dockerfile:
+# dockerfile = "/path/to/custom/Dockerfile"
+keep_container = true  # Keep containers for fast restarts
+
+[sandbox.docker.resources]
+memory = "4g"
+cpus = "2"
+
 [proxy]
 # Enable proxy mode by default for this machine
 enabled = true
@@ -429,10 +480,6 @@ port = 8080
 # Inject GitHub token into API requests (keeps token out of sandbox)
 [proxy.credentials.github]
 enabled = true
-
-[sandbox]
-# Use custom location for sandbox data
-# base_path = "/data/devsandbox"
 
 [overlay]
 # Master switch for overlay filesystem support
@@ -509,6 +556,9 @@ devsandbox --proxy          # Enable even if config has enabled = false
 
 # Override port
 devsandbox --proxy --proxy-port 9090
+
+# Ephemeral mode — remove sandbox state after exit
+devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbox home
 ```
 
 ## Per-Project Configuration
@@ -546,7 +596,7 @@ path = "~/.config/devsandbox/acme.toml"
 **Include file format:**
 - Same structure as main config
 - Nested `[[include]]` blocks are ignored
-- Missing files produce a warning but don't fail
+- Missing include files produce a warning and are skipped. Parse errors in include files are fatal.
 
 ### Local Config Files
 

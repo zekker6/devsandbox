@@ -1,7 +1,41 @@
 # Sandboxing
 
-devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) to create isolated environments for running
-untrusted code.
+devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux or Docker containers on macOS to create
+isolated environments for running untrusted code.
+
+## Isolation Backends
+
+devsandbox supports two isolation backends:
+
+| Backend | Platform | Description |
+|---------|----------|-------------|
+| `bwrap` | Linux only | Uses bubblewrap for namespace-based isolation. Preferred on Linux. |
+| `docker` | Linux, macOS | Uses Docker containers. Required for macOS, optional on Linux. |
+
+### Automatic Selection
+
+By default (`--isolation=auto`), devsandbox selects the best backend for your platform:
+- **Linux**: Uses `bwrap` (bubblewrap)
+- **macOS**: Uses `docker`
+
+### Manual Override
+
+Force a specific backend with the `--isolation` flag:
+
+```bash
+# Use Docker on Linux
+devsandbox --isolation=docker
+
+# Explicitly use bwrap (Linux only)
+devsandbox --isolation=bwrap
+```
+
+Or configure in `~/.config/devsandbox/config.toml`:
+
+```toml
+[sandbox]
+isolation = "docker"  # "auto", "bwrap", or "docker"
+```
 
 ## Security Model
 
@@ -50,7 +84,9 @@ Use `git.mode = "readwrite"` for full git access.
 
 **Network** - By default, full network access is allowed. Use [proxy mode](proxy.md) to isolate and inspect traffic.
 
-## How It Works
+## How It Works (bwrap)
+
+The following sections describe how the bwrap (bubblewrap) backend implements isolation on Linux. For Docker-specific behavior, see [Docker Backend](#docker-backend) below.
 
 ### Filesystem Isolation
 
@@ -134,8 +170,8 @@ Inside the sandbox, these environment variables are set:
 # List all sandboxes
 devsandbox sandboxes list
 
-# Include disk usage (slower)
-devsandbox sandboxes list --size
+# Skip disk usage calculation (faster)
+devsandbox sandboxes list --no-size
 
 # JSON output for scripting
 devsandbox sandboxes list --json
@@ -177,6 +213,13 @@ This verifies:
 - Optional binaries (pasta for proxy mode)
 - User namespace support
 - Directory permissions
+- Overlayfs support (for tool writable layers)
+- Docker availability and daemon status
+- Docker base image (`ghcr.io/zekker6/devsandbox:latest`) presence
+- Configuration file validity
+- Kernel version
+- Recent errors in internal logs
+- Detected development tools (mise, editors, etc.)
 
 ### Debug Mode
 
@@ -341,10 +384,194 @@ devsandbox --info
 
 Output includes a "Custom Mounts" section if rules are configured.
 
+## How It Works (Docker)
+
+The Docker backend provides isolation via containers, enabling macOS support and simplified distribution. The following sections are Docker-specific. For bwrap behavior, see [How It Works (bwrap)](#how-it-works-bwrap) above.
+
+### Docker-Specific Configuration
+
+Configure Docker settings in `~/.config/devsandbox/config.toml`:
+
+```toml
+[sandbox]
+isolation = "docker"
+
+[sandbox.docker]
+# Path to Dockerfile (default: ~/.config/devsandbox/Dockerfile, auto-created)
+# dockerfile = "/path/to/custom/Dockerfile"
+
+# Keep container after exit for fast restarts (default: true)
+keep_container = true
+
+# Resource limits
+[sandbox.docker.resources]
+memory = "4g"
+cpus = "2"
+```
+
+### Container Persistence
+
+By default, Docker containers are kept after exit to enable fast restarts. This significantly improves startup time from ~5-10 seconds to ~1-2 seconds.
+
+**Container Lifecycle:**
+
+| State | Behavior |
+|-------|----------|
+| Container doesn't exist | Creates new container, then starts it |
+| Container stopped | Starts existing container (~1-2s) |
+| Container running | Exec into running container (instant) |
+
+**Container Naming:**
+
+Containers are named `devsandbox-<project>-<hash>` where hash is derived from the project path:
+- Same project directory always gets the same container
+- Different directories with same project name get different containers
+
+**Configuration:**
+
+```toml
+[sandbox.docker]
+keep_container = true   # Keep container after exit (default)
+keep_container = false  # Remove container on exit
+```
+
+**One-off Fresh Containers:**
+
+Use `--rm` flag for ephemeral mode — sandbox state is removed after exit:
+
+```bash
+devsandbox --rm
+```
+
+This works for both backends:
+- **Docker**: don't keep container after exit (fresh container each run)
+- **bwrap**: remove sandbox home directory after exit
+
+**Managing Containers:**
+
+```bash
+# List all sandboxes including Docker container state
+devsandbox sandboxes list
+
+# Prune stopped Docker containers
+devsandbox sandboxes prune
+
+# Force remove specific container
+docker rm -f devsandbox-myproject-abc123
+```
+
+The `sandboxes list` command shows container state (running/stopped/exited) in the STATUS column.
+
+### How Docker Backend Works
+
+The Docker backend:
+
+1. **UID/GID Mapping**: Creates a container user matching your host UID/GID for proper file ownership
+2. **Project Mount**: Mounts your project directory at its host path (read/write)
+3. **Sandbox Home**:
+   - **Linux**: Bind mount for consistency with bwrap
+   - **macOS**: Named volume for better performance
+4. **Tool Configs**: Mounts nvim, tmux, starship configs read-only from host
+5. **Proxy Support**: Uses `host.docker.internal` for proxy connections
+
+### Docker Image
+
+devsandbox uses a Dockerfile-based workflow. On first run, a default Dockerfile is created at
+`~/.config/devsandbox/Dockerfile` with:
+
+```dockerfile
+FROM ghcr.io/zekker6/devsandbox:latest
+```
+
+The image is rebuilt on every sandbox start. Docker layer caching keeps this fast when the Dockerfile
+hasn't changed.
+
+The base image (`ghcr.io/zekker6/devsandbox:latest`) includes:
+- Debian slim base
+- mise for tool management
+- Common development tools (git, curl, bash, zsh)
+- gosu for privilege dropping
+- passt/pasta for network isolation (if needed)
+
+### Customizing the Image
+
+Edit the default Dockerfile at `~/.config/devsandbox/Dockerfile` to add tools globally:
+
+```dockerfile
+FROM ghcr.io/zekker6/devsandbox:latest
+
+# Add project-specific tools
+RUN apt-get update && apt-get install -y postgresql-client
+
+# Pre-install mise tools
+RUN mise install node@20 python@3.12
+```
+
+The global Dockerfile produces a `devsandbox:local` image tag.
+
+### Per-Project Dockerfiles
+
+For project-specific customizations, point to a different Dockerfile in `.devsandbox.toml`:
+
+```toml
+[sandbox.docker]
+dockerfile = "Dockerfile.devsandbox"
+```
+
+Per-project Dockerfiles produce a `devsandbox:<project-name>-<hash>` image tag.
+
+### Manual Image Build
+
+Build the image without starting a sandbox:
+
+```bash
+devsandbox image build
+```
+
+### Platform Differences
+
+| Feature | Linux (bwrap) | Linux (docker) | macOS (docker) |
+|---------|---------------|----------------|----------------|
+| Sandbox home | Bind mount | Bind mount | Named volume |
+| File performance | Native | Near-native | Slower (volume) |
+| .env hiding | Overlay | Volume mount | Volume mount |
+| Network isolation | pasta | HTTP_PROXY | HTTP_PROXY |
+| Host integration | Full | Via mounts | Via mounts |
+
+### Docker Socket Forwarding — Security Warning
+
+When `[tools.docker] enabled = true`, the sandbox gains filtered access to the host
+Docker daemon. The proxy allows:
+
+- **Read operations**: List all containers, images, volumes, and networks on the host
+- **Exec/attach**: Execute commands inside ANY running container on the host
+
+This is **intentional** — it enables Docker-in-Docker workflows. However, it
+effectively grants the sandbox **host-level access via Docker**, which is often
+equivalent to root. **Only enable this for trusted code.**
+
+Container creation, deletion, and image manipulation are blocked by the proxy filter.
+
+### Known Limitations (Docker)
+
+- **No pasta network**: Network isolation uses HTTP_PROXY instead of pasta
+- **Proxy filtering**: Proxy mode with request filtering is supported via per-session Docker networks
+- **.env hiding**: Uses Docker volume mounts (`-v /dev/null`) to hide `.env` files — no special privileges required
+- **macOS file performance**: Named volumes are slower than native filesystem
+- **inotify limitations**: File watching may be less reliable on macOS
+- **No nested Docker**: Cannot run Docker commands inside the sandbox
+
 ## Limitations
 
+### Bwrap Backend (Linux)
 - **Linux only** - Uses Linux-specific namespaces and capabilities
 - **User namespaces required** - Most modern distros have this enabled
 - **No nested containers** - Running Docker inside the sandbox is not supported
 - **Some tools may break** - Tools that require specific system access may fail
 - **Overlay requires kernel support** - Most modern kernels (3.18+) support overlayfs
+
+### Docker Backend (All Platforms)
+- **Docker required** - Docker Desktop or Docker Engine must be installed and running
+- **No pasta network** - Uses HTTP_PROXY for network isolation instead
+- **Performance on macOS** - File operations may be slower due to volume mounts
+- **Image build** - First run builds the image from a Dockerfile (requires downloading the base image ~200MB)

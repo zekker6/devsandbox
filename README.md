@@ -1,7 +1,8 @@
 # devsandbox
 
 A sandbox for running untrusted development tools. Uses [bubblewrap](https://github.com/containers/bubblewrap)
-for filesystem isolation and optionally [pasta](https://passt.top/) for network isolation (proxy mode).
+on Linux or Docker containers on macOS for filesystem isolation, and optionally [pasta](https://passt.top/) for
+network isolation (proxy mode on Linux).
 
 ## Why?
 
@@ -20,13 +21,18 @@ permissions.
 
 ### Installation
 
-**Required:** Linux with user namespaces, [bubblewrap](https://github.com/containers/bubblewrap)
+**Linux (bwrap backend):**
+- [bubblewrap](https://github.com/containers/bubblewrap) (required)
+- [passt](https://passt.top/) (optional, for proxy mode)
 
-**Optional:**
-- [mise](https://mise.jdx.dev/) - for tool version management (node, python, etc.)
-- [passt](https://passt.top/) - for proxy mode (`--proxy`)
+**macOS (docker backend):**
+- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) (required)
+
+**Optional (all platforms):**
+- [mise](https://mise.jdx.dev/) - for tool version management
 
 ```bash
+# Linux: Install bubblewrap
 # Arch Linux
 sudo pacman -S bubblewrap
 
@@ -36,7 +42,10 @@ sudo apt install bubblewrap
 # Fedora
 sudo dnf install bubblewrap
 
-# Mise
+# macOS: Install Docker Desktop
+# Download from https://docs.docker.com/desktop/install/mac-install/
+
+# Install devsandbox via mise
 mise install github:zekker6/devsandbox
 ```
 
@@ -59,6 +68,9 @@ devsandbox bun run dev
 
 # Run AI coding assistant with reduced risk
 devsandbox claude --dangerously-skip-permissions
+
+# Choose isolation backend (auto, bwrap, docker)
+devsandbox --isolation=docker npm install
 
 # Using mise-managed tools inside sandbox
 mise exec "github:zekker6/devsandbox@latest" -- claude --dangerously-skip-permissions
@@ -154,6 +166,13 @@ devsandbox tools info mise          # Show tool details
 devsandbox tools check              # Verify tool setup
 ```
 
+### Diagnostics & Image Management
+
+```bash
+devsandbox doctor                   # Check installation and dependencies
+devsandbox image build              # Build Docker sandbox image without starting
+```
+
 ### Configuration
 
 ```bash
@@ -170,9 +189,16 @@ port = 8080
 
 ## Limitations
 
-- Linux only (uses Linux namespaces)
+**Linux (bwrap backend):**
 - Requires user namespaces enabled
 - MITM proxy may break certificate pinning
+
+**macOS (docker backend):**
+- Requires Docker Desktop running
+- File operations may be slower due to volume mounts
+- Network isolation uses HTTP_PROXY instead of pasta
+
+**Both:**
 - Docker access is read-only (no container creation/deletion, see [docs/tools.md](docs/tools.md#docker))
 
 ## License
