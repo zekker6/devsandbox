@@ -230,6 +230,23 @@ DEVSANDBOX_DEBUG=1 devsandbox
 
 ### Common Issues
 
+**"Docker daemon not running" (macOS)**
+
+Start your Docker runtime:
+
+```bash
+# Docker Desktop
+open -a Docker
+
+# OrbStack
+open -a OrbStack
+
+# Colima
+colima start
+```
+
+Then verify with `devsandbox doctor`.
+
 **"User namespaces not enabled"**
 
 - Check kernel config: `cat /proc/sys/kernel/unprivileged_userns_clone`
@@ -537,6 +554,47 @@ devsandbox image build
 | .env hiding | Overlay | Volume mount | Volume mount |
 | Network isolation | pasta | HTTP_PROXY | HTTP_PROXY |
 | Host integration | Full | Via mounts | Via mounts |
+
+### macOS Docker Environments
+
+#### Supported Runtimes
+
+| Runtime | Notes |
+|---------|-------|
+| [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) | Official Docker runtime. Best compatibility. |
+| [OrbStack](https://orbstack.dev/) | Lightweight alternative. Faster startup, lower resource usage. |
+| [Colima](https://github.com/abiosoft/colima) | Free, open-source. Uses Lima VMs. |
+
+All three provide a Docker-compatible daemon. devsandbox auto-detects the Docker socket location (see [tools.md](tools.md#docker) for socket detection details).
+
+#### Recommended Resources
+
+Docker Desktop (or equivalent) should be configured with at least:
+- **RAM**: 4 GB+
+- **CPUs**: 2+
+
+Lower values work but may slow builds and tool installations inside the sandbox.
+
+#### Volume Performance
+
+On macOS, the sandbox home directory uses a **named Docker volume** instead of a bind mount. This is necessary because bind mounts on macOS go through a virtualization layer (VirtioFS or gRPC-FUSE) that can be 2-5x slower than native filesystem access.
+
+Named volumes store data inside the Docker VM's filesystem, providing near-native performance for operations like `npm install`, Go builds, and other I/O-heavy tasks. The tradeoff is that volume contents are not directly accessible from the macOS Finder — use `devsandbox sandboxes list` to view sizes and `devsandbox sandboxes prune --volumes` to reclaim space.
+
+#### File Watching Limitations
+
+File watching (inotify) across the macOS ↔ Docker boundary can be unreliable. If your dev server doesn't detect file changes, configure it to use polling:
+
+```bash
+# Next.js / webpack
+WATCHPACK_POLLING=true devsandbox npm run dev
+
+# Vite
+devsandbox -- npx vite --force
+
+# Generic: set CHOKIDAR_USEPOLLING for chokidar-based watchers
+CHOKIDAR_USEPOLLING=true devsandbox npm run dev
+```
 
 ### Docker Socket Forwarding — Security Warning
 

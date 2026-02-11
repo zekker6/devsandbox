@@ -66,10 +66,28 @@ func newListCmd() *cobra.Command {
 
 			// Calculate sizes (default: on)
 			if !noSize {
+				// Query Docker volume sizes once if any Docker sandboxes exist
+				var dockerVolumeSizes map[string]int64
+				hasDocker := false
 				for _, s := range sandboxes {
 					if s.Isolation == sandbox.IsolationDocker {
-						// Docker volumes don't have easy size calculation
-						s.SizeBytes = 0
+						hasDocker = true
+						break
+					}
+				}
+				if hasDocker {
+					dockerVolumeSizes = sandbox.GetDockerVolumeSizes()
+				}
+
+				for _, s := range sandboxes {
+					if s.Isolation == sandbox.IsolationDocker {
+						// Try to get size from Docker volume data
+						volumes := sandbox.GetContainerVolumes(s.SandboxRoot)
+						for _, vol := range volumes {
+							if size, ok := dockerVolumeSizes[vol]; ok {
+								s.SizeBytes += size
+							}
+						}
 					} else {
 						size, err := sandbox.GetSandboxSize(s.SandboxRoot)
 						if err != nil {
@@ -105,6 +123,7 @@ func newPruneCmd() *cobra.Command {
 		olderThan string
 		dryRun    bool
 		force     bool
+		volumes   bool
 	)
 
 	cmd := &cobra.Command{
@@ -114,11 +133,11 @@ func newPruneCmd() *cobra.Command {
 
 Without any flags, only orphaned sandboxes (where the original project
 directory no longer exists) are removed.`,
-		Example: `  devsandbox sandboxes prune              # Remove orphaned only
-  devsandbox sandboxes prune --all        # Remove all sandboxes
-  devsandbox sandboxes prune --keep 5     # Keep 5 most recently used
-  devsandbox sandboxes prune --older-than 30d  # Remove unused for 30 days
-  devsandbox sandboxes prune --dry-run    # Show what would be removed`,
+		Example: `  devsandbox sandboxes prune                   # Remove orphaned only
+  devsandbox sandboxes prune --all --volumes    # Remove all sandboxes and volumes
+  devsandbox sandboxes prune --keep 5           # Keep 5 most recently used
+  devsandbox sandboxes prune --older-than 30d   # Remove unused for 30 days
+  devsandbox sandboxes prune --dry-run          # Show what would be removed`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
@@ -166,18 +185,35 @@ directory no longer exists) are removed.`,
 			}
 
 			// Calculate sizes for display
+			var dockerVolumeSizes map[string]int64
+			hasDocker := false
+			for _, s := range toPrune {
+				if s.Isolation == sandbox.IsolationDocker {
+					hasDocker = true
+					break
+				}
+			}
+			if hasDocker {
+				dockerVolumeSizes = sandbox.GetDockerVolumeSizes()
+			}
+
 			var totalSize int64
 			for _, s := range toPrune {
 				if s.Isolation == sandbox.IsolationDocker {
-					s.SizeBytes = 0
+					vols := sandbox.GetContainerVolumes(s.SandboxRoot)
+					for _, vol := range vols {
+						if size, ok := dockerVolumeSizes[vol]; ok {
+							s.SizeBytes += size
+						}
+					}
 				} else {
 					size, err := sandbox.GetSandboxSize(s.SandboxRoot)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
 					}
 					s.SizeBytes = size
-					totalSize += size
 				}
+				totalSize += s.SizeBytes
 			}
 
 			// Show what will be removed
@@ -197,7 +233,7 @@ directory no longer exists) are removed.`,
 				fmt.Printf("  %s (%s)%s\n", s.Name, isoType, status)
 				fmt.Printf("    Project: %s\n", s.ProjectDir)
 				fmt.Printf("    Last used: %s\n", s.LastUsed.Format("2006-01-02 15:04"))
-				if s.Isolation != sandbox.IsolationDocker {
+				if s.SizeBytes > 0 {
 					fmt.Printf("    Size: %s\n", sandbox.FormatSize(s.SizeBytes))
 				}
 				fmt.Println()
@@ -229,7 +265,7 @@ directory no longer exists) are removed.`,
 			// Remove sandboxes (handles both bwrap and docker)
 			var removed, failed int
 			for _, s := range toPrune {
-				if err := sandbox.RemoveSandboxByType(s); err != nil {
+				if err := sandbox.RemoveSandboxByType(s, volumes); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to remove %s: %v\n", s.Name, err)
 					failed++
 				} else {
@@ -248,6 +284,7 @@ directory no longer exists) are removed.`,
 	}
 
 	cmd.Flags().BoolVar(&all, "all", false, "Remove all sandboxes")
+	cmd.Flags().BoolVar(&volumes, "volumes", false, "Also remove associated Docker volumes")
 	cmd.Flags().IntVar(&keep, "keep", 0, "Keep N most recently used sandboxes")
 	cmd.Flags().StringVar(&olderThan, "older-than", "", "Remove sandboxes not used in duration (e.g., 30d, 2w)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be removed without removing")
@@ -303,8 +340,8 @@ func printTable(sandboxes []*sandbox.Metadata, showSize bool) error {
 		}
 
 		sizeStr := sandbox.FormatSize(s.SizeBytes)
-		if s.Isolation == sandbox.IsolationDocker {
-			sizeStr = "-" // Docker volumes don't have easy size
+		if s.Isolation == sandbox.IsolationDocker && s.SizeBytes == 0 {
+			sizeStr = "-"
 		}
 
 		if showSize {

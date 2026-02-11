@@ -1,8 +1,8 @@
 # Proxy Mode
 
-Proxy mode creates a fully isolated network namespace where all HTTP/HTTPS traffic is routed through a local MITM (
-Man-in-the-Middle) proxy. This allows inspection and logging of all network requests made by tools running inside the
-sandbox.
+Proxy mode routes all HTTP/HTTPS traffic through a local MITM (Man-in-the-Middle) proxy for inspection and logging.
+The sections below describe bwrap backend behavior by default. The Docker backend achieves the same goal with different
+mechanisms — see [Backend-Specific Behavior](#backend-specific-behavior) for details.
 
 ## Why Use Proxy Mode?
 
@@ -11,9 +11,11 @@ sandbox.
 - **Security monitoring** - Detect unexpected network connections
 - **Compliance** - Log all external communications for review
 
-## Requirements
+## Requirements (bwrap backend)
 
-Proxy mode requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt—basic sandboxing works without it.
+Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt—basic sandboxing works without it.
+
+> **Docker backend:** The Docker backend does NOT require pasta. It uses per-session Docker networks for isolation instead. See [Backend-Specific Behavior](#backend-specific-behavior).
 
 ```bash
 # Arch Linux
@@ -59,7 +61,32 @@ enabled = true
 port = 8080
 ```
 
-## How It Works
+## Backend-Specific Behavior
+
+The proxy achieves the same goal on both backends — intercept and log HTTP/HTTPS traffic — but the underlying mechanisms differ.
+
+### bwrap backend
+
+- **Network isolation**: pasta creates a new network namespace with its own network stack
+- **Gateway address**: Traffic is routed through `10.0.2.2` (pasta virtual gateway)
+- **CA certificate path** (inside sandbox): `/tmp/devsandbox-ca.crt`
+- **Requirement**: passt/pasta must be installed
+
+### Docker backend
+
+- **Network isolation**: A per-session Docker network is created (no pasta required)
+- **Gateway address**: `host.docker.internal` (Docker's built-in host access)
+- **CA certificate path** (inside container): `/etc/ssl/certs/devsandbox-ca.crt`
+- **Requirement**: Docker daemon running (no additional dependencies)
+
+| Aspect | bwrap | Docker |
+|--------|-------|--------|
+| Network isolation | pasta namespace | Per-session Docker network |
+| Gateway IP | `10.0.2.2` | `host.docker.internal` |
+| CA cert location | `/tmp/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` |
+| Extra dependency | passt/pasta | None (Docker only) |
+
+## How It Works (bwrap)
 
 1. **Network Isolation** - pasta creates a new network namespace with its own network stack
 2. **Gateway Setup** - Traffic is routed through a virtual gateway (10.0.2.2)

@@ -1,11 +1,14 @@
 package sandbox
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -122,10 +125,17 @@ func RemoveDockerVolume(volumeName string) error {
 }
 
 // RemoveDockerContainer stops and removes a Docker container,
-// along with any associated per-session network.
-func RemoveDockerContainer(containerName string) error {
+// along with any associated per-session network and optionally volumes.
+func RemoveDockerContainer(containerName string, removeVolumes bool) error {
 	// Read network label BEFORE removing the container
 	removeDockerNetworks(containerName)
+
+	// Remove volumes BEFORE container removal (need container to exist for inspect)
+	if removeVolumes {
+		if err := removeContainerVolumes(containerName); err != nil {
+			log.Printf("warning: failed to remove volumes for %s: %v", containerName, err)
+		}
+	}
 
 	// Stop if running
 	stopCmd := exec.Command("docker", "stop", containerName)
@@ -164,10 +174,173 @@ func removeDockerNetworks(containerName string) {
 	}
 }
 
-// RemoveSandboxByType removes a sandbox based on its isolation type
-func RemoveSandboxByType(m *Metadata) error {
+// removeContainerVolumes inspects a container's mounts and removes
+// devsandbox-prefixed volumes, skipping the shared cache volume.
+func removeContainerVolumes(containerName string) error {
+	volumes := GetContainerVolumes(containerName)
+	if len(volumes) == 0 {
+		return nil
+	}
+
+	var errs []string
+	for _, vol := range volumes {
+		if !strings.HasPrefix(vol, DockerVolumePrefix) {
+			continue
+		}
+		// Skip the shared cache volume
+		if vol == "devsandbox-cache" {
+			continue
+		}
+		if err := RemoveDockerVolume(vol); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", vol, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to remove volumes: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// GetContainerVolumes returns the names of Docker volumes mounted by a container.
+func GetContainerVolumes(containerName string) []string {
+	cmd := exec.Command("docker", "inspect", "--format",
+		`{{ range .Mounts }}{{ if eq .Type "volume" }}{{ println .Name }}{{ end }}{{ end }}`,
+		containerName)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	var volumes []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			volumes = append(volumes, line)
+		}
+	}
+	return volumes
+}
+
+// GetDockerVolumeSizes returns a map of devsandbox volume names to their sizes in bytes.
+// Parses the output of `docker system df -v`. Returns an empty map on any failure.
+func GetDockerVolumeSizes() map[string]int64 {
+	sizes := make(map[string]int64)
+
+	cmd := exec.Command("docker", "system", "df", "-v")
+	output, err := cmd.Output()
+	if err != nil {
+		return sizes
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	inVolumes := false
+	headerSkipped := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Look for the volumes section
+		if strings.HasPrefix(line, "Local Volumes space usage:") {
+			inVolumes = true
+			headerSkipped = false
+			continue
+		}
+
+		// Detect the end of volumes section (next section or empty line after data)
+		if inVolumes && (strings.HasPrefix(line, "Build cache") || strings.HasPrefix(line, "Images space") || strings.HasPrefix(line, "Containers space")) {
+			break
+		}
+
+		if !inVolumes {
+			continue
+		}
+
+		// Skip the column header line
+		if !headerSkipped {
+			if strings.Contains(line, "VOLUME NAME") || strings.Contains(line, "LINKS") {
+				headerSkipped = true
+			}
+			continue
+		}
+
+		// Skip empty lines
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		// Parse volume line: VOLUME_NAME  LINKS  SIZE
+		fields := strings.Fields(trimmed)
+		if len(fields) < 3 {
+			continue
+		}
+
+		volName := fields[0]
+		if !strings.HasPrefix(volName, DockerVolumePrefix) {
+			continue
+		}
+
+		sizeStr := fields[len(fields)-1]
+		sizes[volName] = parseDockerSize(sizeStr)
+	}
+
+	return sizes
+}
+
+// parseDockerSize converts a Docker size string (e.g., "1.5GB", "250MB", "45.2kB", "0B")
+// to bytes. Returns 0 for invalid or empty input.
+func parseDockerSize(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+
+	// Find where the numeric part ends and the unit begins
+	unitIdx := -1
+	for i, c := range s {
+		if c != '.' && (c < '0' || c > '9') {
+			unitIdx = i
+			break
+		}
+	}
+
+	if unitIdx <= 0 {
+		// No unit found or empty numeric part
+		return 0
+	}
+
+	numStr := s[:unitIdx]
+	unit := s[unitIdx:]
+
+	num, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0
+	}
+
+	var multiplier float64
+	switch strings.ToUpper(unit) {
+	case "B":
+		multiplier = 1
+	case "KB":
+		multiplier = 1000
+	case "MB":
+		multiplier = 1000 * 1000
+	case "GB":
+		multiplier = 1000 * 1000 * 1000
+	case "TB":
+		multiplier = 1000 * 1000 * 1000 * 1000
+	default:
+		return 0
+	}
+
+	return int64(math.Round(num * multiplier))
+}
+
+// RemoveSandboxByType removes a sandbox based on its isolation type.
+// When removeVolumes is true, Docker sandbox volumes are also removed.
+func RemoveSandboxByType(m *Metadata, removeVolumes bool) error {
 	if m.Isolation == IsolationDocker {
-		return RemoveDockerContainer(m.SandboxRoot)
+		return RemoveDockerContainer(m.SandboxRoot, removeVolumes)
 	}
 	return RemoveSandbox(m.SandboxRoot)
 }

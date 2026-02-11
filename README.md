@@ -26,7 +26,9 @@ permissions.
 - [passt](https://passt.top/) (optional, for proxy mode)
 
 **macOS (docker backend):**
-- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) (required)
+- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) (required), or
+- [OrbStack](https://orbstack.dev/) (lightweight alternative), or
+- [Colima](https://github.com/abiosoft/colima) (free, open-source)
 
 **Optional (all platforms):**
 - [mise](https://mise.jdx.dev/) - for tool version management
@@ -48,6 +50,8 @@ sudo dnf install bubblewrap
 # Install devsandbox via mise
 mise install github:zekker6/devsandbox
 ```
+
+> **First run on macOS:** The first sandbox start downloads the base Docker image (~200MB). Subsequent starts reuse the cached image and complete in 1-2 seconds. Run `devsandbox doctor` after installation to verify your setup.
 
 **Build from source:**
 

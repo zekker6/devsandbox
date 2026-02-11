@@ -546,21 +546,6 @@ Some settings can be overridden via environment variables:
 |--------------------|-------------------------------------|
 | `DEVSANDBOX_DEBUG` | Enable debug output (`1` to enable) |
 
-## Command Line Overrides
-
-Command line flags take precedence over configuration file settings:
-
-```bash
-# Override proxy setting from config
-devsandbox --proxy          # Enable even if config has enabled = false
-
-# Override port
-devsandbox --proxy --proxy-port 9090
-
-# Ephemeral mode — remove sandbox state after exit
-devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbox home
-```
-
 ## Per-Project Configuration
 
 devsandbox supports two mechanisms for per-project settings:
@@ -653,9 +638,24 @@ devsandbox trust remove /path/to/project
 
 Settings are merged in this order (later overrides earlier):
 
-1. Global config (`~/.config/devsandbox/config.toml`)
-2. Matching includes (in order they appear)
-3. Local config (`.devsandbox.toml`)
+1. Built-in defaults (secure defaults, no proxy, bwrap on Linux / docker on macOS)
+2. Global config (`~/.config/devsandbox/config.toml`)
+3. Matching includes (in order they appear)
+4. Local config (`.devsandbox.toml`)
+5. Command line flags (highest priority)
+
+**CLI flag examples:**
+
+```bash
+# Override proxy setting from config
+devsandbox --proxy          # Enable even if config has enabled = false
+
+# Override port
+devsandbox --proxy --proxy-port 9090
+
+# Ephemeral mode — remove sandbox state after exit
+devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbox home
+```
 
 **Merge rules:**
 - Scalar values: later source wins
