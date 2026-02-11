@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -140,6 +141,8 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
+	// Simulate PrepareNetwork having set the gateway IP
+	iso.gatewayIP = "172.18.0.1"
 
 	cfg := &Config{
 		ProjectDir:   "/tmp/test-project",
@@ -165,6 +168,16 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 	}
 	if !strings.Contains(argsStr, "PROXY_PORT=8080") {
 		t.Error("Build args missing PROXY_PORT")
+	}
+
+	// Verify --add-host uses the per-session gateway IP, not host-gateway
+	if runtime.GOOS == "linux" {
+		if !strings.Contains(argsStr, "host.docker.internal:172.18.0.1") {
+			t.Errorf("Expected --add-host to use gateway IP 172.18.0.1, got args: %s", argsStr)
+		}
+		if strings.Contains(argsStr, "host-gateway") {
+			t.Error("Should not use host-gateway when gatewayIP is set")
+		}
 	}
 }
 

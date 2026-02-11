@@ -78,6 +78,7 @@ type DockerIsolator struct {
 	config      DockerConfig
 	imageTag    string // set after buildImage
 	networkName string // per-session Docker network
+	gatewayIP   string // per-session network gateway IP (proxy bind address)
 	logger      *logging.ComponentLogger
 }
 
@@ -236,6 +237,7 @@ func (d *DockerIsolator) PrepareNetwork(ctx context.Context, projectDir string) 
 	if bindAddress == "" {
 		return nil, fmt.Errorf("docker network %s has no gateway IP; cannot bind proxy securely", networkName)
 	}
+	d.gatewayIP = bindAddress
 
 	return &NetworkInfo{BindAddress: bindAddress}, nil
 }
@@ -683,9 +685,16 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-v", "/dev/null:"+containerPath+":ro")
 	}
 
-	// On Linux, add host.docker.internal mapping for proxy access
+	// On Linux, add host.docker.internal mapping for proxy access.
+	// Use the per-session network gateway IP (where the proxy binds) instead of
+	// host-gateway, which resolves to the default bridge (docker0) gateway —
+	// a different IP that doesn't have the proxy listening on it.
 	if cfg.ProxyEnabled && runtime.GOOS == "linux" {
-		args = append(args, "--add-host", "host.docker.internal:host-gateway")
+		hostIP := "host-gateway"
+		if d.gatewayIP != "" {
+			hostIP = d.gatewayIP
+		}
+		args = append(args, "--add-host", "host.docker.internal:"+hostIP)
 	}
 
 	// Proxy mode
