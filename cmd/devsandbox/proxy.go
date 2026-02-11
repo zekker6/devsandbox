@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -36,7 +37,10 @@ func newProxyMonitorCmd() *cobra.Command {
 		Short: "Monitor and approve HTTP requests in ask mode",
 		Long: `Interactive terminal for approving/denying HTTP requests when proxy is running in ask mode.
 
-Run this command in a separate terminal while the sandbox is running with --filter-default=ask.
+Can be started before or after the sandbox:
+  - Before: Creates the socket and waits for the sandbox to connect.
+  - After:  Connects to the sandbox's existing socket.
+
 If no socket path is provided, it will be auto-detected from the current directory's sandbox.
 
 Keys (instant response, no Enter needed):
@@ -46,21 +50,37 @@ Keys (instant response, no Enter needed):
   n - Block and remember for session
 
 Requests that don't receive a response within 30 seconds are automatically rejected.`,
-		Example: `  # Auto-detect socket from current project
+		Example: `  # Auto-detect socket from current project (before or after sandbox)
   devsandbox proxy monitor
 
-  # Explicit socket path
+  # Explicit socket path (client mode only)
   devsandbox proxy monitor /path/to/ask.sock`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				return runProxyMonitor(args[0])
 			}
-			socketPath, err := detectAskSocket()
+
+			sandboxBase, err := resolveSandboxBase()
 			if err != nil {
 				return err
 			}
-			return runProxyMonitor(socketPath)
+
+			socketPath := proxy.AskSocketPath(sandboxBase)
+
+			// If socket exists and is live, connect as client (sandbox already running)
+			if _, statErr := os.Stat(socketPath); statErr == nil {
+				conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second)
+				if dialErr == nil {
+					_ = conn.Close()
+					return runProxyMonitor(socketPath)
+				}
+				// Stale socket, remove and fall through to server mode
+				_ = os.Remove(socketPath)
+			}
+
+			// No socket — start in server mode
+			return runProxyMonitorServer(sandboxBase)
 		},
 	}
 }
@@ -85,19 +105,105 @@ func resolveSandboxBase() (string, error) {
 	return filepath.Join(basePath, projectName), nil
 }
 
-// detectAskSocket finds the ask socket for the current directory's sandbox.
-func detectAskSocket() (string, error) {
-	sandboxBase, err := resolveSandboxBase()
-	if err != nil {
-		return "", err
+func runProxyMonitorServer(sandboxBase string) error {
+	socketDir := proxy.AskSocketDir(sandboxBase)
+	if err := os.MkdirAll(socketDir, 0o700); err != nil {
+		return fmt.Errorf("failed to create socket directory: %w", err)
 	}
+
+	lockPath := proxy.AskLockPath(sandboxBase)
+	lock, err := proxy.TryFileLock(lockPath)
+	if err != nil {
+		return fmt.Errorf("another monitor already owns this socket: %w", err)
+	}
+	defer func() { _ = lock.Release() }()
 
 	socketPath := proxy.AskSocketPath(sandboxBase)
-	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("no ask socket found at %s\nMake sure the sandbox is running with --filter-default=ask", socketPath)
-	}
+	_ = os.Remove(socketPath) // Clean up any stale socket
 
-	return socketPath, nil
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to create socket: %w", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	// Set terminal to raw mode
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to set raw terminal mode: %w", err)
+	}
+	cleanup := func() {
+		_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+	defer cleanup()
+
+	// Keyboard input channel
+	keyChan := make(chan byte, 10)
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, readErr := os.Stdin.Read(buf)
+			if readErr != nil || n == 0 {
+				continue
+			}
+			if buf[0] == 3 { // Ctrl+C
+				cleanup()
+				fmt.Print("\r\nExiting monitor...\r\n")
+				os.Exit(0)
+			}
+			keyChan <- buf[0]
+		}
+	}()
+
+	// Signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		cleanup()
+		fmt.Print("\r\nExiting monitor...\r\n")
+		os.Exit(0)
+	}()
+
+	printHeader()
+	fmt.Print("Waiting for sandbox to connect...\r\n\r\n")
+
+	// Accept connections in a loop (persists across sandbox restarts)
+	for {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return fmt.Errorf("accept failed: %w", acceptErr)
+		}
+
+		fmt.Print("Sandbox connected.\r\n\r\n")
+
+		encoder := json.NewEncoder(conn)
+		decoder := json.NewDecoder(conn)
+
+		// Handle requests from this sandbox session
+		for {
+			var req proxy.AskRequest
+			if decodeErr := decoder.Decode(&req); decodeErr != nil {
+				fmt.Print("\r\nSandbox disconnected. Waiting for next connection...\r\n\r\n")
+				_ = conn.Close()
+				break
+			}
+
+			displayRequest(&req)
+			resp := getUserDecisionFromChan(&req, keyChan)
+
+			if encodeErr := encoder.Encode(&resp); encodeErr != nil {
+				fmt.Printf("\r\nFailed to send response: %v\r\n", encodeErr)
+				_ = conn.Close()
+				break
+			}
+
+			fmt.Print("\r\n")
+		}
+	}
 }
 
 func runProxyMonitor(socketPath string) error {
