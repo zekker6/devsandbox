@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"devsandbox/internal/bwrap"
+	"devsandbox/internal/embed"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/network"
 	"devsandbox/internal/proxy"
@@ -28,11 +28,12 @@ func (b *BwrapIsolator) Name() Backend {
 	return BackendBwrap
 }
 
-// Available checks if bwrap is installed and provides helpful installation instructions if not.
+// Available checks if bwrap is available (embedded or system-installed).
 func (b *BwrapIsolator) Available() error {
-	_, err := exec.LookPath("bwrap")
+	_, err := embed.BwrapPath()
 	if err != nil {
-		return errors.New("bubblewrap (bwrap) is not installed\n" +
+		return errors.New("bubblewrap (bwrap) is not available\n" +
+			"Embedded binary extraction failed and system binary not found.\n" +
 			"Install with:\n" +
 			"  Arch:   pacman -S bubblewrap\n" +
 			"  Debian: apt install bubblewrap\n" +

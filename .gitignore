@@ -1,5 +1,5 @@
 tmp/
-bin/
+bin/devsandbox
 .worktrees/
 .idea
 dist

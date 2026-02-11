@@ -189,6 +189,12 @@ type SandboxConfig struct {
 	// Values: "auto" (default), "bwrap", "docker"
 	Isolation IsolationBackend `toml:"isolation"`
 
+	// UseEmbedded controls whether embedded bwrap/pasta binaries are used.
+	// When false, only system-installed binaries are used.
+	// Uses pointer to distinguish between unset (nil) and explicit false.
+	// Default: true
+	UseEmbedded *bool `toml:"use_embedded"`
+
 	// Docker contains Docker-specific settings.
 	Docker DockerConfig `toml:"docker"`
 }
@@ -207,6 +213,14 @@ func (s SandboxConfig) GetIsolation() IsolationBackend {
 		return IsolationAuto
 	}
 	return s.Isolation
+}
+
+// IsUseEmbeddedEnabled returns whether embedded binaries are enabled (defaults to true).
+func (s SandboxConfig) IsUseEmbeddedEnabled() bool {
+	if s.UseEmbedded == nil {
+		return true
+	}
+	return *s.UseEmbedded
 }
 
 // MountsConfig defines custom mount rules for the sandbox.
@@ -671,6 +685,10 @@ port = 8080
 # Base directory for sandbox homes
 # Defaults to ~/.local/share/devsandbox if not set
 # base_path = "~/.local/share/devsandbox"
+
+# Use embedded bwrap and pasta binaries (Linux only, default: true)
+# When false, only system-installed binaries are used.
+# use_embedded = true
 
 # Control visibility of .devsandbox.toml inside the sandbox
 # - "hidden" (default): config file is not visible to sandboxed processes

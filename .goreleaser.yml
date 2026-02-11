@@ -2,6 +2,8 @@ version: 2
 
 before:
   hooks:
+    - |
+      sh -c '[ -n "$BWRAP_TAG" ] && [ -n "$PASTA_TAG" ] || { echo "ERROR: BWRAP_TAG and PASTA_TAG must be set. Run: set -a && . internal/embed/versions.env && goreleaser ..."; exit 1; }'
     - go mod download
 
 builds:
@@ -21,6 +23,8 @@ builds:
       - -X devsandbox/internal/version.Commit={{ .ShortCommit }}
       - -X devsandbox/internal/version.Date={{ .Date }}
       - -X devsandbox/internal/version.Dirty={{ if .IsSnapshot }}true{{ else }}false{{ end }}
+      - -X devsandbox/internal/embed.BwrapVersion={{ .Env.BWRAP_TAG }}
+      - -X devsandbox/internal/embed.PastaVersion={{ .Env.PASTA_TAG }}
 
 archives:
   - formats: tar.gz

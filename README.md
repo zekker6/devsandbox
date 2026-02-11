@@ -4,6 +4,8 @@ A sandbox for running untrusted development tools. Uses [bubblewrap](https://git
 on Linux or Docker containers on macOS for filesystem isolation, and optionally [pasta](https://passt.top/) for
 network isolation (proxy mode on Linux).
 
+On Linux, devsandbox ships with embedded bwrap and pasta binaries — no system packages required.
+
 ## Why?
 
 AI coding assistants like Claude Code, GitHub Copilot, and others can execute arbitrary commands on your system. While
@@ -22,8 +24,13 @@ permissions.
 ### Installation
 
 **Linux (bwrap backend):**
-- [bubblewrap](https://github.com/containers/bubblewrap) (required)
-- [passt](https://passt.top/) (optional, for proxy mode)
+
+No system packages required — devsandbox includes embedded bwrap and pasta binaries.
+To use system-installed binaries instead, set `use_embedded = false` in [configuration](docs/configuration.md).
+
+Optionally install system packages (used as fallback if embedded extraction fails):
+- [bubblewrap](https://github.com/containers/bubblewrap) — sandbox isolation
+- [passt](https://passt.top/) — network isolation for proxy mode
 
 **macOS (docker backend):**
 - [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) (required), or
@@ -34,15 +41,11 @@ permissions.
 - [mise](https://mise.jdx.dev/) - for tool version management
 
 ```bash
-# Linux: Install bubblewrap
-# Arch Linux
-sudo pacman -S bubblewrap
-
-# Debian/Ubuntu
-sudo apt install bubblewrap
-
-# Fedora
-sudo dnf install bubblewrap
+# Linux: No packages required (embedded binaries included)
+# Optional: install system packages as fallback
+# Arch Linux:    sudo pacman -S bubblewrap passt
+# Debian/Ubuntu: sudo apt install bubblewrap passt
+# Fedora:        sudo dnf install bubblewrap passt
 
 # macOS: Install Docker Desktop
 # Download from https://docs.docker.com/desktop/install/mac-install/

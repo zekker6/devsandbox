@@ -1,9 +1,8 @@
 package network
 
-import "os/exec"
+import "devsandbox/internal/embed"
 
 const (
-	pastaCommand = "pasta"
 	// PastaGatewayIP is the default gateway IP for pasta network isolation.
 	// This IP is mapped to the host's 127.0.0.1 via --map-host-loopback.
 	PastaGatewayIP = "10.0.2.2"
@@ -25,9 +24,9 @@ func (p *Pasta) Name() string {
 	return "pasta"
 }
 
-// Available checks if pasta is installed
+// Available checks if pasta is available (embedded or system-installed)
 func (p *Pasta) Available() bool {
-	_, err := exec.LookPath(pastaCommand)
+	_, err := embed.PastaPath()
 	return err == nil
 }
 

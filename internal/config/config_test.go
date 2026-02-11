@@ -46,6 +46,27 @@ func TestOverlayIsEnabled(t *testing.T) {
 	}
 }
 
+func TestSandboxIsUseEmbeddedEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  *bool
+		expected bool
+	}{
+		{"nil defaults to true", nil, true},
+		{"explicit true", boolPtr(true), true},
+		{"explicit false", boolPtr(false), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := SandboxConfig{UseEmbedded: tt.enabled}
+			if got := sc.IsUseEmbeddedEnabled(); got != tt.expected {
+				t.Errorf("IsUseEmbeddedEnabled() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestSandboxGetConfigVisibility(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -133,6 +154,28 @@ mode = "readwrite"
 	}
 	if mode, ok := gitCfg["mode"].(string); !ok || mode != "readwrite" {
 		t.Errorf("expected git mode 'readwrite', got %v", gitCfg["mode"])
+	}
+}
+
+func TestLoadFromUseEmbeddedFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := `
+[sandbox]
+use_embedded = false
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadFrom(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Sandbox.IsUseEmbeddedEnabled() {
+		t.Error("expected use_embedded to be false")
 	}
 }
 

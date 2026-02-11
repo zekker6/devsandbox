@@ -1,7 +1,8 @@
 # Sandboxing
 
 devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux or Docker containers on macOS to create
-isolated environments for running untrusted code.
+isolated environments for running untrusted code. On Linux, bwrap and pasta binaries are embedded — no system packages
+required. To use system-installed binaries instead, see [configuration](configuration.md).
 
 ## Isolation Backends
 
@@ -209,8 +210,8 @@ devsandbox doctor
 
 This verifies:
 
-- Required binaries (bwrap, shell)
-- Optional binaries (pasta for proxy mode)
+- Required binaries (bwrap — embedded or system-installed)
+- Optional binaries (pasta for proxy mode — embedded or system-installed)
 - User namespace support
 - Directory permissions
 - Overlayfs support (for tool writable layers)
@@ -254,7 +255,10 @@ Then verify with `devsandbox doctor`.
 
 **"bwrap not found"**
 
-- Install bubblewrap for your distribution (see main README)
+- devsandbox includes embedded bwrap — this error means extraction failed and no system package is installed
+- Check `devsandbox doctor` output for details (embedded vs system source)
+- Install bubblewrap as a fallback: see [README](../README.md#installation)
+- To disable embedded binaries and use only system packages, set `use_embedded = false` in [configuration](configuration.md)
 
 **"Permission denied" on project files**
 

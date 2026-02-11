@@ -15,7 +15,11 @@ mechanisms — see [Backend-Specific Behavior](#backend-specific-behavior) for d
 
 Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt—basic sandboxing works without it.
 
+devsandbox includes an embedded pasta binary — no system packages required. To use a system-installed pasta instead, set `use_embedded = false` in [configuration](configuration.md).
+
 > **Docker backend:** The Docker backend does NOT require pasta. It uses per-session Docker networks for isolation instead. See [Backend-Specific Behavior](#backend-specific-behavior).
+
+Optionally install the system package as a fallback:
 
 ```bash
 # Arch Linux
@@ -34,7 +38,7 @@ Verify installation:
 devsandbox doctor
 ```
 
-If passt is not installed, the sandbox will still work but `--proxy` mode will be unavailable.
+The doctor output shows whether each binary is embedded or system-installed.
 
 ## Enabling Proxy Mode
 
@@ -499,13 +503,13 @@ Filter decisions are logged with requests:
 
 ### "proxy mode requires pasta"
 
-Install passt:
+devsandbox includes an embedded pasta binary. If you see this error, extraction failed and no system package is installed:
 
 ```bash
-# Check with doctor
+# Check doctor for details (shows embedded vs system source)
 devsandbox doctor
 
-# Install (see Requirements above)
+# Install system package as fallback (see Requirements above)
 ```
 
 ### Requests timing out

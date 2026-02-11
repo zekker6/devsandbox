@@ -1,28 +1,28 @@
 package bwrap
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 
+	"devsandbox/internal/embed"
 	"devsandbox/internal/network"
 )
 
 func CheckInstalled() error {
-	_, err := exec.LookPath("bwrap")
+	_, err := embed.BwrapPath()
 	if err != nil {
-		return errors.New("bubblewrap (bwrap) is not installed\nRun 'devsandbox doctor' for installation instructions")
+		return fmt.Errorf("bubblewrap (bwrap) is not available: %w\nRun 'devsandbox doctor' for details", err)
 	}
 	return nil
 }
 
-// pastaSupportsMapHostLoopback checks if pasta supports --map-host-loopback option.
-// This option was added in newer versions of passt/pasta.
-func pastaSupportsMapHostLoopback() bool {
-	cmd := exec.Command("pasta", "--help")
+// pastaSupportsMapHostLoopback checks if the pasta binary at the given path
+// supports --map-host-loopback. For embedded binaries, use embed.PastaHasMapHostLoopback instead.
+func pastaSupportsMapHostLoopback(pastaPath string) bool {
+	cmd := exec.Command(pastaPath, "--help")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
@@ -31,9 +31,9 @@ func pastaSupportsMapHostLoopback() bool {
 }
 
 func Exec(bwrapArgs []string, shellCmd []string) error {
-	bwrapPath, err := exec.LookPath("bwrap")
+	bwrapPath, err := embed.BwrapPath()
 	if err != nil {
-		return err
+		return fmt.Errorf("bwrap not available: %w", err)
 	}
 
 	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+2)
@@ -49,9 +49,9 @@ func Exec(bwrapArgs []string, shellCmd []string) error {
 // Unlike Exec, this keeps the parent process alive, which is necessary
 // when background goroutines (like ActiveTool proxies) need to keep running.
 func ExecRun(bwrapArgs []string, shellCmd []string) error {
-	bwrapPath, err := exec.LookPath("bwrap")
+	bwrapPath, err := embed.BwrapPath()
 	if err != nil {
-		return err
+		return fmt.Errorf("bwrap not available: %w", err)
 	}
 
 	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+2)
@@ -78,14 +78,14 @@ func ExecRun(bwrapArgs []string, shellCmd []string) error {
 // Unlike the regular Exec function, this uses exec.Command instead of syscall.Exec
 // so that the calling process (and its proxy server goroutine) stays alive.
 func ExecWithPasta(bwrapArgs []string, shellCmd []string, portForwardArgs []string) error {
-	pastaPath, err := exec.LookPath("pasta")
+	pastaPath, err := embed.PastaPath()
 	if err != nil {
-		return errors.New("pasta is not installed (required for proxy mode)\nRun 'devsandbox doctor' for installation instructions")
+		return fmt.Errorf("pasta not available (required for proxy mode): %w\nRun 'devsandbox doctor' for details", err)
 	}
 
-	bwrapPath, err := exec.LookPath("bwrap")
+	bwrapPath, err := embed.BwrapPath()
 	if err != nil {
-		return err
+		return fmt.Errorf("bwrap not available: %w", err)
 	}
 
 	// Build pasta command with network isolation:
@@ -110,9 +110,14 @@ func ExecWithPasta(bwrapArgs []string, shellCmd []string, portForwardArgs []stri
 	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+len(portForwardArgs)+16)
 	args = append(args, "--config-net") // Configure network interface
 
-	// Use --map-host-loopback if available (newer pasta versions)
-	// This maps the gateway IP to host's 127.0.0.1 for proxy access
-	if pastaSupportsMapHostLoopback() {
+	// Use --map-host-loopback if supported.
+	// For embedded pasta, we know the version at build time.
+	// For system pasta (fallback), check at runtime.
+	supportsMapHostLoopback := embed.PastaHasMapHostLoopback
+	if !embed.IsEmbedded(pastaPath) {
+		supportsMapHostLoopback = pastaSupportsMapHostLoopback(pastaPath)
+	}
+	if supportsMapHostLoopback {
 		args = append(args, "--map-host-loopback", network.PastaGatewayIP)
 	}
 

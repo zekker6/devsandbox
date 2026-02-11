@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/embed"
 	"devsandbox/internal/isolator"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/proxy"
@@ -88,7 +90,11 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newTrustCmd())
 	rootCmd.AddCommand(newImageCmd())
 
-	rootCmd.SetVersionTemplate(fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date))
+	versionTpl := fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date)
+	if runtime.GOOS == "linux" {
+		versionTpl += fmt.Sprintf("  bwrap: %s  pasta: %s\n", embed.BwrapVersion, embed.PastaVersion)
+	}
+	rootCmd.SetVersionTemplate(versionTpl)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -117,6 +123,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	appCfg, _, _, err := config.LoadConfig()
 	if err != nil {
 		return err
+	}
+
+	// Apply embedded binary setting before any embed.BwrapPath/PastaPath calls
+	if !appCfg.Sandbox.IsUseEmbeddedEnabled() {
+		embed.Disabled = true
 	}
 
 	// Determine isolation backend

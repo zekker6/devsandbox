@@ -1,0 +1,3 @@
+# Embedded binary dependencies — treat as binary, exclude from language stats
+internal/embed/bin/** binary
+internal/embed/bin/** linguist-vendored

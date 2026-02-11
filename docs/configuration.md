@@ -169,6 +169,10 @@ cpus = "2"
 # Defaults to ~/.local/share/devsandbox
 # base_path = "~/.local/share/devsandbox"
 
+# Use embedded bwrap and pasta binaries (Linux only, default: true)
+# When false, only system-installed binaries are used.
+# use_embedded = true
+
 # Control visibility of .devsandbox.toml inside the sandbox
 # - "hidden" (default): config file is not visible to sandboxed processes
 # - "readonly": config file is visible but read-only

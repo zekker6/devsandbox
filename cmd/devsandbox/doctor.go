@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/embed"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -52,11 +53,23 @@ Checks (Linux only):
 }
 
 func runDoctor() error {
+	// Load config to check use_embedded setting
+	appCfg, _, _, err := config.LoadConfig()
+	if err != nil {
+		// Non-fatal: continue with defaults
+		appCfg = config.DefaultConfig()
+	}
+
+	if !appCfg.Sandbox.IsUseEmbeddedEnabled() {
+		embed.Disabled = true
+	}
+
 	var results []checkResult
 
 	// Platform-specific checks (Linux only)
 	if runtime.GOOS == "linux" {
-		results = append(results, checkBinary("bwrap", true, "bubblewrap - required for sandbox isolation on Linux"))
+		results = append(results, checkEmbeddedBinary("bwrap", embed.BwrapVersion, true))
+		results = append(results, checkEmbeddedBinary("pasta", embed.PastaVersion, false))
 		results = append(results, checkUserNamespaces())
 		results = append(results, checkKernelVersion())
 		results = append(results, checkOverlayfs())
@@ -64,9 +77,6 @@ func runDoctor() error {
 
 	// Universal checks
 	results = append(results, checkShell())
-	if runtime.GOOS == "linux" {
-		results = append(results, checkBinary("pasta", false, "passt - required for proxy mode"))
-	}
 	results = append(results, checkDirectories())
 	results = append(results, checkConfigFile())
 	results = append(results, checkRecentLogs())
@@ -95,34 +105,6 @@ func runDoctor() error {
 
 	fmt.Println("\nAll checks passed!")
 	return nil
-}
-
-func checkBinary(name string, required bool, description string) checkResult {
-	path, err := exec.LookPath(name)
-	if err != nil {
-		status := "warn"
-		if required {
-			status = "error"
-		}
-		return checkResult{
-			name:    name,
-			status:  status,
-			message: fmt.Sprintf("not found - %s", description),
-		}
-	}
-
-	// Try to get version
-	version := getBinaryVersion(name)
-	msg := fmt.Sprintf("found at %s", path)
-	if version != "" {
-		msg = fmt.Sprintf("%s (%s)", version, path)
-	}
-
-	return checkResult{
-		name:    name,
-		status:  "ok",
-		message: msg,
-	}
 }
 
 func getBinaryVersion(name string) string {
@@ -405,10 +387,55 @@ func printDetectedTools() {
 	fmt.Printf("\n%d of %d tools available\n", len(availableTools), len(allTools))
 }
 
+func checkEmbeddedBinary(name string, version string, required bool) checkResult {
+	var path string
+	var err error
+
+	switch name {
+	case "bwrap":
+		path, err = embed.BwrapPath()
+	case "pasta":
+		path, err = embed.PastaPath()
+	default:
+		return checkResult{
+			name:    name,
+			status:  "error",
+			message: "unknown binary",
+		}
+	}
+
+	if err != nil {
+		status := "warn"
+		if required {
+			status = "error"
+		}
+		msg := fmt.Sprintf("not available: %v", err)
+		if embed.Disabled {
+			msg = fmt.Sprintf("not found (embedded disabled): %v", err)
+		}
+		return checkResult{
+			name:    name,
+			status:  status,
+			message: msg,
+		}
+	}
+
+	source := "embedded"
+	if !embed.IsEmbedded(path) {
+		source = "system"
+	}
+
+	return checkResult{
+		name:    name,
+		status:  "ok",
+		message: fmt.Sprintf("v%s (%s) at %s", version, source, path),
+	}
+}
+
 // checkOverlayfs tests if bwrap's overlayfs support works.
 // This is needed for tool overlay features (e.g., mise with writable layers).
 func checkOverlayfs() checkResult {
-	bwrapPath, err := exec.LookPath("bwrap")
+	bwrapPath, err := embed.BwrapPath()
 	if err != nil {
 		return checkResult{
 			name:    "overlayfs",

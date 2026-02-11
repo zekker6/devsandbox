@@ -1,5 +1,8 @@
 version: "3"
 
+dotenv:
+  - internal/embed/versions.env
+
 vars:
   GIT_COMMIT:
     sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
@@ -18,6 +21,8 @@ vars:
   # Git tag for the current commit, or "dev" if not tagged
   GIT_VERSION:
     sh: git describe --tags --exact-match 2>/dev/null || echo "dev"
+  BWRAP_REPO: https://github.com/containers/bubblewrap.git
+  PASTA_REPO: https://passt.top/passt
 
 tasks:
   default:
@@ -65,12 +70,21 @@ tasks:
     desc: Build binary for local development
     cmds:
       - mkdir -p bin
-      - go build -ldflags "-X devsandbox/internal/version.Version={{.GIT_VERSION}} -X devsandbox/internal/version.Commit={{.GIT_COMMIT}} -X devsandbox/internal/version.Date={{.BUILD_DATE}} -X devsandbox/internal/version.Dirty={{.GIT_DIRTY}} -X devsandbox/internal/version.DirtyHash={{.GIT_DIRTY_HASH}}" -o bin/devsandbox ./cmd/devsandbox
+      - >-
+        go build -ldflags
+        "-X devsandbox/internal/version.Version={{.GIT_VERSION}}
+        -X devsandbox/internal/version.Commit={{.GIT_COMMIT}}
+        -X devsandbox/internal/version.Date={{.BUILD_DATE}}
+        -X devsandbox/internal/version.Dirty={{.GIT_DIRTY}}
+        -X devsandbox/internal/version.DirtyHash={{.GIT_DIRTY_HASH}}
+        -X devsandbox/internal/embed.BwrapVersion={{.BWRAP_TAG}}
+        -X devsandbox/internal/embed.PastaVersion={{.PASTA_TAG}}"
+        -o bin/devsandbox ./cmd/devsandbox
 
   release:snapshot:
     desc: Build snapshot release using goreleaser (for testing)
     cmds:
-      - goreleaser release --snapshot --clean
+      - set -a && . internal/embed/versions.env && goreleaser release --snapshot --clean
 
   install:
     desc: Install binary to ~/.local/bin
@@ -91,6 +105,150 @@ tasks:
 
   docker:test:
     desc: Test the devsandbox Docker image
-    deps: [docker:build]
+    deps: [ docker:build ]
     cmds:
       - docker run --rm -v "{{.PWD}}:/workspace" -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) devsandbox:local bash -c "whoami && mise --version"
+
+  # --- Embed builder images ---
+
+  embed:builder:amd64:
+    internal: true
+    cmds:
+      - >-
+        docker build --platform linux/amd64
+        -t devsandbox-embed-builder:amd64
+        -f internal/embed/Dockerfile.builder internal/embed/
+
+  embed:builder:arm64:
+    internal: true
+    cmds:
+      - >-
+        docker build --platform linux/arm64
+        -t devsandbox-embed-builder:arm64
+        -f internal/embed/Dockerfile.builder internal/embed/
+
+  embed:builder:host:
+    internal: true
+    vars:
+      HOST_ARCH:
+        sh: uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/'
+    cmds:
+      - >-
+        docker build
+        -t devsandbox-embed-builder:{{.HOST_ARCH}}
+        -f internal/embed/Dockerfile.builder internal/embed/
+
+  # --- Individual binary builds ---
+
+  embed:build:bwrap-amd64:
+    internal: true
+    deps: [embed:builder:amd64]
+    cmds:
+      - mkdir -p internal/embed/bin/amd64
+      - >-
+        docker run --rm --platform linux/amd64
+        --user $(id -u):$(id -g)
+        -v {{.PWD}}/internal/embed/bin/amd64:/out
+        devsandbox-embed-builder:amd64 sh -c '
+        git clone --depth 1 --branch {{.BWRAP_TAG}} {{.BWRAP_REPO}} /tmp/build &&
+        cd /tmp/build &&
+        LDFLAGS=-static meson setup _build --prefer-static -Ddefault_library=static -Dtests=false &&
+        meson compile -C _build &&
+        cp _build/bwrap /out/bwrap &&
+        strip /out/bwrap
+        '
+
+  embed:build:bwrap-arm64:
+    internal: true
+    deps: [embed:builder:arm64]
+    cmds:
+      - mkdir -p internal/embed/bin/arm64
+      - >-
+        docker run --rm --platform linux/arm64
+        --user $(id -u):$(id -g)
+        -v {{.PWD}}/internal/embed/bin/arm64:/out
+        devsandbox-embed-builder:arm64 sh -c '
+        git clone --depth 1 --branch {{.BWRAP_TAG}} {{.BWRAP_REPO}} /tmp/build &&
+        cd /tmp/build &&
+        LDFLAGS=-static meson setup _build --prefer-static -Ddefault_library=static -Dtests=false &&
+        meson compile -C _build &&
+        cp _build/bwrap /out/bwrap &&
+        strip /out/bwrap
+        '
+
+  embed:build:pasta-amd64:
+    internal: true
+    deps: [embed:builder:amd64]
+    cmds:
+      - mkdir -p internal/embed/bin/amd64
+      - >-
+        docker run --rm --platform linux/amd64
+        --user $(id -u):$(id -g)
+        -v {{.PWD}}/internal/embed/bin/amd64:/out
+        devsandbox-embed-builder:amd64 sh -c '
+        git clone --depth 1 --branch {{.PASTA_TAG}} {{.PASTA_REPO}} /tmp/build &&
+        cd /tmp/build &&
+        CFLAGS="-static" make pasta &&
+        cp pasta /out/pasta &&
+        strip /out/pasta
+        '
+
+  embed:build:pasta-arm64:
+    internal: true
+    deps: [embed:builder:arm64]
+    cmds:
+      - mkdir -p internal/embed/bin/arm64
+      - >-
+        docker run --rm --platform linux/arm64
+        --user $(id -u):$(id -g)
+        -v {{.PWD}}/internal/embed/bin/arm64:/out
+        devsandbox-embed-builder:arm64 sh -c '
+        git clone --depth 1 --branch {{.PASTA_TAG}} {{.PASTA_REPO}} /tmp/build &&
+        cd /tmp/build &&
+        CFLAGS="-static" make pasta &&
+        cp pasta /out/pasta &&
+        strip /out/pasta
+        '
+  # --- Public entry points ---
+
+  embed:build:
+    desc: Build static bwrap and pasta binaries for all platforms (arm64 requires QEMU binfmt)
+    deps:
+      - embed:build:bwrap-amd64
+      - embed:build:bwrap-arm64
+      - embed:build:pasta-amd64
+      - embed:build:pasta-arm64
+
+  embed:latest-tags:
+    desc: Print latest upstream tags for bwrap and pasta
+    cmds:
+      - |
+        echo "=== Current pinned ==="
+        echo "  BWRAP_TAG: {{.BWRAP_TAG}}"
+        echo "  PASTA_TAG: {{.PASTA_TAG}}"
+        echo ""
+        echo "=== Latest upstream ==="
+        bwrap_tag=$(git ls-remote --tags --sort=-v:refname {{.BWRAP_REPO}} 'refs/tags/v*' | grep -v '\^{}' | head -1 | sed 's|.*refs/tags/||')
+        echo "  bwrap: ${bwrap_tag}"
+        pasta_tag=$(git ls-remote --tags {{.PASTA_REPO}} | grep -v '\^{}' | sed 's|.*refs/tags/||' | sort -t. -k1,1 | tail -1)
+        echo "  pasta: ${pasta_tag}"
+
+  embed:setup-qemu:
+    desc: Set up QEMU binfmt for cross-platform Docker builds (run on host, not in sandbox)
+    cmds:
+      - docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+  embed:verify:
+    desc: Verify embedded binaries are real (not placeholders)
+    cmds:
+      - |
+        for arch in amd64 arm64; do
+          for bin in bwrap pasta; do
+            f="internal/embed/bin/${arch}/${bin}"
+            if ! file "$f" | grep -q "ELF"; then
+              echo "FAIL: $f is not an ELF binary (run 'task embed:build' first)"
+              exit 1
+            fi
+            echo "OK: $f — $(file "$f" | cut -d: -f2)"
+          done
+        done

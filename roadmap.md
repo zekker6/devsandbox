@@ -3,21 +3,18 @@
 ## Completed
 
 - [x] configuration support
-    - allow to configure tools to be enabled
-    - allow to generate config for tools based on detected tools availability
+  - allow to configure tools to be enabled
+  - allow to generate config for tools based on detected tools availability
 - [x] Docker isolation backend (Linux and macOS support)
 
 ## Planned
-
-- tui 
+- capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
+  - collection modes:
+    - ebpf - linux only, very fast and efficient
+    - fsnotify - cross-platform, but less efficient
+- config show use generated code instead of manual crafting of toml (e.g. just toml.Marshal)
+- tui
   - for sandboxes management (list, delete, view logs etc)
   - for proxy configuration (logs / approval)
-- support for GUI applications
-- embed pasta/bwrap for simpler installation
-- bwrap-in-Docker (run bwrap inside a Docker container for enhanced isolation)
-- capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
-    - collection modes:
-        - ebpf - linux only, very fast and efficient
-        - fsnotify - cross-platform, but less efficient
 
 ## Bugs
