@@ -10,7 +10,7 @@ import (
 )
 
 func TestIntegration_MonitorFirst(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	socketDir := AskSocketDir(dir)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		t.Fatalf("mkdir failed: %v", err)

@@ -9,8 +9,20 @@ import (
 	"time"
 )
 
+// shortTempDir creates a short temp directory suitable for Unix socket paths.
+// macOS limits socket paths to 104 bytes; t.TempDir() paths are too long.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ds-")
+	if err != nil {
+		t.Fatalf("failed to create short temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestAskServer_ServerMode(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 
 	server, err := NewAskServer(dir)
 	if err != nil {
@@ -29,7 +41,7 @@ func TestAskServer_ServerMode(t *testing.T) {
 }
 
 func TestAskServer_ClientMode(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	socketDir := AskSocketDir(dir)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -71,7 +83,7 @@ func TestAskServer_ClientMode(t *testing.T) {
 }
 
 func TestAskServer_ClientMode_Ask(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	socketDir := AskSocketDir(dir)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -141,7 +153,7 @@ func TestAskServer_ClientMode_Ask(t *testing.T) {
 }
 
 func TestAskServer_StaleSocket(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	socketDir := AskSocketDir(dir)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
