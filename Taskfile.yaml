@@ -188,9 +188,9 @@ tasks:
         devsandbox-embed-builder:amd64 sh -c '
         git clone --depth 1 --branch {{.PASTA_TAG}} {{.PASTA_REPO}} /tmp/build &&
         cd /tmp/build &&
-        CFLAGS="-static" make pasta &&
-        cp pasta /out/pasta &&
-        strip /out/pasta
+        CFLAGS="-static" make pasta pasta.avx2 &&
+        cp pasta pasta.avx2 /out/ &&
+        strip /out/pasta /out/pasta.avx2
         '
 
   embed:build:pasta-arm64:

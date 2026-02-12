@@ -136,12 +136,18 @@ func BwrapPath() (string, error) {
 // PastaPath returns the path to the pasta binary.
 // Extracts the embedded binary on first call. Falls back to system binary if extraction fails.
 // If Disabled is true, skips extraction and uses system binary only.
+// On amd64, also extracts pasta.avx2 alongside pasta (pasta exec's it at startup for better performance).
 func PastaPath() (string, error) {
 	pastaOnce.Do(func() {
 		if !Disabled {
 			dir, err := PastaCacheDir()
 			if err == nil {
 				pastaPath, pastaErr = extractBinary("pasta", dir)
+				if pastaErr == nil && runtime.GOARCH == "amd64" {
+					// Best-effort: pasta tries to exec pasta.avx2 from same dir at startup.
+					// Ignore errors — pasta works fine without it.
+					_, _ = extractBinary("pasta.avx2", dir)
+				}
 			}
 		}
 		if pastaErr != nil || Disabled {
