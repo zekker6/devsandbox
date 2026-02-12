@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -68,18 +69,16 @@ Requests that don't receive a response within 30 seconds are automatically rejec
 
 			socketPath := proxy.AskSocketPath(sandboxBase)
 
-			// If socket exists and is live, connect as client (sandbox already running)
+			// If socket exists, try connecting directly as client (no probe dial)
 			if _, statErr := os.Stat(socketPath); statErr == nil {
-				conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second)
-				if dialErr == nil {
-					_ = conn.Close()
-					return runProxyMonitor(socketPath)
+				if clientErr := runProxyMonitor(socketPath); clientErr == nil {
+					return nil
 				}
-				// Stale socket, remove and fall through to server mode
+				// Connection failed — stale socket, clean up and fall through
 				_ = os.Remove(socketPath)
 			}
 
-			// No socket — start in server mode
+			// No socket or stale socket — start in server mode
 			return runProxyMonitorServer(sandboxBase)
 		},
 	}
@@ -135,10 +134,11 @@ func runProxyMonitorServer(sandboxBase string) error {
 	if err != nil {
 		return fmt.Errorf("failed to set raw terminal mode: %w", err)
 	}
-	cleanup := func() {
-		_ = term.Restore(int(os.Stdin.Fd()), oldState)
-	}
-	defer cleanup()
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
+
+	// Shutdown coordination — cancel context instead of os.Exit so defers run
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Keyboard input channel
 	keyChan := make(chan byte, 10)
@@ -147,12 +147,12 @@ func runProxyMonitorServer(sandboxBase string) error {
 		for {
 			n, readErr := os.Stdin.Read(buf)
 			if readErr != nil || n == 0 {
-				continue
+				return
 			}
 			if buf[0] == 3 { // Ctrl+C
-				cleanup()
-				fmt.Print("\r\nExiting monitor...\r\n")
-				os.Exit(0)
+				cancel()
+				_ = listener.Close()
+				return
 			}
 			keyChan <- buf[0]
 		}
@@ -162,10 +162,12 @@ func runProxyMonitorServer(sandboxBase string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigChan
-		cleanup()
-		fmt.Print("\r\nExiting monitor...\r\n")
-		os.Exit(0)
+		select {
+		case <-sigChan:
+			cancel()
+			_ = listener.Close()
+		case <-ctx.Done():
+		}
 	}()
 
 	printHeader()
@@ -175,10 +177,20 @@ func runProxyMonitorServer(sandboxBase string) error {
 	for {
 		conn, acceptErr := listener.Accept()
 		if acceptErr != nil {
+			if ctx.Err() != nil {
+				fmt.Print("\r\nExiting monitor...\r\n")
+				return nil
+			}
 			return fmt.Errorf("accept failed: %w", acceptErr)
 		}
 
 		fmt.Print("Sandbox connected.\r\n\r\n")
+
+		// Close connection on shutdown so decode unblocks
+		go func() {
+			<-ctx.Done()
+			_ = conn.Close()
+		}()
 
 		encoder := json.NewEncoder(conn)
 		decoder := json.NewDecoder(conn)
@@ -187,13 +199,17 @@ func runProxyMonitorServer(sandboxBase string) error {
 		for {
 			var req proxy.AskRequest
 			if decodeErr := decoder.Decode(&req); decodeErr != nil {
+				if ctx.Err() != nil {
+					fmt.Print("\r\nExiting monitor...\r\n")
+					return nil
+				}
 				fmt.Print("\r\nSandbox disconnected. Waiting for next connection...\r\n\r\n")
 				_ = conn.Close()
 				break
 			}
 
 			displayRequest(&req)
-			resp := getUserDecisionFromChan(&req, keyChan)
+			resp := getUserDecisionWithTimeout(&req, keyChan)
 
 			if encodeErr := encoder.Encode(&resp); encodeErr != nil {
 				fmt.Printf("\r\nFailed to send response: %v\r\n", encodeErr)
@@ -222,12 +238,11 @@ func runProxyMonitor(socketPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to set raw terminal mode: %w", err)
 	}
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
 
-	// Cleanup function
-	cleanup := func() {
-		_ = term.Restore(int(os.Stdin.Fd()), oldState)
-	}
-	defer cleanup()
+	// Shutdown coordination — cancel context instead of os.Exit so defers run
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Channel for keyboard input
 	keyChan := make(chan byte, 10)
@@ -238,16 +253,14 @@ func runProxyMonitor(socketPath string) error {
 		for {
 			n, err := os.Stdin.Read(buf)
 			if err != nil || n == 0 {
-				continue
+				return
 			}
-			key := buf[0]
-			// Handle Ctrl+C immediately
-			if key == 3 {
-				cleanup()
-				fmt.Print("\r\nExiting monitor...\r\n")
-				os.Exit(0)
+			if buf[0] == 3 { // Ctrl+C
+				cancel()
+				_ = conn.Close()
+				return
 			}
-			keyChan <- key
+			keyChan <- buf[0]
 		}
 	}()
 
@@ -255,10 +268,12 @@ func runProxyMonitor(socketPath string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigChan
-		cleanup()
-		fmt.Print("\r\nExiting monitor...\r\n")
-		os.Exit(0)
+		select {
+		case <-sigChan:
+			cancel()
+			_ = conn.Close()
+		case <-ctx.Done():
+		}
 	}()
 
 	printHeader()
@@ -267,6 +282,10 @@ func runProxyMonitor(socketPath string) error {
 	for {
 		var req proxy.AskRequest
 		if err := decoder.Decode(&req); err != nil {
+			if ctx.Err() != nil {
+				fmt.Print("\r\nExiting monitor...\r\n")
+				return nil
+			}
 			fmt.Printf("\r\nConnection closed: %v\r\n", err)
 			return nil
 		}
@@ -275,7 +294,7 @@ func runProxyMonitor(socketPath string) error {
 		displayRequest(&req)
 
 		// Get user decision (single keypress)
-		resp := getUserDecisionFromChan(&req, keyChan)
+		resp := getUserDecisionWithTimeout(&req, keyChan)
 
 		// Send response back to proxy
 		if err := encoder.Encode(&resp); err != nil {
@@ -325,43 +344,57 @@ func displayRequest(req *proxy.AskRequest) {
 	fmt.Print("└──────────────────────────────────────────────────────────────────┘\r\n")
 }
 
-func getUserDecisionFromChan(req *proxy.AskRequest, keyChan <-chan byte) proxy.AskResponse {
-	fmt.Print("Decision: ")
-
-	for key := range keyChan {
-		resp := proxy.AskResponse{ID: req.ID}
-
-		switch key {
-		case 'a', 'A', 'y', 'Y':
-			resp.Action = proxy.FilterActionAllow
-			fmt.Printf("%c\r\n✓ Allowed: %s\r\n", key, req.Host)
-			return resp
-
-		case 'b', 'B':
-			resp.Action = proxy.FilterActionBlock
-			fmt.Printf("%c\r\n✗ Blocked: %s\r\n", key, req.Host)
-			return resp
-
-		case 's', 'S':
-			resp.Action = proxy.FilterActionAllow
-			resp.Remember = true
-			fmt.Printf("%c\r\n✓ Allowed for session: %s\r\n", key, req.Host)
-			return resp
-
-		case 'n', 'N':
-			resp.Action = proxy.FilterActionBlock
-			resp.Remember = true
-			fmt.Printf("%c\r\n✗ Blocked for session: %s\r\n", key, req.Host)
-			return resp
-
-		default:
-			// Ignore unknown keys, wait for valid input
-			continue
-		}
+func getUserDecisionWithTimeout(req *proxy.AskRequest, keyChan <-chan byte) proxy.AskResponse {
+	timeout := 30 * time.Second
+	if req.Timeout > 0 {
+		timeout = time.Duration(req.Timeout) * time.Second
 	}
 
-	// Channel closed, return block as default
-	return proxy.AskResponse{ID: req.ID, Action: proxy.FilterActionBlock}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	fmt.Print("Decision: ")
+
+	for {
+		select {
+		case key, ok := <-keyChan:
+			if !ok {
+				return proxy.AskResponse{ID: req.ID, Action: proxy.FilterActionBlock}
+			}
+			resp := proxy.AskResponse{ID: req.ID}
+
+			switch key {
+			case 'a', 'A', 'y', 'Y':
+				resp.Action = proxy.FilterActionAllow
+				fmt.Printf("%c\r\n✓ Allowed: %s\r\n", key, req.Host)
+				return resp
+
+			case 'b', 'B':
+				resp.Action = proxy.FilterActionBlock
+				fmt.Printf("%c\r\n✗ Blocked: %s\r\n", key, req.Host)
+				return resp
+
+			case 's', 'S':
+				resp.Action = proxy.FilterActionAllow
+				resp.Remember = true
+				fmt.Printf("%c\r\n✓ Allowed for session: %s\r\n", key, req.Host)
+				return resp
+
+			case 'n', 'N':
+				resp.Action = proxy.FilterActionBlock
+				resp.Remember = true
+				fmt.Printf("%c\r\n✗ Blocked for session: %s\r\n", key, req.Host)
+				return resp
+
+			default:
+				continue
+			}
+
+		case <-timer.C:
+			fmt.Print("\r\n  Request timed out (auto-rejected)\r\n")
+			return proxy.AskResponse{ID: req.ID, Action: proxy.FilterActionBlock}
+		}
+	}
 }
 
 func truncate(s string, maxLen int) string {

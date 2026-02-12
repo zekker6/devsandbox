@@ -36,6 +36,7 @@ type AskRequest struct {
 	Path    string            `json:"path"`
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    string            `json:"body,omitempty"`
+	Timeout int               `json:"timeout,omitempty"` // Seconds until auto-reject; 0 = 30s default
 }
 
 // AskResponse is sent from the monitor back to the proxy.
@@ -210,43 +211,83 @@ func (s *AskServer) handleMonitor(monitor *monitorConn) {
 }
 
 // handleClientResponses reads responses from the monitor in client mode.
+// If the monitor disconnects, it retries connecting until Close() is called.
 func (s *AskServer) handleClientResponses() {
 	for {
-		var resp AskResponse
-		if err := s.decoder.Decode(&resp); err != nil {
-			s.mu.Lock()
-			closed := s.closed
-			s.mu.Unlock()
-			if closed {
-				return
+		// Read responses from the current connection
+		for {
+			var resp AskResponse
+			if err := s.decoder.Decode(&resp); err != nil {
+				s.mu.Lock()
+				closed := s.closed
+				s.mu.Unlock()
+				if closed {
+					return
+				}
+				break // Connection lost, enter reconnect loop
 			}
-			// Monitor disconnected — mark connection dead and cancel all pending requests
-			s.mu.Lock()
-			s.conn = nil
-			s.mu.Unlock()
 
 			s.pendingMu.Lock()
-			for id, ch := range s.pending {
-				close(ch)
-				delete(s.pending, id)
+			ch, ok := s.pending[resp.ID]
+			if ok {
+				delete(s.pending, resp.ID)
 			}
 			s.pendingMu.Unlock()
-			return
+
+			if ok {
+				select {
+				case ch <- resp:
+				default:
+				}
+				close(ch)
+			}
 		}
 
+		// Monitor disconnected — mark dead and cancel all pending requests
+		s.mu.Lock()
+		s.conn = nil
+		s.mu.Unlock()
+
 		s.pendingMu.Lock()
-		ch, ok := s.pending[resp.ID]
-		if ok {
-			delete(s.pending, resp.ID)
+		for id, ch := range s.pending {
+			close(ch)
+			delete(s.pending, id)
 		}
 		s.pendingMu.Unlock()
 
-		if ok {
-			select {
-			case ch <- resp:
-			default:
+		// Reconnect loop: retry every second until socket is available
+		for {
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				return
 			}
-			close(ch)
+			s.mu.Unlock()
+
+			time.Sleep(1 * time.Second)
+
+			conn, err := net.DialTimeout("unix", s.socketPath, 2*time.Second)
+			if err != nil {
+				continue
+			}
+
+			// Reconnected — update connection state
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				_ = conn.Close()
+				return
+			}
+			s.conn = conn
+			s.mu.Unlock()
+
+			s.clientMu.Lock()
+			s.encoder = json.NewEncoder(conn)
+			s.clientMu.Unlock()
+
+			s.decoder = json.NewDecoder(conn)
+
+			break // Back to reading responses
 		}
 	}
 }
@@ -342,7 +383,10 @@ func (s *AskServer) askServer(ctx context.Context, req *AskRequest) (AskResponse
 	}
 
 	select {
-	case resp := <-ch:
+	case resp, ok := <-ch:
+		if !ok {
+			return AskResponse{}, ErrNoMonitor
+		}
 		return resp, nil
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -374,6 +418,14 @@ func (s *AskServer) Close() error {
 	s.monitors = nil
 	s.monitorsMu.Unlock()
 
+	// Cancel all pending requests so blocked Ask() calls return immediately
+	s.pendingMu.Lock()
+	for id, ch := range s.pending {
+		close(ch)
+		delete(s.pending, id)
+	}
+	s.pendingMu.Unlock()
+
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
@@ -402,6 +454,8 @@ func NewAskQueue(server *AskServer, engine *FilterEngine, timeout time.Duration)
 // Returns ErrNoMonitor if no monitor is connected.
 // Returns ErrTimeout if the request times out.
 func (q *AskQueue) RequestApproval(req *AskRequest) (FilterAction, error) {
+	req.Timeout = int(q.timeout.Seconds())
+
 	ctx, cancel := context.WithTimeout(context.Background(), q.timeout)
 	defer cancel()
 

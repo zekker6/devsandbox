@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"testing"
@@ -175,5 +176,126 @@ func TestAskServer_StaleSocket(t *testing.T) {
 
 	if server.Mode() != AskModeServer {
 		t.Errorf("expected server mode after stale cleanup, got %s", server.Mode())
+	}
+}
+
+func TestAskQueue_SetsTimeout(t *testing.T) {
+	dir := shortTempDir(t)
+	socketDir := AskSocketDir(dir)
+	if err := os.MkdirAll(socketDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	socketPath := AskSocketPath(dir)
+
+	// Monitor that captures the raw request
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	receivedCh := make(chan AskRequest, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		decoder := json.NewDecoder(conn)
+		var req AskRequest
+		if err := decoder.Decode(&req); err != nil {
+			return
+		}
+		receivedCh <- req
+		// Send response so Ask() doesn't block
+		encoder := json.NewEncoder(conn)
+		_ = encoder.Encode(AskResponse{ID: req.ID, Action: FilterActionAllow})
+	}()
+
+	server, err := NewAskServer(dir)
+	if err != nil {
+		t.Fatalf("NewAskServer failed: %v", err)
+	}
+	defer func() { _ = server.Close() }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !server.HasMonitor() {
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for monitor")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	queue := NewAskQueue(server, nil, 45*time.Second)
+	_, _ = queue.RequestApproval(&AskRequest{
+		ID:     "timeout-test",
+		Method: "GET",
+		URL:    "https://example.com",
+		Host:   "example.com",
+	})
+
+	select {
+	case req := <-receivedCh:
+		if req.Timeout != 45 {
+			t.Errorf("expected Timeout=45, got %d", req.Timeout)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitor did not receive request")
+	}
+}
+
+func TestAskServer_Close_CancelsPending(t *testing.T) {
+	dir := shortTempDir(t)
+
+	server, err := NewAskServer(dir)
+	if err != nil {
+		t.Fatalf("NewAskServer failed: %v", err)
+	}
+
+	socketPath := AskSocketPath(dir)
+
+	// Connect a monitor that never responds
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("monitor dial failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !server.HasMonitor() {
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for monitor")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Send a request in background — monitor will never respond
+	errCh := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := server.Ask(ctx, &AskRequest{
+			ID:     "pending-1",
+			Method: "GET",
+			URL:    "https://example.com",
+			Host:   "example.com",
+		})
+		errCh <- err
+	}()
+
+	// Give Ask time to register the pending request
+	time.Sleep(50 * time.Millisecond)
+
+	// Close the server — should cancel the pending request immediately
+	_ = server.Close()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrNoMonitor) {
+			t.Errorf("expected ErrNoMonitor, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Ask did not return after Close — pending request was not cancelled")
 	}
 }
