@@ -2,5 +2,27 @@
   "extends": [
     "github>zekker6/renovate-config",
     "github>zekker6/renovate-config:automerge-github-actions"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["internal/embed/versions\\.env$"],
+      "matchStrings": [
+        "BWRAP_TAG=(?<currentValue>v\\d+\\.\\d+\\.\\d+)\\n"
+      ],
+      "depNameTemplate": "containers/bubblewrap",
+      "datasourceTemplate": "github-tags"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["internal/embed/versions\\.env$"],
+      "matchStrings": [
+        "PASTA_TAG=(?<currentValue>\\d{4}_\\d{2}_\\d{2}\\.[a-f0-9]+)\\n"
+      ],
+      "depNameTemplate": "passt",
+      "packageNameTemplate": "https://passt.top/passt",
+      "datasourceTemplate": "git-tags",
+      "versioningTemplate": "regex:^(?<major>\\d{4})_(?<minor>\\d{2})_(?<patch>\\d{2})\\.(?<build>[a-f0-9]+)$"
+    }
   ]
 }
