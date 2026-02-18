@@ -6,7 +6,9 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": ["internal/embed/versions\\.env$"],
+      "managerFilePatterns": [
+        "/internal/embed/versions\\.env$/"
+      ],
       "matchStrings": [
         "BWRAP_TAG=(?<currentValue>v\\d+\\.\\d+\\.\\d+)\\n"
       ],
@@ -15,7 +17,9 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["internal/embed/versions\\.env$"],
+      "managerFilePatterns": [
+        "/internal/embed/versions\\.env$/"
+      ],
       "matchStrings": [
         "PASTA_TAG=(?<currentValue>\\d{4}_\\d{2}_\\d{2}\\.[a-f0-9]+)\\n"
       ],
