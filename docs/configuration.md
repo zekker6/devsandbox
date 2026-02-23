@@ -84,6 +84,126 @@ When multiple fields are set, priority is: `value` > `env` > `file`. Set exactly
 
 > **AI agent workflow:** Credential injection is particularly useful for AI coding assistants like Claude Code that need GitHub API access. The token stays on the host -- the AI agent never sees it, but its API requests to github.com are automatically authenticated.
 
+### Content Redaction
+
+The proxy can scan outgoing requests for secrets and take action before they leave your machine. Redaction scanning checks request bodies, headers, and URLs against configured rules.
+
+```toml
+[proxy.redaction]
+# Enable content redaction scanning (requires proxy mode)
+enabled = true
+
+# Action when a secret is detected and the rule has no override
+# "block" (default) - reject the request with HTTP 403
+# "redact" - replace the secret with [REDACTED:<rule-name>] and forward
+# "log" - allow the request but log a warning
+default_action = "block"
+```
+
+#### Rule Types
+
+Rules detect secrets using either a **source** (exact value lookup) or a **pattern** (regex match). Each rule can optionally override the default action.
+
+**Source-based rules** — resolve a secret value and scan for exact matches:
+
+```toml
+# From environment variable
+[[proxy.redaction.rules]]
+name = "api-key"
+action = "block"
+[proxy.redaction.rules.source]
+env = "API_SECRET_KEY"
+
+# From file (whitespace trimmed, supports ~ expansion)
+[[proxy.redaction.rules]]
+name = "db-password"
+[proxy.redaction.rules.source]
+file = "~/.config/myapp/db-password"
+
+# From .env file in project directory
+[[proxy.redaction.rules]]
+name = "app-secret"
+[proxy.redaction.rules.source]
+env_file_key = "APP_SECRET"
+
+# Static value (prefer env or file for real secrets)
+[[proxy.redaction.rules]]
+name = "test-token"
+[proxy.redaction.rules.source]
+value = "test-secret-value"
+```
+
+**Source types:**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `env` | Environment variable on the host | `env = "API_SECRET_KEY"` |
+| `file` | File path (supports `~`, whitespace trimmed) | `file = "~/.secrets/token"` |
+| `env_file_key` | Key in project `.env` file | `env_file_key = "DB_PASSWORD"` |
+| `value` | Static value in config | `value = "literal-secret"` |
+
+**Pattern-based rules** — match regex patterns anywhere in the request:
+
+```toml
+[[proxy.redaction.rules]]
+name = "openai-keys"
+action = "redact"
+pattern = "sk-[a-zA-Z0-9]{20,}"
+
+[[proxy.redaction.rules]]
+name = "aws-keys"
+action = "block"
+pattern = "AKIA[0-9A-Z]{16}"
+```
+
+#### Actions
+
+| Action | Behavior | Request | Logged |
+|--------|----------|---------|--------|
+| `block` | Reject with HTTP 403 | Not forwarded | Yes (redacted) |
+| `redact` | Replace secret with `[REDACTED:<name>]` | Forwarded (modified) | Yes (redacted) |
+| `log` | Allow unmodified | Forwarded (original) | Yes (original) |
+
+When multiple rules match, the most severe action wins: **block > redact > log**.
+
+#### AI Agent Example
+
+Prevent an AI coding assistant from leaking your API keys:
+
+```toml
+[proxy]
+enabled = true
+
+[proxy.redaction]
+enabled = true
+default_action = "block"
+
+# Block if any of these secrets appear in outgoing requests
+[[proxy.redaction.rules]]
+name = "anthropic-key"
+[proxy.redaction.rules.source]
+env = "ANTHROPIC_API_KEY"
+
+[[proxy.redaction.rules]]
+name = "openai-pattern"
+pattern = "sk-[a-zA-Z0-9]{20,}"
+
+# Redact GitHub token (allow request with token replaced)
+[[proxy.redaction.rules]]
+name = "github-token"
+action = "redact"
+[proxy.redaction.rules.source]
+env = "GITHUB_TOKEN"
+```
+
+**Notes:**
+
+- Content redaction requires proxy mode (`--proxy`).
+- All source values must resolve at startup. If an environment variable is missing or a file is unreadable, devsandbox exits with an error (fail-closed).
+- Log entries for blocked and redacted requests have secrets replaced — secrets never appear in proxy logs.
+- Redaction rules are always additive when merging configs. The default action uses most-restrictive-wins (see [Config Priority](#config-priority)).
+- Redaction rules must not match values used by credential injectors. If a redaction rule (source or pattern) would match an injected credential, devsandbox exits with an error at startup. This prevents the confusing situation where credential injection adds a token and redaction immediately blocks it.
+
 ### Avoiding GitHub Rate Limits (Recommended for macOS)
 
 This is optional but strongly recommended. Without it, tool installation via mise inside the sandbox may hit GitHub's 60 requests/hour limit, causing transient failures during initial setup.
@@ -565,6 +685,16 @@ port = 8080
 [proxy.credentials.github]
 enabled = true
 
+# Scan outgoing requests for secrets
+[proxy.redaction]
+enabled = true
+default_action = "block"
+
+[[proxy.redaction.rules]]
+name = "anthropic-key"
+[proxy.redaction.rules.source]
+env = "ANTHROPIC_API_KEY"
+
 [overlay]
 # Master switch for overlay filesystem support
 enabled = true
@@ -748,6 +878,7 @@ devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbo
 - Scalar values: later source wins
 - Maps (`[tools]`): deep merge
 - Arrays (`[[proxy.filter.rules]]`): concatenate (later rules have higher priority)
+- Redaction: most-restrictive-wins — later configs can enable but never disable; `default_action` takes the higher severity (`block` > `redact` > `log`); rules are always additive
 
 ## See Also
 

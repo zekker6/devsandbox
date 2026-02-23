@@ -225,7 +225,7 @@ func (e *FilterEngine) Config() *FilterConfig {
 
 // BlockResponse creates an HTTP 403 response for blocked requests.
 func BlockResponse(req *http.Request, reason string) *http.Response {
-	body := fmt.Sprintf("Request blocked by devsandbox filter: %s\n", reason)
+	body := fmt.Sprintf("Request blocked by devsandbox: %s\n", reason)
 
 	return &http.Response{
 		StatusCode: http.StatusForbidden,
@@ -236,7 +236,7 @@ func BlockResponse(req *http.Request, reason string) *http.Response {
 		Header: http.Header{
 			"Content-Type":   []string{"text/plain; charset=utf-8"},
 			"Content-Length": []string{fmt.Sprintf("%d", len(body))},
-			"X-Blocked-By":   []string{"devsandbox-filter"},
+			"X-Blocked-By":   []string{"devsandbox"},
 		},
 		Body:          io.NopCloser(strings.NewReader(body)),
 		ContentLength: int64(len(body)),

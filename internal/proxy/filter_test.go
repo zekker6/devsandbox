@@ -356,7 +356,7 @@ func TestBlockResponse(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", resp.StatusCode)
 	}
-	if resp.Header.Get("X-Blocked-By") != "devsandbox-filter" {
+	if resp.Header.Get("X-Blocked-By") != "devsandbox" {
 		t.Errorf("expected X-Blocked-By header")
 	}
 }

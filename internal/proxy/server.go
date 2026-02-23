@@ -1,13 +1,17 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -32,6 +36,7 @@ type Server struct {
 	reqLogger           *RequestLogger
 	proxyLogger         *RotatingFileWriter
 	filterEngine        *FilterEngine
+	redactionEngine     *RedactionEngine
 	askServer           *AskServer
 	askQueue            *AskQueue
 	credentialInjectors []CredentialInjector
@@ -39,6 +44,42 @@ type Server struct {
 	mu                  sync.Mutex
 	running             bool
 	requestID           uint64
+}
+
+// validateCredentialRedactionConflicts checks that no credential injector's resolved
+// value would be caught by a redaction rule. This prevents the confusing situation
+// where credential injection adds a token and redaction immediately blocks/modifies it.
+func validateCredentialRedactionConflicts(injectors []CredentialInjector, engine *RedactionEngine) error {
+	if engine == nil || !engine.IsEnabled() || len(injectors) == 0 {
+		return nil
+	}
+
+	var errs []string
+	for _, injector := range injectors {
+		ci, ok := injector.(ConfigurableInjector)
+		if !ok {
+			continue
+		}
+		value := ci.ResolvedValue()
+		if value == "" {
+			continue
+		}
+
+		matches := engine.MatchesValue(value)
+		if len(matches) > 0 {
+			errs = append(errs, fmt.Sprintf(
+				"credential injector %q conflicts with redaction rules %v: "+
+					"injected credential value matches redaction rules that would block or modify it; "+
+					"either remove the conflicting redaction rules or disable credential injection for this domain",
+				ci.Name(), matches,
+			))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func NewServer(cfg *Config) (*Server, error) {
@@ -96,6 +137,24 @@ func NewServer(cfg *Config) (*Server, error) {
 		}
 	}
 
+	// Create redaction engine if configured
+	var redactionEngine *RedactionEngine
+	if cfg.Redaction != nil && cfg.Redaction.IsEnabled() {
+		redactionEngine, err = NewRedactionEngine(cfg.Redaction, cfg.ProjectDir)
+		if err != nil {
+			_ = proxyLogger.Close()
+			_ = reqLogger.Close()
+			return nil, fmt.Errorf("failed to create redaction engine: %w", err)
+		}
+	}
+
+	// Cross-validate: credential injectors must not conflict with redaction rules
+	if err := validateCredentialRedactionConflicts(cfg.CredentialInjectors, redactionEngine); err != nil {
+		_ = proxyLogger.Close()
+		_ = reqLogger.Close()
+		return nil, fmt.Errorf("credential/redaction conflict: %w", err)
+	}
+
 	// Set up ask mode if configured (default_action = ask)
 	var askServer *AskServer
 	var askQueue *AskQueue
@@ -118,6 +177,7 @@ func NewServer(cfg *Config) (*Server, error) {
 		reqLogger:           reqLogger,
 		proxyLogger:         proxyLogger,
 		filterEngine:        filterEngine,
+		redactionEngine:     redactionEngine,
 		askServer:           askServer,
 		askQueue:            askQueue,
 		credentialInjectors: cfg.CredentialInjectors,
@@ -162,57 +222,166 @@ func (s *Server) setupLogging() {
 			}
 		}
 
-		if s.filterEngine == nil || !s.filterEngine.IsEnabled() {
-			return req, nil
-		}
-		decision := s.filterEngine.Match(req)
+		// Apply filter rules if configured
+		if s.filterEngine != nil && s.filterEngine.IsEnabled() {
+			decision := s.filterEngine.Match(req)
 
-		// Log the filter decision
-		if entry != nil {
-			entry.FilterAction = string(decision.Action)
-			entry.FilterReason = decision.Reason
-		}
-
-		switch decision.Action {
-		case FilterActionBlock:
-			// Block the request
-			resp := BlockResponse(req, decision.Reason)
-			// Log as blocked
+			// Log the filter decision
 			if entry != nil {
-				s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
-				_ = s.reqLogger.Log(entry)
+				entry.FilterAction = string(decision.Action)
+				entry.FilterReason = decision.Reason
 			}
-			return nil, resp
 
-		case FilterActionAsk:
-			// Handle ask mode
-			if s.askQueue != nil {
-				action := s.handleAskMode(req, entry, reqBody)
-				if action == FilterActionBlock {
-					resp := BlockResponse(req, "blocked by user")
-					if entry != nil {
-						entry.FilterAction = string(FilterActionBlock)
-						entry.FilterReason = "blocked by user decision"
-						s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
-						_ = s.reqLogger.Log(entry)
-					}
-					return nil, resp
-				}
-				// User allowed - continue with request
+			switch decision.Action {
+			case FilterActionBlock:
+				// Block the request
+				resp := BlockResponse(req, decision.Reason)
+				// Log as blocked
 				if entry != nil {
-					entry.FilterAction = string(FilterActionAllow)
-					entry.FilterReason = "allowed by user decision"
+					s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
+					_ = s.reqLogger.Log(entry)
 				}
-			} else {
-				// No ask queue configured, use default action
-				defaultAction := s.filterEngine.Config().GetDefaultAction()
-				if defaultAction == FilterActionBlock {
-					resp := BlockResponse(req, "ask mode not available, using default block")
+				return nil, resp
+
+			case FilterActionAsk:
+				// Handle ask mode
+				if s.askQueue != nil {
+					action := s.handleAskMode(req, entry, reqBody)
+					if action == FilterActionBlock {
+						resp := BlockResponse(req, "blocked by user")
+						if entry != nil {
+							entry.FilterAction = string(FilterActionBlock)
+							entry.FilterReason = "blocked by user decision"
+							s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
+							_ = s.reqLogger.Log(entry)
+						}
+						return nil, resp
+					}
+					// User allowed - continue with request
 					if entry != nil {
+						entry.FilterAction = string(FilterActionAllow)
+						entry.FilterReason = "allowed by user decision"
+					}
+				} else {
+					// No ask queue configured, use default action
+					defaultAction := s.filterEngine.Config().GetDefaultAction()
+					if defaultAction == FilterActionBlock {
+						resp := BlockResponse(req, "ask mode not available, using default block")
+						if entry != nil {
+							s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
+							_ = s.reqLogger.Log(entry)
+						}
+						return nil, resp
+					}
+				}
+			}
+		}
+
+		// Redaction scan (after filter allows the request)
+		// Re-read body from req in case credential injection modified it.
+		// This ensures redaction scans the actual outgoing body, not a stale copy.
+		if s.redactionEngine != nil && s.redactionEngine.IsEnabled() {
+			scanBody := reqBody
+			if req.Body != nil {
+				freshBody, err := io.ReadAll(req.Body)
+				if err != nil {
+					resp := BlockResponse(req, "failed to read request body for redaction scan")
+					if entry != nil {
+						entry.RedactionAction = "block"
+						entry.Error = "redaction body read error: " + err.Error()
 						s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 						_ = s.reqLogger.Log(entry)
 					}
 					return nil, resp
+				}
+				scanBody = freshBody
+				req.Body = io.NopCloser(bytes.NewReader(freshBody))
+			}
+
+			result := s.redactionEngine.Scan(req, scanBody)
+			if result.Matched {
+				// Build rule names list for logging and response
+				ruleNames := make([]string, len(result.Matches))
+				for i, m := range result.Matches {
+					ruleNames[i] = m.RuleName
+				}
+
+				// Log match details
+				if entry != nil {
+					entry.RedactionAction = string(result.Action)
+					entry.RedactionMatches = ruleNames
+				}
+
+				switch result.Action {
+				case RedactionActionBlock:
+					resp := BlockResponse(req, "request blocked: secret pattern detected in outgoing request")
+					if entry != nil {
+						// Update entry with redacted values so secrets don't persist in logs
+						if result.Body != nil {
+							entry.RequestBody = result.Body
+						}
+						if result.URL != "" {
+							entry.URL = result.URL
+						}
+						if result.Headers != nil {
+							entry.RequestHeaders = result.Headers
+						}
+						s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
+						_ = s.reqLogger.Log(entry)
+					}
+					return nil, resp
+
+				case RedactionActionRedact:
+					// Replace request body with redacted content
+					req.Body = io.NopCloser(bytes.NewReader(result.Body))
+					req.ContentLength = int64(len(result.Body))
+					req.Header.Del("Content-Length") // Let Go derive from ContentLength
+
+					// Replace URL — if parse fails, the redaction placeholder
+					// created an invalid URL. Block rather than leak the secret.
+					parsedURL, parseErr := url.Parse(result.URL)
+					if parseErr != nil {
+						resp := BlockResponse(req, fmt.Sprintf(
+							"secret detected but redacted URL is unparseable: %v", parseErr))
+						if entry != nil {
+							entry.RedactionAction = string(RedactionActionBlock)
+							// Use redacted values so secrets don't persist in logs
+							if result.Body != nil {
+								entry.RequestBody = result.Body
+							}
+							if result.URL != "" {
+								entry.URL = result.URL
+							}
+							if result.Headers != nil {
+								entry.RequestHeaders = result.Headers
+							}
+							s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
+							_ = s.reqLogger.Log(entry)
+						}
+						return nil, resp
+					}
+					req.URL = parsedURL
+
+					// Replace headers
+					for k, vals := range result.Headers {
+						req.Header[k] = vals
+					}
+
+					// Update log entry with redacted values
+					if entry != nil {
+						if result.Body != nil {
+							entry.RequestBody = result.Body
+						}
+						if result.URL != "" {
+							entry.URL = result.URL
+						}
+						if result.Headers != nil {
+							entry.RequestHeaders = result.Headers
+						}
+					}
+
+				case RedactionActionLog:
+					// Log-only: request proceeds unmodified, warning is in the log entry
 				}
 			}
 		}

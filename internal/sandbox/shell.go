@@ -5,6 +5,31 @@ import (
 	"strings"
 )
 
+// escapeForShellDoubleQuote escapes a string for safe inclusion inside
+// double-quoted strings in bash/zsh. Escapes \, $, ", and `.
+func escapeForShellDoubleQuote(s string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`$`, `\$`,
+		`"`, `\"`,
+		"`", "\\`",
+	)
+	return replacer.Replace(s)
+}
+
+// escapeForFishDoubleQuote escapes a string for safe inclusion inside
+// double-quoted strings in fish. Escapes \, $, and ".
+// Note: fish only recognizes \\, \$, \" and \newline inside double quotes;
+// other \x sequences are kept literal, so we must not escape backticks here.
+func escapeForFishDoubleQuote(s string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`$`, `\$`,
+		`"`, `\"`,
+	)
+	return replacer.Replace(s)
+}
+
 // shellQuote quotes a string for safe use in a shell command.
 // Returns the string unchanged if it's safe, otherwise wraps in single quotes.
 func shellQuote(s string) string {
@@ -48,7 +73,7 @@ func buildFishCommand(cfg *Config, args []string) []string {
 	miseActivation := "if command -q mise; mise activate fish | source; end"
 
 	if len(args) == 0 {
-		greeting := fmt.Sprintf(`set -gx fish_greeting "🔒 Sandbox: %s | .env blocked | No SSH/git push"`, cfg.ProjectName)
+		greeting := fmt.Sprintf(`set -gx fish_greeting "🔒 Sandbox: %s | .env blocked | No SSH/git push"`, escapeForFishDoubleQuote(cfg.ProjectName))
 		fishInit := miseActivation + "; " + greeting + "; exec fish"
 		return []string{cfg.ShellPath, "-c", fishInit}
 	}
@@ -63,7 +88,7 @@ func buildBashCommand(cfg *Config, args []string) []string {
 
 	if len(args) == 0 {
 		// Set PS1 prompt with sandbox indicator
-		ps1 := fmt.Sprintf(`PS1="🔒 [%s] \w $ "`, cfg.ProjectName)
+		ps1 := fmt.Sprintf(`PS1="🔒 [%s] \w $ "`, escapeForShellDoubleQuote(cfg.ProjectName))
 		bashInit := miseActivation + "; " + ps1 + "; exec bash --norc --noprofile"
 		return []string{cfg.ShellPath, "-c", bashInit}
 	}
@@ -78,7 +103,7 @@ func buildZshCommand(cfg *Config, args []string) []string {
 
 	if len(args) == 0 {
 		// Set PROMPT with sandbox indicator
-		prompt := fmt.Sprintf(`PROMPT="🔒 [%s] %%~ $ "`, cfg.ProjectName)
+		prompt := fmt.Sprintf(`PROMPT="🔒 [%s] %%~ $ "`, escapeForShellDoubleQuote(cfg.ProjectName))
 		zshInit := miseActivation + "; " + prompt + "; exec zsh --no-rcs"
 		return []string{cfg.ShellPath, "-c", zshInit}
 	}

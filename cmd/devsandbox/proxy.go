@@ -105,6 +105,10 @@ func resolveSandboxBase() (string, error) {
 }
 
 func runProxyMonitorServer(sandboxBase string) error {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("proxy monitor requires an interactive terminal (stdin is not a TTY)")
+	}
+
 	socketDir := proxy.AskSocketDir(sandboxBase)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
@@ -223,6 +227,10 @@ func runProxyMonitorServer(sandboxBase string) error {
 }
 
 func runProxyMonitor(socketPath string) error {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("proxy monitor requires an interactive terminal (stdin is not a TTY)")
+	}
+
 	// Connect to the ask server
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {

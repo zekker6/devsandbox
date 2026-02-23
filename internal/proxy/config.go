@@ -55,6 +55,12 @@ type Config struct {
 	// Dispatcher is an optional shared log dispatcher for remote forwarding.
 	// If set, the server uses it instead of creating its own from LogReceivers.
 	Dispatcher *logging.Dispatcher
+
+	// Redaction contains content redaction configuration.
+	Redaction *RedactionConfig
+
+	// ProjectDir is the project directory for resolving .env files.
+	ProjectDir string
 }
 
 func NewConfig(sandboxBase string, port int) *Config {

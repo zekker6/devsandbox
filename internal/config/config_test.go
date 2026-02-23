@@ -955,6 +955,120 @@ sandbox_port = 8080
 	}
 }
 
+func TestProxyRedactionConfig_ParseAndValidate(t *testing.T) {
+	tomlStr := `
+[proxy]
+enabled = true
+
+[proxy.redaction]
+enabled = true
+default_action = "block"
+
+[[proxy.redaction.rules]]
+name = "api-secret"
+action = "block"
+[proxy.redaction.rules.source]
+env = "SECRET_TOKEN"
+
+[[proxy.redaction.rules]]
+name = "openai-pattern"
+action = "redact"
+pattern = "sk-[a-zA-Z0-9]+"
+`
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(tomlStr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFrom(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+
+	if cfg.Proxy.Redaction.DefaultAction != "block" {
+		t.Errorf("default_action = %q, want %q", cfg.Proxy.Redaction.DefaultAction, "block")
+	}
+	if len(cfg.Proxy.Redaction.Rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(cfg.Proxy.Redaction.Rules))
+	}
+	if cfg.Proxy.Redaction.Rules[0].Name != "api-secret" {
+		t.Errorf("rule[0].name = %q, want %q", cfg.Proxy.Redaction.Rules[0].Name, "api-secret")
+	}
+	if cfg.Proxy.Redaction.Rules[0].Source == nil {
+		t.Fatal("rule[0].source is nil")
+	}
+	if cfg.Proxy.Redaction.Rules[0].Source.Env != "SECRET_TOKEN" {
+		t.Errorf("rule[0].source.env = %q, want %q", cfg.Proxy.Redaction.Rules[0].Source.Env, "SECRET_TOKEN")
+	}
+	if cfg.Proxy.Redaction.Rules[1].Pattern != "sk-[a-zA-Z0-9]+" {
+		t.Errorf("rule[1].pattern = %q, want %q", cfg.Proxy.Redaction.Rules[1].Pattern, "sk-[a-zA-Z0-9]+")
+	}
+}
+
+func TestProxyRedactionConfig_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		toml    string
+		wantErr string
+	}{
+		{
+			"invalid default action",
+			`[proxy.redaction]
+enabled = true
+default_action = "explode"`,
+			"invalid default_action",
+		},
+		{
+			"both source and pattern",
+			`[proxy.redaction]
+enabled = true
+default_action = "block"
+[[proxy.redaction.rules]]
+pattern = "sk-.*"
+[proxy.redaction.rules.source]
+env = "TOKEN"`,
+			"source and pattern are mutually exclusive",
+		},
+		{
+			"neither source nor pattern",
+			`[proxy.redaction]
+enabled = true
+default_action = "block"
+[[proxy.redaction.rules]]
+name = "empty"`,
+			"either source or pattern is required",
+		},
+		{
+			"invalid regex",
+			`[proxy.redaction]
+enabled = true
+default_action = "block"
+[[proxy.redaction.rules]]
+pattern = "[invalid"`,
+			"invalid regex",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfgPath := filepath.Join(tmpDir, "config.toml")
+			if err := os.WriteFile(cfgPath, []byte(tt.toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := LoadFrom(cfgPath)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestApplyIncludes_MissingFileWarns(t *testing.T) {
 	projectDir := t.TempDir()
 	cfg := &Config{
@@ -968,5 +1082,88 @@ func TestApplyIncludes_MissingFileWarns(t *testing.T) {
 	}
 	if result == nil {
 		t.Error("should return config even with missing include")
+	}
+}
+
+func TestMergeConfigs_RedactionEnabledCannotBeDisabledByOverlay(t *testing.T) {
+	base := &Config{}
+	base.Proxy.Redaction.Enabled = boolPtr(true)
+	base.Proxy.Redaction.DefaultAction = "block"
+
+	overlay := &Config{}
+	overlay.Proxy.Redaction.Enabled = boolPtr(false)
+	overlay.Proxy.Redaction.DefaultAction = "log"
+
+	result := mergeConfigs(base, overlay)
+
+	if result.Proxy.Redaction.Enabled == nil || !*result.Proxy.Redaction.Enabled {
+		t.Error("overlay should not be able to disable globally-enabled redaction")
+	}
+	if result.Proxy.Redaction.DefaultAction != "block" {
+		t.Errorf("overlay should not be able to weaken default action from block to %s",
+			result.Proxy.Redaction.DefaultAction)
+	}
+}
+
+func TestMergeConfigs_RedactionOverlayCanEnable(t *testing.T) {
+	base := &Config{}
+	overlay := &Config{}
+	overlay.Proxy.Redaction.Enabled = boolPtr(true)
+
+	result := mergeConfigs(base, overlay)
+
+	if result.Proxy.Redaction.Enabled == nil || !*result.Proxy.Redaction.Enabled {
+		t.Error("overlay should be able to enable redaction when base has no setting")
+	}
+}
+
+func TestMergeConfigs_RedactionRulesAdditive(t *testing.T) {
+	base := &Config{}
+	base.Proxy.Redaction.Rules = []ProxyRedactionRule{{Name: "base-rule"}}
+
+	overlay := &Config{}
+	overlay.Proxy.Redaction.Rules = []ProxyRedactionRule{{Name: "overlay-rule"}}
+
+	result := mergeConfigs(base, overlay)
+
+	if len(result.Proxy.Redaction.Rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(result.Proxy.Redaction.Rules))
+	}
+	// Overlay rules should be prepended (higher priority)
+	if result.Proxy.Redaction.Rules[0].Name != "overlay-rule" {
+		t.Errorf("expected overlay rule first, got %s", result.Proxy.Redaction.Rules[0].Name)
+	}
+	if result.Proxy.Redaction.Rules[1].Name != "base-rule" {
+		t.Errorf("expected base rule second, got %s", result.Proxy.Redaction.Rules[1].Name)
+	}
+}
+
+func TestMergeConfigs_RedactionMostRestrictiveAction(t *testing.T) {
+	tests := []struct {
+		name     string
+		base     string
+		overlay  string
+		expected string
+	}{
+		{"block beats log", "block", "log", "block"},
+		{"block beats redact", "block", "redact", "block"},
+		{"redact beats log", "log", "redact", "redact"},
+		{"overlay can escalate from log to block", "log", "block", "block"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &Config{}
+			base.Proxy.Redaction.DefaultAction = tt.base
+
+			overlay := &Config{}
+			overlay.Proxy.Redaction.DefaultAction = tt.overlay
+
+			result := mergeConfigs(base, overlay)
+
+			if result.Proxy.Redaction.DefaultAction != tt.expected {
+				t.Errorf("expected %s, got %s", tt.expected, result.Proxy.Redaction.DefaultAction)
+			}
+		})
 	}
 }

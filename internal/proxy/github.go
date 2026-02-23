@@ -57,6 +57,14 @@ func (g *GitHubCredentialInjector) Match(req *http.Request) bool {
 	return NormalizeHost(req.URL.Host) == "api.github.com"
 }
 
+// ResolvedValue returns the resolved token value.
+func (g *GitHubCredentialInjector) ResolvedValue() string {
+	if !g.enabled {
+		return ""
+	}
+	return g.token
+}
+
 // Inject adds the Authorization header if not already present.
 func (g *GitHubCredentialInjector) Inject(req *http.Request) {
 	// Don't override existing authorization

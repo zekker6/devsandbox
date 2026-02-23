@@ -6,12 +6,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"devsandbox/internal/sandbox/tools"
 )
+
+// isTTY reports whether stdout is connected to a terminal.
+var isTTY = sync.OnceValue(func() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
+})
+
+// color wraps text in ANSI color codes when stdout is a TTY.
+// Returns plain text otherwise.
+func color(code, text string) string {
+	if !isTTY() {
+		return text
+	}
+	return code + text + "\033[0m"
+}
 
 func newToolsCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -297,26 +313,26 @@ func newToolsCheckCmd() *cobra.Command {
 
 			for _, r := range results {
 				if r.Available {
-					fmt.Printf("\033[32m✓\033[0m %s", r.Name)
+					fmt.Printf("%s %s", color("\033[32m", "✓"), r.Name)
 					if r.BinaryPath != "" {
 						fmt.Printf(" (%s)", r.BinaryPath)
 					}
 					fmt.Println()
 				} else {
-					fmt.Printf("\033[31m✗\033[0m %s (not available)\n", r.Name)
+					fmt.Printf("%s %s (not available)\n", color("\033[31m", "✗"), r.Name)
 				}
 
 				// Show binding status for available tools
 				if r.Available && len(r.Bindings) > 0 {
 					for _, b := range r.Bindings {
-						status := "\033[32m✓\033[0m"
+						status := color("\033[32m", "✓")
 						note := ""
 						if !b.Exists {
 							if b.Optional {
-								status = "\033[33m○\033[0m"
+								status = color("\033[33m", "○")
 								note = " (optional, missing)"
 							} else {
-								status = "\033[31m✗\033[0m"
+								status = color("\033[31m", "✗")
 								note = " (missing!)"
 							}
 						}
@@ -327,7 +343,7 @@ func newToolsCheckCmd() *cobra.Command {
 
 				if len(r.Issues) > 0 {
 					for _, issue := range r.Issues {
-						fmt.Printf("    \033[33m!\033[0m %s\n", issue)
+						fmt.Printf("    %s %s\n", color("\033[33m", "!"), issue)
 					}
 				}
 			}
@@ -400,10 +416,10 @@ func buildToolInfo(tool tools.Tool, homeDir, sandboxHome string, resolve bool) T
 	return info
 }
 
-func printToolInfo(info ToolInfo, homeDir string, resolve bool) {
-	status := "\033[32mavailable\033[0m"
+func printToolInfo(info ToolInfo, _ string, _ bool) {
+	status := color("\033[32m", "available")
 	if !info.Available {
-		status = "\033[31mmissing\033[0m"
+		status = color("\033[31m", "missing")
 	}
 
 	fmt.Printf("Tool: %s\n", info.Name)

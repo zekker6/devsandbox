@@ -16,8 +16,13 @@ func createOverlayDirs(sandboxHome, dest, subdir string) (upper, work string, er
 	if !filepath.IsAbs(cleanDest) {
 		return "", "", fmt.Errorf("overlay dest must be absolute path, got: %s", dest)
 	}
-	if strings.Contains(cleanDest, "..") {
-		return "", "", fmt.Errorf("overlay dest contains invalid path traversal: %s", dest)
+	// After filepath.Clean on an absolute path, ".." as a path segment should be
+	// impossible. Check anyway as defense-in-depth, but only match ".." as an actual
+	// path component — not as a substring of filenames like "..cache".
+	for seg := range strings.SplitSeq(cleanDest, string(filepath.Separator)) {
+		if seg == ".." {
+			return "", "", fmt.Errorf("overlay dest contains path traversal: %s", dest)
+		}
 	}
 
 	// Convert dest path to safe directory name

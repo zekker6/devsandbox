@@ -8,13 +8,10 @@
 - [x] Docker isolation backend (Linux and macOS support)
 
 ## Planned
-- capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
+
+- [ ] dbus notifications support
+- [ ] capture more audit data (e.g. files access, attempts to access restricted files, attempts to access network etc)
   - collection modes:
     - ebpf - linux only, very fast and efficient
     - fsnotify - cross-platform, but less efficient
-- config show use generated code instead of manual crafting of toml (e.g. just toml.Marshal)
-- tui
-  - for sandboxes management (list, delete, view logs etc)
-  - for proxy configuration (logs / approval)
-
-## Bugs
+- [ ] config show use generated code instead of manual crafting of toml (e.g. just toml.Marshal)

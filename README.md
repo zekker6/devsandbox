@@ -57,6 +57,7 @@ Run `devsandbox doctor` to verify your setup.
 | mise-managed tools | Read-only |
 | Network (default) | Full access |
 | Network (proxy mode) | Isolated and logged |
+| Outgoing secrets (proxy + redaction) | Blocked or redacted |
 
 Everything is configurable. See [Configuration](docs/configuration.md) for details.
 
@@ -66,6 +67,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Your tools, your shell** -- mise-managed tools, shell configs, editor setups (nvim, starship, tmux) all work inside the sandbox
 - **MITM proxy** -- optional traffic inspection with log viewing, filtering, and export
 - **HTTP filtering** -- whitelist/blacklist domains, or interactively approve requests one at a time
+- **Content redaction** -- scan outgoing requests for secrets, block or replace them before they leave your machine
 - **Cross-platform** -- [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux (sub-second startup), Docker containers on macOS
 - **Per-project isolation** -- each project gets its own sandbox home, caches, and logs
 - **Git modes** -- readonly (default), readwrite (with SSH/GPG), or disabled
@@ -218,7 +220,7 @@ devsandbox image build              # Build Docker image (macOS)
 | Page | Contents |
 |---|---|
 | [Sandboxing](docs/sandboxing.md) | Isolation backends, security model, filesystem layout, overlay mounts, custom mounts, Docker backend details |
-| [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, remote logging |
+| [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, content redaction, remote logging |
 | [Tools](docs/tools.md) | mise integration, shell/editor/prompt setup, AI assistant configs, Git modes, Docker socket proxy |
 | [Configuration](docs/configuration.md) | Config file reference, per-project configs, conditional includes, port forwarding, credential injection |
 | [Use Cases](docs/use-cases.md) | Shell aliases, autocompletion, development workflows, security monitoring scripts |

@@ -3,7 +3,6 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // FindEnvFiles walks dir up to maxDepth and returns paths to .env files.
@@ -24,14 +23,26 @@ func FindEnvFiles(dir string, maxDepth int) []string {
 			if skipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
-			depth := strings.Count(strings.TrimPrefix(path, dir), string(os.PathSeparator))
-			if depth > maxDepth {
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
 				return filepath.SkipDir
+			}
+			if rel != "." {
+				// Count path components: "a/b/c" has depth 3
+				depth := 1
+				for i := range len(rel) {
+					if rel[i] == filepath.Separator {
+						depth++
+					}
+				}
+				if depth > maxDepth {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
 		name := d.Name()
-		if name == ".env" || strings.HasPrefix(name, ".env.") {
+		if name == ".env" || len(name) > 5 && name[:5] == ".env." {
 			files = append(files, path)
 		}
 		return nil

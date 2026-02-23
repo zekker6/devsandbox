@@ -636,6 +636,80 @@ func TestDockerIsolator_ConfigHash_ChangesOnPortChange(t *testing.T) {
 	}
 }
 
+func TestDockerIsolator_ConfigHash_ChangesOnBindings(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	cfg1 := &Config{}
+	cfg2 := &Config{
+		Bindings: []Binding{
+			{Source: "/host/path", Dest: "/container/path", ReadOnly: true},
+		},
+	}
+
+	if iso.configHash(cfg1) == iso.configHash(cfg2) {
+		t.Error("configHash should differ when bindings change")
+	}
+}
+
+func TestDockerIsolator_ConfigHash_ChangesOnEnvironment(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	cfg1 := &Config{}
+	cfg2 := &Config{
+		Environment: map[string]string{"FOO": "bar"},
+	}
+
+	if iso.configHash(cfg1) == iso.configHash(cfg2) {
+		t.Error("configHash should differ when environment changes")
+	}
+}
+
+func TestDockerIsolator_ConfigHash_ChangesOnToolsConfig(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	cfg1 := &Config{}
+	cfg2 := &Config{
+		ToolsConfig: map[string]any{"git": map[string]any{"enabled": false}},
+	}
+
+	if iso.configHash(cfg1) == iso.configHash(cfg2) {
+		t.Error("configHash should differ when tools config changes")
+	}
+}
+
+func TestDockerIsolator_ConfigHash_ChangesOnOverlay(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	cfg1 := &Config{OverlayEnabled: false}
+	cfg2 := &Config{OverlayEnabled: true}
+
+	if iso.configHash(cfg1) == iso.configHash(cfg2) {
+		t.Error("configHash should differ when overlay toggle changes")
+	}
+}
+
+func TestDockerIsolator_ConfigHash_ChangesOnEnvFiles(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	// Create a temp project dir with no .env files
+	tmpDir1 := t.TempDir()
+	// Create a temp project dir with a .env file
+	tmpDir2 := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir2, ".env"), []byte("SECRET=x"), 0o644)
+
+	cfg1 := &Config{ProjectDir: tmpDir1}
+	cfg2 := &Config{ProjectDir: tmpDir2}
+
+	if iso.configHash(cfg1) == iso.configHash(cfg2) {
+		t.Error("configHash should differ when .env files are present")
+	}
+}
+
 func TestDockerIsolator_ConfigHash_ChangesOnResourceLimits(t *testing.T) {
 	iso1 := NewDockerIsolator(DockerConfig{MemoryLimit: "4g"})
 	iso2 := NewDockerIsolator(DockerConfig{MemoryLimit: "8g"})

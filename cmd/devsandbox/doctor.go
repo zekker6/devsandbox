@@ -204,17 +204,10 @@ func checkDirectories() checkResult {
 
 	info, err := os.Stat(baseDir)
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(baseDir, 0o755); err != nil {
-			return checkResult{
-				name:    "directories",
-				status:  "error",
-				message: fmt.Sprintf("cannot create %s: %v", baseDir, err),
-			}
-		}
 		return checkResult{
 			name:    "directories",
-			status:  "ok",
-			message: fmt.Sprintf("created %s", baseDir),
+			status:  "warn",
+			message: fmt.Sprintf("%s does not exist (will be created on first sandbox run)", baseDir),
 		}
 	}
 	if err != nil {
@@ -233,22 +226,24 @@ func checkDirectories() checkResult {
 		}
 	}
 
-	testFile := filepath.Join(baseDir, ".doctor-test")
-	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
+	// Check writability with a transient temp file (cleaned up immediately).
+	testFile, err := os.CreateTemp(baseDir, ".doctor-check-*")
+	if err != nil {
 		return checkResult{
 			name:    "directories",
 			status:  "error",
 			message: fmt.Sprintf("%s is not writable: %v", baseDir, err),
 		}
 	}
-	_ = os.Remove(testFile) // cleanup, best effort
+	_ = testFile.Close()
+	_ = os.Remove(testFile.Name())
 
 	sandboxCount := 0
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
 		return checkResult{
-			name:    "sandboxes",
-			status:  "warning",
+			name:    "directories",
+			status:  "warn",
 			message: fmt.Sprintf("%s exists but cannot list contents: %v", baseDir, err),
 		}
 	}
@@ -527,8 +522,8 @@ func checkOverlayfs() checkResult {
 	}
 }
 
-// checkRecentLogs checks for recent errors in internal logs.
-// Looks at logs from the last 24 hours and summarizes any issues.
+// checkRecentLogs checks for recent errors in internal logs across all projects.
+// Scans per-project log directories for errors in the last 24 hours.
 func checkRecentLogs() checkResult {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -539,104 +534,83 @@ func checkRecentLogs() checkResult {
 		}
 	}
 
-	logPath := filepath.Join(homeDir, ".local", "share", "devsandbox", "logs", "internal", "logging-errors.log")
-
-	info, err := os.Stat(logPath)
-	if os.IsNotExist(err) {
+	baseDir := sandbox.SandboxBasePath(homeDir)
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		// Base dir doesn't exist yet — no logs to check.
 		return checkResult{
 			name:    "logs",
 			status:  "ok",
-			message: "no error log found (good)",
-		}
-	}
-	if err != nil {
-		return checkResult{
-			name:    "logs",
-			status:  "warn",
-			message: fmt.Sprintf("cannot access log: %v", err),
+			message: "no sandbox logs found",
 		}
 	}
 
-	// Check file age
-	if time.Since(info.ModTime()) > 7*24*time.Hour {
-		return checkResult{
-			name:    "logs",
-			status:  "ok",
-			message: fmt.Sprintf("no recent errors (last entry: %s)", info.ModTime().Format("2006-01-02")),
-		}
-	}
-
-	// Read and parse recent entries
-	file, err := os.Open(logPath)
-	if err != nil {
-		return checkResult{
-			name:    "logs",
-			status:  "warn",
-			message: fmt.Sprintf("cannot open log: %v", err),
-		}
-	}
-	defer func() { _ = file.Close() }()
-
-	cutoff := time.Now().Add(-24 * time.Hour)
-	var recentErrors []string
-	componentCounts := make(map[string]int)
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
+	// Collect all internal log directories across projects.
+	// Logs live in two places per project:
+	//   {project}/logs/internal/         (proxy internal errors)
+	//   {project}/home/logs/internal/    (sandbox/main errors)
+	var logFiles []string
+	for _, e := range entries {
+		if !e.IsDir() {
 			continue
 		}
-
-		// Parse timestamp (format: 2006-01-02T15:04:05Z07:00)
-		if len(line) < 25 {
-			continue
-		}
-
-		timestamp, err := time.Parse(time.RFC3339, line[:25])
-		if err != nil {
-			// Try without timezone (some entries might have shorter timestamps)
-			timestamp, err = time.Parse("2006-01-02T15:04:05", line[:19])
+		projectDir := filepath.Join(baseDir, e.Name())
+		for _, sub := range []string{
+			filepath.Join(projectDir, "logs", "internal"),
+			filepath.Join(projectDir, "home", "logs", "internal"),
+		} {
+			files, err := os.ReadDir(sub)
 			if err != nil {
 				continue
 			}
-		}
-
-		if timestamp.After(cutoff) {
-			recentErrors = append(recentErrors, line)
-
-			// Extract component from [component] format
-			start := strings.Index(line, "[")
-			end := strings.Index(line, "]")
-			if start > 0 && end > start {
-				component := line[start+1 : end]
-				componentCounts[component]++
+			for _, f := range files {
+				if !f.IsDir() && strings.HasSuffix(f.Name(), ".log") {
+					logFiles = append(logFiles, filepath.Join(sub, f.Name()))
+				}
 			}
 		}
 	}
 
-	if len(recentErrors) == 0 {
+	if len(logFiles) == 0 {
 		return checkResult{
 			name:    "logs",
 			status:  "ok",
-			message: "no errors in last 24h",
+			message: "no error logs found",
 		}
 	}
 
-	// Build summary
+	cutoff := time.Now().Add(-24 * time.Hour)
+	var recentErrors int
+	componentCounts := make(map[string]int)
+
+	for _, logPath := range logFiles {
+		info, err := os.Stat(logPath)
+		if err != nil || time.Since(info.ModTime()) > 7*24*time.Hour {
+			continue // Skip old or inaccessible logs
+		}
+		scanLogFile(logPath, cutoff, &recentErrors, componentCounts)
+	}
+
+	if recentErrors == 0 {
+		return checkResult{
+			name:    "logs",
+			status:  "ok",
+			message: fmt.Sprintf("no errors in last 24h (%d log files checked)", len(logFiles)),
+		}
+	}
+
 	var parts []string
 	for component, count := range componentCounts {
 		parts = append(parts, fmt.Sprintf("%s:%d", component, count))
 	}
 
-	msg := fmt.Sprintf("%d errors in last 24h", len(recentErrors))
+	msg := fmt.Sprintf("%d errors in last 24h", recentErrors)
 	if len(parts) > 0 {
 		msg += fmt.Sprintf(" (%s)", strings.Join(parts, ", "))
 	}
 
-	// Show last error if there's only one, or just the count
 	status := "warn"
-	if len(recentErrors) > 10 {
+	if recentErrors > 10 {
 		status = "error"
 	}
 
@@ -644,6 +618,41 @@ func checkRecentLogs() checkResult {
 		name:    "logs",
 		status:  status,
 		message: msg,
+	}
+}
+
+// scanLogFile reads a log file and counts recent errors after cutoff.
+func scanLogFile(logPath string, cutoff time.Time, recentErrors *int, componentCounts map[string]int) {
+	file, err := os.Open(logPath)
+	if err != nil {
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || len(line) < 19 {
+			continue
+		}
+
+		timestamp, err := time.Parse(time.RFC3339, line[:min(len(line), 25)])
+		if err != nil {
+			timestamp, err = time.Parse("2006-01-02T15:04:05", line[:19])
+			if err != nil {
+				continue
+			}
+		}
+
+		if timestamp.After(cutoff) {
+			*recentErrors++
+
+			start := strings.Index(line, "[")
+			end := strings.Index(line, "]")
+			if start > 0 && end > start {
+				componentCounts[line[start+1:end]]++
+			}
+		}
 	}
 }
 
