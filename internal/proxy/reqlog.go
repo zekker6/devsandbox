@@ -20,18 +20,20 @@ const (
 
 // RequestLog represents a logged HTTP request/response pair
 type RequestLog struct {
-	Timestamp       time.Time           `json:"ts"`
-	Method          string              `json:"method"`
-	URL             string              `json:"url"`
-	RequestHeaders  map[string][]string `json:"req_headers,omitempty"`
-	RequestBody     []byte              `json:"req_body,omitempty"`
-	StatusCode      int                 `json:"status,omitempty"`
-	ResponseHeaders map[string][]string `json:"resp_headers,omitempty"`
-	ResponseBody    []byte              `json:"resp_body,omitempty"`
-	Duration        time.Duration       `json:"duration_ns,omitempty"`
-	Error           string              `json:"error,omitempty"`
-	FilterAction    string              `json:"filter_action,omitempty"`
-	FilterReason    string              `json:"filter_reason,omitempty"`
+	Timestamp        time.Time           `json:"ts"`
+	Method           string              `json:"method"`
+	URL              string              `json:"url"`
+	RequestHeaders   map[string][]string `json:"req_headers,omitempty"`
+	RequestBody      []byte              `json:"req_body,omitempty"`
+	StatusCode       int                 `json:"status,omitempty"`
+	ResponseHeaders  map[string][]string `json:"resp_headers,omitempty"`
+	ResponseBody     []byte              `json:"resp_body,omitempty"`
+	Duration         time.Duration       `json:"duration_ns,omitempty"`
+	Error            string              `json:"error,omitempty"`
+	FilterAction     string              `json:"filter_action,omitempty"`
+	FilterReason     string              `json:"filter_reason,omitempty"`
+	RedactionAction  string              `json:"redaction_action,omitempty"`
+	RedactionMatches []string            `json:"redaction_matches,omitempty"`
 }
 
 // RequestLogger writes HTTP request/response logs to rotating gzip-compressed files
@@ -94,6 +96,8 @@ func (rl *RequestLogger) toLogEntry(req *RequestLog) *logging.Entry {
 		level = logging.LevelError
 	} else if req.FilterAction == "block" {
 		level = logging.LevelWarn
+	} else if req.RedactionAction == "block" {
+		level = logging.LevelWarn
 	} else if req.StatusCode >= 400 {
 		level = logging.LevelWarn
 	}
@@ -112,6 +116,14 @@ func (rl *RequestLogger) toLogEntry(req *RequestLog) *logging.Entry {
 	}
 	if req.FilterReason != "" {
 		fields["filter_reason"] = req.FilterReason
+	}
+
+	// Add redaction fields if present
+	if req.RedactionAction != "" {
+		fields["redaction_action"] = req.RedactionAction
+	}
+	if len(req.RedactionMatches) > 0 {
+		fields["redaction_matches"] = req.RedactionMatches
 	}
 
 	return &logging.Entry{

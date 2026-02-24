@@ -110,15 +110,21 @@ func (e *Engine) ExpandedPaths() map[string]Rule {
 	paths := make(map[string]Rule)
 
 	for _, rule := range e.rules {
+		matched := false
+
 		// Check if pattern ends with /** (entire directory) and the prefix is a literal path.
 		// e.g., "/path/to/dir/**" is a directory pattern, but "**/vendor/**" is not.
 		if dirPath, isDir := strings.CutSuffix(rule.Expanded, "/**"); isDir && !containsGlobChars(dirPath) {
 			// Verify directory exists
 			info, err := os.Stat(dirPath)
 			if err == nil && info.IsDir() {
+				matched = true
 				if _, exists := paths[dirPath]; !exists {
 					paths[dirPath] = rule
 				}
+			}
+			if !matched {
+				e.logWarnf("mount pattern %q matched no paths", rule.Pattern)
 			}
 			continue
 		}
@@ -134,11 +140,16 @@ func (e *Engine) ExpandedPaths() map[string]Rule {
 			if _, err := os.Stat(path); err != nil {
 				continue
 			}
+			matched = true
 
 			// First match wins
 			if _, exists := paths[path]; !exists {
 				paths[path] = rule
 			}
+		}
+
+		if !matched {
+			e.logWarnf("mount pattern %q matched no paths", rule.Pattern)
 		}
 	}
 
@@ -157,6 +168,8 @@ func (e *Engine) ExpandedPathsInDir(baseDir string) map[string]Rule {
 			continue
 		}
 
+		matched := false
+
 		// Check if pattern ends with /** (entire directory) and the prefix is a literal path
 		// (no glob characters). e.g., "vendor/**" is a directory pattern, but "**/secrets/**" is not.
 		if dirSuffix, isDir := strings.CutSuffix(rule.Expanded, "/**"); isDir && !containsGlobChars(dirSuffix) {
@@ -164,9 +177,13 @@ func (e *Engine) ExpandedPathsInDir(baseDir string) map[string]Rule {
 			dirPath := filepath.Join(baseDir, dirSuffix)
 			info, err := os.Stat(dirPath)
 			if err == nil && info.IsDir() {
+				matched = true
 				if _, exists := paths[dirPath]; !exists {
 					paths[dirPath] = rule
 				}
+			}
+			if !matched {
+				e.logWarnf("mount pattern %q matched no paths in %s", rule.Pattern, baseDir)
 			}
 			continue
 		}
@@ -185,11 +202,16 @@ func (e *Engine) ExpandedPathsInDir(baseDir string) map[string]Rule {
 			if _, err := os.Stat(absPath); err != nil {
 				continue
 			}
+			matched = true
 
 			// First match wins
 			if _, exists := paths[absPath]; !exists {
 				paths[absPath] = rule
 			}
+		}
+
+		if !matched {
+			e.logWarnf("mount pattern %q matched no paths in %s", rule.Pattern, baseDir)
 		}
 	}
 

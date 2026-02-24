@@ -1,8 +1,10 @@
 package mounts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"devsandbox/internal/config"
@@ -194,6 +196,61 @@ func TestExpandedPaths_NoMatches(t *testing.T) {
 
 	if len(paths) != 0 {
 		t.Errorf("expected 0 paths for non-matching patterns, got %d: %v", len(paths), paths)
+	}
+}
+
+type testLogger struct {
+	warnings []string
+}
+
+func (l *testLogger) Warnf(format string, args ...any) {
+	l.warnings = append(l.warnings, fmt.Sprintf(format, args...))
+}
+
+func TestExpandedPaths_LogsNoMatchWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := config.MountsConfig{
+		Rules: []config.MountRule{
+			{Pattern: tmpDir + "/nonexistent/**", Mode: "hidden"},
+			{Pattern: tmpDir + "/*.xyz", Mode: "readonly"},
+		},
+	}
+	engine := NewEngine(cfg, tmpDir)
+	logger := &testLogger{}
+	engine.SetLogger(logger)
+
+	_ = engine.ExpandedPaths()
+
+	if len(logger.warnings) != 2 {
+		t.Errorf("expected 2 warnings for non-matching patterns, got %d: %v",
+			len(logger.warnings), logger.warnings)
+	}
+	for _, w := range logger.warnings {
+		if !strings.Contains(w, "matched no paths") {
+			t.Errorf("unexpected warning message: %s", w)
+		}
+	}
+}
+
+func TestExpandedPathsInDir_LogsNoMatchWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := config.MountsConfig{
+		Rules: []config.MountRule{
+			{Pattern: "nonexistent/**", Mode: "hidden"},
+			{Pattern: "*.xyz", Mode: "readonly"},
+		},
+	}
+	engine := NewEngine(cfg, tmpDir)
+	logger := &testLogger{}
+	engine.SetLogger(logger)
+
+	_ = engine.ExpandedPathsInDir(tmpDir)
+
+	if len(logger.warnings) != 2 {
+		t.Errorf("expected 2 warnings for non-matching patterns, got %d: %v",
+			len(logger.warnings), logger.warnings)
 	}
 }
 

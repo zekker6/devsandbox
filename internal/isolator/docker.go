@@ -964,7 +964,9 @@ func (d *DockerIsolator) getContainerState(ctx context.Context, name string) (ex
 
 // configHash computes a hash of the container-creation-time settings that cannot
 // be changed after `docker create`. When any of these change, the container must
-// be recreated.
+// be recreated. This includes network/proxy settings, resource limits, volume
+// mounts (bindings, tool mounts, .env hiding), and environment variables — all
+// of which are baked into the container at creation and not passed via docker exec.
 func (d *DockerIsolator) configHash(cfg *Config) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "proxy=%t\n", cfg.ProxyEnabled)
@@ -975,6 +977,39 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 	_, _ = fmt.Fprintf(h, "image=%s\n", d.imageTag)
 	_, _ = fmt.Fprintf(h, "mem=%s\n", d.config.MemoryLimit)
 	_, _ = fmt.Fprintf(h, "cpu=%s\n", d.config.CPULimit)
+
+	// Bindings — volume mounts passed to docker create.
+	_, _ = fmt.Fprintf(h, "overlay=%t\n", cfg.OverlayEnabled)
+	for _, b := range cfg.Bindings {
+		_, _ = fmt.Fprintf(h, "bind=%s:%s:ro=%t:opt=%t\n", b.Source, b.Dest, b.ReadOnly, b.Optional)
+	}
+
+	// Tool bindings — derived from tools config, so hash the config inputs.
+	toolKeys := make([]string, 0, len(cfg.ToolsConfig))
+	for k := range cfg.ToolsConfig {
+		toolKeys = append(toolKeys, k)
+	}
+	sort.Strings(toolKeys)
+	for _, k := range toolKeys {
+		_, _ = fmt.Fprintf(h, "tool=%s:%v\n", k, cfg.ToolsConfig[k])
+	}
+
+	// Environment variables — baked into docker create, not passed via exec.
+	envKeys := make([]string, 0, len(cfg.Environment))
+	for k := range cfg.Environment {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
+		_, _ = fmt.Fprintf(h, "env=%s=%s\n", k, cfg.Environment[k])
+	}
+
+	// .env file hiding — bind /dev/null over .env files at creation time.
+	envFiles := sandbox.FindEnvFiles(cfg.ProjectDir, 3)
+	for _, f := range envFiles {
+		_, _ = fmt.Fprintf(h, "envhide=%s\n", f)
+	}
+
 	return fmt.Sprintf("%x", h.Sum(nil)[:8])
 }
 

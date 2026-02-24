@@ -514,6 +514,28 @@ func TestBuildCredentialInjectors(t *testing.T) {
 	})
 }
 
+func TestGitHubCredentialInjector_ResolvedValue(t *testing.T) {
+	t.Run("returns token when configured", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "test-token-123")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{"enabled": true})
+
+		if got := injector.ResolvedValue(); got != "test-token-123" {
+			t.Errorf("ResolvedValue() = %q, want %q", got, "test-token-123")
+		}
+	})
+
+	t.Run("returns empty when disabled", func(t *testing.T) {
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{"enabled": false})
+
+		if got := injector.ResolvedValue(); got != "" {
+			t.Errorf("ResolvedValue() = %q, want empty", got)
+		}
+	})
+}
+
 func TestRegisteredCredentialInjectors(t *testing.T) {
 	names := RegisteredCredentialInjectors()
 

@@ -66,6 +66,9 @@ type ProxyConfig struct {
 	// a map of injector-specific settings. Each injector parses its own config.
 	// All injectors are disabled by default.
 	Credentials map[string]any `toml:"credentials"`
+
+	// Redaction contains content redaction scanning configuration.
+	Redaction ProxyRedactionConfig `toml:"redaction"`
 }
 
 // IsEnabled returns whether proxy is enabled (defaults to false).
@@ -116,6 +119,48 @@ type ProxyFilterRule struct {
 
 	// Reason is shown when blocking a request.
 	Reason string `toml:"reason"`
+}
+
+// ProxyRedactionConfig contains content redaction settings.
+type ProxyRedactionConfig struct {
+	// Enabled enables content redaction scanning.
+	// Default: false (nil = disabled).
+	Enabled *bool `toml:"enabled"`
+
+	// DefaultAction is the action when a secret is detected.
+	// "block", "redact", or "log". Default: "block".
+	DefaultAction string `toml:"default_action"`
+
+	// Rules is the list of redaction rules.
+	Rules []ProxyRedactionRule `toml:"rules"`
+}
+
+// ProxyRedactionRule defines a single redaction rule.
+type ProxyRedactionRule struct {
+	// Name is an optional human-readable identifier.
+	// Auto-generated as "rule-<index>" if omitted.
+	Name string `toml:"name"`
+
+	// Action overrides the default action for this rule.
+	Action string `toml:"action"`
+
+	// Source resolves the secret value. Mutually exclusive with Pattern.
+	Source *ProxyRedactionSource `toml:"source"`
+
+	// Pattern is a regex pattern to match. Mutually exclusive with Source.
+	Pattern string `toml:"pattern"`
+}
+
+// ProxyRedactionSource defines where to get the secret value.
+type ProxyRedactionSource struct {
+	// Value is a static secret string.
+	Value string `toml:"value"`
+	// Env is the name of an environment variable.
+	Env string `toml:"env"`
+	// File is a path to a file containing the secret.
+	File string `toml:"file"`
+	// EnvFileKey is a key to look up in project .env files.
+	EnvFileKey string `toml:"env_file_key"`
 }
 
 // ConfigVisibility defines how .devsandbox.toml is exposed to the sandbox.
@@ -510,6 +555,11 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate redaction config
+	if err := c.validateRedaction(); err != nil {
+		return err
+	}
+
 	// Validate Docker resource limits
 	if mem := c.Sandbox.Docker.Resources.Memory; mem != "" {
 		matched, _ := regexp.MatchString(`^\d+[bkmgBKMG]?$`, mem)
@@ -584,6 +634,47 @@ func (c *Config) validatePortForwarding() error {
 					rule.Protocol, rule.SandboxPort, existing, rule.Name)
 			}
 			outboundPorts[key] = rule.Name
+		}
+	}
+
+	return nil
+}
+
+// validateRedaction validates the proxy redaction configuration.
+func (c *Config) validateRedaction() error {
+	r := c.Proxy.Redaction
+
+	validActions := map[string]bool{"block": true, "redact": true, "log": true, "": true}
+	if !validActions[r.DefaultAction] {
+		return fmt.Errorf("proxy.redaction: invalid default_action %q (must be block, redact, or log)", r.DefaultAction)
+	}
+
+	for i, rule := range r.Rules {
+		hasSource := rule.Source != nil
+		hasPattern := rule.Pattern != ""
+
+		if hasSource && hasPattern {
+			return fmt.Errorf("proxy.redaction.rules[%d]: source and pattern are mutually exclusive", i)
+		}
+		if !hasSource && !hasPattern {
+			return fmt.Errorf("proxy.redaction.rules[%d]: either source or pattern is required", i)
+		}
+
+		if hasSource {
+			src := rule.Source
+			if src.Value == "" && src.Env == "" && src.File == "" && src.EnvFileKey == "" {
+				return fmt.Errorf("proxy.redaction.rules[%d]: source must have at least one field set", i)
+			}
+		}
+
+		if hasPattern {
+			if _, err := regexp.Compile(rule.Pattern); err != nil {
+				return fmt.Errorf("proxy.redaction.rules[%d]: invalid regex pattern: %w", i, err)
+			}
+		}
+
+		if !validActions[rule.Action] {
+			return fmt.Errorf("proxy.redaction.rules[%d]: action must be 'block', 'redact', or 'log', got %q", i, rule.Action)
 		}
 	}
 
@@ -679,6 +770,28 @@ port = 8080
 # GitHub API token injection (reads GITHUB_TOKEN or GH_TOKEN from host)
 # [proxy.credentials.github]
 # enabled = true
+
+# Content redaction (requires proxy mode)
+# Scans outgoing request bodies, headers, and URLs for secrets.
+# [proxy.redaction]
+# enabled = true
+# default_action = "block"  # "block", "redact", or "log"
+
+# Source-based rule: detects exact secret value
+# [[proxy.redaction.rules]]
+# name = "api-secret"
+# action = "block"
+# [proxy.redaction.rules.source]
+# env = "API_SECRET_KEY"     # from environment variable
+# # value = "literal-secret" # OR static value
+# # file = "~/.secrets/key"  # OR from file
+# # env_file_key = "DB_PASS" # OR from .env file key
+
+# Pattern-based rule: detects regex matches
+# [[proxy.redaction.rules]]
+# name = "openai-keys"
+# action = "redact"
+# pattern = "sk-[a-zA-Z0-9]{32,}"
 
 # Sandbox settings
 [sandbox]

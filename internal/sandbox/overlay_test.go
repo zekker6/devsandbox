@@ -88,3 +88,20 @@ func TestCreateOverlayDirs_PathTraversalResolved(t *testing.T) {
 		t.Errorf("unexpected work path: %s", work)
 	}
 }
+
+func TestCreateOverlayDirs_DoubleDotInFilename(t *testing.T) {
+	// Filenames containing ".." as a substring (e.g., "..cache") are valid
+	// and should not be rejected by path traversal checks.
+	tmpDir := t.TempDir()
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+
+	_, _, err := createOverlayDirs(sandboxHome, "/var/log/..cache", "")
+	if err != nil {
+		t.Errorf("path with '..' in filename should be allowed, got: %v", err)
+	}
+
+	_, _, err = createOverlayDirs(sandboxHome, "/opt/..hidden-dir/data", "")
+	if err != nil {
+		t.Errorf("path with '..' prefix in dirname should be allowed, got: %v", err)
+	}
+}

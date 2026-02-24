@@ -42,6 +42,27 @@ func mergeConfigs(base, overlay *Config) *Config {
 		)
 	}
 
+	// Proxy redaction: security settings use most-restrictive-wins
+	if overlay.Proxy.Redaction.Enabled != nil {
+		if result.Proxy.Redaction.Enabled == nil || !*result.Proxy.Redaction.Enabled {
+			// Only allow overlay to ENABLE, never disable
+			result.Proxy.Redaction.Enabled = overlay.Proxy.Redaction.Enabled
+		}
+	}
+	if overlay.Proxy.Redaction.DefaultAction != "" {
+		result.Proxy.Redaction.DefaultAction = mostRestrictiveAction(
+			result.Proxy.Redaction.DefaultAction,
+			overlay.Proxy.Redaction.DefaultAction,
+		)
+	}
+	// Rules are always additive (overlay prepends for higher priority)
+	if len(overlay.Proxy.Redaction.Rules) > 0 {
+		result.Proxy.Redaction.Rules = append(
+			overlay.Proxy.Redaction.Rules,
+			result.Proxy.Redaction.Rules...,
+		)
+	}
+
 	// Sandbox settings
 	if overlay.Sandbox.BasePath != "" {
 		result.Sandbox.BasePath = overlay.Sandbox.BasePath
@@ -113,6 +134,16 @@ func mergeConfigs(base, overlay *Config) *Config {
 	// result.Include stays from base
 
 	return &result
+}
+
+// mostRestrictiveAction returns the more restrictive of two redaction actions.
+// Precedence: block > redact > log.
+func mostRestrictiveAction(a, b string) string {
+	severity := map[string]int{"log": 0, "redact": 1, "block": 2}
+	if severity[a] >= severity[b] {
+		return a
+	}
+	return b
 }
 
 // mergeToolsConfig deep-merges tool configurations.

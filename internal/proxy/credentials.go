@@ -31,6 +31,9 @@ type ConfigurableInjector interface {
 	Configure(cfg map[string]any)
 	// Enabled returns whether this injector is active after configuration.
 	Enabled() bool
+	// ResolvedValue returns the resolved credential value (for conflict detection).
+	// Returns empty string if the injector is disabled or has no credential.
+	ResolvedValue() string
 }
 
 // credentialRegistry maps injector names to factory functions.

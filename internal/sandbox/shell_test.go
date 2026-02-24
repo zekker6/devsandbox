@@ -220,6 +220,111 @@ func TestDetectShell(t *testing.T) {
 	}
 }
 
+func TestEscapeForShellDoubleQuote(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"simple", "simple"},
+		{`has"quote`, `has\"quote`},
+		{"has$dollar", `has\$dollar`},
+		{"has`backtick`", "has\\`backtick\\`"},
+		{`has\backslash`, `has\\backslash`},
+		{`all"$` + "`" + `\special`, `all\"\$` + "\\`" + `\\special`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := escapeForShellDoubleQuote(tt.input)
+			if result != tt.expected {
+				t.Errorf("escapeForShellDoubleQuote(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestEscapeForFishDoubleQuote(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"simple", "simple"},
+		{`has"quote`, `has\"quote`},
+		{"has$dollar", `has\$dollar`},
+		{"has`backtick`", "has`backtick`"}, // backtick NOT escaped in fish
+		{`has\backslash`, `has\\backslash`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := escapeForFishDoubleQuote(tt.input)
+			if result != tt.expected {
+				t.Errorf("escapeForFishDoubleQuote(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildShellCommand_ProjectNameEscaping(t *testing.T) {
+	t.Run("bash escapes project name", func(t *testing.T) {
+		cfg := &Config{
+			ProjectName: `test"$(whoami)`,
+			Shell:       ShellBash,
+			ShellPath:   "/bin/bash",
+		}
+		cmd := BuildShellCommand(cfg, []string{})
+		// $ and " must be escaped in the output
+		if !strings.Contains(cmd[2], `\$(whoami)`) {
+			t.Errorf("bash prompt missing escaped $: %s", cmd[2])
+		}
+		if !strings.Contains(cmd[2], `\"`) {
+			t.Errorf("bash prompt missing escaped quote: %s", cmd[2])
+		}
+	})
+
+	t.Run("bash escapes backticks", func(t *testing.T) {
+		cfg := &Config{
+			ProjectName: "test`id`end",
+			Shell:       ShellBash,
+			ShellPath:   "/bin/bash",
+		}
+		cmd := BuildShellCommand(cfg, []string{})
+		if !strings.Contains(cmd[2], "\\`id\\`") {
+			t.Errorf("bash prompt missing escaped backticks: %s", cmd[2])
+		}
+	})
+
+	t.Run("zsh escapes project name", func(t *testing.T) {
+		cfg := &Config{
+			ProjectName: `test"$(whoami)`,
+			Shell:       ShellZsh,
+			ShellPath:   "/usr/bin/zsh",
+		}
+		cmd := BuildShellCommand(cfg, []string{})
+		if !strings.Contains(cmd[2], `\$(whoami)`) {
+			t.Errorf("zsh prompt missing escaped $: %s", cmd[2])
+		}
+		if !strings.Contains(cmd[2], `\"`) {
+			t.Errorf("zsh prompt missing escaped quote: %s", cmd[2])
+		}
+	})
+
+	t.Run("fish escapes project name", func(t *testing.T) {
+		cfg := &Config{
+			ProjectName: `test"$(whoami)`,
+			Shell:       ShellFish,
+			ShellPath:   "/usr/bin/fish",
+		}
+		cmd := BuildShellCommand(cfg, []string{})
+		if !strings.Contains(cmd[2], `\$(whoami)`) {
+			t.Errorf("fish greeting missing escaped $: %s", cmd[2])
+		}
+		if !strings.Contains(cmd[2], `\"`) {
+			t.Errorf("fish greeting missing escaped quote: %s", cmd[2])
+		}
+	})
+}
+
 func TestShellQuote(t *testing.T) {
 	tests := []struct {
 		input    string

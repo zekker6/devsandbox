@@ -527,6 +527,66 @@ Filter decisions are logged with requests:
 }
 ```
 
+## Content Redaction
+
+Content redaction scans outgoing requests for secrets before they leave your machine. It checks request bodies, headers, and URLs against configured rules.
+
+### Actions
+
+| Action | What happens |
+|--------|-------------|
+| **Block** | Request rejected with HTTP 403. Secret never leaves your machine. |
+| **Redact** | Secret replaced with `[REDACTED:<rule-name>]` in body, headers, and URL. Modified request forwarded to destination. |
+| **Log** | Request forwarded unmodified. Match recorded in proxy logs as a warning. |
+
+### Quick Start
+
+```bash
+# Block requests containing your API key
+devsandbox --proxy
+```
+
+```toml
+# ~/.config/devsandbox/config.toml or .devsandbox.toml
+[proxy.redaction]
+enabled = true
+default_action = "block"
+
+[[proxy.redaction.rules]]
+name = "api-key"
+[proxy.redaction.rules.source]
+env = "API_SECRET_KEY"
+```
+
+Any outgoing request containing the value of `$API_SECRET_KEY` is blocked with HTTP 403.
+
+### Log Entries
+
+Redaction events appear in proxy logs with additional fields:
+
+```json
+{
+  "ts": "2026-02-23T10:30:05Z",
+  "method": "POST",
+  "url": "https://api.example.com/v1/chat",
+  "status": 403,
+  "redaction_action": "block",
+  "redaction_matches": ["api-key"]
+}
+```
+
+For the `redact` action, the logged URL and body contain the replacement placeholders — the original secret never appears in logs.
+
+View redaction events:
+
+```bash
+devsandbox logs proxy --json | jq 'select(.redaction_action != null)'
+```
+
+### Configuration Reference
+
+See [Configuration: Content Redaction](configuration.md#content-redaction) for the full TOML reference, source types, pattern rules, and merge behavior.
+
 ## Troubleshooting
 
 ### "proxy mode requires pasta"

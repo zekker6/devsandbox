@@ -120,7 +120,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	blockDomains, _ := cmd.Flags().GetStringSlice("block-domain")
 
 	// Load configuration file with project-specific overrides
-	appCfg, _, _, err := config.LoadConfig()
+	appCfg, _, projectDir, err := config.LoadConfig()
 	if err != nil {
 		return err
 	}
@@ -256,6 +256,8 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		pCfg.LogAttributes = appCfg.Logging.Attributes
 		pCfg.CredentialInjectors = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
 		pCfg.Filter = buildFilterConfig(appCfg, cmd, filterDefault, allowDomains, blockDomains)
+		pCfg.Redaction = buildRedactionConfig(&appCfg.Proxy.Redaction)
+		pCfg.ProjectDir = projectDir
 
 		if netInfo != nil {
 			pCfg.BindAddress = netInfo.BindAddress
@@ -285,6 +287,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 			} else {
 				fmt.Fprintf(os.Stderr, "Filter: %d rules, default action: %s\n", len(pCfg.Filter.Rules), pCfg.Filter.DefaultAction)
 			}
+		}
+
+		if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
+			fmt.Fprintf(os.Stderr, "Redaction: %d rules, default action: %s\n",
+				len(pCfg.Redaction.Rules), pCfg.Redaction.GetDefaultAction())
 		}
 	}
 
@@ -468,6 +475,34 @@ func buildFilterConfig(appCfg *config.Config, cmd *cobra.Command, filterDefault 
 	}
 
 	return filterCfg
+}
+
+// buildRedactionConfig converts config types to proxy redaction types.
+func buildRedactionConfig(cfg *config.ProxyRedactionConfig) *proxy.RedactionConfig {
+	if cfg == nil {
+		return nil
+	}
+	redCfg := &proxy.RedactionConfig{
+		Enabled:       cfg.Enabled,
+		DefaultAction: proxy.RedactionAction(cfg.DefaultAction),
+	}
+	for _, r := range cfg.Rules {
+		rule := proxy.RedactionRule{
+			Name:    r.Name,
+			Action:  proxy.RedactionAction(r.Action),
+			Pattern: r.Pattern,
+		}
+		if r.Source != nil {
+			rule.Source = &proxy.RedactionSource{
+				Value:      r.Source.Value,
+				Env:        r.Source.Env,
+				File:       r.Source.File,
+				EnvFileKey: r.Source.EnvFileKey,
+			}
+		}
+		redCfg.Rules = append(redCfg.Rules, rule)
+	}
+	return redCfg
 }
 
 // proxyResult holds the running proxy server and its cleanup/signal handling.
