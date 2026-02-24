@@ -22,10 +22,22 @@ func (c *Claude) Description() string {
 	return "Claude Code AI assistant"
 }
 
+// configDir returns the CLAUDE_CONFIG_DIR value if set, or empty string for defaults.
+func (c *Claude) configDir() string {
+	return os.Getenv("CLAUDE_CONFIG_DIR")
+}
+
 func (c *Claude) Available(homeDir string) bool {
 	// Check if claude is installed or if claude config exists
 	if _, err := exec.LookPath("claude"); err == nil {
 		return true
+	}
+
+	// Check custom config directory from CLAUDE_CONFIG_DIR
+	if dir := c.configDir(); dir != "" {
+		if _, err := os.Stat(dir); err == nil {
+			return true
+		}
 	}
 
 	// Also check for claude directories/files
@@ -52,47 +64,64 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 			ReadOnly: true,
 			Optional: true,
 		},
-		// Claude directory
-		{
-			Source:   filepath.Join(homeDir, ".claude"),
+	}
+
+	if dir := c.configDir(); dir != "" {
+		// Custom config directory from CLAUDE_CONFIG_DIR
+		bindings = append(bindings, Binding{
+			Source:   dir,
 			ReadOnly: false,
 			Optional: true,
-		},
-		// Claude config directory
-		{
+		})
+	} else {
+		// Default config paths
+		bindings = append(bindings,
+			Binding{
+				Source:   filepath.Join(homeDir, ".claude"),
+				ReadOnly: false,
+				Optional: true,
+			},
+			Binding{
+				Source:   filepath.Join(homeDir, ".claude.json"),
+				ReadOnly: false,
+				Optional: true,
+			},
+			Binding{
+				Source:   filepath.Join(homeDir, ".claude.json.backup"),
+				ReadOnly: false,
+				Optional: true,
+			},
+		)
+	}
+
+	// These bindings are always included regardless of CLAUDE_CONFIG_DIR
+	bindings = append(bindings,
+		Binding{
 			Source:   filepath.Join(homeDir, ".config", "Claude"),
 			ReadOnly: false,
 			Optional: true,
 		},
-		// Claude CLI cache
-		{
+		Binding{
 			Source:   filepath.Join(homeDir, ".cache", "claude-cli-nodejs"),
 			ReadOnly: false,
 			Optional: true,
 		},
-		// Claude Code installation
-		{
+		Binding{
 			Source:   filepath.Join(homeDir, ".local", "share", "claude"),
 			ReadOnly: false,
 			Optional: true,
 		},
-		// Claude config files
-		{
-			Source:   filepath.Join(homeDir, ".claude.json"),
-			ReadOnly: false,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".claude.json.backup"),
-			ReadOnly: false,
-			Optional: true,
-		},
-	}
+	)
 
 	return bindings
 }
 
 func (c *Claude) Environment(homeDir, sandboxHome string) []EnvVar {
+	if c.configDir() != "" {
+		return []EnvVar{
+			{Name: "CLAUDE_CONFIG_DIR", FromHost: true},
+		}
+	}
 	return nil
 }
 
@@ -117,6 +146,11 @@ func (c *Claude) Check(homeDir string) CheckResult {
 		filepath.Join(homeDir, ".claude"),
 		filepath.Join(homeDir, ".claude.json"),
 		filepath.Join(homeDir, ".config", "Claude"),
+	}
+
+	// Add custom config dir if set
+	if dir := c.configDir(); dir != "" {
+		configPaths = append(configPaths, dir)
 	}
 
 	for _, p := range configPaths {

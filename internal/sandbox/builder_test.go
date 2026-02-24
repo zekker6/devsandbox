@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"devsandbox/internal/config"
+	"devsandbox/internal/sandbox/mounts"
 )
 
 func TestBuilder_BasicArgs(t *testing.T) {
@@ -361,6 +364,199 @@ func TestIsParentPath(t *testing.T) {
 			if result != tt.expected {
 				t.Errorf("isParentPath(%q, %q) = %v, want %v",
 					tt.parent, tt.child, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuilder_AddCustomMounts_SkipsHomePaths(t *testing.T) {
+	// Create temp dirs for the mounts to resolve against
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "test")
+	outsideDir := filepath.Join(tmpDir, "opt", "tools")
+	homeChildDir := filepath.Join(homeDir, ".claude")
+	projectDir := filepath.Join(homeDir, "myproject")
+
+	for _, d := range []string{outsideDir, homeChildDir, projectDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	engine := mounts.NewEngine(config.MountsConfig{
+		Rules: []config.MountRule{
+			{Pattern: outsideDir, Mode: "readonly"},
+			{Pattern: homeChildDir, Mode: "readwrite"},
+		},
+	}, homeDir)
+
+	cfg := &Config{
+		HomeDir:      homeDir,
+		ProjectDir:   projectDir,
+		SandboxHome:  filepath.Join(tmpDir, "sandbox", "home"),
+		MountsConfig: engine,
+	}
+
+	b := NewBuilder(cfg)
+	b.AddCustomMounts()
+	args := b.Build()
+
+	// outsideDir should be mounted (--ro-bind)
+	foundOutside := false
+	foundHomeChild := false
+	for _, arg := range args {
+		if arg == outsideDir {
+			foundOutside = true
+		}
+		if arg == homeChildDir {
+			foundHomeChild = true
+		}
+	}
+
+	if !foundOutside {
+		t.Errorf("expected %s to be mounted by AddCustomMounts, args: %v", outsideDir, args)
+	}
+	if foundHomeChild {
+		t.Errorf("expected %s to NOT be mounted by AddCustomMounts (should be deferred to AddHomeCustomMounts), args: %v", homeChildDir, args)
+	}
+}
+
+func TestBuilder_HomeCustomMount_NoPanic(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "test")
+	homeChildDir := filepath.Join(homeDir, "Code", "victoria-metrics", ".claude")
+	projectDir := filepath.Join(homeDir, "myproject")
+	sandboxHome := filepath.Join(tmpDir, "sandbox", "home")
+
+	for _, d := range []string{homeChildDir, projectDir, sandboxHome} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	engine := mounts.NewEngine(config.MountsConfig{
+		Rules: []config.MountRule{
+			{Pattern: homeChildDir, Mode: "readwrite"},
+		},
+	}, homeDir)
+
+	cfg := &Config{
+		HomeDir:      homeDir,
+		ProjectDir:   projectDir,
+		SandboxHome:  sandboxHome,
+		MountsConfig: engine,
+	}
+
+	// This should NOT panic — the exact scenario from the bug report
+	b := NewBuilder(cfg)
+	b.AddCustomMounts()
+	b.Bind(sandboxHome, homeDir) // simulates AddSandboxHome
+	b.AddHomeCustomMounts()
+
+	args := b.Build()
+
+	// Verify the sandbox home bind comes before the child bind
+	homeIdx := -1
+	childIdx := -1
+	for i, arg := range args {
+		if arg == homeDir && i > 0 && args[i-1] == sandboxHome {
+			homeIdx = i
+		}
+		if arg == homeChildDir {
+			childIdx = i
+		}
+	}
+
+	if homeIdx == -1 {
+		t.Errorf("sandbox home bind not found in args: %v", args)
+	}
+	if childIdx == -1 {
+		t.Errorf("home child bind not found in args: %v", args)
+	}
+	if homeIdx != -1 && childIdx != -1 && homeIdx >= childIdx {
+		t.Errorf("sandbox home (idx %d) should come before child mount (idx %d) in args: %v", homeIdx, childIdx, args)
+	}
+}
+
+func TestBuilder_AddHomeCustomMounts_MountsHomePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "test")
+	outsideDir := filepath.Join(tmpDir, "opt", "tools")
+	homeChildDir := filepath.Join(homeDir, ".claude")
+	projectDir := filepath.Join(homeDir, "myproject")
+	sandboxHome := filepath.Join(tmpDir, "sandbox", "home")
+
+	for _, d := range []string{outsideDir, homeChildDir, projectDir, sandboxHome} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	engine := mounts.NewEngine(config.MountsConfig{
+		Rules: []config.MountRule{
+			{Pattern: outsideDir, Mode: "readonly"},
+			{Pattern: homeChildDir, Mode: "readwrite"},
+		},
+	}, homeDir)
+
+	cfg := &Config{
+		HomeDir:      homeDir,
+		ProjectDir:   projectDir,
+		SandboxHome:  sandboxHome,
+		MountsConfig: engine,
+	}
+
+	b := NewBuilder(cfg)
+	// Simulate the correct build order: sandbox home first, then home custom mounts
+	b.Bind(sandboxHome, homeDir) // AddSandboxHome would do this
+	b.AddHomeCustomMounts()
+	args := b.Build()
+
+	// homeChildDir should be mounted (--bind)
+	foundHomeChild := false
+	foundOutside := false
+	for _, arg := range args {
+		if arg == homeChildDir {
+			foundHomeChild = true
+		}
+		if arg == outsideDir {
+			foundOutside = true
+		}
+	}
+
+	if !foundHomeChild {
+		t.Errorf("expected %s to be mounted by AddHomeCustomMounts, args: %v", homeChildDir, args)
+	}
+	if foundOutside {
+		t.Errorf("expected %s to NOT be mounted by AddHomeCustomMounts, args: %v", outsideDir, args)
+	}
+}
+
+func TestBuilder_isInsideHome(t *testing.T) {
+	cfg := &Config{
+		HomeDir:    "/home/test",
+		ProjectDir: "/home/test/myproject",
+	}
+	b := NewBuilder(cfg)
+
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"/home/test", true},
+		{"/home/test/.config", true},
+		{"/home/test/Code/project/.claude", true},
+		{"/home/testing", false},
+		{"/opt/tools", false},
+		{"/usr/lib", false},
+		{"/home/test-other", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			result := b.isInsideHome(tt.path)
+			if result != tt.expected {
+				t.Errorf("isInsideHome(%q) = %v, want %v", tt.path, result, tt.expected)
 			}
 		})
 	}

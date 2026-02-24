@@ -97,6 +97,7 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	builder.AddCABindings()
 	builder.AddCustomMounts()
 	builder.AddSandboxHome()
+	builder.AddHomeCustomMounts()
 	builder.AddProjectBindings()
 	builder.AddTools()
 	builder.SuppressSSHAgent()

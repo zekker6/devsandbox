@@ -583,7 +583,8 @@ func (b *Builder) AddCustomMounts() *Builder {
 	paths := make([]string, 0, len(expandedPaths))
 	for path := range expandedPaths {
 		// Skip paths inside project directory - they're handled in AddProjectBindings()
-		if b.isInsideProject(path) {
+		// Skip paths inside home directory - they're handled in AddHomeCustomMounts()
+		if b.isInsideProject(path) || b.isInsideHome(path) {
 			continue
 		}
 		paths = append(paths, path)
@@ -591,6 +592,43 @@ func (b *Builder) AddCustomMounts() *Builder {
 	sortedPaths := sortPaths(paths)
 
 	// Apply mounts in sorted order
+	for _, path := range sortedPaths {
+		rule := expandedPaths[path]
+		b.applyMountRule(path, rule)
+	}
+
+	return b
+}
+
+// AddHomeCustomMounts applies custom mount rules for paths inside the user's home directory.
+// Called after AddSandboxHome() so these mounts punch through the synthetic home,
+// exposing real host paths into the sandbox.
+// Note: Paths inside the project directory are still handled by AddProjectBindings().
+func (b *Builder) AddHomeCustomMounts() *Builder {
+	if b.cfg.MountsConfig == nil {
+		return b
+	}
+
+	engine := b.cfg.MountsConfig
+	if len(engine.Rules()) == 0 {
+		return b
+	}
+
+	expandedPaths := engine.ExpandedPaths()
+	paths := make([]string, 0, len(expandedPaths))
+	for path := range expandedPaths {
+		// Only include paths inside home that are NOT inside the project
+		if b.isInsideHome(path) && !b.isInsideProject(path) {
+			paths = append(paths, path)
+		}
+	}
+
+	if len(paths) == 0 {
+		return b
+	}
+
+	sortedPaths := sortPaths(paths)
+
 	for _, path := range sortedPaths {
 		rule := expandedPaths[path]
 		b.applyMountRule(path, rule)
@@ -611,6 +649,18 @@ func (b *Builder) isInsideProject(path string) bool {
 
 	// Check if path is a child of project dir
 	return strings.HasPrefix(cleanPath, projectDir+string(filepath.Separator))
+}
+
+// isInsideHome checks if a path is inside the user's home directory.
+func (b *Builder) isInsideHome(path string) bool {
+	home := filepath.Clean(b.cfg.HomeDir)
+	cleanPath := filepath.Clean(path)
+
+	if cleanPath == home {
+		return true
+	}
+
+	return strings.HasPrefix(cleanPath, home+string(filepath.Separator))
 }
 
 // applyMountRule applies a single custom mount rule to a path.
