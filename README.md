@@ -71,6 +71,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Cross-platform** -- [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux (sub-second startup), Docker containers on macOS
 - **Per-project isolation** -- each project gets its own sandbox home, caches, and logs
 - **Git modes** -- readonly (default), readwrite (with SSH/GPG), or disabled
+- **Desktop notifications** -- sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
 
 ## How It Works
 
@@ -231,7 +232,7 @@ devsandbox image build              # Build Docker image (macOS)
 - Requires unprivileged user namespaces (see [Troubleshooting](docs/sandboxing.md#troubleshooting) for distro-specific guidance)
 - SELinux or AppArmor may restrict namespace operations (see [Security Modules](docs/sandboxing.md#security-modules))
 - MITM proxy may break tools with certificate pinning
-- GUI applications are not supported (no display server forwarding)
+- GUI applications are not supported (no display server forwarding), but desktop notifications work via XDG Portal
 
 **macOS (Docker):**
 - Requires a running Docker daemon

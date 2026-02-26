@@ -878,6 +878,12 @@ writable = false
 # When true: changes are stored in ~/.local/share/devsandbox/<project>/overlay/
 persistent = false
 
+# XDG Desktop Portal settings (Linux only)
+# Provides desktop notifications for sandboxed apps via xdg-desktop-portal.
+# Requires: xdg-dbus-proxy, xdg-desktop-portal + a backend
+# [tools.portal]
+# notifications = true    # Allow sending desktop notifications
+
 # Remote logging configuration
 # Proxy logs can be forwarded to remote destinations
 [logging]

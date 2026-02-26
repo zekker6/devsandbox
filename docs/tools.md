@@ -36,6 +36,7 @@ Example output:
 │ oh-my-posh    │ missing   │ Oh My Posh prompt with sandbox indicator      │
 │ oh-my-zsh     │ missing   │ Oh My Zsh framework with sandbox indicator    │
 │ opencode      │ available │ OpenCode AI assistant                         │
+│ portal        │ available │ XDG Desktop Portal (notifications)            │
 │ powerlevel10k │ missing   │ Powerlevel10k zsh theme                       │
 │ starship      │ available │ Starship prompt with sandbox indicator        │
 │ tmux          │ missing   │ Tmux terminal multiplexer with sandbox indicator │
@@ -518,6 +519,66 @@ Example output:
     ✓ /run/docker.sock
     mode: enabled (read-only + exec)
 ```
+
+## XDG Desktop Portal (Linux only)
+
+Sandboxed applications can send desktop notifications to the host via [XDG Desktop Portal](https://flatpak.github.io/xdg-desktop-portal/). This uses `xdg-dbus-proxy` to expose only the notification portal interface — no other D-Bus access is granted.
+
+### Requirements
+
+- `xdg-dbus-proxy` binary installed on the host
+- `xdg-desktop-portal` running with a backend (e.g., `xdg-desktop-portal-gtk`, `xdg-desktop-portal-kde`)
+- A D-Bus session bus available (`DBUS_SESSION_BUS_ADDRESS` set)
+
+```bash
+# Arch Linux
+sudo pacman -S xdg-dbus-proxy xdg-desktop-portal xdg-desktop-portal-gtk
+
+# Debian/Ubuntu
+sudo apt install xdg-dbus-proxy xdg-desktop-portal xdg-desktop-portal-gtk
+
+# Fedora
+sudo dnf install xdg-dbus-proxy xdg-desktop-portal xdg-desktop-portal-gtk
+```
+
+### Configuration
+
+Notifications are enabled by default when the requirements are met. To disable:
+
+```toml
+[tools.portal]
+notifications = false
+```
+
+### How It Works
+
+1. `xdg-dbus-proxy` starts as a background process, creating a filtered D-Bus socket
+2. Only `org.freedesktop.portal.Desktop` and `org.freedesktop.portal.Notification` interfaces are allowed through
+3. The proxy socket is bind-mounted into the sandbox at `$XDG_RUNTIME_DIR/.dbus-proxy/bus`
+4. `DBUS_SESSION_BUS_ADDRESS` inside the sandbox points to the proxy socket
+5. A `.flatpak-info` file is created so `xdg-desktop-portal` recognizes the sandbox as a valid Flatpak-like application
+
+The proxy is started before the sandbox launches and stopped when the sandbox exits.
+
+### Checking Portal Status
+
+```bash
+devsandbox tools check portal
+```
+
+Example output:
+
+```
+✓ portal (/usr/bin/xdg-dbus-proxy)
+    ✓ /run/user/1000/bus
+    notifications: enabled
+```
+
+### Limitations
+
+- Linux only (bwrap backend) — not available on macOS Docker backend
+- Only the notification portal is currently supported
+- The host must have a running D-Bus session bus with a unix socket
 
 ## Adding Custom Tools
 

@@ -503,6 +503,21 @@ supported; TCP connections to remote Docker daemons are not proxied.
 
 See [docs/tools.md](tools.md#docker) for full details on allowed operations.
 
+#### XDG Desktop Portal (Linux only)
+
+```toml
+[tools.portal]
+# Allow sandboxed apps to send desktop notifications via xdg-desktop-portal.
+# Requires: xdg-dbus-proxy, xdg-desktop-portal + a backend (e.g., -gtk, -kde)
+# Default: true (enabled when requirements are met)
+notifications = true
+```
+
+When enabled, a filtered D-Bus proxy exposes only the notification portal interface to the sandbox.
+No other D-Bus services are accessible.
+
+See [docs/tools.md](tools.md#xdg-desktop-portal-linux-only) for requirements and details.
+
 ## Remote Logging
 
 Proxy request logs can be forwarded to remote destinations for centralized logging and monitoring. Multiple receivers

@@ -28,6 +28,7 @@
 | AI agent recommended config | [Configuration: AI Agent Config](configuration.md#ai-agent-recommended-config) |
 | Run Claude Code autonomously | [Use Cases: Claude Code](use-cases.md#running-claude-code-autonomously) |
 | Enable Docker socket access | [Tools: Docker](tools.md#docker) |
+| Desktop notifications in sandbox | [Tools: XDG Portal](tools.md#xdg-desktop-portal-linux-only) |
 | Per-project config files | [Configuration: Per-Project](configuration.md#per-project-configuration) |
 | Remote logging (syslog, OTLP) | [Configuration: Remote Logging](configuration.md#remote-logging) |
 | Port forwarding | [Configuration: Port Forwarding](configuration.md#port-forwarding) |
