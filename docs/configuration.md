@@ -29,6 +29,38 @@ enabled = false
 port = 8080
 ```
 
+### Proxy Extra Environment Variables
+
+When proxy mode is active, devsandbox sets standard proxy environment variables
+(`HTTP_PROXY`, `HTTPS_PROXY`, `YARN_HTTP_PROXY`, etc.) automatically. For tools
+with non-standard proxy configuration, add custom variable names:
+
+```toml
+[proxy]
+enabled = true
+extra_env = ["GRADLE_OPTS_PROXY", "MY_CUSTOM_PROXY"]
+```
+
+Each variable in `extra_env` is set to the proxy URL (e.g., `http://10.0.2.2:8080`)
+when proxy mode is active.
+
+### Proxy Extra CA Environment Variables
+
+When proxy mode is active with HTTPS interception, devsandbox sets standard CA bundle
+environment variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
+`CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`) automatically. For tools with non-standard CA
+bundle configuration, add custom variable names:
+
+```toml
+[proxy]
+enabled = true
+extra_ca_env = ["MY_TOOL_CA_BUNDLE", "CUSTOM_SSL_CERT"]
+```
+
+Each variable in `extra_ca_env` is set to the CA certificate path
+(e.g., `/tmp/devsandbox-ca.crt` for bwrap, `/etc/ssl/certs/devsandbox-ca.crt` for Docker)
+when proxy mode is active.
+
 ### Proxy Credentials
 
 The proxy can inject authentication credentials into requests for specific domains, keeping tokens out of the sandbox environment. Credentials are read from host environment variables and added to matching requests transparently.

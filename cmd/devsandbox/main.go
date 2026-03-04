@@ -177,6 +177,8 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	if cmd.Flags().Changed("proxy-port") {
 		cfg.ProxyPort = proxyPort
 	}
+	cfg.ProxyExtraEnv = appCfg.Proxy.ExtraEnv
+	cfg.ProxyExtraCAEnv = appCfg.Proxy.ExtraCAEnv
 
 	// CLI override for git mode
 	if cmd.Flags().Changed("git-mode") {

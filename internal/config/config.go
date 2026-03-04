@@ -67,6 +67,16 @@ type ProxyConfig struct {
 	// All injectors are disabled by default.
 	Credentials map[string]any `toml:"credentials"`
 
+	// ExtraEnv is a list of additional environment variable names that will be
+	// set to the proxy URL when proxy mode is enabled.
+	// Useful for tools with non-standard proxy configuration (e.g., YARN_HTTP_PROXY).
+	ExtraEnv []string `toml:"extra_env"`
+
+	// ExtraCAEnv is a list of additional environment variable names that will be
+	// set to the CA certificate path when proxy mode is enabled.
+	// Useful for tools with non-standard CA bundle configuration.
+	ExtraCAEnv []string `toml:"extra_ca_env"`
+
 	// Redaction contains content redaction scanning configuration.
 	Redaction ProxyRedactionConfig `toml:"redaction"`
 }
@@ -488,6 +498,18 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate extra env var names
+	for i, name := range c.Proxy.ExtraEnv {
+		if name == "" {
+			return fmt.Errorf("proxy.extra_env[%d]: variable name cannot be empty", i)
+		}
+	}
+	for i, name := range c.Proxy.ExtraCAEnv {
+		if name == "" {
+			return fmt.Errorf("proxy.extra_ca_env[%d]: variable name cannot be empty", i)
+		}
+	}
+
 	// Validate ask timeout (must be positive if set)
 	if c.Proxy.Filter.AskTimeout < 0 {
 		return fmt.Errorf("proxy.filter.ask_timeout cannot be negative, got %d", c.Proxy.Filter.AskTimeout)
@@ -731,6 +753,18 @@ enabled = false
 
 # Default proxy server port
 port = 8080
+
+# Additional environment variables set to the proxy URL when proxy is active.
+# Built-in vars (always set): HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy,
+# NO_PROXY, no_proxy, YARN_HTTP_PROXY, YARN_HTTPS_PROXY
+# Add tool-specific proxy vars here:
+# extra_env = ["CUSTOM_HTTP_PROXY", "MY_TOOL_PROXY"]
+
+# Additional environment variables set to the CA certificate path when proxy is active.
+# Built-in vars (always set): SSL_CERT_FILE, NODE_EXTRA_CA_CERTS,
+# REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE, GIT_SSL_CAINFO
+# Add tool-specific CA bundle vars here:
+# extra_ca_env = ["MY_TOOL_CA_BUNDLE", "CUSTOM_SSL_CERT"]
 
 # HTTP request filtering (requires proxy mode)
 # Filtering is enabled when default_action is set.

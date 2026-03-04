@@ -91,6 +91,10 @@ type Config struct {
 	ProxyHost string
 	// ProxyCAPath is the path to the proxy CA certificate (for HTTPS MITM).
 	ProxyCAPath string
+	// ProxyExtraEnv is a list of additional env var names set to the proxy URL.
+	ProxyExtraEnv []string
+	// ProxyExtraCAEnv is a list of additional env var names set to the CA cert path.
+	ProxyExtraCAEnv []string
 	// Environment variables to set.
 	Environment map[string]string
 	// Bindings are filesystem mounts (translated per-backend).

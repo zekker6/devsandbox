@@ -434,6 +434,8 @@ func TestSandbox_ProxyEnvironmentVariables(t *testing.T) {
 	expectedVars := []string{
 		"HTTP_PROXY=",
 		"HTTPS_PROXY=",
+		"YARN_HTTP_PROXY=",
+		"YARN_HTTPS_PROXY=",
 		"DEVSANDBOX_PROXY=1",
 		"NODE_EXTRA_CA_CERTS=",
 		"REQUESTS_CA_BUNDLE=",

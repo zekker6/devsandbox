@@ -933,12 +933,22 @@ func (b *Builder) SuppressSSHAgent() *Builder {
 func (b *Builder) AddProxyEnvironment() *Builder {
 	proxyURL := fmt.Sprintf("http://%s:%d", b.cfg.GatewayIP, b.cfg.ProxyPort)
 
+	// Standard proxy env vars (both cases for broad compatibility)
 	b.SetEnv("HTTP_PROXY", proxyURL)
 	b.SetEnv("HTTPS_PROXY", proxyURL)
 	b.SetEnv("http_proxy", proxyURL)
 	b.SetEnv("https_proxy", proxyURL)
 	b.SetEnv("NO_PROXY", "localhost,127.0.0.1")
 	b.SetEnv("no_proxy", "localhost,127.0.0.1")
+
+	// Tool-specific proxy env vars
+	b.SetEnv("YARN_HTTP_PROXY", proxyURL)
+	b.SetEnv("YARN_HTTPS_PROXY", proxyURL)
+
+	// User-defined extra proxy env vars from config
+	for _, name := range b.cfg.ProxyExtraEnv {
+		b.SetEnv(name, proxyURL)
+	}
 
 	// CA certificate path for various tools
 	// We use /tmp because /etc/ssl is mounted read-only from host
@@ -948,6 +958,11 @@ func (b *Builder) AddProxyEnvironment() *Builder {
 	b.SetEnv("CURL_CA_BUNDLE", caCertPath)
 	b.SetEnv("GIT_SSL_CAINFO", caCertPath)
 	b.SetEnv("SSL_CERT_FILE", caCertPath)
+
+	// User-defined extra CA bundle env vars from config
+	for _, name := range b.cfg.ProxyExtraCAEnv {
+		b.SetEnv(name, caCertPath)
+	}
 
 	b.SetEnv("DEVSANDBOX_PROXY", "1")
 

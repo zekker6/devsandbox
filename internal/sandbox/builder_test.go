@@ -669,3 +669,98 @@ func TestBuilderErr(t *testing.T) {
 		t.Error("expected non-nil args")
 	}
 }
+
+func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
+	cfg := &Config{
+		ProxyEnabled: true,
+		ProxyPort:    8080,
+		GatewayIP:    "10.0.2.2",
+	}
+
+	b := NewBuilder(cfg)
+	b.AddProxyEnvironment()
+
+	args := b.Build()
+
+	// Check for YARN proxy vars
+	expectedVars := map[string]string{
+		"HTTP_PROXY":       "http://10.0.2.2:8080",
+		"HTTPS_PROXY":      "http://10.0.2.2:8080",
+		"http_proxy":       "http://10.0.2.2:8080",
+		"https_proxy":      "http://10.0.2.2:8080",
+		"YARN_HTTP_PROXY":  "http://10.0.2.2:8080",
+		"YARN_HTTPS_PROXY": "http://10.0.2.2:8080",
+		"NO_PROXY":         "localhost,127.0.0.1",
+		"no_proxy":         "localhost,127.0.0.1",
+		"DEVSANDBOX_PROXY": "1",
+	}
+
+	for wantName, wantValue := range expectedVars {
+		found := false
+		for i := 0; i < len(args)-2; i++ {
+			if args[i] == "--setenv" && args[i+1] == wantName && args[i+2] == wantValue {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing env var %s=%s in args", wantName, wantValue)
+		}
+	}
+}
+
+func TestBuilder_AddProxyEnvironment_ExtraCAEnv(t *testing.T) {
+	cfg := &Config{
+		ProxyEnabled:    true,
+		ProxyPort:       8080,
+		GatewayIP:       "10.0.2.2",
+		ProxyExtraCAEnv: []string{"MY_CA_BUNDLE", "CUSTOM_SSL_CERT"},
+	}
+
+	b := NewBuilder(cfg)
+	b.AddProxyEnvironment()
+
+	args := b.Build()
+	caCertPath := "/tmp/devsandbox-ca.crt"
+
+	for _, varName := range []string{"MY_CA_BUNDLE", "CUSTOM_SSL_CERT"} {
+		found := false
+		for i := 0; i < len(args)-2; i++ {
+			if args[i] == "--setenv" && args[i+1] == varName && args[i+2] == caCertPath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing extra CA env var %s=%s in args", varName, caCertPath)
+		}
+	}
+}
+
+func TestBuilder_AddProxyEnvironment_ExtraEnv(t *testing.T) {
+	cfg := &Config{
+		ProxyEnabled:  true,
+		ProxyPort:     9090,
+		GatewayIP:     "10.0.2.2",
+		ProxyExtraEnv: []string{"MY_CUSTOM_PROXY", "ANOTHER_PROXY"},
+	}
+
+	b := NewBuilder(cfg)
+	b.AddProxyEnvironment()
+
+	args := b.Build()
+	proxyURL := "http://10.0.2.2:9090"
+
+	for _, varName := range []string{"MY_CUSTOM_PROXY", "ANOTHER_PROXY"} {
+		found := false
+		for i := 0; i < len(args)-2; i++ {
+			if args[i] == "--setenv" && args[i+1] == varName && args[i+2] == proxyURL {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing extra env var %s=%s in args", varName, proxyURL)
+		}
+	}
+}

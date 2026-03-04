@@ -23,6 +23,20 @@ func mergeConfigs(base, overlay *Config) *Config {
 		result.Proxy.Port = overlay.Proxy.Port
 	}
 
+	// Proxy extra env vars: prepend overlay (higher priority)
+	if len(overlay.Proxy.ExtraEnv) > 0 {
+		result.Proxy.ExtraEnv = append(
+			overlay.Proxy.ExtraEnv,
+			result.Proxy.ExtraEnv...,
+		)
+	}
+	if len(overlay.Proxy.ExtraCAEnv) > 0 {
+		result.Proxy.ExtraCAEnv = append(
+			overlay.Proxy.ExtraCAEnv,
+			result.Proxy.ExtraCAEnv...,
+		)
+	}
+
 	// Proxy filter
 	if overlay.Proxy.Filter.DefaultAction != "" {
 		result.Proxy.Filter.DefaultAction = overlay.Proxy.Filter.DefaultAction

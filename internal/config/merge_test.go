@@ -234,6 +234,53 @@ func Test_mergeConfigs_DockerDockerfile(t *testing.T) {
 	}
 }
 
+func TestMergeConfigs_ProxyExtraEnv(t *testing.T) {
+	base := DefaultConfig()
+	base.Proxy.ExtraEnv = []string{"BASE_PROXY"}
+
+	overlay := &Config{
+		Proxy: ProxyConfig{
+			ExtraEnv: []string{"OVERLAY_PROXY"},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	// Overlay prepends (higher priority, consistent with filter rules)
+	if len(result.Proxy.ExtraEnv) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %v", len(result.Proxy.ExtraEnv), result.Proxy.ExtraEnv)
+	}
+	if result.Proxy.ExtraEnv[0] != "OVERLAY_PROXY" {
+		t.Errorf("expected overlay entry first, got %q", result.Proxy.ExtraEnv[0])
+	}
+	if result.Proxy.ExtraEnv[1] != "BASE_PROXY" {
+		t.Errorf("expected base entry second, got %q", result.Proxy.ExtraEnv[1])
+	}
+}
+
+func TestMergeConfigs_ProxyExtraCAEnv(t *testing.T) {
+	base := DefaultConfig()
+	base.Proxy.ExtraCAEnv = []string{"BASE_CA"}
+
+	overlay := &Config{
+		Proxy: ProxyConfig{
+			ExtraCAEnv: []string{"OVERLAY_CA"},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	if len(result.Proxy.ExtraCAEnv) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %v", len(result.Proxy.ExtraCAEnv), result.Proxy.ExtraCAEnv)
+	}
+	if result.Proxy.ExtraCAEnv[0] != "OVERLAY_CA" {
+		t.Errorf("expected overlay entry first, got %q", result.Proxy.ExtraCAEnv[0])
+	}
+	if result.Proxy.ExtraCAEnv[1] != "BASE_CA" {
+		t.Errorf("expected base entry second, got %q", result.Proxy.ExtraCAEnv[1])
+	}
+}
+
 func Test_mergeConfigs_DockerDockerfileNotOverriddenByEmpty(t *testing.T) {
 	base := &Config{
 		Sandbox: SandboxConfig{

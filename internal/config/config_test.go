@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -1064,6 +1066,90 @@ pattern = "[invalid"`,
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestProxyExtraEnv_ParseAndValidate(t *testing.T) {
+	tomlStr := `
+[proxy]
+enabled = true
+extra_env = ["YARN_HTTP_PROXY", "YARN_HTTPS_PROXY", "CUSTOM_PROXY"]
+`
+	cfg := &Config{}
+	if err := toml.Unmarshal([]byte(tomlStr), cfg); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	if len(cfg.Proxy.ExtraEnv) != 3 {
+		t.Fatalf("expected 3 extra_env entries, got %d", len(cfg.Proxy.ExtraEnv))
+	}
+	if cfg.Proxy.ExtraEnv[0] != "YARN_HTTP_PROXY" {
+		t.Errorf("expected first entry YARN_HTTP_PROXY, got %q", cfg.Proxy.ExtraEnv[0])
+	}
+}
+
+func TestProxyExtraCAEnv_ParseAndValidate(t *testing.T) {
+	tomlStr := `
+[proxy]
+enabled = true
+extra_ca_env = ["MY_CA_BUNDLE", "CUSTOM_SSL_CERT"]
+`
+	cfg := &Config{}
+	if err := toml.Unmarshal([]byte(tomlStr), cfg); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	if len(cfg.Proxy.ExtraCAEnv) != 2 {
+		t.Fatalf("expected 2 extra_ca_env entries, got %d", len(cfg.Proxy.ExtraCAEnv))
+	}
+	if cfg.Proxy.ExtraCAEnv[0] != "MY_CA_BUNDLE" {
+		t.Errorf("expected first entry MY_CA_BUNDLE, got %q", cfg.Proxy.ExtraCAEnv[0])
+	}
+}
+
+func TestProxyExtraCAEnv_ValidationErrors(t *testing.T) {
+	cfg := &Config{
+		Proxy: ProxyConfig{
+			ExtraCAEnv: []string{"VALID", ""},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected validation error for empty extra_ca_env entry")
+	}
+}
+
+func TestProxyExtraEnv_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+	}{
+		{
+			name: "empty var name",
+			toml: `
+[proxy]
+extra_env = ["VALID", ""]
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{}
+			if err := toml.Unmarshal([]byte(tt.toml), cfg); err != nil {
+				return // Parse failure is acceptable
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Error("expected validation error")
 			}
 		})
 	}

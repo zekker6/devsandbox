@@ -263,6 +263,8 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		Interactive:    cfg.Interactive,
 		ProxyEnabled:   sandboxCfg.ProxyEnabled,
 		ProxyPort:      cfg.ProxyPort,
+		ProxyExtraEnv:   sandboxCfg.ProxyExtraEnv,
+		ProxyExtraCAEnv: sandboxCfg.ProxyExtraCAEnv,
 		Environment:    make(map[string]string),
 		ToolsConfig:    sandboxCfg.ToolsConfig,
 		OverlayEnabled: sandboxCfg.OverlayEnabled,
@@ -746,6 +748,15 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-e", "no_proxy=localhost,127.0.0.1")
 		args = append(args, "-e", "NO_PROXY=localhost,127.0.0.1")
 
+		// Tool-specific proxy env vars
+		args = append(args, "-e", fmt.Sprintf("YARN_HTTP_PROXY=%s", proxyURL))
+		args = append(args, "-e", fmt.Sprintf("YARN_HTTPS_PROXY=%s", proxyURL))
+
+		// User-defined extra proxy env vars from config
+		for _, name := range cfg.ProxyExtraEnv {
+			args = append(args, "-e", fmt.Sprintf("%s=%s", name, proxyURL))
+		}
+
 		// Mount CA certificate for HTTPS MITM and set SSL_CERT_FILE
 		if cfg.ProxyCAPath != "" {
 			caDest := "/etc/ssl/certs/devsandbox-ca.crt"
@@ -757,6 +768,11 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 			args = append(args, "-e", fmt.Sprintf("REQUESTS_CA_BUNDLE=%s", caDest))
 			args = append(args, "-e", fmt.Sprintf("CURL_CA_BUNDLE=%s", caDest))
 			args = append(args, "-e", fmt.Sprintf("GIT_SSL_CAINFO=%s", caDest))
+
+			// User-defined extra CA bundle env vars from config
+			for _, name := range cfg.ProxyExtraCAEnv {
+				args = append(args, "-e", fmt.Sprintf("%s=%s", name, caDest))
+			}
 		}
 	}
 

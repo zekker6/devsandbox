@@ -46,6 +46,10 @@ type Config struct {
 	ProxyPort    int
 	ProxyCAPath  string
 	GatewayIP    string
+	// ProxyExtraEnv is a list of additional env var names set to the proxy URL.
+	ProxyExtraEnv []string
+	// ProxyExtraCAEnv is a list of additional env var names set to the CA cert path.
+	ProxyExtraCAEnv []string
 	// True if network namespace is isolated (pasta)
 	NetworkIsolated bool
 
