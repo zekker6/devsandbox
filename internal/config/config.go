@@ -250,6 +250,13 @@ type SandboxConfig struct {
 	// Default: true
 	UseEmbedded *bool `toml:"use_embedded"`
 
+	// HideEnvFiles controls whether .env files are hidden from the sandbox.
+	// When true, .env files are overlaid with /dev/null to prevent credential leaks.
+	// When false, .env files are visible inside the sandbox.
+	// Uses pointer to distinguish between unset (nil) and explicit false.
+	// Default: true
+	HideEnvFiles *bool `toml:"hide_env_files"`
+
 	// Docker contains Docker-specific settings.
 	Docker DockerConfig `toml:"docker"`
 }
@@ -276,6 +283,14 @@ func (s SandboxConfig) IsUseEmbeddedEnabled() bool {
 		return true
 	}
 	return *s.UseEmbedded
+}
+
+// IsHideEnvFilesEnabled returns whether .env file hiding is enabled (defaults to true).
+func (s SandboxConfig) IsHideEnvFilesEnabled() bool {
+	if s.HideEnvFiles == nil {
+		return true
+	}
+	return *s.HideEnvFiles
 }
 
 // MountsConfig defines custom mount rules for the sandbox.
@@ -837,6 +852,12 @@ port = 8080
 # When false, only system-installed binaries are used.
 # use_embedded = true
 
+# Hide .env files from the sandbox (default: true)
+# When true, .env files are overlaid with /dev/null to prevent credential leaks.
+# Set to false if sandboxed tools need to read .env files directly.
+# Can also be overridden at runtime with --no-hide-env flag.
+# hide_env_files = true
+
 # Control visibility of .devsandbox.toml inside the sandbox
 # - "hidden" (default): config file is not visible to sandboxed processes
 # - "readonly": config file is visible but read-only
@@ -845,7 +866,7 @@ port = 8080
 
 # Custom mount rules - control how paths are mounted in the sandbox
 # Note: Home directory paths (~/.ssh, ~/.aws, etc.) are NOT mounted by default.
-# .env files in the project are hidden by default (hardcoded).
+# .env files in the project are hidden by default (see hide_env_files above).
 #
 # Use these rules to:
 # - Mount additional paths from the host filesystem

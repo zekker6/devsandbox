@@ -80,6 +80,9 @@ Proxy Mode (--proxy):
 	// Sandbox lifecycle flag
 	rootCmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
 
+	// Security flags
+	rootCmd.Flags().Bool("no-hide-env", false, "Disable .env file hiding (exposes .env files inside the sandbox)")
+
 	// Add subcommands
 	rootCmd.AddCommand(newSandboxesCmd())
 	rootCmd.AddCommand(newDoctorCmd())
@@ -202,6 +205,13 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	cfg.ConfigVisibility = string(appCfg.Sandbox.GetConfigVisibility())
 	cfg.MountsConfig = mounts.NewEngine(appCfg.Sandbox.Mounts, cfg.HomeDir)
 	cfg.Isolation = iso.IsolationType()
+
+	// .env file hiding: config default, then CLI override
+	cfg.HideEnvFiles = appCfg.Sandbox.IsHideEnvFilesEnabled()
+	if cmd.Flags().Changed("no-hide-env") {
+		noHideEnv, _ := cmd.Flags().GetBool("no-hide-env")
+		cfg.HideEnvFiles = !noHideEnv
+	}
 
 	if showInfo {
 		printInfo(cfg)
@@ -362,7 +372,11 @@ func printInfo(cfg *sandbox.Config) {
 	fmt.Println()
 	fmt.Println("Blocked Paths:")
 	fmt.Println("  ~/.ssh, ~/.aws, ~/.azure, ~/.gcloud (not mounted)")
-	fmt.Println("  .env, .env.* files (hidden, project secrets)")
+	if cfg.HideEnvFiles {
+		fmt.Println("  .env, .env.* files (hidden, project secrets)")
+	} else {
+		fmt.Println("  .env, .env.* files (visible, hiding disabled)")
+	}
 
 	if cfg.MountsConfig != nil && len(cfg.MountsConfig.Rules()) > 0 {
 		fmt.Println()

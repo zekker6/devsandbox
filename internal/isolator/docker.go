@@ -268,6 +268,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		Environment:     make(map[string]string),
 		ToolsConfig:     sandboxCfg.ToolsConfig,
 		OverlayEnabled:  sandboxCfg.OverlayEnabled,
+		HideEnvFiles:    sandboxCfg.HideEnvFiles,
 	}
 
 	// Add CA path if proxy is enabled
@@ -702,17 +703,18 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-e", k+"="+cfg.Environment[k])
 	}
 
-	// .env hiding — always mount /dev/null over .env files at container creation time.
-	// This is a security default that cannot be disabled. If env vars are needed
-	// inside the sandbox, use explicit env passthrough instead of mounting .env files.
-	envFiles := sandbox.FindEnvFiles(cfg.ProjectDir, 3)
-	for _, hostPath := range envFiles {
-		relPath, err := filepath.Rel(cfg.ProjectDir, hostPath)
-		if err != nil {
-			continue
+	// .env hiding — mount /dev/null over .env files at container creation time.
+	// This is a security default that can be disabled via config or --no-hide-env flag.
+	if cfg.HideEnvFiles {
+		envFiles := sandbox.FindEnvFiles(cfg.ProjectDir, 3)
+		for _, hostPath := range envFiles {
+			relPath, err := filepath.Rel(cfg.ProjectDir, hostPath)
+			if err != nil {
+				continue
+			}
+			containerPath := filepath.Join(cfg.ProjectDir, relPath)
+			args = append(args, "-v", "/dev/null:"+containerPath+":ro")
 		}
-		containerPath := filepath.Join(cfg.ProjectDir, relPath)
-		args = append(args, "-v", "/dev/null:"+containerPath+":ro")
 	}
 
 	// On Linux, add host.docker.internal mapping for proxy access.

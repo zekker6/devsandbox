@@ -233,10 +233,11 @@ func TestDockerIsolator_Build_EnvFilesAlwaysHidden(t *testing.T) {
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
 
 	cfg := &Config{
-		ProjectDir:  projectDir,
-		SandboxHome: "/tmp/test-sandbox",
-		HomeDir:     "/home/testuser",
-		Shell:       "/bin/bash",
+		ProjectDir:   projectDir,
+		SandboxHome:  "/tmp/test-sandbox",
+		HomeDir:      "/home/testuser",
+		Shell:        "/bin/bash",
+		HideEnvFiles: true,
 	}
 
 	result, err := iso.BuildDocker(context.Background(), cfg)
@@ -246,7 +247,7 @@ func TestDockerIsolator_Build_EnvFilesAlwaysHidden(t *testing.T) {
 
 	argsStr := strings.Join(result.Args, " ")
 
-	// Should have /dev/null volume mount for .env file (always-on)
+	// Should have /dev/null volume mount for .env file
 	if !strings.Contains(argsStr, "/dev/null:") {
 		t.Error("Build args missing /dev/null volume mount for .env hiding")
 	}
@@ -1024,10 +1025,11 @@ func TestBuildCommonArgs_EnvFilesAlwaysHidden(t *testing.T) {
 	iso.imageTag = "test:latest"
 
 	cfg := &Config{
-		ProjectDir:  projectDir,
-		SandboxHome: "/tmp/test-sandbox",
-		HomeDir:     "/home/testuser",
-		Shell:       "/bin/bash",
+		ProjectDir:   projectDir,
+		SandboxHome:  "/tmp/test-sandbox",
+		HomeDir:      "/home/testuser",
+		Shell:        "/bin/bash",
+		HideEnvFiles: true,
 	}
 	args, err := iso.buildCommonArgs(cfg)
 	if err != nil {
@@ -1072,10 +1074,11 @@ func TestBuildCommonArgs_NestedEnvFilesHidden(t *testing.T) {
 	iso.imageTag = "test:latest"
 
 	cfg := &Config{
-		ProjectDir:  projectDir,
-		SandboxHome: "/tmp/test-sandbox",
-		HomeDir:     "/home/testuser",
-		Shell:       "/bin/bash",
+		ProjectDir:   projectDir,
+		SandboxHome:  "/tmp/test-sandbox",
+		HomeDir:      "/home/testuser",
+		Shell:        "/bin/bash",
+		HideEnvFiles: true,
 	}
 	args, err := iso.buildCommonArgs(cfg)
 	if err != nil {
@@ -1114,6 +1117,36 @@ func TestBuildCommonArgs_EnvFilesHiddenWithoutEnvFiles(t *testing.T) {
 
 	if strings.Contains(argsStr, "/dev/null:") {
 		t.Error("no /dev/null mounts expected when no .env files exist")
+	}
+}
+
+func TestBuildCommonArgs_EnvFilesNotHiddenWhenDisabled(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".env"), []byte("SECRET=val"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".env.local"), []byte("OTHER=val"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "test:latest"
+
+	cfg := &Config{
+		ProjectDir:   projectDir,
+		SandboxHome:  "/tmp/test-sandbox",
+		HomeDir:      "/home/testuser",
+		Shell:        "/bin/bash",
+		HideEnvFiles: false,
+	}
+	args, err := iso.buildCommonArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildCommonArgs failed: %v", err)
+	}
+	argsStr := strings.Join(args, " ")
+
+	if strings.Contains(argsStr, "/dev/null:") {
+		t.Error("no /dev/null mounts expected when env hiding is disabled")
 	}
 }
 

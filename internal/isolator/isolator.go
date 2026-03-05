@@ -103,6 +103,8 @@ type Config struct {
 	ToolsConfig map[string]any
 	// OverlayEnabled indicates if overlay mounts are enabled.
 	OverlayEnabled bool
+	// HideEnvFiles controls whether .env files are hidden from the sandbox.
+	HideEnvFiles bool
 }
 
 // Binding represents a filesystem mount.

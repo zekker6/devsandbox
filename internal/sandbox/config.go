@@ -67,6 +67,10 @@ type Config struct {
 	// Values: "hidden", "readonly", "readwrite"
 	ConfigVisibility string
 
+	// HideEnvFiles controls whether .env files are hidden from the sandbox.
+	// Default: true
+	HideEnvFiles bool
+
 	// Logger for reporting warnings and errors during sandbox setup.
 	// If nil, log messages are silently dropped.
 	Logger Logger

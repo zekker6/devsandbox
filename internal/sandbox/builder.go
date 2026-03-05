@@ -757,9 +757,11 @@ func (b *Builder) AddProjectBindings() *Builder {
 	// This must happen AFTER the project is bound
 	b.applyProjectCustomMounts()
 
-	// Hide .env files in project directory
-	for _, path := range FindEnvFiles(b.cfg.ProjectDir, 3) {
-		b.ROBind("/dev/null", path)
+	// Hide .env files in project directory (security default, can be disabled via config)
+	if b.cfg.HideEnvFiles {
+		for _, path := range FindEnvFiles(b.cfg.ProjectDir, 3) {
+			b.ROBind("/dev/null", path)
+		}
 	}
 
 	b.Tmpfs(b.cfg.XDGRuntime)
