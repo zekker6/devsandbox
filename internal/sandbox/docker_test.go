@@ -1,7 +1,10 @@
 package sandbox
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +135,90 @@ func TestParseDockerSize(t *testing.T) {
 				t.Errorf("parseDockerSize(%q) = %d, want %d", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestDockerContainerName(t *testing.T) {
+	name := DockerContainerName("/home/user/projects/myapp")
+	if name == "" {
+		t.Fatal("DockerContainerName() returned empty string")
+	}
+	// Must start with devsandbox- prefix
+	if name[:len("devsandbox-")] != "devsandbox-" {
+		t.Errorf("expected devsandbox- prefix, got %q", name)
+	}
+	// Must contain the project basename
+	if !strings.Contains(name, "myapp") {
+		t.Errorf("expected container name to contain 'myapp', got %q", name)
+	}
+	// Same input must produce same output
+	name2 := DockerContainerName("/home/user/projects/myapp")
+	if name != name2 {
+		t.Errorf("expected deterministic output, got %q and %q", name, name2)
+	}
+	// Different input must produce different output
+	name3 := DockerContainerName("/home/user/projects/other")
+	if name == name3 {
+		t.Errorf("expected different names for different projects, both got %q", name)
+	}
+}
+
+func TestRemoveSandboxByType_DockerWithFilesystemPath(t *testing.T) {
+	// Skip if docker is not available
+	_, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("Docker not installed")
+	}
+
+	// Create a temp directory to simulate a disk-listed Docker sandbox
+	tmpDir := t.TempDir()
+	sandboxDir := filepath.Join(tmpDir, "devsandbox-test123")
+	if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Metadata{
+		Isolation:   IsolationDocker,
+		SandboxRoot: sandboxDir, // Filesystem path, not container name
+		ProjectDir:  "/nonexistent/project",
+	}
+
+	// Should NOT fail — the Docker container doesn't exist but the disk
+	// directory should still be cleaned up.
+	err = RemoveSandboxByType(m, false)
+	if err != nil {
+		t.Errorf("RemoveSandboxByType() should succeed cleaning up disk dir even when container is gone: %v", err)
+	}
+
+	// Verify the disk directory was removed
+	if _, err := os.Stat(sandboxDir); !os.IsNotExist(err) {
+		t.Error("expected disk directory to be removed")
+	}
+}
+
+func TestRemoveSandboxByType_DockerWithUnknownProjectDir(t *testing.T) {
+	// Create a temp directory to simulate a disk-listed Docker sandbox
+	// with unknown project dir
+	tmpDir := t.TempDir()
+	sandboxDir := filepath.Join(tmpDir, "devsandbox-unknown")
+	if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Metadata{
+		Isolation:   IsolationDocker,
+		SandboxRoot: sandboxDir,
+		ProjectDir:  "(unknown)",
+	}
+
+	// Should clean up disk dir without trying Docker container removal
+	err := RemoveSandboxByType(m, false)
+	if err != nil {
+		t.Errorf("RemoveSandboxByType() should clean up disk dir for unknown project: %v", err)
+	}
+
+	if _, err := os.Stat(sandboxDir); !os.IsNotExist(err) {
+		t.Error("expected disk directory to be removed")
 	}
 }
 

@@ -254,20 +254,20 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 
 	// Build isolator config from RunConfig
 	isoCfg := &Config{
-		ProjectDir:     sandboxCfg.ProjectDir,
-		SandboxHome:    sandboxCfg.SandboxHome,
-		HomeDir:        sandboxCfg.HomeDir,
-		Shell:          string(sandboxCfg.Shell),
-		ShellPath:      sandboxCfg.ShellPath,
-		Command:        cfg.Command,
-		Interactive:    cfg.Interactive,
-		ProxyEnabled:   sandboxCfg.ProxyEnabled,
-		ProxyPort:      cfg.ProxyPort,
+		ProjectDir:      sandboxCfg.ProjectDir,
+		SandboxHome:     sandboxCfg.SandboxHome,
+		HomeDir:         sandboxCfg.HomeDir,
+		Shell:           string(sandboxCfg.Shell),
+		ShellPath:       sandboxCfg.ShellPath,
+		Command:         cfg.Command,
+		Interactive:     cfg.Interactive,
+		ProxyEnabled:    sandboxCfg.ProxyEnabled,
+		ProxyPort:       cfg.ProxyPort,
 		ProxyExtraEnv:   sandboxCfg.ProxyExtraEnv,
 		ProxyExtraCAEnv: sandboxCfg.ProxyExtraCAEnv,
-		Environment:    make(map[string]string),
-		ToolsConfig:    sandboxCfg.ToolsConfig,
-		OverlayEnabled: sandboxCfg.OverlayEnabled,
+		Environment:     make(map[string]string),
+		ToolsConfig:     sandboxCfg.ToolsConfig,
+		OverlayEnabled:  sandboxCfg.OverlayEnabled,
 	}
 
 	// Add CA path if proxy is enabled
@@ -959,11 +959,8 @@ func getToolConfig(toolsConfig map[string]any, toolName string) map[string]any {
 }
 
 // containerName generates a Docker container name for the sandbox.
-// Format: devsandbox-<project>-<hash>
 func (d *DockerIsolator) containerName(projectDir string) string {
-	projectName := filepath.Base(projectDir)
-	hash := sha256.Sum256([]byte(projectDir))
-	return fmt.Sprintf("devsandbox-%s-%x", projectName, hash[:8])
+	return sandbox.DockerContainerName(projectDir)
 }
 
 // getContainerState checks if a container exists and its state.

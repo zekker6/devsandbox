@@ -2,12 +2,14 @@ package sandbox
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,15 @@ import (
 
 // DockerVolumePrefix is the prefix used for devsandbox Docker volumes
 const DockerVolumePrefix = "devsandbox-"
+
+// DockerContainerName generates the Docker container name for a project directory.
+// Format: devsandbox-<project>-<hash>
+// This must match the naming convention used by the Docker isolator.
+func DockerContainerName(projectDir string) string {
+	projectName := filepath.Base(projectDir)
+	hash := sha256.Sum256([]byte(projectDir))
+	return fmt.Sprintf("devsandbox-%s-%x", projectName, hash[:8])
+}
 
 // ListDockerSandboxes returns metadata for all devsandbox Docker containers.
 func ListDockerSandboxes() ([]*Metadata, error) {
@@ -340,7 +351,42 @@ func parseDockerSize(s string) int64 {
 // When removeVolumes is true, Docker sandbox volumes are also removed.
 func RemoveSandboxByType(m *Metadata, removeVolumes bool) error {
 	if m.Isolation == IsolationDocker {
-		return RemoveDockerContainer(m.SandboxRoot, removeVolumes)
+		containerName := m.SandboxRoot
+		var diskDir string
+
+		// When discovered via disk listing (ListSandboxes), SandboxRoot is a
+		// filesystem path. For Docker-listed sandboxes, it is the container name.
+		if filepath.IsAbs(containerName) {
+			diskDir = containerName
+			if m.ProjectDir != "" && m.ProjectDir != "(unknown)" {
+				containerName = DockerContainerName(m.ProjectDir)
+			} else {
+				// Cannot determine container name; just clean up disk.
+				return RemoveSandbox(diskDir)
+			}
+		}
+
+		// Try to remove the Docker container. Tolerate "No such container"
+		// errors — the container may have been removed already.
+		err := RemoveDockerContainer(containerName, removeVolumes)
+		if err != nil && !isContainerNotFound(err) {
+			if diskDir == "" {
+				return err
+			}
+			// Log but don't fail — still clean up the disk directory.
+			log.Printf("warning: failed to remove docker container %s: %v", containerName, err)
+		}
+
+		// Clean up on-disk metadata directory if present.
+		if diskDir != "" {
+			return RemoveSandbox(diskDir)
+		}
+		return nil
 	}
 	return RemoveSandbox(m.SandboxRoot)
+}
+
+// isContainerNotFound checks whether the error indicates a missing Docker container.
+func isContainerNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "No such container")
 }
