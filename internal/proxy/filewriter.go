@@ -49,7 +49,7 @@ func NewRotatingFileWriter(cfg RotatingFileWriterConfig) (*RotatingFileWriter, e
 		cfg.MaxFiles = defaultMaxFiles
 	}
 
-	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
@@ -108,7 +108,7 @@ func (w *RotatingFileWriter) openOrRotate() error {
 
 	if lastFile != "" && lastSize < w.cfg.MaxSize {
 		// Reuse existing uncompressed file
-		file, err := os.OpenFile(lastFile, os.O_WRONLY|os.O_APPEND, 0o644)
+		file, err := os.OpenFile(lastFile, os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			// Fall back to creating new file
 			return w.rotate()
@@ -151,7 +151,7 @@ func (w *RotatingFileWriter) rotate() error {
 		w.cfg.Suffix,
 	))
 
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create log file: %w", err)
 	}
@@ -177,7 +177,7 @@ func (w *RotatingFileWriter) compressFile(srcPath string) {
 	}
 	defer func() { _ = src.Close() }()
 
-	dst, err := os.Create(archivePath)
+	dst, err := os.OpenFile(archivePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return
 	}

@@ -129,11 +129,11 @@ func (d *DockerIsolator) resolveDockerfile(projectDir, configDir string) (string
 	// Default: configDir/Dockerfile
 	defaultPath := filepath.Join(configDir, "Dockerfile")
 	if _, err := os.Stat(defaultPath); os.IsNotExist(err) {
-		if err := os.MkdirAll(configDir, 0o755); err != nil {
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
 			return "", fmt.Errorf("failed to create config dir: %w", err)
 		}
 		content := fmt.Sprintf("FROM %s\n", DefaultImage)
-		if err := os.WriteFile(defaultPath, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(defaultPath, []byte(content), 0o600); err != nil {
 			return "", fmt.Errorf("failed to create default Dockerfile: %w", err)
 		}
 	} else if err != nil {

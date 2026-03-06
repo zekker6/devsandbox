@@ -19,11 +19,11 @@ type ErrorLogger struct {
 // The file is created if it doesn't exist, and appended to if it does.
 func NewErrorLogger(path string) (*ErrorLogger, error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open error log: %w", err)
 	}

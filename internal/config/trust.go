@@ -61,11 +61,11 @@ func (s *TrustStore) Save() error {
 	}
 
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	f, err := os.Create(s.path)
+	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create trust store: %w", err)
 	}
