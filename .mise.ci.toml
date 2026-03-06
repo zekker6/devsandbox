@@ -4,5 +4,5 @@
 [tools]
 go = "1.26.1"
 task = "3.40"
-golangci-lint = "2.10.1"
+golangci-lint = "2.11.1"
 neovim = "0.10"
