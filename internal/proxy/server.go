@@ -443,7 +443,9 @@ func (s *Server) Start() error {
 
 	s.listener = listener
 	s.server = &http.Server{
-		Handler: s.proxy,
+		Handler:           s.proxy,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	s.running = true
