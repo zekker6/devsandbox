@@ -78,11 +78,10 @@ func TestRemoveSandboxByType_Docker(t *testing.T) {
 		t.Skip("Docker not installed")
 	}
 
-	// Should not panic, just fail (container doesn't exist)
+	// Should not panic or error — "No such container" is tolerated during cleanup
 	err = RemoveSandboxByType(m, false)
-	// Error is expected since container doesn't exist
-	if err == nil {
-		t.Error("RemoveSandboxByType() should error for non-existent docker container")
+	if err != nil {
+		t.Errorf("RemoveSandboxByType() should tolerate non-existent docker container: %v", err)
 	}
 }
 
