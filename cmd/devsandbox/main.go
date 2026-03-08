@@ -182,6 +182,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	cfg.ProxyExtraEnv = appCfg.Proxy.ExtraEnv
 	cfg.ProxyExtraCAEnv = appCfg.Proxy.ExtraCAEnv
+	cfg.EnvPassthrough = appCfg.Sandbox.EnvPassthrough
 
 	// CLI override for git mode
 	if cmd.Flags().Changed("git-mode") {

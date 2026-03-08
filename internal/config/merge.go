@@ -110,6 +110,14 @@ func mergeConfigs(base, overlay *Config) *Config {
 		)
 	}
 
+	// Sandbox env passthrough: prepend overlay (higher priority)
+	if len(overlay.Sandbox.EnvPassthrough) > 0 {
+		result.Sandbox.EnvPassthrough = append(
+			overlay.Sandbox.EnvPassthrough,
+			result.Sandbox.EnvPassthrough...,
+		)
+	}
+
 	// Port forwarding settings
 	if overlay.PortForwarding.Enabled != nil {
 		result.PortForwarding.Enabled = overlay.PortForwarding.Enabled

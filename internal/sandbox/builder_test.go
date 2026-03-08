@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"devsandbox/internal/config"
@@ -762,5 +763,31 @@ func TestBuilder_AddProxyEnvironment_ExtraEnv(t *testing.T) {
 		if !found {
 			t.Errorf("missing extra env var %s=%s in args", varName, proxyURL)
 		}
+	}
+}
+
+func TestBuilder_AddEnvironment_EnvPassthrough(t *testing.T) {
+	t.Setenv("PASSTHROUGH_SET", "hello")
+	// Deliberately do NOT set PASSTHROUGH_UNSET
+
+	cfg := &Config{
+		HomeDir:        "/home/testuser",
+		SandboxHome:    "/tmp/sandbox/home",
+		Shell:          ShellBash,
+		ShellPath:      "/bin/bash",
+		EnvPassthrough: []string{"PASSTHROUGH_SET", "PASSTHROUGH_UNSET"},
+	}
+
+	b := NewBuilder(cfg)
+	b.AddEnvironment()
+
+	args := b.Build()
+	argsStr := strings.Join(args, " ")
+
+	if !strings.Contains(argsStr, "PASSTHROUGH_SET") {
+		t.Error("expected PASSTHROUGH_SET to be passed through")
+	}
+	if strings.Contains(argsStr, "PASSTHROUGH_UNSET") {
+		t.Error("PASSTHROUGH_UNSET should not appear (not set on host)")
 	}
 }

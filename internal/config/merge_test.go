@@ -281,6 +281,29 @@ func TestMergeConfigs_ProxyExtraCAEnv(t *testing.T) {
 	}
 }
 
+func TestMergeConfigs_SandboxEnvPassthrough(t *testing.T) {
+	base := DefaultConfig()
+	base.Sandbox.EnvPassthrough = []string{"BASE_VAR"}
+
+	overlay := &Config{
+		Sandbox: SandboxConfig{
+			EnvPassthrough: []string{"OVERLAY_VAR"},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	if len(result.Sandbox.EnvPassthrough) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %v", len(result.Sandbox.EnvPassthrough), result.Sandbox.EnvPassthrough)
+	}
+	if result.Sandbox.EnvPassthrough[0] != "OVERLAY_VAR" {
+		t.Errorf("expected overlay entry first, got %q", result.Sandbox.EnvPassthrough[0])
+	}
+	if result.Sandbox.EnvPassthrough[1] != "BASE_VAR" {
+		t.Errorf("expected base entry second, got %q", result.Sandbox.EnvPassthrough[1])
+	}
+}
+
 func Test_mergeConfigs_DockerDockerfileNotOverriddenByEmpty(t *testing.T) {
 	base := &Config{
 		Sandbox: SandboxConfig{

@@ -92,6 +92,7 @@ tasks:
       - build
     cmds:
       - mkdir -p ~/.local/bin
+      - rm -f ~/.local/bin/devsandbox
       - cp bin/devsandbox ~/.local/bin/
 
   prune-local:

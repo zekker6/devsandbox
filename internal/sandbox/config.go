@@ -50,6 +50,9 @@ type Config struct {
 	ProxyExtraEnv []string
 	// ProxyExtraCAEnv is a list of additional env var names set to the CA cert path.
 	ProxyExtraCAEnv []string
+	// EnvPassthrough is a list of host env var names to pass through to the sandbox.
+	EnvPassthrough []string
+
 	// True if network namespace is isolated (pasta)
 	NetworkIsolated bool
 

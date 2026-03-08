@@ -1071,6 +1071,37 @@ pattern = "[invalid"`,
 	}
 }
 
+func TestSandboxEnvPassthrough_ParseAndValidate(t *testing.T) {
+	tomlData := `
+[sandbox]
+env_passthrough = ["MY_API_KEY", "CUSTOM_TOOL_CONFIG", "CI"]
+`
+	cfg := DefaultConfig()
+	if err := toml.Unmarshal([]byte(tomlData), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Sandbox.EnvPassthrough) != 3 {
+		t.Fatalf("expected 3 env_passthrough entries, got %d", len(cfg.Sandbox.EnvPassthrough))
+	}
+	if cfg.Sandbox.EnvPassthrough[0] != "MY_API_KEY" {
+		t.Errorf("expected first entry MY_API_KEY, got %q", cfg.Sandbox.EnvPassthrough[0])
+	}
+}
+
+func TestSandboxEnvPassthrough_ValidationErrors(t *testing.T) {
+	cfg := &Config{
+		Sandbox: SandboxConfig{
+			EnvPassthrough: []string{"VALID", ""},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected validation error for empty env_passthrough name")
+	}
+}
+
 func TestProxyExtraEnv_ParseAndValidate(t *testing.T) {
 	tomlStr := `
 [proxy]

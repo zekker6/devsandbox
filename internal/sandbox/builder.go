@@ -866,6 +866,11 @@ func (b *Builder) AddEnvironment() *Builder {
 		}
 	}
 
+	// Pass through user-configured host environment variables
+	for _, name := range b.cfg.EnvPassthrough {
+		b.SetEnvIfSet(name)
+	}
+
 	// Add proxy environment if enabled
 	if b.cfg.ProxyEnabled {
 		b.AddProxyEnvironment()

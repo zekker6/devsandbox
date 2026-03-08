@@ -257,6 +257,10 @@ type SandboxConfig struct {
 	// Default: true
 	HideEnvFiles *bool `toml:"hide_env_files"`
 
+	// EnvPassthrough is a list of host environment variable names to pass through
+	// to the sandbox. Variables not set on the host are silently skipped.
+	EnvPassthrough []string `toml:"env_passthrough"`
+
 	// Docker contains Docker-specific settings.
 	Docker DockerConfig `toml:"docker"`
 }
@@ -522,6 +526,13 @@ func (c *Config) Validate() error {
 	for i, name := range c.Proxy.ExtraCAEnv {
 		if name == "" {
 			return fmt.Errorf("proxy.extra_ca_env[%d]: variable name cannot be empty", i)
+		}
+	}
+
+	// Validate env passthrough var names
+	for i, name := range c.Sandbox.EnvPassthrough {
+		if name == "" {
+			return fmt.Errorf("sandbox.env_passthrough[%d]: variable name cannot be empty", i)
 		}
 	}
 
@@ -857,6 +868,10 @@ port = 8080
 # Set to false if sandboxed tools need to read .env files directly.
 # Can also be overridden at runtime with --no-hide-env flag.
 # hide_env_files = true
+
+# Pass host environment variables into the sandbox.
+# Listed variables are copied from the host; unset variables are silently skipped.
+# env_passthrough = ["MY_API_KEY", "CUSTOM_TOOL_CONFIG"]
 
 # Control visibility of .devsandbox.toml inside the sandbox
 # - "hidden" (default): config file is not visible to sandboxed processes

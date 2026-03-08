@@ -265,6 +265,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		ProxyPort:       cfg.ProxyPort,
 		ProxyExtraEnv:   sandboxCfg.ProxyExtraEnv,
 		ProxyExtraCAEnv: sandboxCfg.ProxyExtraCAEnv,
+		EnvPassthrough:  sandboxCfg.EnvPassthrough,
 		Environment:     make(map[string]string),
 		ToolsConfig:     sandboxCfg.ToolsConfig,
 		OverlayEnabled:  sandboxCfg.OverlayEnabled,
@@ -701,6 +702,13 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	sort.Strings(envKeys)
 	for _, k := range envKeys {
 		args = append(args, "-e", k+"="+cfg.Environment[k])
+	}
+
+	// Pass through host environment variables
+	for _, name := range cfg.EnvPassthrough {
+		if val, ok := os.LookupEnv(name); ok {
+			args = append(args, "-e", name+"="+val)
+		}
 	}
 
 	// .env hiding — mount /dev/null over .env files at container creation time.
