@@ -13,7 +13,7 @@ devsandbox removes that risk. It wraps any command in a sandbox that provides fu
 **Install:**
 
 ```bash
-mise install github:zekker6/devsandbox
+mise use -g github:zekker6/devsandbox
 ```
 
 > Homebrew is not currently available. For direct binary download, see [Installation Details](#installation-details).
@@ -162,10 +162,10 @@ Requirements:
 
 ```bash
 # Option 1: mise
-mise install github:zekker6/devsandbox
+mise use -g github:zekker6/devsandbox
 
 # Option 2: Download binary
-curl -L https://github.com/zekker6/devsandbox/releases/latest/download/devsandbox-linux-amd64.tar.gz | tar xz
+curl -L https://github.com/zekker6/devsandbox/releases/latest/download/devsandbox_Linux_x86_64.tar.gz | tar xz
 sudo mv devsandbox /usr/local/bin/
 ```
 
