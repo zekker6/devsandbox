@@ -73,14 +73,34 @@ func TestMise_DockerBindings_NoCacheDirs(t *testing.T) {
 	}
 }
 
-// isolateMiseConfig points mise at empty config/data directories so tests
-// are not affected by host or CI mise settings (e.g. trusted_config_paths).
+// isolateMiseConfig points mise at empty config/data directories and unsets
+// trust-related env vars so tests are not affected by host or CI settings.
 func isolateMiseConfig(t *testing.T) {
 	t.Helper()
 	t.Setenv("MISE_CONFIG_DIR", t.TempDir())
 	t.Setenv("MISE_DATA_DIR", t.TempDir())
-	t.Setenv("MISE_TRUSTED_CONFIG_PATHS", "")
-	t.Setenv("MISE_YES", "")
+	// Must fully unset (not set to empty) — mise checks var presence, not value.
+	unsetForTest(t, "MISE_TRUSTED_CONFIG_PATHS")
+	unsetForTest(t, "MISE_YES")
+}
+
+// unsetForTest removes an env var for the duration of the test, restoring it on cleanup.
+func unsetForTest(t *testing.T, key string) {
+	t.Helper()
+	if orig, ok := os.LookupEnv(key); ok {
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("failed to unset %s: %v", key, err)
+		}
+		t.Cleanup(func() {
+			if err := os.Setenv(key, orig); err != nil {
+				t.Errorf("failed to restore %s: %v", key, err)
+			}
+		})
+	} else {
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("failed to unset %s: %v", key, err)
+		}
+	}
 }
 
 func TestCheckMiseTrust_NoMise(t *testing.T) {
