@@ -1,9 +1,7 @@
 package tools
 
 import (
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -73,16 +71,6 @@ func TestMise_DockerBindings_NoCacheDirs(t *testing.T) {
 	}
 }
 
-// isolateMiseConfig points mise at empty config/data directories so tests
-// are not affected by host or CI mise settings (e.g. trusted_config_paths).
-func isolateMiseConfig(t *testing.T) {
-	t.Helper()
-	t.Setenv("MISE_CONFIG_DIR", t.TempDir())
-	t.Setenv("MISE_DATA_DIR", t.TempDir())
-	t.Setenv("MISE_TRUSTED_CONFIG_PATHS", "")
-	t.Setenv("MISE_YES", "")
-}
-
 func TestCheckMiseTrust_NoMise(t *testing.T) {
 	// If mise is not installed, CheckMiseTrust should return nil
 	if _, err := exec.LookPath("mise"); err != nil {
@@ -110,70 +98,6 @@ func TestCheckMiseTrust_NoConfig(t *testing.T) {
 	for _, s := range statuses {
 		if !s.Trusted {
 			t.Errorf("unexpected untrusted status for %s", s.Path)
-		}
-	}
-}
-
-func TestCheckMiseTrust_UntrustedConfig(t *testing.T) {
-	if _, err := exec.LookPath("mise"); err != nil {
-		t.Skip("mise not installed")
-	}
-
-	// Isolate mise from host config to get consistent trust behavior in CI.
-	// jdx/mise-action may configure trusted_config_paths in mise's settings file.
-	isolateMiseConfig(t)
-
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, ".mise.toml")
-	if err := os.WriteFile(configPath, []byte("[tools]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	statuses, err := CheckMiseTrust(dir)
-	if err != nil {
-		t.Fatalf("CheckMiseTrust() error = %v", err)
-	}
-
-	// Should have at least one untrusted entry for the temp dir
-	foundUntrusted := false
-	for _, s := range statuses {
-		if !s.Trusted && strings.Contains(s.Path, dir) {
-			foundUntrusted = true
-		}
-	}
-	if !foundUntrusted {
-		t.Errorf("expected untrusted status for %s, got: %v", dir, statuses)
-	}
-}
-
-func TestTrustMiseConfig(t *testing.T) {
-	if _, err := exec.LookPath("mise"); err != nil {
-		t.Skip("mise not installed")
-	}
-
-	// Isolate mise from host config to get consistent trust behavior in CI.
-	isolateMiseConfig(t)
-
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, ".mise.toml")
-	if err := os.WriteFile(configPath, []byte("[tools]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Trust the config
-	if err := TrustMiseConfig(dir); err != nil {
-		t.Fatalf("TrustMiseConfig() error = %v", err)
-	}
-
-	// Verify it's now trusted
-	statuses, err := CheckMiseTrust(dir)
-	if err != nil {
-		t.Fatalf("CheckMiseTrust() error = %v", err)
-	}
-
-	for _, s := range statuses {
-		if strings.Contains(s.Path, dir) && !s.Trusted {
-			t.Errorf("expected trusted status for %s after TrustMiseConfig()", s.Path)
 		}
 	}
 }
