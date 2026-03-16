@@ -367,17 +367,8 @@ func printInfo(cfg *sandbox.Config) {
 	fmt.Println("Mounted Paths:")
 	fmt.Println("  /usr, /lib, /lib64, /bin (read-only system)")
 	fmt.Printf("  %s (read-write)\n", cfg.ProjectDir)
-	if cfg.OverlayEnabled && miseWritable {
-		mode := "tmpoverlay"
-		if misePersistent {
-			mode = "overlay"
-		}
-		fmt.Printf("  ~/.local/share/mise (%s, writable)\n", mode)
-	} else {
-		fmt.Println("  ~/.config/mise, ~/.local/share/mise (read-only tools)")
-	}
-	fmt.Printf("  Shell config for %s (read-only)\n", cfg.Shell)
-	fmt.Println("  ~/.config/nvim, ~/.local/share/nvim (read-only editor)")
+	fmt.Println()
+	printToolMounts(cfg)
 	fmt.Println()
 	fmt.Println("Blocked Paths:")
 	fmt.Println("  ~/.ssh, ~/.aws, ~/.azure, ~/.gcloud (not mounted)")
@@ -411,6 +402,77 @@ func printInfo(cfg *sandbox.Config) {
 		fmt.Printf("  Mise Persistent: %v\n", misePersistent)
 		if misePersistent {
 			fmt.Printf("  Overlay Dir:     %s/overlay/\n", cfg.SandboxHome)
+		}
+	}
+}
+
+// printToolMounts displays bindings from all available tools.
+func printToolMounts(cfg *sandbox.Config) {
+	homeDir := cfg.HomeDir
+	sandboxHome := cfg.SandboxHome
+
+	// Configure tools that support it (same as builder)
+	globalCfg := tools.GlobalConfig{
+		OverlayEnabled: cfg.OverlayEnabled,
+		ProjectDir:     cfg.ProjectDir,
+		HomeDir:        cfg.HomeDir,
+	}
+	for _, tool := range tools.Available(homeDir) {
+		if configurable, ok := tool.(tools.ToolWithConfig); ok {
+			var toolCfg map[string]any
+			if cfg.ToolsConfig != nil {
+				if section, ok := cfg.ToolsConfig[tool.Name()]; ok {
+					toolCfg, _ = section.(map[string]any)
+				}
+			}
+			configurable.Configure(globalCfg, toolCfg)
+		}
+	}
+
+	fmt.Println("Tool Mounts:")
+	for _, tool := range tools.Available(homeDir) {
+		bindings := tool.Bindings(homeDir, sandboxHome)
+
+		// Filter to bindings that would actually be mounted
+		var active []tools.Binding
+		for _, b := range bindings {
+			if b.Optional {
+				if _, err := os.Stat(b.Source); err != nil {
+					continue
+				}
+			}
+			active = append(active, b)
+		}
+
+		if len(active) == 0 {
+			continue
+		}
+
+		fmt.Printf("  %s:\n", tool.Name())
+		for _, b := range active {
+			dest := b.Dest
+			if dest == "" {
+				dest = b.Source
+			}
+			src := shortenPath(b.Source, homeDir)
+			dst := shortenPath(dest, homeDir)
+
+			mode := "ro"
+			if !b.ReadOnly {
+				mode = "rw"
+			}
+			switch b.Type {
+			case tools.MountOverlay:
+				mode = "overlay"
+			case tools.MountTmpOverlay:
+				mode = "tmpoverlay"
+			}
+
+			if src == dst {
+				fmt.Printf("    %s (%s)\n", src, mode)
+			} else {
+				fmt.Printf("    %s → %s (%s)\n", src, dst, mode)
+			}
 		}
 	}
 }
