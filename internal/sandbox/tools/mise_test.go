@@ -109,6 +109,10 @@ func TestCheckMiseTrust_UntrustedConfig(t *testing.T) {
 		t.Skip("mise not installed")
 	}
 
+	// Clear trust-related env vars to get consistent behavior in CI
+	t.Setenv("MISE_TRUSTED_CONFIG_PATHS", "")
+	t.Setenv("MISE_YES", "")
+
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mise.toml")
 	if err := os.WriteFile(configPath, []byte("[tools]\n"), 0o644); err != nil {
@@ -136,6 +140,10 @@ func TestTrustMiseConfig(t *testing.T) {
 	if _, err := exec.LookPath("mise"); err != nil {
 		t.Skip("mise not installed")
 	}
+
+	// Clear trust-related env vars to get consistent behavior in CI
+	t.Setenv("MISE_TRUSTED_CONFIG_PATHS", "")
+	t.Setenv("MISE_YES", "")
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mise.toml")

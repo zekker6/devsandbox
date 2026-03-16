@@ -192,10 +192,17 @@ type MiseTrustStatus struct {
 }
 
 // CheckMiseTrust checks if mise config files in the given directory are trusted.
+// Only returns statuses for config files within the specified directory, ignoring
+// parent directory configs that mise also reports.
 // Returns nil if mise is not available or no config files are found.
 func CheckMiseTrust(dir string) ([]MiseTrustStatus, error) {
 	if _, err := exec.LookPath("mise"); err != nil {
 		return nil, nil
+	}
+
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving directory path: %w", err)
 	}
 
 	cmd := exec.Command("mise", "trust", "--show")
@@ -218,6 +225,17 @@ func CheckMiseTrust(dir string) ([]MiseTrustStatus, error) {
 		}
 		path := line[:idx]
 		status := line[idx+2:]
+
+		// Only include configs that are within the requested directory.
+		// mise trust --show also reports configs from parent directories.
+		absPath, pathErr := filepath.Abs(path)
+		if pathErr != nil {
+			continue
+		}
+		if !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) && absPath != absDir {
+			continue
+		}
+
 		statuses = append(statuses, MiseTrustStatus{
 			Path:    path,
 			Trusted: status == "trusted",
