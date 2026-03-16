@@ -6,7 +6,7 @@ Sandbox your AI coding assistants. Run Claude Code, Copilot, aider, and other to
 
 AI coding assistants execute shell commands, install packages, and make network requests on your machine -- with full access to your `~/.ssh` keys, `~/.aws` credentials, `.env` secrets, and everything else. An AI agent with unrestricted access could read your `~/.ssh/id_ed25519`, exfiltrate `~/.aws/credentials` via an API call, or `rm -rf` your home directory.
 
-devsandbox removes that risk. It wraps any command in a sandbox that provides full read/write access to your project and all your development tools, while blocking access to credentials, keys, and secrets. An optional proxy mode logs every HTTP/HTTPS request for inspection.
+devsandbox removes that risk. It wraps any command in a sandbox scoped to your current working directory -- the directory you run `devsandbox` from becomes the project root with full read/write access, while everything outside it (credentials, keys, secrets, other projects) is blocked. An optional proxy mode logs every HTTP/HTTPS request for inspection.
 
 ## Prerequisites
 
@@ -62,14 +62,17 @@ mise use -g github:zekker6/devsandbox
 **Sandbox your AI agent:**
 
 ```bash
-# 1. Run Claude Code in the sandbox
+# 1. cd into your project
+cd ~/projects/my-app
+
+# 2. Run Claude Code in the sandbox (scoped to ~/projects/my-app)
 devsandbox claude --dangerously-skip-permissions
 
-# 2. Verify what's protected
+# 3. Verify what's protected
 devsandbox --info
 ```
 
-Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts -- safe inside the sandbox because devsandbox provides the security boundary.
+devsandbox sandboxes the current working directory -- `cd` into your project first, then run `devsandbox`. Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts -- safe inside the sandbox because devsandbox provides the security boundary.
 
 **Works with:** Claude Code, GitHub Copilot, aider, Cursor, Continue, Cline, OpenCode, and any CLI-based development tool.
 
