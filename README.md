@@ -8,6 +8,47 @@ AI coding assistants execute shell commands, install packages, and make network 
 
 devsandbox removes that risk. It wraps any command in a sandbox that provides full read/write access to your project and all your development tools, while blocking access to credentials, keys, and secrets. An optional proxy mode logs every HTTP/HTTPS request for inspection.
 
+## Prerequisites
+
+devsandbox requires [mise](https://mise.jdx.dev/) for tool version management. Install it before proceeding.
+
+**Linux:**
+
+```bash
+curl https://mise.jdx.dev/install.sh | sh
+```
+
+After installing, activate mise in your shell ([setup guide](https://mise.jdx.dev/getting-started.html)):
+
+```bash
+# bash
+echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+
+# zsh
+echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc
+
+# fish
+echo '~/.local/bin/mise activate fish | source' >> ~/.config/fish/config.fish
+```
+
+Additionally, your kernel must support unprivileged user namespaces. Verify with:
+
+```bash
+unshare --user true
+# Should succeed silently. If it fails, see Limitations.
+```
+
+**macOS:**
+
+```bash
+brew install mise
+```
+
+A Docker runtime is also required (ensure it is running before using devsandbox):
+- [OrbStack](https://orbstack.dev/) -- recommended for Apple Silicon (fastest startup, lowest resource usage)
+- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) -- most widely tested
+- [Colima](https://github.com/abiosoft/colima) -- free and open-source
+
 ## Quickstart
 
 **Install:**
@@ -184,10 +225,7 @@ sudo apt install bubblewrap passt
 sudo dnf install bubblewrap passt
 ```
 
-**macOS:** Install a Docker runtime (ensure it is running before using devsandbox):
-- [OrbStack](https://orbstack.dev/) -- recommended for Apple Silicon (fastest startup, lowest resource usage)
-- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) -- most widely tested
-- [Colima](https://github.com/abiosoft/colima) -- free and open-source
+**macOS:** Requires a Docker runtime -- see [Prerequisites](#prerequisites) for options.
 
 **Build from source:**
 
