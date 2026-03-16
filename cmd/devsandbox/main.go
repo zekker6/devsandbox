@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -125,6 +126,13 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	// Load configuration file with project-specific overrides
 	appCfg, _, projectDir, err := config.LoadConfig()
 	if err != nil {
+		return err
+	}
+
+	// Ensure mise configs are trusted before sandbox launch.
+	// Inside the sandbox, mise config dirs are read-only so trust prompts
+	// cannot be persisted, causing repeated prompts on every launch.
+	if err := ensureMiseTrust(projectDir); err != nil {
 		return err
 	}
 
@@ -574,6 +582,59 @@ func startProxyServer(pCfg *proxy.Config) (*proxyResult, error) {
 // Call as: defer deferProxyCleanup(result)
 func deferProxyCleanup(result *proxyResult) {
 	result.cleanup()
+}
+
+// ensureMiseTrust checks that mise config files in the project directory are trusted.
+// Inside the sandbox, mise's config/state dirs are read-only so trust changes cannot
+// be persisted. This pre-flight check prevents repeated trust prompts on every launch.
+func ensureMiseTrust(projectDir string) error {
+	statuses, err := tools.CheckMiseTrust(projectDir)
+	if err != nil || len(statuses) == 0 {
+		return nil
+	}
+
+	var untrusted []string
+	for _, s := range statuses {
+		if !s.Trusted {
+			untrusted = append(untrusted, s.Path)
+		}
+	}
+
+	if len(untrusted) == 0 {
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Mise config is not trusted for this project.\n")
+	fmt.Fprintf(os.Stderr, "Trust cannot be persisted inside the sandbox (read-only mounts),\n")
+	fmt.Fprintf(os.Stderr, "so mise will prompt on every launch without this.\n\n")
+	for _, path := range untrusted {
+		fmt.Fprintf(os.Stderr, "  untrusted: %s\n", path)
+	}
+	fmt.Fprintln(os.Stderr)
+
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprintf(os.Stderr, "Warning: run 'mise trust' in the project directory to fix this\n")
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Trust mise config? [Y/n]: ")
+	var response string
+	if _, err := fmt.Scanln(&response); err != nil {
+		// Empty input (just Enter) defaults to yes
+		response = "y"
+	}
+	response = strings.ToLower(strings.TrimSpace(response))
+
+	if response != "" && response != "y" && response != "yes" {
+		fmt.Fprintf(os.Stderr, "Skipped. Run 'mise trust' manually to avoid repeated prompts.\n")
+		return nil
+	}
+
+	if err := tools.TrustMiseConfig(projectDir); err != nil {
+		return fmt.Errorf("failed to trust mise config: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Mise config trusted.\n\n")
+	return nil
 }
 
 // createActiveToolsRunner creates an active tools runner with the sandbox configuration.

@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bufio"
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 func init() {
@@ -181,4 +183,53 @@ func (m *Mise) DockerBindings(homeDir, sandboxHome string) []DockerMount {
 		// The container uses its own copies at /home/sandboxuser/.local/share/mise etc.
 		// This allows mise to write tracking configs without read-only mount errors.
 	}
+}
+
+// MiseTrustStatus represents the trust status of a mise config directory.
+type MiseTrustStatus struct {
+	Path    string
+	Trusted bool
+}
+
+// CheckMiseTrust checks if mise config files in the given directory are trusted.
+// Returns nil if mise is not available or no config files are found.
+func CheckMiseTrust(dir string) ([]MiseTrustStatus, error) {
+	if _, err := exec.LookPath("mise"); err != nil {
+		return nil, nil
+	}
+
+	cmd := exec.Command("mise", "trust", "--show")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, nil
+	}
+
+	var statuses []MiseTrustStatus
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		idx := strings.LastIndex(line, ": ")
+		if idx == -1 {
+			continue
+		}
+		path := line[:idx]
+		status := line[idx+2:]
+		statuses = append(statuses, MiseTrustStatus{
+			Path:    path,
+			Trusted: status == "trusted",
+		})
+	}
+
+	return statuses, nil
+}
+
+// TrustMiseConfig runs `mise trust` for the given directory.
+func TrustMiseConfig(dir string) error {
+	cmd := exec.Command("mise", "trust")
+	cmd.Dir = dir
+	return cmd.Run()
 }
