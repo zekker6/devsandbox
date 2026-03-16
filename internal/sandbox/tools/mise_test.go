@@ -73,6 +73,16 @@ func TestMise_DockerBindings_NoCacheDirs(t *testing.T) {
 	}
 }
 
+// isolateMiseConfig points mise at empty config/data directories so tests
+// are not affected by host or CI mise settings (e.g. trusted_config_paths).
+func isolateMiseConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("MISE_CONFIG_DIR", t.TempDir())
+	t.Setenv("MISE_DATA_DIR", t.TempDir())
+	t.Setenv("MISE_TRUSTED_CONFIG_PATHS", "")
+	t.Setenv("MISE_YES", "")
+}
+
 func TestCheckMiseTrust_NoMise(t *testing.T) {
 	// If mise is not installed, CheckMiseTrust should return nil
 	if _, err := exec.LookPath("mise"); err != nil {
@@ -109,9 +119,9 @@ func TestCheckMiseTrust_UntrustedConfig(t *testing.T) {
 		t.Skip("mise not installed")
 	}
 
-	// Clear trust-related env vars to get consistent behavior in CI
-	t.Setenv("MISE_TRUSTED_CONFIG_PATHS", "")
-	t.Setenv("MISE_YES", "")
+	// Isolate mise from host config to get consistent trust behavior in CI.
+	// jdx/mise-action may configure trusted_config_paths in mise's settings file.
+	isolateMiseConfig(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mise.toml")
@@ -141,9 +151,8 @@ func TestTrustMiseConfig(t *testing.T) {
 		t.Skip("mise not installed")
 	}
 
-	// Clear trust-related env vars to get consistent behavior in CI
-	t.Setenv("MISE_TRUSTED_CONFIG_PATHS", "")
-	t.Setenv("MISE_YES", "")
+	// Isolate mise from host config to get consistent trust behavior in CI.
+	isolateMiseConfig(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mise.toml")

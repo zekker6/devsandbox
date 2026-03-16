@@ -10,6 +10,17 @@ import (
 	"testing"
 )
 
+// skipIfNoDocker skips the test if Docker is not installed or the daemon is not running.
+func skipIfNoDocker(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("Docker not installed")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("Docker daemon not running")
+	}
+}
+
 func TestDockerIsolator_Name(t *testing.T) {
 	iso := NewDockerIsolator(DockerConfig{})
 	if iso.Name() != BackendDocker {
@@ -82,10 +93,7 @@ func setupTestDockerfile(t *testing.T) string {
 }
 
 func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
@@ -134,10 +142,7 @@ func TestDockerIsolator_Build_BasicArgs(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithProxy(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
@@ -182,10 +187,7 @@ func TestDockerIsolator_Build_WithProxy(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{
@@ -218,10 +220,7 @@ func TestDockerIsolator_Build_WithResourceLimits(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_EnvFilesAlwaysHidden(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	// Create a temp project dir with .env files
 	projectDir := t.TempDir()
@@ -259,10 +258,7 @@ func TestDockerIsolator_Build_EnvFilesAlwaysHidden(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_WithCommand(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
@@ -288,10 +284,7 @@ func TestDockerIsolator_Build_WithCommand(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
@@ -320,10 +313,7 @@ func TestDockerIsolator_Build_BindingNotExists(t *testing.T) {
 }
 
 func TestDockerIsolator_Build_OptionalBindingNotExists(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
@@ -478,6 +468,7 @@ func TestDockerIsolator_containerName(t *testing.T) {
 }
 
 func TestDockerIsolator_getContainerState(t *testing.T) {
+	skipIfNoDocker(t)
 	iso := NewDockerIsolator(DockerConfig{})
 
 	// Non-existent container should return not exists
@@ -491,10 +482,7 @@ func TestDockerIsolator_getContainerState(t *testing.T) {
 }
 
 func TestDockerIsolator_BuildDocker_KeepContainer_Create(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	// Test that with KeepContainer=true and no existing container,
 	// the result is DockerActionCreate
@@ -550,10 +538,7 @@ func TestDockerIsolator_BuildDocker_KeepContainer_Create(t *testing.T) {
 }
 
 func TestDockerIsolator_BuildDocker_KeepContainer_Labels(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{
@@ -724,10 +709,7 @@ func TestDockerIsolator_ConfigHash_ChangesOnResourceLimits(t *testing.T) {
 }
 
 func TestDockerIsolator_BuildDocker_KeepContainer_ConfigHashLabel(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{
@@ -756,10 +738,7 @@ func TestDockerIsolator_BuildDocker_KeepContainer_ConfigHashLabel(t *testing.T) 
 }
 
 func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	configDir := setupTestDockerfile(t)
 	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
@@ -1151,10 +1130,7 @@ func TestBuildCommonArgs_EnvFilesNotHiddenWhenDisabled(t *testing.T) {
 }
 
 func TestGetToolBindings_DockerHostRemapped(t *testing.T) {
-	_, lookErr := exec.LookPath("docker")
-	if lookErr != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 	// Check if Docker socket exists
 	if _, err := os.Stat("/run/docker.sock"); err != nil {
 		t.Skip("Docker socket not available")

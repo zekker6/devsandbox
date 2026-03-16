@@ -8,6 +8,17 @@ import (
 	"testing"
 )
 
+// skipIfNoDocker skips the test if Docker is not installed or the daemon is not running.
+func skipIfNoDocker(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("Docker not installed")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("Docker daemon not running")
+	}
+}
+
 func TestListDockerSandboxes_NoDocker(t *testing.T) {
 	// Save original PATH and restore after test
 	// This test verifies behavior when docker is not available
@@ -66,34 +77,26 @@ func TestRemoveSandboxByType_Bwrap(t *testing.T) {
 }
 
 func TestRemoveSandboxByType_Docker(t *testing.T) {
+	skipIfNoDocker(t)
+
 	// Test that docker sandboxes use RemoveDockerContainer
 	m := &Metadata{
 		Isolation:   IsolationDocker,
 		SandboxRoot: "nonexistent-container",
 	}
 
-	// Skip if docker is not available
-	_, err := exec.LookPath("docker")
-	if err != nil {
-		t.Skip("Docker not installed")
-	}
-
 	// Should not panic or error — "No such container" is tolerated during cleanup
-	err = RemoveSandboxByType(m, false)
+	err := RemoveSandboxByType(m, false)
 	if err != nil {
 		t.Errorf("RemoveSandboxByType() should tolerate non-existent docker container: %v", err)
 	}
 }
 
 func TestRemoveContainerVolumes_NonExistent(t *testing.T) {
-	// Skip if docker is not available
-	_, err := exec.LookPath("docker")
-	if err != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	// Should handle non-existent container gracefully (no volumes to remove)
-	err = removeContainerVolumes("nonexistent-container-xyz")
+	err := removeContainerVolumes("nonexistent-container-xyz")
 	if err != nil {
 		t.Errorf("removeContainerVolumes() should handle non-existent container gracefully: %v", err)
 	}
@@ -163,11 +166,7 @@ func TestDockerContainerName(t *testing.T) {
 }
 
 func TestRemoveSandboxByType_DockerWithFilesystemPath(t *testing.T) {
-	// Skip if docker is not available
-	_, err := exec.LookPath("docker")
-	if err != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	// Create a temp directory to simulate a disk-listed Docker sandbox
 	tmpDir := t.TempDir()
@@ -184,8 +183,7 @@ func TestRemoveSandboxByType_DockerWithFilesystemPath(t *testing.T) {
 
 	// Should NOT fail — the Docker container doesn't exist but the disk
 	// directory should still be cleaned up.
-	err = RemoveSandboxByType(m, false)
-	if err != nil {
+	if err := RemoveSandboxByType(m, false); err != nil {
 		t.Errorf("RemoveSandboxByType() should succeed cleaning up disk dir even when container is gone: %v", err)
 	}
 
@@ -222,11 +220,7 @@ func TestRemoveSandboxByType_DockerWithUnknownProjectDir(t *testing.T) {
 }
 
 func TestGetContainerVolumes_NonExistent(t *testing.T) {
-	// Skip if docker is not available
-	_, err := exec.LookPath("docker")
-	if err != nil {
-		t.Skip("Docker not installed")
-	}
+	skipIfNoDocker(t)
 
 	// Non-existent container should return nil
 	volumes := GetContainerVolumes("nonexistent-container-xyz")
