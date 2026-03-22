@@ -257,3 +257,96 @@ func TestServerDynamicPortSelection(t *testing.T) {
 
 	t.Logf("Server 1 port: %d, Server 2 port: %d", server1.Port(), server2.Port())
 }
+
+func TestNewServer_NoMITM(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "proxy-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	cfg := NewConfig(tmpDir, 0)
+	cfg.MITM = false
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer with MITM=false failed: %v", err)
+	}
+
+	if server.ca != nil {
+		t.Error("CA should be nil when MITM is disabled")
+	}
+	if server.proxy == nil {
+		t.Error("proxy should still be created")
+	}
+}
+
+func TestServerHTTPS_NoMITM_Tunnels(t *testing.T) {
+	// Skip when running inside an environment with a transparent/system proxy.
+	// CONNECT tunnel mode uses raw TCP which gets intercepted by the outer proxy,
+	// causing the test to fail with EOF. MITM tests work because goproxy uses HTTP
+	// transport (which chains through the system proxy correctly).
+	if os.Getenv("HTTP_PROXY") != "" || os.Getenv("http_proxy") != "" {
+		t.Skip("skipping: CONNECT tunnel test cannot run behind a system proxy")
+	}
+
+	// Start a test HTTPS server
+	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "hello from TLS tunnel")
+	}))
+	defer testServer.Close()
+
+	// Start proxy with MITM disabled
+	tmpDir, err := os.MkdirTemp("", "proxy-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	cfg := NewConfig(tmpDir, 18083)
+	cfg.MITM = false
+
+	proxyServer, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer func() { _ = proxyServer.Stop() }()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Create HTTPS client that uses proxy — no proxy CA needed since MITM is off.
+	// InsecureSkipVerify is used because httptest.NewTLSServer uses a self-signed cert;
+	// the test verifies tunnel functionality, not certificate validation.
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // test only
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	// Make HTTPS request — should tunnel through without MITM
+	resp, err := client.Get(testServer.URL)
+	if err != nil {
+		t.Fatalf("HTTPS request through tunnel failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello from TLS tunnel" {
+		t.Errorf("unexpected body: %s", body)
+	}
+}

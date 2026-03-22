@@ -320,3 +320,41 @@ func Test_mergeConfigs_DockerDockerfileNotOverriddenByEmpty(t *testing.T) {
 		t.Errorf("expected dockerfile preserved from base, got %q", result.Sandbox.Docker.Dockerfile)
 	}
 }
+
+func Test_mergeConfigs_MITMOverlay(t *testing.T) {
+	base := &Config{
+		Proxy: ProxyConfig{
+			MITM: boolPtr(true),
+		},
+	}
+	overlay := &Config{
+		Proxy: ProxyConfig{
+			MITM: boolPtr(false),
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	if result.Proxy.IsMITMEnabled() {
+		t.Error("overlay MITM=false should override base MITM=true")
+	}
+}
+
+func Test_mergeConfigs_MITMNilNotOverride(t *testing.T) {
+	base := &Config{
+		Proxy: ProxyConfig{
+			MITM: boolPtr(false),
+		},
+	}
+	overlay := &Config{
+		Proxy: ProxyConfig{
+			// MITM: nil (not set)
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	if result.Proxy.IsMITMEnabled() {
+		t.Error("nil overlay should not override base MITM=false")
+	}
+}

@@ -66,6 +66,7 @@ Proxy Mode (--proxy):
 	rootCmd.Flags().Bool("info", false, "Show sandbox configuration")
 	rootCmd.Flags().Bool("proxy", false, "Enable proxy mode (route traffic through MITM proxy)")
 	rootCmd.Flags().Int("proxy-port", proxy.DefaultProxyPort, "Proxy server port")
+	rootCmd.Flags().Bool("no-mitm", false, "Disable HTTPS MITM interception (transparent CONNECT tunneling)")
 
 	// Tool flags
 	rootCmd.Flags().String("git-mode", "", "Override git tool mode for this session (readonly, readwrite, disabled)")
@@ -119,6 +120,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	showInfo, _ := cmd.Flags().GetBool("info")
 	proxyEnabled, _ := cmd.Flags().GetBool("proxy")
 	proxyPort, _ := cmd.Flags().GetInt("proxy-port")
+	noMITM, _ := cmd.Flags().GetBool("no-mitm")
 	filterDefault, _ := cmd.Flags().GetString("filter-default")
 	allowDomains, _ := cmd.Flags().GetStringSlice("allow-domain")
 	blockDomains, _ := cmd.Flags().GetStringSlice("block-domain")
@@ -190,6 +192,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	cfg.ProxyExtraEnv = appCfg.Proxy.ExtraEnv
 	cfg.ProxyExtraCAEnv = appCfg.Proxy.ExtraCAEnv
+	// MITM defaults to true; config file can set it; --no-mitm CLI flag overrides
+	cfg.ProxyMITM = appCfg.Proxy.IsMITMEnabled()
+	if cmd.Flags().Changed("no-mitm") && noMITM {
+		cfg.ProxyMITM = false
+	}
 	cfg.EnvPassthrough = appCfg.Sandbox.EnvPassthrough
 
 	// CLI override for git mode
@@ -272,6 +279,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	var proxyServer *proxy.Server
 	if cfg.ProxyEnabled {
 		pCfg := proxy.NewConfig(cfg.SandboxRoot, proxyPort)
+		pCfg.MITM = cfg.ProxyMITM
 		pCfg.Dispatcher = logDispatcher
 		pCfg.LogReceivers = appCfg.Logging.Receivers
 		pCfg.LogAttributes = appCfg.Logging.Attributes
@@ -297,7 +305,9 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		if proxyRes.port != proxyPort {
 			fmt.Fprintf(os.Stderr, "Note: Using port %d (requested port %d was busy)\n", proxyRes.port, proxyPort)
 		}
-		fmt.Fprintf(os.Stderr, "CA certificate: %s\n", proxyRes.caPath)
+		if cfg.ProxyMITM {
+			fmt.Fprintf(os.Stderr, "CA certificate: %s\n", proxyRes.caPath)
+		}
 
 		if pCfg.Filter != nil && pCfg.Filter.IsEnabled() {
 			if pCfg.Filter.DefaultAction == proxy.FilterActionAsk {
@@ -313,6 +323,19 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
 			fmt.Fprintf(os.Stderr, "Redaction: %d rules, default action: %s\n",
 				len(pCfg.Redaction.Rules), pCfg.Redaction.GetDefaultAction())
+		}
+
+		if !cfg.ProxyMITM {
+			fmt.Fprintf(os.Stderr, "MITM: disabled (transparent CONNECT tunneling)\n")
+			if len(pCfg.CredentialInjectors) > 0 {
+				fmt.Fprintf(os.Stderr, "WARN: MITM disabled — HTTPS credential injection will not work. Credentials are only injected for plain HTTP requests.\n")
+			}
+			if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
+				fmt.Fprintf(os.Stderr, "WARN: MITM disabled — HTTPS request bodies and headers cannot be inspected for secrets. Redaction only applies to plain HTTP requests.\n")
+			}
+			if pCfg.Filter != nil && pCfg.Filter.IsEnabled() {
+				fmt.Fprintf(os.Stderr, "WARN: MITM disabled — HTTPS request filtering is limited to host-level matching. Path/header/body matching only works for plain HTTP.\n")
+			}
 		}
 	}
 
@@ -333,7 +356,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Build RunConfig and delegate to the isolator
 	var proxyCAPath string
-	if proxyRes != nil {
+	if proxyRes != nil && cfg.ProxyMITM {
 		proxyCAPath = proxyRes.caPath
 	}
 
@@ -391,7 +414,11 @@ func printInfo(cfg *sandbox.Config) {
 		fmt.Println("Proxy Mode:")
 		fmt.Printf("  Port:     %d\n", cfg.ProxyPort)
 		fmt.Printf("  Log Dir:  %s/logs/proxy/\n", cfg.SandboxRoot)
-		fmt.Printf("  CA Path:  %s\n", cfg.ProxyCAPath)
+		if cfg.ProxyMITM {
+			fmt.Printf("  CA Path:  %s\n", cfg.ProxyCAPath)
+		} else {
+			fmt.Println("  MITM:     disabled (transparent CONNECT tunneling)")
+		}
 		fmt.Printf("  Gateway:  %s\n", cfg.GatewayIP)
 	}
 

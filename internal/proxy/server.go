@@ -83,9 +83,13 @@ func validateCredentialRedactionConflicts(injectors []CredentialInjector, engine
 }
 
 func NewServer(cfg *Config) (*Server, error) {
-	ca, err := LoadOrCreateCA(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load/create CA: %w", err)
+	var ca *CA
+	if cfg.MITM {
+		var err error
+		ca, err = LoadOrCreateCA(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load/create CA: %w", err)
+		}
 	}
 
 	proxy := goproxy.NewProxyHttpServer()
@@ -190,7 +194,15 @@ func NewServer(cfg *Config) (*Server, error) {
 }
 
 func (s *Server) setupMITM() {
-	// Configure MITM for all HTTPS connections
+	if !s.config.MITM {
+		// Transparent mode: tunnel CONNECT requests without interception
+		s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			return goproxy.OkConnect, host
+		})
+		return
+	}
+
+	// MITM mode: intercept all HTTPS connections
 	s.proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 
 	// Set up certificate generation

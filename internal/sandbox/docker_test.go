@@ -8,7 +8,8 @@ import (
 	"testing"
 )
 
-// skipIfNoDocker skips the test if Docker is not installed or the daemon is not running.
+// skipIfNoDocker skips the test if Docker is not installed, the daemon is not running,
+// or write operations are blocked (e.g., inside a devsandbox with Docker proxy).
 func skipIfNoDocker(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
@@ -16,6 +17,16 @@ func skipIfNoDocker(t *testing.T) {
 	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skip("Docker daemon not running")
+	}
+	// Verify write operations work (sandbox Docker proxy may block them)
+	out, err := exec.Command("docker", "create", "--name", "devsandbox-docker-test-probe", "hello-world").CombinedOutput()
+	if err != nil {
+		outStr := string(out)
+		if strings.Contains(outStr, "blocked") || strings.Contains(outStr, "connection reset") {
+			t.Skip("Docker write operations blocked (running inside sandbox)")
+		}
+	} else {
+		_ = exec.Command("docker", "rm", "devsandbox-docker-test-probe").Run()
 	}
 }
 

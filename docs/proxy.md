@@ -67,6 +67,40 @@ enabled = true
 port = 8080
 ```
 
+## Transparent Proxy Mode (No MITM)
+
+By default, the proxy performs MITM (Man-in-the-Middle) interception on HTTPS connections, using a generated CA certificate. This enables full traffic inspection, credential injection, and content redaction for HTTPS.
+
+If you don't need HTTPS inspection — for example, when tools have certificate pinning or you only need network isolation with HTTP logging — you can disable MITM:
+
+### Command Line
+
+```bash
+devsandbox --proxy --no-mitm
+```
+
+### Configuration File
+
+```toml
+[proxy]
+enabled = true
+mitm = false
+```
+
+### What Changes
+
+| Feature | MITM enabled (default) | MITM disabled |
+|---------|----------------------|---------------|
+| HTTP filtering/logging | Full | Full |
+| HTTPS body/header inspection | Full | None |
+| HTTPS credential injection | Works | Does not work |
+| HTTPS content redaction | Works | Does not work |
+| HTTPS request logging | Full request/response | CONNECT hostname only |
+| CA certificate injection | Yes | Skipped |
+| Network isolation | Yes | Yes |
+
+When MITM is disabled, the proxy logs warnings at startup if credential injectors, redaction rules, or filter rules are configured — since these features cannot inspect encrypted HTTPS traffic.
+
 ## Backend-Specific Behavior
 
 The proxy achieves the same goal on both backends — intercept and log HTTP/HTTPS traffic — but the underlying mechanisms differ.

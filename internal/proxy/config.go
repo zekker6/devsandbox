@@ -29,6 +29,7 @@ const (
 
 type Config struct {
 	Enabled        bool
+	MITM           bool // When false, CONNECT requests are tunneled without TLS interception. Default: true.
 	Port           int
 	BindAddress    string // IP to bind to (default "127.0.0.1"). For Docker, use DockerBridgeIP().
 	SandboxBase    string // Root directory for this sandbox instance
@@ -68,6 +69,7 @@ func NewConfig(sandboxBase string, port int) *Config {
 	logBase := filepath.Join(sandboxBase, LogBaseDirName)
 	return &Config{
 		Enabled:        true,
+		MITM:           true,
 		Port:           port,
 		SandboxBase:    sandboxBase,
 		CADir:          caDir,

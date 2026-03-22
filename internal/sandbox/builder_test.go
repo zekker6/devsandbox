@@ -674,6 +674,7 @@ func TestBuilderErr(t *testing.T) {
 func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
 	cfg := &Config{
 		ProxyEnabled: true,
+		ProxyMITM:    true,
 		ProxyPort:    8080,
 		GatewayIP:    "10.0.2.2",
 	}
@@ -713,6 +714,7 @@ func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
 func TestBuilder_AddProxyEnvironment_ExtraCAEnv(t *testing.T) {
 	cfg := &Config{
 		ProxyEnabled:    true,
+		ProxyMITM:       true,
 		ProxyPort:       8080,
 		GatewayIP:       "10.0.2.2",
 		ProxyExtraCAEnv: []string{"MY_CA_BUNDLE", "CUSTOM_SSL_CERT"},
@@ -741,6 +743,7 @@ func TestBuilder_AddProxyEnvironment_ExtraCAEnv(t *testing.T) {
 func TestBuilder_AddProxyEnvironment_ExtraEnv(t *testing.T) {
 	cfg := &Config{
 		ProxyEnabled:  true,
+		ProxyMITM:     true,
 		ProxyPort:     9090,
 		GatewayIP:     "10.0.2.2",
 		ProxyExtraEnv: []string{"MY_CUSTOM_PROXY", "ANOTHER_PROXY"},
@@ -789,5 +792,65 @@ func TestBuilder_AddEnvironment_EnvPassthrough(t *testing.T) {
 	}
 	if strings.Contains(argsStr, "PASSTHROUGH_UNSET") {
 		t.Error("PASSTHROUGH_UNSET should not appear (not set on host)")
+	}
+}
+
+func TestBuilder_AddProxyEnvironment_NoMITM(t *testing.T) {
+	cfg := &Config{
+		ProxyEnabled: true,
+		ProxyMITM:    false,
+		ProxyPort:    8080,
+		GatewayIP:    "10.0.2.2",
+	}
+
+	b := NewBuilder(cfg)
+	b.AddProxyEnvironment()
+
+	args := b.Build()
+	joined := strings.Join(args, " ")
+
+	// Should still have proxy env vars
+	if !strings.Contains(joined, "--setenv HTTP_PROXY http://10.0.2.2:8080") {
+		t.Error("expected HTTP_PROXY to be set")
+	}
+	if !strings.Contains(joined, "--setenv DEVSANDBOX_PROXY 1") {
+		t.Error("expected DEVSANDBOX_PROXY to be set")
+	}
+
+	// Should NOT have CA cert env vars
+	if strings.Contains(joined, "NODE_EXTRA_CA_CERTS") {
+		t.Error("NODE_EXTRA_CA_CERTS should not be set when MITM is disabled")
+	}
+	if strings.Contains(joined, "SSL_CERT_FILE") {
+		t.Error("SSL_CERT_FILE should not be set when MITM is disabled")
+	}
+	if strings.Contains(joined, "CURL_CA_BUNDLE") {
+		t.Error("CURL_CA_BUNDLE should not be set when MITM is disabled")
+	}
+	if strings.Contains(joined, "GIT_SSL_CAINFO") {
+		t.Error("GIT_SSL_CAINFO should not be set when MITM is disabled")
+	}
+	if strings.Contains(joined, "REQUESTS_CA_BUNDLE") {
+		t.Error("REQUESTS_CA_BUNDLE should not be set when MITM is disabled")
+	}
+}
+
+func TestBuilder_AddProxyEnvironment_NoMITM_SkipsExtraCAEnv(t *testing.T) {
+	cfg := &Config{
+		ProxyEnabled:    true,
+		ProxyMITM:       false,
+		ProxyPort:       8080,
+		GatewayIP:       "10.0.2.2",
+		ProxyExtraCAEnv: []string{"MY_TOOL_CA_BUNDLE"},
+	}
+
+	b := NewBuilder(cfg)
+	b.AddProxyEnvironment()
+
+	args := b.Build()
+	joined := strings.Join(args, " ")
+
+	if strings.Contains(joined, "MY_TOOL_CA_BUNDLE") {
+		t.Error("extra CA env vars should not be set when MITM is disabled")
 	}
 }

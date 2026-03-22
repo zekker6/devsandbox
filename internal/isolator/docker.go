@@ -272,8 +272,8 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		HideEnvFiles:    sandboxCfg.HideEnvFiles,
 	}
 
-	// Add CA path if proxy is enabled
-	if sandboxCfg.ProxyEnabled && cfg.ProxyServer != nil {
+	// Add CA path if proxy is enabled and MITM generated a CA
+	if sandboxCfg.ProxyEnabled && cfg.ProxyServer != nil && cfg.ProxyServer.CA() != nil {
 		isoCfg.ProxyCAPath = cfg.ProxyServer.Config().CACertPath
 	}
 

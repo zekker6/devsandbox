@@ -55,6 +55,11 @@ type ProxyConfig struct {
 	// Uses pointer to distinguish between unset (nil) and explicit false.
 	Enabled *bool `toml:"enabled"`
 
+	// MITM enables HTTPS Man-in-the-Middle interception.
+	// When false, HTTPS connections are tunneled through without decryption.
+	// Default: true (nil = enabled).
+	MITM *bool `toml:"mitm"`
+
 	// Port is the default proxy server port.
 	Port int `toml:"port"`
 
@@ -87,6 +92,14 @@ func (p ProxyConfig) IsEnabled() bool {
 		return false
 	}
 	return *p.Enabled
+}
+
+// IsMITMEnabled returns whether MITM is enabled (defaults to true).
+func (p ProxyConfig) IsMITMEnabled() bool {
+	if p.MITM == nil {
+		return true
+	}
+	return *p.MITM
 }
 
 // ProxyFilterConfig contains HTTP filtering settings.
@@ -779,6 +792,13 @@ enabled = false
 
 # Default proxy server port
 port = 8080
+
+# MITM (Man-in-the-Middle) HTTPS interception.
+# When true (default), the proxy intercepts HTTPS connections using a generated CA certificate.
+# When false, HTTPS connections are tunneled through without decryption (transparent proxy).
+# Disabling MITM means credential injection, content redaction, and request filtering
+# will not work for HTTPS traffic — only for plain HTTP.
+# mitm = true
 
 # Additional environment variables set to the proxy URL when proxy is active.
 # Built-in vars (always set): HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy,

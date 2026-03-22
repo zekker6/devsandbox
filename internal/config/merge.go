@@ -19,6 +19,9 @@ func mergeConfigs(base, overlay *Config) *Config {
 	if overlay.Proxy.Enabled != nil {
 		result.Proxy.Enabled = overlay.Proxy.Enabled
 	}
+	if overlay.Proxy.MITM != nil {
+		result.Proxy.MITM = overlay.Proxy.MITM
+	}
 	if overlay.Proxy.Port != 0 {
 		result.Proxy.Port = overlay.Proxy.Port
 	}

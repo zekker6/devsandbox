@@ -45,6 +45,7 @@ type Config struct {
 	ProxyEnabled bool
 	ProxyPort    int
 	ProxyCAPath  string
+	ProxyMITM    bool
 	GatewayIP    string
 	// ProxyExtraEnv is a list of additional env var names set to the proxy URL.
 	ProxyExtraEnv []string

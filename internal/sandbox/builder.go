@@ -957,18 +957,20 @@ func (b *Builder) AddProxyEnvironment() *Builder {
 		b.SetEnv(name, proxyURL)
 	}
 
-	// CA certificate path for various tools
-	// We use /tmp because /etc/ssl is mounted read-only from host
-	caCertPath := "/tmp/devsandbox-ca.crt"
-	b.SetEnv("REQUESTS_CA_BUNDLE", caCertPath)
-	b.SetEnv("NODE_EXTRA_CA_CERTS", caCertPath)
-	b.SetEnv("CURL_CA_BUNDLE", caCertPath)
-	b.SetEnv("GIT_SSL_CAINFO", caCertPath)
-	b.SetEnv("SSL_CERT_FILE", caCertPath)
+	// CA certificate path for various tools (only when MITM is enabled)
+	if b.cfg.ProxyMITM {
+		// We use /tmp because /etc/ssl is mounted read-only from host
+		caCertPath := "/tmp/devsandbox-ca.crt"
+		b.SetEnv("REQUESTS_CA_BUNDLE", caCertPath)
+		b.SetEnv("NODE_EXTRA_CA_CERTS", caCertPath)
+		b.SetEnv("CURL_CA_BUNDLE", caCertPath)
+		b.SetEnv("GIT_SSL_CAINFO", caCertPath)
+		b.SetEnv("SSL_CERT_FILE", caCertPath)
 
-	// User-defined extra CA bundle env vars from config
-	for _, name := range b.cfg.ProxyExtraCAEnv {
-		b.SetEnv(name, caCertPath)
+		// User-defined extra CA bundle env vars from config
+		for _, name := range b.cfg.ProxyExtraCAEnv {
+			b.SetEnv(name, caCertPath)
+		}
 	}
 
 	b.SetEnv("DEVSANDBOX_PROXY", "1")
