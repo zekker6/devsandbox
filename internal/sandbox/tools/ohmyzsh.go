@@ -32,11 +32,7 @@ func (o *OhMyZsh) Bindings(homeDir, sandboxHome string) []Binding {
 
 	bindings := []Binding{
 		// Oh-my-zsh installation
-		{
-			Source:   filepath.Join(homeDir, ".oh-my-zsh"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".oh-my-zsh"), Category: CategoryData, Optional: true},
 	}
 
 	// Use sandbox custom dir if setup ran successfully
@@ -44,7 +40,7 @@ func (o *OhMyZsh) Bindings(homeDir, sandboxHome string) []Binding {
 		bindings = append(bindings, Binding{
 			Source:   sandboxCustom,
 			Dest:     filepath.Join(homeDir, ".oh-my-zsh", "custom"),
-			ReadOnly: true,
+			Category: CategoryData,
 			Optional: true,
 		})
 	}

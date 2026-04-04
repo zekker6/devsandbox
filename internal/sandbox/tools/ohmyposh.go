@@ -50,16 +50,8 @@ func (o *OhMyPosh) Available(homeDir string) bool {
 
 func (o *OhMyPosh) Bindings(homeDir, sandboxHome string) []Binding {
 	return []Binding{
-		{
-			Source:   filepath.Join(homeDir, ".config", "ohmyposh"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".poshthemes"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".config", "ohmyposh"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".poshthemes"), Category: CategoryData, Optional: true},
 	}
 }
 

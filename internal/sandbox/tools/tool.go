@@ -21,12 +21,32 @@ const (
 	MountTmpOverlay MountType = "tmpoverlay"
 )
 
+// BindingCategory classifies what a binding represents for mount mode policy.
+type BindingCategory string
+
+const (
+	// CategoryConfig is for configuration files and directories (~/.config/*, dotfiles).
+	CategoryConfig BindingCategory = "config"
+	// CategoryCache is for cache directories (~/.cache/*).
+	CategoryCache BindingCategory = "cache"
+	// CategoryData is for data directories (~/.local/share/*).
+	CategoryData BindingCategory = "data"
+	// CategoryState is for state directories (~/.local/state/*).
+	CategoryState BindingCategory = "state"
+	// CategoryRuntime is for runtime files (XDG_RUNTIME_DIR, sockets).
+	CategoryRuntime BindingCategory = "runtime"
+)
+
 // Binding represents a filesystem binding for bwrap.
 type Binding struct {
 	Source   string // Host path (lower layer for overlays)
 	Dest     string // Container path (defaults to Source if empty)
 	ReadOnly bool   // Mount as read-only (only for bind mounts)
 	Optional bool   // Skip if source doesn't exist
+
+	// Category classifies this binding for mount mode policy resolution.
+	// Empty defaults to CategoryConfig (safest — gets tmpoverlay under split policy).
+	Category BindingCategory
 
 	// Type specifies how to mount (bind, overlay, tmpoverlay).
 	// Defaults to MountBind if empty.
@@ -105,8 +125,8 @@ type ToolWithCheck interface {
 
 // GlobalConfig contains global settings that tools may need.
 type GlobalConfig struct {
-	// OverlayEnabled indicates if overlays are globally enabled.
-	OverlayEnabled bool
+	// DefaultMountMode is the global mount mode for tool bindings.
+	DefaultMountMode string
 
 	// ProjectDir is the current project directory (where .git may reside).
 	ProjectDir string

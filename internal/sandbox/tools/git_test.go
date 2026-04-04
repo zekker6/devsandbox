@@ -92,20 +92,24 @@ func TestGit_Bindings_ReadOnly_NoProject(t *testing.T) {
 		t.Errorf("expected dest %q, got %q", expectedDest, b.Dest)
 	}
 
-	if !b.ReadOnly {
-		t.Error("expected binding to be read-only")
-	}
-
 	if !b.Optional {
 		t.Error("expected binding to be optional")
+	}
+
+	if b.Category != CategoryConfig {
+		t.Errorf("expected category %q, got %q", CategoryConfig, b.Category)
 	}
 }
 
 func TestGit_Bindings_ReadOnly_WithGitDir(t *testing.T) {
-	// Create a temp project with .git directory
+	// Create a temp project with .git directory and config file
 	tmpDir := t.TempDir()
 	gitDir := filepath.Join(tmpDir, ".git")
 	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitConfig := filepath.Join(gitDir, "config")
+	if err := os.WriteFile(gitConfig, []byte("[remote \"origin\"]\n\turl = https://ghp_secret@github.com/user/repo.git\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -114,9 +118,10 @@ func TestGit_Bindings_ReadOnly_WithGitDir(t *testing.T) {
 
 	bindings := g.Bindings("/home/user", "/sandbox/home")
 
-	// With projectDir containing .git, should have 2 bindings
-	if len(bindings) != 2 {
-		t.Fatalf("expected 2 bindings for readonly mode with .git, got %d", len(bindings))
+	// With projectDir containing .git + config, should have 3 bindings:
+	// gitconfig.safe, .git (ro), .git/config (hidden with /dev/null)
+	if len(bindings) != 3 {
+		t.Fatalf("expected 3 bindings for readonly mode with .git, got %d", len(bindings))
 	}
 
 	// Find the .git binding
@@ -136,8 +141,37 @@ func TestGit_Bindings_ReadOnly_WithGitDir(t *testing.T) {
 		t.Error(".git binding should be read-only in readonly mode")
 	}
 
+	if gitBinding.Type != MountBind {
+		t.Errorf(".git binding should have explicit Type=MountBind, got %q", gitBinding.Type)
+	}
+
+	if gitBinding.Category != CategoryConfig {
+		t.Errorf(".git binding: expected category %q, got %q", CategoryConfig, gitBinding.Category)
+	}
+
 	if gitBinding.Optional {
 		t.Error(".git binding should not be optional")
+	}
+
+	// Find the .git/config hidden binding
+	var configBinding *Binding
+	for i := range bindings {
+		if bindings[i].Source == "/dev/null" && bindings[i].Dest == gitConfig {
+			configBinding = &bindings[i]
+			break
+		}
+	}
+
+	if configBinding == nil {
+		t.Fatal("expected .git/config hidden binding (overlaid with /dev/null)")
+	}
+
+	if configBinding.Type != MountBind {
+		t.Errorf(".git/config binding should have Type=MountBind, got %q", configBinding.Type)
+	}
+
+	if !configBinding.ReadOnly {
+		t.Error(".git/config binding should be read-only")
 	}
 }
 
@@ -152,28 +186,30 @@ func TestGit_Bindings_ReadWrite(t *testing.T) {
 	}
 
 	// Check expected bindings exist
-	expectedBindings := map[string]struct {
-		readOnly bool
-	}{
-		"/home/user/.gitconfig":       {readOnly: false}, // gitconfig is writable
-		"/home/user/.git-credentials": {readOnly: true},
-		"/home/user/.ssh":             {readOnly: true},
-		"/home/user/.gnupg":           {readOnly: true},
+	expectedSources := map[string]bool{
+		"/home/user/.gitconfig":       true,
+		"/home/user/.git-credentials": true,
+		"/home/user/.ssh":             true,
+		"/home/user/.gnupg":           true,
 	}
 
 	for _, b := range bindings {
-		expected, ok := expectedBindings[b.Source]
-		if !ok {
+		if !expectedSources[b.Source] {
 			t.Errorf("unexpected binding source: %s", b.Source)
 			continue
 		}
 
-		if b.ReadOnly != expected.readOnly {
-			t.Errorf("binding %s: expected readOnly=%v, got %v", b.Source, expected.readOnly, b.ReadOnly)
+		if b.Category != CategoryConfig {
+			t.Errorf("binding %s: expected category %q, got %q", b.Source, CategoryConfig, b.Category)
 		}
 
 		if !b.Optional {
 			t.Errorf("binding %s: expected optional=true", b.Source)
+		}
+
+		// ReadOnly is not set by the tool — the builder resolves it via mount mode
+		if b.ReadOnly {
+			t.Errorf("binding %s: ReadOnly should not be set by tool (builder resolves it)", b.Source)
 		}
 	}
 }
@@ -535,4 +571,34 @@ func TestGit_ShellInit(t *testing.T) {
 	if g.ShellInit("fish") != "" {
 		t.Error("expected empty shell init")
 	}
+}
+
+func TestGit_Bindings_Categories(t *testing.T) {
+	t.Run("readonly mode", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		sandboxHome := t.TempDir()
+		if err := os.WriteFile(filepath.Join(sandboxHome, ".gitconfig.safe"), []byte("[user]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		g := &Git{mode: GitModeReadOnly, projectDir: ""}
+		bindings := g.Bindings(tmpDir, sandboxHome)
+
+		for _, b := range bindings {
+			if b.Category != CategoryConfig {
+				t.Errorf("binding %s: Category = %q, want %q", b.Source, b.Category, CategoryConfig)
+			}
+		}
+	})
+
+	t.Run("readwrite mode", func(t *testing.T) {
+		g := &Git{mode: GitModeReadWrite}
+		bindings := g.Bindings("/home/test", "/tmp/sandbox")
+
+		for _, b := range bindings {
+			if b.Category != CategoryConfig {
+				t.Errorf("binding %s: Category = %q, want %q", b.Source, b.Category, CategoryConfig)
+			}
+		}
+	})
 }

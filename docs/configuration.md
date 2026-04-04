@@ -461,14 +461,28 @@ Inside sandbox, connect to `10.0.2.2:5432` (pasta gateway IP on Linux) or `host.
 
 ### Overlay Settings
 
-Global overlayfs settings:
+Global overlayfs settings control the default mount mode for all tool bindings:
 
 ```toml
 [overlay]
-# Master switch for overlay filesystem support
-# When disabled, all tools use read-only bind mounts
-enabled = true
+# Default mount mode for tool bindings.
+# Accepted values: "split" (default), "overlay", "tmpoverlay", "readonly", "readwrite"
+#
+# split        - configs → tmpoverlay (discarded on exit); caches/data/state → persistent overlay
+# overlay      - all bindings → persistent overlay (writes saved to sandbox home)
+# tmpoverlay   - all bindings → tmpoverlay (writes discarded on sandbox exit)
+# readonly     - all bindings → read-only bind mount to host
+# readwrite    - all bindings → read-write bind mount to host
+default = "split"
 ```
+
+#### Why `split` Is the Default (Supply Chain Security)
+
+The `split` default protects your host from malicious packages installed inside the sandbox. A compromised package running under a sandboxed package manager (npm, pip, cargo, mise, etc.) could attempt to poison your host configs — for example, injecting a backdoor into `~/.gitconfig`, `~/.npmrc`, or shell startup files.
+
+With `split`, config directories are mounted via `tmpoverlay`: any writes to them are discarded when the sandbox exits. Caches, data, and state directories use a persistent overlay so tool installations survive across sessions without touching your real host paths. Your host config files are never modified by sandboxed processes.
+
+Use a broader mode only when you explicitly trust the project and need write-through to the host.
 
 ### Tool-Specific Configuration
 
@@ -483,6 +497,10 @@ Each tool can have its own configuration section under `[tools.<name>]`.
 # - "readwrite": full access with credentials, SSH keys, GPG keys
 # - "disabled": no git configuration (git commands work without user config)
 mode = "readonly"
+
+# Override the global [overlay] default for this tool's bindings (optional).
+# Accepted values: "split", "overlay", "tmpoverlay", "readonly", "readwrite"
+# mount_mode = "readwrite"
 ```
 
 **Mode Details:**
@@ -496,18 +514,36 @@ mode = "readonly"
 In `readwrite` mode, SSH and GPG directories are mounted read-only to protect private keys
 while still allowing git operations that need them.
 
+#### Per-Tool Mount Mode Override
+
+Each tool supports a `mount_mode` field that overrides the global `[overlay] default` for that tool's bindings:
+
+```toml
+[tools.git]
+mount_mode = "readwrite"  # Override global default for this tool
+
+[tools.claude]
+mount_mode = "disabled"   # Don't mount any claude config into the sandbox
+```
+
+Valid per-tool values: `split`, `overlay`, `tmpoverlay`, `readonly`, `readwrite`, `disabled`.
+
+The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely — the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox.
+
 #### Mise
 
 ```toml
 [tools.mise]
-# Allow mise to install/update tools via overlayfs
-# When enabled, mise directories are mounted with a writable overlay layer
-writable = false
-
-# Persist mise changes across sandbox sessions
-# When false: changes are discarded when sandbox exits (safer)
-# When true: changes are stored in ~/.local/share/devsandbox/<project>/overlay/
-persistent = false
+# Override the global [overlay] default for mise's bindings (optional).
+# Accepted values: "split", "overlay", "tmpoverlay", "readonly", "readwrite"
+#
+# The global default ("split") is recommended: mise data/cache directories use a
+# persistent overlay so installed tools survive across sessions, while mise config
+# files are protected via tmpoverlay.
+#
+# Set to "overlay" to persist all mise state (config + data) across sessions.
+# Set to "tmpoverlay" to discard all mise state on sandbox exit.
+# mount_mode = "overlay"
 ```
 
 #### Docker
@@ -743,18 +779,15 @@ name = "anthropic-key"
 env = "ANTHROPIC_API_KEY"
 
 [overlay]
-# Master switch for overlay filesystem support
-enabled = true
+# Default mount mode for all tool bindings (split is the secure default)
+default = "split"
 
 [tools.git]
 # Use readonly mode for most projects
 mode = "readonly"
 
 [tools.mise]
-# Allow mise to install tools inside sandbox
-writable = true
-# Don't persist changes (safer default)
-persistent = false
+# Use default mount mode (split): mise data persists, config files are protected
 
 [port_forwarding]
 # Enable port forwarding for dev server access

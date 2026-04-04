@@ -10,7 +10,9 @@ import (
 // createOverlayDirs creates upper and work directories for an overlay mount.
 // Returns the paths to upper and work directories.
 // subdir is an optional subdirectory under "overlay/" (e.g., "custom").
-func createOverlayDirs(sandboxHome, dest, subdir string) (upper, work string, err error) {
+// sessionID, when non-empty, routes the overlay under "overlay/sessions/<sessionID>/[subdir/]<safePath>"
+// instead of the default "overlay/[subdir/]<safePath>".
+func createOverlayDirs(sandboxHome, dest, subdir, sessionID string) (upper, work string, err error) {
 	cleanDest := filepath.Clean(dest)
 
 	if !filepath.IsAbs(cleanDest) {
@@ -30,7 +32,13 @@ func createOverlayDirs(sandboxHome, dest, subdir string) (upper, work string, er
 
 	// Build overlay directory path
 	var overlayDir string
-	if subdir != "" {
+	if sessionID != "" {
+		if subdir != "" {
+			overlayDir = filepath.Join(sandboxHome, "overlay", "sessions", sessionID, subdir, safePath)
+		} else {
+			overlayDir = filepath.Join(sandboxHome, "overlay", "sessions", sessionID, safePath)
+		}
+	} else if subdir != "" {
 		overlayDir = filepath.Join(sandboxHome, "overlay", subdir, safePath)
 	} else {
 		overlayDir = filepath.Join(sandboxHome, "overlay", safePath)
@@ -47,4 +55,16 @@ func createOverlayDirs(sandboxHome, dest, subdir string) (upper, work string, er
 	}
 
 	return upper, work, nil
+}
+
+// persistentOverlayUpperDir returns the path to the primary session's persistent
+// upper directory for a given overlay destination. Does not create any directories.
+func persistentOverlayUpperDir(sandboxHome, dest, subdir string) string {
+	cleanDest := filepath.Clean(dest)
+	safePath := strings.ReplaceAll(strings.TrimPrefix(cleanDest, "/"), "/", "_")
+
+	if subdir != "" {
+		return filepath.Join(sandboxHome, "overlay", subdir, safePath, "upper")
+	}
+	return filepath.Join(sandboxHome, "overlay", safePath, "upper")
 }

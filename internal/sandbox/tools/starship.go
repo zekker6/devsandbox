@@ -40,7 +40,7 @@ func (s *Starship) Bindings(homeDir, sandboxHome string) []Binding {
 		{
 			Source:   sandboxStarshipConfig,
 			Dest:     starshipConfig,
-			ReadOnly: true,
+			Category: CategoryConfig,
 			Optional: true, // Might not exist if setup failed
 		},
 	}

@@ -178,12 +178,16 @@ func (p *Portal) Bindings(homeDir, sandboxHome string) []Binding {
 		{
 			Source:   proxyDir,
 			Dest:     dest,
+			Type:     MountBind,
+			Category: CategoryRuntime,
 			ReadOnly: true,
 			Optional: true,
 		},
 		{
 			Source:   flatpakInfoSrc,
 			Dest:     "/.flatpak-info",
+			Type:     MountBind,
+			Category: CategoryRuntime,
 			ReadOnly: true,
 			Optional: true,
 		},

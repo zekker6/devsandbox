@@ -44,25 +44,25 @@ func (o *OpenCode) Bindings(homeDir, sandboxHome string) []Binding {
 		// OpenCode configuration
 		{
 			Source:   filepath.Join(homeDir, ".config", "opencode"),
-			ReadOnly: false,
+			Category: CategoryConfig,
 			Optional: true,
 		},
 		// OpenCode data
 		{
 			Source:   filepath.Join(homeDir, ".local", "share", "opencode"),
-			ReadOnly: false,
+			Category: CategoryData,
 			Optional: true,
 		},
 		// OpenCode cache
 		{
 			Source:   filepath.Join(homeDir, ".cache", "opencode"),
-			ReadOnly: false,
+			Category: CategoryCache,
 			Optional: true,
 		},
 		// Oh-my-opencode cache
 		{
 			Source:   filepath.Join(homeDir, ".cache", "oh-my-opencode"),
-			ReadOnly: false,
+			Category: CategoryCache,
 			Optional: true,
 		},
 	}

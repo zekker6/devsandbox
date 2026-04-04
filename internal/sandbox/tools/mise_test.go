@@ -71,6 +71,37 @@ func TestMise_DockerBindings_NoCacheDirs(t *testing.T) {
 	}
 }
 
+func TestMise_Bindings_Categories(t *testing.T) {
+	m := &Mise{}
+	bindings := m.Bindings("/home/test", "/tmp/sandbox")
+
+	expected := map[string]BindingCategory{
+		"/home/test/.local/bin":        CategoryData,
+		"/home/test/.config/mise":      CategoryConfig,
+		"/home/test/.local/share/mise": CategoryData,
+		"/home/test/.cache/mise":       CategoryCache,
+		"/home/test/.local/state/mise": CategoryState,
+	}
+
+	for _, b := range bindings {
+		want, ok := expected[b.Source]
+		if !ok {
+			t.Errorf("unexpected binding source: %s", b.Source)
+			continue
+		}
+		if b.Category != want {
+			t.Errorf("binding %s: Category = %q, want %q", b.Source, b.Category, want)
+		}
+		if b.Type != "" {
+			t.Errorf("binding %s: Type should be empty, got %q", b.Source, b.Type)
+		}
+		delete(expected, b.Source)
+	}
+	for src := range expected {
+		t.Errorf("missing binding for %s", src)
+	}
+}
+
 func TestCheckMiseTrust_NoMise(t *testing.T) {
 	// If mise is not installed, CheckMiseTrust should return nil
 	if _, err := exec.LookPath("mise"); err != nil {

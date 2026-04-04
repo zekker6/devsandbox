@@ -48,16 +48,8 @@ func (t *Tmux) Bindings(homeDir, sandboxHome string) []Binding {
 
 	bindings := []Binding{
 		// Tmux plugins (tpm)
-		{
-			Source:   filepath.Join(homeDir, ".tmux", "plugins"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".config", "tmux", "plugins"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".tmux", "plugins"), Category: CategoryData, Optional: true},
+		{Source: filepath.Join(homeDir, ".config", "tmux", "plugins"), Category: CategoryData, Optional: true},
 	}
 
 	// Use sandbox tmux config if setup ran successfully
@@ -65,22 +57,14 @@ func (t *Tmux) Bindings(homeDir, sandboxHome string) []Binding {
 		bindings = append(bindings, Binding{
 			Source:   sandboxTmuxConf,
 			Dest:     filepath.Join(homeDir, ".tmux.conf"),
-			ReadOnly: true,
+			Category: CategoryConfig,
 			Optional: true,
 		})
 	} else {
 		// Fall back to original configs
 		bindings = append(bindings,
-			Binding{
-				Source:   filepath.Join(homeDir, ".tmux.conf"),
-				ReadOnly: true,
-				Optional: true,
-			},
-			Binding{
-				Source:   filepath.Join(homeDir, ".config", "tmux", "tmux.conf"),
-				ReadOnly: true,
-				Optional: true,
-			},
+			Binding{Source: filepath.Join(homeDir, ".tmux.conf"), Category: CategoryConfig, Optional: true},
+			Binding{Source: filepath.Join(homeDir, ".config", "tmux", "tmux.conf"), Category: CategoryConfig, Optional: true},
 		)
 	}
 

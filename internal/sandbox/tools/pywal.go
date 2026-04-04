@@ -30,11 +30,7 @@ func (p *Pywal) Available(homeDir string) bool {
 
 func (p *Pywal) Bindings(homeDir, sandboxHome string) []Binding {
 	return []Binding{
-		{
-			Source:   filepath.Join(homeDir, ".cache", "wal"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".cache", "wal"), Category: CategoryCache, Optional: true},
 	}
 }
 

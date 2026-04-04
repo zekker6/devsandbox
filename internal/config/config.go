@@ -333,20 +333,19 @@ type MountRule struct {
 	Mode string `toml:"mode"`
 }
 
-// OverlayConfig contains global overlayfs settings.
+// OverlayConfig contains global overlay/mount mode settings for tool bindings.
 type OverlayConfig struct {
-	// Enabled allows tools to use overlayfs for writable mounts.
-	// When false, all overlay mounts are disabled (tools use read-only bind mounts).
-	// Default: true
-	Enabled *bool `toml:"enabled"`
+	// Default sets the mount mode for all tool bindings.
+	// Values: "split" (default), "overlay", "tmpoverlay", "readonly", "readwrite"
+	Default string `toml:"default"`
 }
 
-// IsEnabled returns whether overlays are enabled (defaults to true).
-func (o OverlayConfig) IsEnabled() bool {
-	if o.Enabled == nil {
-		return true
+// GetDefault returns the default mount mode (defaults to "split").
+func (o OverlayConfig) GetDefault() string {
+	if o.Default == "" {
+		return "split"
 	}
-	return *o.Enabled
+	return o.Default
 }
 
 // GetToolConfig returns the configuration map for a specific tool.
@@ -456,10 +455,8 @@ func DefaultConfig() *Config {
 		Sandbox: SandboxConfig{
 			BasePath: "", // Empty means use default XDG path
 		},
-		Overlay: OverlayConfig{
-			Enabled: nil, // nil means enabled (default true)
-		},
-		Tools: make(map[string]any),
+		Overlay: OverlayConfig{},
+		Tools:   make(map[string]any),
 	}
 }
 
@@ -570,6 +567,32 @@ func (c *Config) Validate() error {
 	}
 	if !validVisibilities[c.Sandbox.ConfigVisibility] {
 		return fmt.Errorf("sandbox.config_visibility must be 'hidden', 'readonly', or 'readwrite', got %q", c.Sandbox.ConfigVisibility)
+	}
+
+	// Validate overlay default
+	validOverlayDefaults := map[string]bool{
+		"split": true, "overlay": true, "tmpoverlay": true,
+		"readonly": true, "readwrite": true, "": true,
+	}
+	if !validOverlayDefaults[c.Overlay.Default] {
+		return fmt.Errorf("overlay.default must be 'split', 'overlay', 'tmpoverlay', 'readonly', or 'readwrite', got %q", c.Overlay.Default)
+	}
+
+	// Validate per-tool mount_mode (also accepts "disabled" to skip a tool entirely)
+	validToolMountModes := map[string]bool{
+		"split": true, "overlay": true, "tmpoverlay": true,
+		"readonly": true, "readwrite": true, "disabled": true, "": true,
+	}
+	for name, toolRaw := range c.Tools {
+		toolCfg, ok := toolRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if mode, ok := toolCfg["mount_mode"].(string); ok && mode != "" {
+			if !validToolMountModes[mode] {
+				return fmt.Errorf("tools.%s.mount_mode must be 'split', 'overlay', 'tmpoverlay', 'readonly', 'readwrite', or 'disabled', got %q", name, mode)
+			}
+		}
 	}
 
 	// Validate filter rules

@@ -58,9 +58,10 @@ func (c *Claude) Available(homeDir string) bool {
 
 func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 	bindings := []Binding{
-		// Claude Code system installation (npm global)
+		// Claude Code system installation (npm global) — explicit escape hatch, read-only
 		{
 			Source:   "/opt/claude-code",
+			Type:     MountBind,
 			ReadOnly: true,
 			Optional: true,
 		},
@@ -70,7 +71,7 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 		// Custom config directory from CLAUDE_CONFIG_DIR
 		bindings = append(bindings, Binding{
 			Source:   dir,
-			ReadOnly: false,
+			Category: CategoryConfig,
 			Optional: true,
 		})
 	} else {
@@ -78,17 +79,19 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 		bindings = append(bindings,
 			Binding{
 				Source:   filepath.Join(homeDir, ".claude"),
-				ReadOnly: false,
+				Category: CategoryConfig,
 				Optional: true,
 			},
+			// .claude.json files must be rw bind mounts — they are files (not dirs)
+			// so overlays don't apply, and Claude Code needs write access.
 			Binding{
 				Source:   filepath.Join(homeDir, ".claude.json"),
-				ReadOnly: false,
+				Type:     MountBind,
 				Optional: true,
 			},
 			Binding{
 				Source:   filepath.Join(homeDir, ".claude.json.backup"),
-				ReadOnly: false,
+				Type:     MountBind,
 				Optional: true,
 			},
 		)
@@ -98,17 +101,17 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 	bindings = append(bindings,
 		Binding{
 			Source:   filepath.Join(homeDir, ".config", "Claude"),
-			ReadOnly: false,
+			Category: CategoryConfig,
 			Optional: true,
 		},
 		Binding{
 			Source:   filepath.Join(homeDir, ".cache", "claude-cli-nodejs"),
-			ReadOnly: false,
+			Category: CategoryCache,
 			Optional: true,
 		},
 		Binding{
 			Source:   filepath.Join(homeDir, ".local", "share", "claude"),
-			ReadOnly: false,
+			Category: CategoryData,
 			Optional: true,
 		},
 	)

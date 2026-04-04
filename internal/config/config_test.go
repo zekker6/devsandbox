@@ -22,29 +22,46 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Sandbox.BasePath != "" {
 		t.Error("expected empty base path by default")
 	}
-	if !cfg.Overlay.IsEnabled() {
-		t.Error("expected overlay to be enabled by default")
+	if cfg.Overlay.GetDefault() != "split" {
+		t.Errorf("expected overlay default to be 'split', got %q", cfg.Overlay.GetDefault())
 	}
 }
 
-func TestOverlayIsEnabled(t *testing.T) {
+func TestOverlayGetDefault(t *testing.T) {
 	tests := []struct {
 		name     string
-		enabled  *bool
-		expected bool
+		cfg      OverlayConfig
+		expected string
 	}{
-		{"nil defaults to true", nil, true},
-		{"explicit true", boolPtr(true), true},
-		{"explicit false", boolPtr(false), false},
+		{"nil default returns split", OverlayConfig{}, "split"},
+		{"explicit split", OverlayConfig{Default: "split"}, "split"},
+		{"explicit overlay", OverlayConfig{Default: "overlay"}, "overlay"},
+		{"explicit tmpoverlay", OverlayConfig{Default: "tmpoverlay"}, "tmpoverlay"},
+		{"explicit readonly", OverlayConfig{Default: "readonly"}, "readonly"},
+		{"explicit readwrite", OverlayConfig{Default: "readwrite"}, "readwrite"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			oc := OverlayConfig{Enabled: tt.enabled}
-			if got := oc.IsEnabled(); got != tt.expected {
-				t.Errorf("IsEnabled() = %v, want %v", got, tt.expected)
+			got := tt.cfg.GetDefault()
+			if got != tt.expected {
+				t.Errorf("GetDefault() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestValidate_OverlayDefault(t *testing.T) {
+	valid := []string{"", "split", "overlay", "tmpoverlay", "readonly", "readwrite"}
+	for _, v := range valid {
+		cfg := &Config{Overlay: OverlayConfig{Default: v}}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() with overlay.default=%q returned error: %v", v, err)
+		}
+	}
+
+	cfg := &Config{Overlay: OverlayConfig{Default: "invalid"}}
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() with overlay.default='invalid' should return error")
 	}
 }
 
@@ -125,7 +142,7 @@ port = 9090
 base_path = "~/sandbox"
 
 [overlay]
-enabled = false
+default = "readonly"
 
 [tools.git]
 mode = "readwrite"
@@ -145,8 +162,8 @@ mode = "readwrite"
 	if cfg.Proxy.Port != 9090 {
 		t.Errorf("expected port 9090, got %d", cfg.Proxy.Port)
 	}
-	if cfg.Overlay.IsEnabled() {
-		t.Error("expected overlay to be disabled (explicit false in config)")
+	if cfg.Overlay.GetDefault() != "readonly" {
+		t.Errorf("expected overlay default 'readonly', got %q", cfg.Overlay.GetDefault())
 	}
 
 	// Check tool config

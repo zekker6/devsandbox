@@ -103,8 +103,8 @@ type Config struct {
 	Bindings []Binding
 	// ToolsConfig contains tool-specific configuration from config file.
 	ToolsConfig map[string]any
-	// OverlayEnabled indicates if overlay mounts are enabled.
-	OverlayEnabled bool
+	// DefaultMountMode is the global mount mode for tool bindings.
+	DefaultMountMode string
 	// HideEnvFiles controls whether .env files are hidden from the sandbox.
 	HideEnvFiles bool
 }

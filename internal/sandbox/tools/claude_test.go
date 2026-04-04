@@ -46,8 +46,8 @@ func TestClaude_Bindings_CustomConfigDir(t *testing.T) {
 	for _, b := range bindings {
 		if b.Source == customDir {
 			foundCustom = true
-			if b.ReadOnly {
-				t.Error("custom config dir binding should be read-write")
+			if b.Category != CategoryConfig {
+				t.Errorf("custom config dir binding: expected category %q, got %q", CategoryConfig, b.Category)
 			}
 			if !b.Optional {
 				t.Error("custom config dir binding should be optional")

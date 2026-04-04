@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -60,9 +62,10 @@ type Config struct {
 	// PortForwardingRules contains validated port forwarding rules.
 	PortForwardingRules []config.PortForwardingRule
 
-	// Overlay settings
-	OverlayEnabled bool           // Global overlay enable/disable
-	ToolsConfig    map[string]any // Per-tool configuration from config file
+	// DefaultMountMode is the global mount mode for tool bindings.
+	// Values: "split", "overlay", "tmpoverlay", "readonly", "readwrite"
+	DefaultMountMode string
+	ToolsConfig      map[string]any // Per-tool configuration from config file
 
 	// Custom mount settings
 	MountsConfig *mounts.Engine // Compiled mount rules
@@ -78,6 +81,14 @@ type Config struct {
 	// Logger for reporting warnings and errors during sandbox setup.
 	// If nil, log messages are silently dropped.
 	Logger Logger
+
+	// SessionID is a unique identifier for concurrent sessions.
+	// Empty for the primary session, set to 8 hex chars for concurrent sessions.
+	SessionID string
+
+	// IsConcurrent is true when another session is already active for this project.
+	// Concurrent sessions use session-scoped overlay dirs that are cleaned up on exit.
+	IsConcurrent bool
 }
 
 // Options allows customizing sandbox configuration.
@@ -196,6 +207,15 @@ func (c *Config) EnsureSandboxDirs() error {
 	}
 
 	return nil
+}
+
+// GenerateSessionID returns a random 8-character hex string for session identification.
+func GenerateSessionID() (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate session ID: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // GetSandboxBase returns the base path for all sandboxes.

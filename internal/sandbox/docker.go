@@ -186,7 +186,7 @@ func removeDockerNetworks(containerName string) {
 }
 
 // removeContainerVolumes inspects a container's mounts and removes
-// devsandbox-prefixed volumes, skipping the shared cache volume.
+// devsandbox-prefixed volumes (including per-project cache volumes).
 func removeContainerVolumes(containerName string) error {
 	volumes := GetContainerVolumes(containerName)
 	if len(volumes) == 0 {
@@ -198,10 +198,8 @@ func removeContainerVolumes(containerName string) error {
 		if !strings.HasPrefix(vol, DockerVolumePrefix) {
 			continue
 		}
-		// Skip the shared cache volume
-		if vol == "devsandbox-cache" {
-			continue
-		}
+		// Per-project cache volumes (devsandbox-cache-*) are cleaned up with the container
+		// since each project has its own isolated cache volume.
 		if err := RemoveDockerVolume(vol); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", vol, err))
 		}

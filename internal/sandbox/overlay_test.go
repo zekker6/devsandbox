@@ -10,7 +10,7 @@ func TestCreateOverlayDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 	sandboxHome := filepath.Join(tmpDir, "sandbox")
 
-	upper, work, err := createOverlayDirs(sandboxHome, "/home/user/.local/share/mise", "")
+	upper, work, err := createOverlayDirs(sandboxHome, "/home/user/.local/share/mise", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestCreateOverlayDirs_WithSubdir(t *testing.T) {
 	tmpDir := t.TempDir()
 	sandboxHome := filepath.Join(tmpDir, "sandbox")
 
-	upper, work, err := createOverlayDirs(sandboxHome, "/opt/tools", "custom")
+	upper, work, err := createOverlayDirs(sandboxHome, "/opt/tools", "custom", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,13 +56,13 @@ func TestCreateOverlayDirs_InvalidPath(t *testing.T) {
 	sandboxHome := filepath.Join(tmpDir, "sandbox")
 
 	// Relative paths should be rejected
-	_, _, err := createOverlayDirs(sandboxHome, "relative/path", "")
+	_, _, err := createOverlayDirs(sandboxHome, "relative/path", "", "")
 	if err == nil {
 		t.Error("expected error for relative path")
 	}
 
 	// Relative path with traversal should be rejected (not absolute)
-	_, _, err = createOverlayDirs(sandboxHome, "../../../etc/passwd", "")
+	_, _, err = createOverlayDirs(sandboxHome, "../../../etc/passwd", "", "")
 	if err == nil {
 		t.Error("expected error for relative path with traversal")
 	}
@@ -74,7 +74,7 @@ func TestCreateOverlayDirs_PathTraversalResolved(t *testing.T) {
 	tmpDir := t.TempDir()
 	sandboxHome := filepath.Join(tmpDir, "sandbox")
 
-	upper, work, err := createOverlayDirs(sandboxHome, "/path/with/../traversal", "")
+	upper, work, err := createOverlayDirs(sandboxHome, "/path/with/../traversal", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -95,13 +95,61 @@ func TestCreateOverlayDirs_DoubleDotInFilename(t *testing.T) {
 	tmpDir := t.TempDir()
 	sandboxHome := filepath.Join(tmpDir, "sandbox")
 
-	_, _, err := createOverlayDirs(sandboxHome, "/var/log/..cache", "")
+	_, _, err := createOverlayDirs(sandboxHome, "/var/log/..cache", "", "")
 	if err != nil {
 		t.Errorf("path with '..' in filename should be allowed, got: %v", err)
 	}
 
-	_, _, err = createOverlayDirs(sandboxHome, "/opt/..hidden-dir/data", "")
+	_, _, err = createOverlayDirs(sandboxHome, "/opt/..hidden-dir/data", "", "")
 	if err != nil {
 		t.Errorf("path with '..' prefix in dirname should be allowed, got: %v", err)
+	}
+}
+
+func TestCreateOverlayDirs_WithSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+
+	upper, work, err := createOverlayDirs(sandboxHome, "/home/user/.cache/mise", "", "abc12345")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedBase := filepath.Join(sandboxHome, "overlay", "sessions", "abc12345", "home_user_.cache_mise")
+	if upper != filepath.Join(expectedBase, "upper") {
+		t.Errorf("unexpected upper path: %s, expected: %s", upper, filepath.Join(expectedBase, "upper"))
+	}
+	if work != filepath.Join(expectedBase, "work") {
+		t.Errorf("unexpected work path: %s, expected: %s", work, filepath.Join(expectedBase, "work"))
+	}
+}
+
+func TestCreateOverlayDirs_EmptySessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+
+	upper, _, err := createOverlayDirs(sandboxHome, "/home/user/.cache/mise", "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedBase := filepath.Join(sandboxHome, "overlay", "home_user_.cache_mise")
+	if upper != filepath.Join(expectedBase, "upper") {
+		t.Errorf("unexpected upper path: %s, expected: %s", upper, filepath.Join(expectedBase, "upper"))
+	}
+}
+
+func TestCreateOverlayDirs_SessionWithSubdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+
+	upper, _, err := createOverlayDirs(sandboxHome, "/opt/tools", "custom", "abc12345")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedBase := filepath.Join(sandboxHome, "overlay", "sessions", "abc12345", "custom", "opt_tools")
+	if upper != filepath.Join(expectedBase, "upper") {
+		t.Errorf("unexpected upper path: %s, expected: %s", upper, filepath.Join(expectedBase, "upper"))
 	}
 }

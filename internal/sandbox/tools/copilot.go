@@ -42,13 +42,13 @@ func (c *Copilot) Bindings(homeDir, sandboxHome string) []Binding {
 		// Copilot configuration
 		{
 			Source:   filepath.Join(homeDir, ".config", "github-copilot"),
-			ReadOnly: false,
+			Category: CategoryConfig,
 			Optional: true,
 		},
 		// Copilot cache
 		{
 			Source:   filepath.Join(homeDir, ".cache", "github-copilot"),
-			ReadOnly: false,
+			Category: CategoryCache,
 			Optional: true,
 		},
 	}

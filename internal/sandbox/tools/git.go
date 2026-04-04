@@ -114,7 +114,7 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 		{
 			Source:   safeGitconfig,
 			Dest:     filepath.Join(homeDir, ".gitconfig"),
-			ReadOnly: true,
+			Category: CategoryConfig,
 			Optional: true, // Safe config might not exist if Setup failed
 		},
 	}
@@ -125,9 +125,23 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 		if _, err := os.Stat(gitDir); err == nil {
 			bindings = append(bindings, Binding{
 				Source:   gitDir,
-				ReadOnly: true,
-				Optional: false, // .git must exist if we're mounting it
+				Type:     MountBind, // Explicit: must be ro bind, not overlay
+				ReadOnly: true,      // Security constraint of readonly mode
+				Category: CategoryConfig,
 			})
+
+			// Hide .git/config — it may contain embedded credentials in remote URLs
+			// (e.g., https://ghp_xxxx@github.com/user/repo.git)
+			gitConfig := filepath.Join(gitDir, "config")
+			if _, err := os.Stat(gitConfig); err == nil {
+				bindings = append(bindings, Binding{
+					Source:   "/dev/null",
+					Dest:     gitConfig,
+					Type:     MountBind,
+					ReadOnly: true,
+					Category: CategoryConfig,
+				})
+			}
 		}
 	}
 
@@ -136,34 +150,28 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 
 // readWriteBindings returns bindings for readwrite mode (full git access).
 func (g *Git) readWriteBindings(homeDir, _ string) []Binding {
-	bindings := []Binding{
-		// Full gitconfig (read-write)
+	return []Binding{
 		{
 			Source:   filepath.Join(homeDir, ".gitconfig"),
-			ReadOnly: false,
+			Category: CategoryConfig,
 			Optional: true,
 		},
-		// Git credentials
 		{
 			Source:   filepath.Join(homeDir, ".git-credentials"),
-			ReadOnly: true, // Read-only to prevent accidental modification
+			Category: CategoryConfig,
 			Optional: true,
 		},
-		// SSH directory for git over SSH
 		{
 			Source:   filepath.Join(homeDir, ".ssh"),
-			ReadOnly: true, // Read-only to protect private keys
+			Category: CategoryConfig,
 			Optional: true,
 		},
-		// GPG for commit signing
 		{
 			Source:   filepath.Join(homeDir, ".gnupg"),
-			ReadOnly: true, // Read-only to protect keys
+			Category: CategoryConfig,
 			Optional: true,
 		},
 	}
-
-	return bindings
 }
 
 func (g *Git) Environment(homeDir, sandboxHome string) []EnvVar {

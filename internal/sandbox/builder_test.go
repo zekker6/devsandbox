@@ -9,6 +9,7 @@ import (
 
 	"devsandbox/internal/config"
 	"devsandbox/internal/sandbox/mounts"
+	"devsandbox/internal/sandbox/tools"
 )
 
 func TestBuilder_BasicArgs(t *testing.T) {
@@ -852,5 +853,118 @@ func TestBuilder_AddProxyEnvironment_NoMITM_SkipsExtraCAEnv(t *testing.T) {
 
 	if strings.Contains(joined, "MY_TOOL_CA_BUNDLE") {
 		t.Error("extra CA env vars should not be set when MITM is disabled")
+	}
+}
+
+func TestBuilder_ApplyPersistentOverlay_ConcurrentSession(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create the source directory (overlay requires existing dir)
+	srcDir := filepath.Join(tmpDir, "src", ".cache", "mise")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compute the persistent upper dir path the same way persistentOverlayUpperDir does
+	sandboxHome := filepath.Join(tmpDir, "sandbox", "home")
+	persistentUpper := persistentOverlayUpperDir(sandboxHome, srcDir, "")
+	if err := os.MkdirAll(persistentUpper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		HomeDir:      filepath.Join(tmpDir, "src"),
+		SandboxHome:  sandboxHome,
+		IsConcurrent: true,
+		SessionID:    "test1234",
+	}
+
+	builder := NewBuilder(cfg)
+	builder.AddBaseArgs()
+
+	binding := tools.Binding{
+		Source:   srcDir,
+		Type:     tools.MountOverlay,
+		Category: tools.CategoryCache,
+	}
+
+	builder.applyPersistentOverlay(binding, srcDir, sandboxHome)
+
+	args := builder.Build()
+	joined := strings.Join(args, " ")
+
+	// Should have the persistent upper as an overlay-src
+	if !strings.Contains(joined, "--overlay-src "+persistentUpper) {
+		t.Errorf("expected persistent upper as overlay-src, got:\n%s", joined)
+	}
+
+	// Should have session-scoped overlay dirs
+	sessionOverlayBase := filepath.Join(sandboxHome, "overlay", "sessions", "test1234")
+	if !strings.Contains(joined, sessionOverlayBase) {
+		t.Errorf("expected session-scoped overlay dir, got:\n%s", joined)
+	}
+}
+
+func TestResolveBindingType(t *testing.T) {
+	tests := []struct {
+		name         string
+		category     tools.BindingCategory
+		toolMode     string
+		globalMode   string
+		explicitType tools.MountType
+		wantType     tools.MountType
+		wantRO       bool
+	}{
+		// Split mode (default)
+		{"split/config", tools.CategoryConfig, "", "split", "", tools.MountTmpOverlay, false},
+		{"split/cache", tools.CategoryCache, "", "split", "", tools.MountOverlay, false},
+		{"split/data", tools.CategoryData, "", "split", "", tools.MountOverlay, false},
+		{"split/state", tools.CategoryState, "", "split", "", tools.MountOverlay, false},
+		{"split/runtime", tools.CategoryRuntime, "", "split", "", tools.MountTmpOverlay, false},
+		{"split/empty category", "", "", "split", "", tools.MountTmpOverlay, false},
+
+		// Readonly mode
+		{"readonly/config", tools.CategoryConfig, "", "readonly", "", tools.MountBind, true},
+		{"readonly/cache", tools.CategoryCache, "", "readonly", "", tools.MountBind, true},
+
+		// Readwrite mode
+		{"readwrite/config", tools.CategoryConfig, "", "readwrite", "", tools.MountBind, false},
+		{"readwrite/cache", tools.CategoryCache, "", "readwrite", "", tools.MountBind, false},
+
+		// Overlay mode
+		{"overlay/config", tools.CategoryConfig, "", "overlay", "", tools.MountOverlay, false},
+		{"overlay/cache", tools.CategoryCache, "", "overlay", "", tools.MountOverlay, false},
+
+		// Tmpoverlay mode
+		{"tmpoverlay/config", tools.CategoryConfig, "", "tmpoverlay", "", tools.MountTmpOverlay, false},
+		{"tmpoverlay/cache", tools.CategoryCache, "", "tmpoverlay", "", tools.MountTmpOverlay, false},
+
+		// Per-tool override
+		{"tool override readwrite", tools.CategoryConfig, "readwrite", "split", "", tools.MountBind, false},
+		{"tool override readonly", tools.CategoryCache, "readonly", "split", "", tools.MountBind, true},
+		{"tool override overlay", tools.CategoryConfig, "overlay", "split", "", tools.MountOverlay, false},
+
+		// Explicit Type from tool (escape hatch)
+		{"explicit type preserved", tools.CategoryConfig, "", "split", tools.MountBind, tools.MountBind, false},
+
+		// Default global mode when empty
+		{"empty global defaults to split", tools.CategoryConfig, "", "", "", tools.MountTmpOverlay, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binding := tools.Binding{
+				Source:   "/home/test/.config/foo",
+				Category: tt.category,
+				Type:     tt.explicitType,
+			}
+			ResolveBindingType(&binding, tt.toolMode, tt.globalMode)
+			if binding.Type != tt.wantType {
+				t.Errorf("Type = %q, want %q", binding.Type, tt.wantType)
+			}
+			if tt.wantType == tools.MountBind && binding.ReadOnly != tt.wantRO {
+				t.Errorf("ReadOnly = %v, want %v", binding.ReadOnly, tt.wantRO)
+			}
+		})
 	}
 }

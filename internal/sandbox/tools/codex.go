@@ -39,7 +39,7 @@ func (c *Codex) Bindings(homeDir, sandboxHome string) []Binding {
 		// Codex configuration, credentials, and logs
 		{
 			Source:   filepath.Join(homeDir, ".codex"),
-			ReadOnly: false,
+			Category: CategoryConfig,
 			Optional: true,
 		},
 	}

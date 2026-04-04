@@ -142,7 +142,7 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		return bwrap.ExecWithPasta(bwrapArgs, shellCmd, portForwardArgs)
 	}
 
-	if cfg.HasActiveTools || cfg.RemoveOnExit {
+	if cfg.HasActiveTools || cfg.RemoveOnExit || sandboxCfg.IsConcurrent {
 		return bwrap.ExecRun(bwrapArgs, shellCmd)
 	}
 

@@ -14,10 +14,7 @@ func init() {
 
 // Mise provides mise tool manager integration.
 // Mise manages development tools like Node.js, Python, Go, etc.
-type Mise struct {
-	writable   bool
-	persistent bool
-}
+type Mise struct{}
 
 func (m *Mise) Name() string {
 	return "mise"
@@ -32,89 +29,34 @@ func (m *Mise) Available(homeDir string) bool {
 	return err == nil
 }
 
-// Configure implements ToolWithConfig.
-// Parses mise-specific config from the raw map.
-func (m *Mise) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
-	// If overlays are globally disabled, don't enable writable mode
-	if !globalCfg.OverlayEnabled {
-		m.writable = false
-		m.persistent = false
-		return
-	}
-
-	if toolCfg == nil {
-		return
-	}
-	if v, ok := toolCfg["writable"].(bool); ok {
-		m.writable = v
-	}
-	if v, ok := toolCfg["persistent"].(bool); ok {
-		m.persistent = v
-	}
-}
-
 func (m *Mise) Bindings(homeDir, sandboxHome string) []Binding {
-	// User's local bin directory (may contain mise shims)
-	// Always read-only - shims just redirect to actual tools
-	bindings := []Binding{
+	return []Binding{
 		{
 			Source:   filepath.Join(homeDir, ".local", "bin"),
-			ReadOnly: true,
+			Category: CategoryData,
 			Optional: true,
 		},
-		// Mise configuration - always read-only
 		{
 			Source:   filepath.Join(homeDir, ".config", "mise"),
-			ReadOnly: true,
+			Category: CategoryConfig,
+			Optional: true,
+		},
+		{
+			Source:   filepath.Join(homeDir, ".local", "share", "mise"),
+			Category: CategoryData,
+			Optional: true,
+		},
+		{
+			Source:   filepath.Join(homeDir, ".cache", "mise"),
+			Category: CategoryCache,
+			Optional: true,
+		},
+		{
+			Source:   filepath.Join(homeDir, ".local", "state", "mise"),
+			Category: CategoryState,
 			Optional: true,
 		},
 	}
-
-	// Mise installed tools and data
-	if m.writable {
-		mountType := MountTmpOverlay
-		if m.persistent {
-			mountType = MountOverlay
-		}
-		bindings = append(bindings,
-			Binding{
-				Source:   filepath.Join(homeDir, ".local", "share", "mise"),
-				Type:     mountType,
-				Optional: true,
-			},
-			Binding{
-				Source:   filepath.Join(homeDir, ".cache", "mise"),
-				Type:     mountType,
-				Optional: true,
-			},
-			Binding{
-				Source:   filepath.Join(homeDir, ".local", "state", "mise"),
-				Type:     mountType,
-				Optional: true,
-			},
-		)
-	} else {
-		// Default: read-only bind mounts
-		bindings = append(bindings,
-			Binding{
-				Source:   filepath.Join(homeDir, ".local", "share", "mise"),
-				ReadOnly: true,
-				Optional: true,
-			},
-			Binding{
-				Source:   filepath.Join(homeDir, ".cache", "mise"),
-				ReadOnly: true,
-				Optional: true,
-			},
-			Binding{
-				Source:   filepath.Join(homeDir, ".local", "state", "mise"),
-				ReadOnly: true,
-				Optional: true,
-			},
-		)
-	}
-
-	return bindings
 }
 
 func (m *Mise) Environment(homeDir, sandboxHome string) []EnvVar {

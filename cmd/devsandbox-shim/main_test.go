@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -110,5 +113,79 @@ func TestEnvOr(t *testing.T) {
 	}
 	if got := envOr("TEST_ENVOR_UNSET", "default"); got != "default" {
 		t.Errorf("expected 'default', got %q", got)
+	}
+}
+
+func TestLoadOverlayManifest_Valid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlays.json")
+	data := `{"overlays":[{"path":"/home/sandboxuser/.config/fish","type":"tmpoverlay"}]}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the target directory so it passes the isDir check
+	if err := os.MkdirAll("/home/sandboxuser/.config/fish", 0o755); err != nil {
+		t.Skipf("cannot create test directory: %v", err)
+	}
+
+	entries := loadOverlayManifest(path)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/home/sandboxuser/.config/fish" {
+		t.Errorf("path = %q, want /home/sandboxuser/.config/fish", entries[0].Path)
+	}
+	if entries[0].Type != "tmpoverlay" {
+		t.Errorf("type = %q, want tmpoverlay", entries[0].Type)
+	}
+}
+
+func TestLoadOverlayManifest_NotExists(t *testing.T) {
+	entries := loadOverlayManifest("/nonexistent/path.json")
+	if len(entries) != 0 {
+		t.Errorf("expected empty slice for missing file, got %d entries", len(entries))
+	}
+}
+
+func TestLoadOverlayManifest_Malformed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.json")
+	_ = os.WriteFile(path, []byte("{invalid"), 0o644)
+
+	// Test the parsing separately since fatal calls os.Exit
+	var m overlayManifest
+	err := parseOverlayManifest([]byte("{invalid"), &m)
+	if err == nil {
+		t.Error("expected error for malformed JSON")
+	}
+}
+
+func TestLoadOverlayManifest_SkipsFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a directory entry and a file entry
+	dirPath := filepath.Join(dir, "fishdir")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(dir, "config.fish")
+	if err := os.WriteFile(filePath, []byte("# fish"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, "overlays.json")
+	data := fmt.Sprintf(`{"overlays":[{"path":"%s","type":"tmpoverlay"},{"path":"%s","type":"tmpoverlay"}]}`,
+		dirPath, filePath)
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := loadOverlayManifest(path)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (dir only), got %d", len(entries))
+	}
+	if entries[0].Path != dirPath {
+		t.Errorf("expected dir path %s, got %s", dirPath, entries[0].Path)
 	}
 }

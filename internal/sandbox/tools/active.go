@@ -8,11 +8,11 @@ import (
 
 // ActiveToolsConfig contains configuration for running active tools.
 type ActiveToolsConfig struct {
-	HomeDir        string
-	SandboxHome    string
-	OverlayEnabled bool
-	ProjectDir     string
-	ToolsConfig    map[string]any
+	HomeDir          string
+	SandboxHome      string
+	DefaultMountMode string
+	ProjectDir       string
+	ToolsConfig      map[string]any
 }
 
 // ActiveToolsRunner manages the lifecycle of active tools.
@@ -52,9 +52,9 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 		// Configure tool if it supports configuration
 		if configurable, ok := tool.(ToolWithConfig); ok {
 			globalCfg := GlobalConfig{
-				OverlayEnabled: r.cfg.OverlayEnabled,
-				ProjectDir:     r.cfg.ProjectDir,
-				HomeDir:        r.cfg.HomeDir,
+				DefaultMountMode: r.cfg.DefaultMountMode,
+				ProjectDir:       r.cfg.ProjectDir,
+				HomeDir:          r.cfg.HomeDir,
 			}
 			var toolCfg map[string]any
 			if r.cfg.ToolsConfig != nil {

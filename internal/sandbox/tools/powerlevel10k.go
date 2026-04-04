@@ -44,27 +44,11 @@ func (p *Powerlevel10k) Bindings(homeDir, sandboxHome string) []Binding {
 
 	bindings := []Binding{
 		// Powerlevel10k installation paths
-		{
-			Source:   filepath.Join(homeDir, ".oh-my-zsh", "custom", "themes", "powerlevel10k"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".local", "share", "powerlevel10k"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, "powerlevel10k"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".oh-my-zsh", "custom", "themes", "powerlevel10k"), Category: CategoryData, Optional: true},
+		{Source: filepath.Join(homeDir, ".local", "share", "powerlevel10k"), Category: CategoryData, Optional: true},
+		{Source: filepath.Join(homeDir, "powerlevel10k"), Category: CategoryData, Optional: true},
 		// Powerlevel10k cache (for instant prompt)
-		{
-			Source:   filepath.Join(homeDir, ".cache", "p10k-instant-prompt-"+os.Getenv("USER")+".zsh"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".cache", "p10k-instant-prompt-"+os.Getenv("USER")+".zsh"), Category: CategoryCache, Optional: true},
 	}
 
 	// Use sandbox p10k config if setup ran successfully
@@ -72,14 +56,14 @@ func (p *Powerlevel10k) Bindings(homeDir, sandboxHome string) []Binding {
 		bindings = append(bindings, Binding{
 			Source:   sandboxP10k,
 			Dest:     filepath.Join(homeDir, ".p10k.zsh"),
-			ReadOnly: true,
+			Category: CategoryConfig,
 			Optional: true,
 		})
 	} else {
 		// Fall back to original config
 		bindings = append(bindings, Binding{
 			Source:   filepath.Join(homeDir, ".p10k.zsh"),
-			ReadOnly: true,
+			Category: CategoryConfig,
 			Optional: true,
 		})
 	}

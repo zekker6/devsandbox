@@ -13,6 +13,8 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -23,12 +25,19 @@ import (
 )
 
 const (
-	sandboxUser   = "sandboxuser"
-	sandboxHome   = "/home/sandboxuser"
-	readySentinel = "/tmp/.devsandbox-ready"
+	sandboxUser         = "sandboxuser"
+	sandboxHome         = "/home/sandboxuser"
+	readySentinel       = "/tmp/.devsandbox-ready"
+	overlayManifestPath = "/tmp/.devsandbox-overlays.json"
 )
 
 func main() {
+	// Check if this is a re-exec as the overlay child process
+	if os.Getenv("__DEVSANDBOX_OVERLAY_CHILD") == "1" {
+		overlayChild()
+		return // unreachable — overlayChild calls syscall.Exec
+	}
+
 	uid, gid := getHostIDs()
 
 	ensureUser(uid, gid)
@@ -40,10 +49,19 @@ func main() {
 	suppressSSHAgent()
 	writeReadySentinel()
 
+	// Load overlay manifest — the Docker isolator writes this when tmpoverlay
+	// bindings exist. If present, we fork into a user namespace to mount overlayfs.
+	overlays := loadOverlayManifest(overlayManifestPath)
+
 	// The remaining args after the entrypoint are the command to run
 	args := os.Args[1:]
 	if len(args) == 0 {
 		args = []string{"/bin/bash"}
+	}
+
+	if len(overlays) > 0 {
+		execWithOverlays(uid, gid, overlays, args)
+		// execWithOverlays does not return on success
 	}
 
 	dropPrivsAndExec(uid, gid, args)
@@ -302,6 +320,49 @@ func chownRecursive(path string, uid, gid int) error {
 		_ = os.Lchown(p, uid, gid)
 		return nil
 	})
+}
+
+type overlayEntry struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+
+type overlayManifest struct {
+	Overlays []overlayEntry `json:"overlays"`
+}
+
+func parseOverlayManifest(data []byte, m *overlayManifest) error {
+	return json.Unmarshal(data, m)
+}
+
+// loadOverlayManifest reads the overlay manifest and returns validated entries.
+// Returns an empty slice if the manifest file does not exist.
+// Fatals if the file exists but is malformed.
+// Skips entries whose path is not an existing directory.
+func loadOverlayManifest(path string) []overlayEntry {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		fatal("read overlay manifest: %v", err)
+	}
+
+	var m overlayManifest
+	if err := parseOverlayManifest(data, &m); err != nil {
+		fatal("parse overlay manifest: %v", err)
+	}
+
+	// Filter to existing directories only (overlayfs requires dirs)
+	var valid []overlayEntry
+	for _, entry := range m.Overlays {
+		info, err := os.Stat(entry.Path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		valid = append(valid, entry)
+	}
+	return valid
 }
 
 func warn(format string, args ...any) {

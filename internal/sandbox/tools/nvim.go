@@ -11,7 +11,7 @@ func init() {
 }
 
 // Nvim provides Neovim editor configuration.
-// Mounts config, data, state, and cache directories read-only.
+// Mounts config, data, state, and cache directories.
 type Nvim struct{}
 
 func (n *Nvim) Name() string {
@@ -30,29 +30,13 @@ func (n *Nvim) Available(homeDir string) bool {
 func (n *Nvim) Bindings(homeDir, sandboxHome string) []Binding {
 	return []Binding{
 		// Neovim configuration
-		{
-			Source:   filepath.Join(homeDir, ".config", "nvim"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".config", "nvim"), Category: CategoryConfig, Optional: true},
 		// Neovim data (plugins, etc.)
-		{
-			Source:   filepath.Join(homeDir, ".local", "share", "nvim"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".local", "share", "nvim"), Category: CategoryData, Optional: true},
 		// Neovim state
-		{
-			Source:   filepath.Join(homeDir, ".local", "state", "nvim"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".local", "state", "nvim"), Category: CategoryState, Optional: true},
 		// Neovim cache
-		{
-			Source:   filepath.Join(homeDir, ".cache", "nvim"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".cache", "nvim"), Category: CategoryCache, Optional: true},
 	}
 }
 

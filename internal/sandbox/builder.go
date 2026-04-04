@@ -453,7 +453,12 @@ func (b *Builder) AddTools() *Builder {
 
 	// Apply bindings from all available tools
 	for _, tool := range tools.Available(home) {
+		toolMountMode := b.getToolMountMode(tool.Name())
+		if toolMountMode == "disabled" {
+			continue // Skip all bindings for this tool
+		}
 		for _, binding := range tool.Bindings(home, sandboxHome) {
+			ResolveBindingType(&binding, toolMountMode, b.cfg.DefaultMountMode)
 			b.applyBinding(binding, sandboxHome)
 		}
 	}
@@ -465,9 +470,9 @@ func (b *Builder) AddTools() *Builder {
 func (b *Builder) configureTool(tool tools.ToolWithConfig, toolName string) {
 	// Build global config
 	globalCfg := tools.GlobalConfig{
-		OverlayEnabled: b.cfg.OverlayEnabled,
-		ProjectDir:     b.cfg.ProjectDir,
-		HomeDir:        b.cfg.HomeDir,
+		DefaultMountMode: b.cfg.DefaultMountMode,
+		ProjectDir:       b.cfg.ProjectDir,
+		HomeDir:          b.cfg.HomeDir,
 	}
 
 	// Get tool's config section from ToolsConfig
@@ -481,11 +486,40 @@ func (b *Builder) configureTool(tool tools.ToolWithConfig, toolName string) {
 	tool.Configure(globalCfg, toolCfg)
 }
 
+// getToolMountMode extracts mount_mode from the tool's config section.
+func (b *Builder) getToolMountMode(toolName string) string {
+	if b.cfg.ToolsConfig == nil {
+		return ""
+	}
+	section, ok := b.cfg.ToolsConfig[toolName]
+	if !ok {
+		return ""
+	}
+	toolCfg, ok := section.(map[string]any)
+	if !ok {
+		return ""
+	}
+	mode, _ := toolCfg["mount_mode"].(string)
+	return mode
+}
+
 // applyBinding applies a single binding based on its type.
+// Overlay mounts only work on directories. If the source is a file,
+// overlay types fall back to read-only bind mount (safe default).
 func (b *Builder) applyBinding(binding tools.Binding, sandboxHome string) {
 	dest := binding.Dest
 	if dest == "" {
 		dest = binding.Source
+	}
+
+	// Overlay mounts require directories. For files, fall back to ro bind mount.
+	if binding.Type == tools.MountTmpOverlay || binding.Type == tools.MountOverlay {
+		if info, err := os.Stat(binding.Source); err != nil || !info.IsDir() {
+			binding.Type = tools.MountBind
+			binding.ReadOnly = true
+			b.applyBindMount(binding, dest)
+			return
+		}
 	}
 
 	switch binding.Type {
@@ -517,6 +551,45 @@ func (b *Builder) applyBindMount(binding tools.Binding, dest string) {
 	}
 }
 
+// ResolveBindingType sets the binding's Type and ReadOnly based on mount mode policy.
+// If the binding already has an explicit Type set, it is preserved (tool escape hatch).
+// Resolution chain: toolMode > globalMode > "split" (hardcoded fallback).
+// Exported for use by the Docker isolator.
+func ResolveBindingType(binding *tools.Binding, toolMode, globalMode string) {
+	// Explicit Type from tool takes precedence
+	if binding.Type != "" {
+		return
+	}
+
+	mode := globalMode
+	if toolMode != "" {
+		mode = toolMode
+	}
+	if mode == "" {
+		mode = "split"
+	}
+
+	switch mode {
+	case "readwrite":
+		binding.Type = tools.MountBind
+		binding.ReadOnly = false
+	case "readonly":
+		binding.Type = tools.MountBind
+		binding.ReadOnly = true
+	case "overlay":
+		binding.Type = tools.MountOverlay
+	case "tmpoverlay":
+		binding.Type = tools.MountTmpOverlay
+	case "split":
+		switch binding.Category {
+		case tools.CategoryCache, tools.CategoryData, tools.CategoryState:
+			binding.Type = tools.MountOverlay
+		default: // CategoryConfig, CategoryRuntime, empty
+			binding.Type = tools.MountTmpOverlay
+		}
+	}
+}
+
 // applyTmpOverlay applies an overlay with writes to tmpfs (discarded on exit).
 func (b *Builder) applyTmpOverlay(binding tools.Binding, dest string) {
 	// Check if source exists when optional
@@ -539,13 +612,15 @@ func (b *Builder) applyTmpOverlay(binding tools.Binding, dest string) {
 }
 
 // applyPersistentOverlay applies an overlay with persistent writes.
+// For concurrent sessions, the primary session's persistent upper dir is added
+// as an additional read-only lower layer, and writes go to session-scoped dirs.
 func (b *Builder) applyPersistentOverlay(binding tools.Binding, dest string, sandboxHome string) {
 	// Check if source exists when optional
 	if binding.Optional && !pathExists(binding.Source) {
 		return
 	}
 
-	upperDir, workDir, err := createOverlayDirs(sandboxHome, dest, "")
+	upperDir, workDir, err := createOverlayDirs(sandboxHome, dest, "", b.cfg.SessionID)
 	if err != nil {
 		b.logWarnf("overlay dirs: %v", err)
 		return
@@ -562,6 +637,16 @@ func (b *Builder) applyPersistentOverlay(binding tools.Binding, dest string, san
 
 	// Add primary source and mount with persistent upper layer
 	b.OverlaySrc(binding.Source)
+
+	// For concurrent sessions, add the primary session's persistent upper dir
+	// as an additional lower layer so the concurrent session sees installed tools/caches.
+	if b.cfg.IsConcurrent {
+		persistentUpper := persistentOverlayUpperDir(sandboxHome, dest, "")
+		if pathExists(persistentUpper) {
+			b.OverlaySrc(persistentUpper)
+		}
+	}
+
 	b.Overlay(upperDir, workDir, dest)
 }
 
@@ -725,10 +810,18 @@ func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) 
 		return
 	}
 
-	upperDir, workDir, err := createOverlayDirs(b.cfg.SandboxHome, path, "custom")
+	upperDir, workDir, err := createOverlayDirs(b.cfg.SandboxHome, path, "custom", b.cfg.SessionID)
 	if err != nil {
 		b.logWarnf("mounts: %v", err)
 		return
+	}
+
+	// For concurrent sessions, add primary session's persistent upper as lower layer
+	if b.cfg.IsConcurrent {
+		persistentUpper := persistentOverlayUpperDir(b.cfg.SandboxHome, path, "custom")
+		if pathExists(persistentUpper) {
+			b.OverlaySrc(persistentUpper)
+		}
 	}
 
 	b.Overlay(upperDir, workDir, path)

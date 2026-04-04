@@ -38,37 +38,13 @@ func (f *Fish) Bindings(homeDir, sandboxHome string) []Binding {
 	// tries to write universal variables.
 	fishConfig := filepath.Join(homeDir, ".config", "fish")
 	return []Binding{
-		{
-			Source:   filepath.Join(fishConfig, "config.fish"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(fishConfig, "functions"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(fishConfig, "completions"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(fishConfig, "conf.d"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(fishConfig, "themes"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(fishConfig, "fish_plugins"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		// Note: .local/share/fish is NOT mounted read-only because fish needs
+		{Source: filepath.Join(fishConfig, "config.fish"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(fishConfig, "functions"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(fishConfig, "completions"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(fishConfig, "conf.d"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(fishConfig, "themes"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(fishConfig, "fish_plugins"), Category: CategoryConfig, Optional: true},
+		// Note: .local/share/fish is NOT mounted because fish needs
 		// to write universal variables to fish_variables. Let fish use the
 		// sandbox home's copy which is writable.
 	}
@@ -126,37 +102,13 @@ func (z *Zsh) Available(homeDir string) bool {
 
 func (z *Zsh) Bindings(homeDir, sandboxHome string) []Binding {
 	return []Binding{
-		{
-			Source:   filepath.Join(homeDir, ".zshrc"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".zshenv"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".zprofile"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".config", "zsh"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".zshrc"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".zshenv"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".zprofile"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".config", "zsh"), Category: CategoryConfig, Optional: true},
 		// Oh-my-zsh
-		{
-			Source:   filepath.Join(homeDir, ".oh-my-zsh"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".local", "share", "zsh"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".oh-my-zsh"), Category: CategoryData, Optional: true},
+		{Source: filepath.Join(homeDir, ".local", "share", "zsh"), Category: CategoryData, Optional: true},
 	}
 }
 
@@ -217,76 +169,24 @@ func (b *Bash) Available(homeDir string) bool {
 func (b *Bash) Bindings(homeDir, sandboxHome string) []Binding {
 	return []Binding{
 		// Core bash configuration files
-		{
-			Source:   filepath.Join(homeDir, ".bashrc"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".bash_profile"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".profile"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".bash_logout"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".bashrc"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".bash_profile"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".profile"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".bash_logout"), Category: CategoryConfig, Optional: true},
 		// Custom tools support: aliases, functions, completions
-		{
-			Source:   filepath.Join(homeDir, ".bash_aliases"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".bash_functions"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".bash_completion"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".bash_completion.d"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".bash_aliases"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".bash_functions"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".bash_completion"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".bash_completion.d"), Category: CategoryConfig, Optional: true},
 		// Readline configuration (affects bash input)
-		{
-			Source:   filepath.Join(homeDir, ".inputrc"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".inputrc"), Category: CategoryConfig, Optional: true},
 		// XDG config locations
-		{
-			Source:   filepath.Join(homeDir, ".config", "bash"),
-			ReadOnly: true,
-			Optional: true,
-		},
-		{
-			Source:   filepath.Join(homeDir, ".config", "readline"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".config", "bash"), Category: CategoryConfig, Optional: true},
+		{Source: filepath.Join(homeDir, ".config", "readline"), Category: CategoryConfig, Optional: true},
 		// Local bash data (history excluded for privacy)
-		{
-			Source:   filepath.Join(homeDir, ".local", "share", "bash"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".local", "share", "bash"), Category: CategoryData, Optional: true},
 		// Bash-it framework (popular bash customization)
-		{
-			Source:   filepath.Join(homeDir, ".bash_it"),
-			ReadOnly: true,
-			Optional: true,
-		},
+		{Source: filepath.Join(homeDir, ".bash_it"), Category: CategoryData, Optional: true},
 	}
 }
 

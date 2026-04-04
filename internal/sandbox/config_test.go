@@ -84,6 +84,24 @@ func TestSanitizeProjectName(t *testing.T) {
 	}
 }
 
+func TestGenerateSessionID(t *testing.T) {
+	id1, err := GenerateSessionID()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(id1) != 8 {
+		t.Errorf("expected 8 hex chars, got %d: %q", len(id1), id1)
+	}
+
+	id2, err := GenerateSessionID()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id1 == id2 {
+		t.Error("expected unique IDs, got duplicates")
+	}
+}
+
 func TestGenerateSandboxName(t *testing.T) {
 	// Same directory name in different paths should produce different sandbox names
 	name1 := GenerateSandboxName("/home/user/work/myproject")

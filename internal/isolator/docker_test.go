@@ -681,11 +681,11 @@ func TestDockerIsolator_ConfigHash_ChangesOnOverlay(t *testing.T) {
 	iso := NewDockerIsolator(DockerConfig{})
 	iso.imageTag = "devsandbox:local"
 
-	cfg1 := &Config{OverlayEnabled: false}
-	cfg2 := &Config{OverlayEnabled: true}
+	cfg1 := &Config{DefaultMountMode: "readonly"}
+	cfg2 := &Config{DefaultMountMode: "split"}
 
 	if iso.configHash(cfg1) == iso.configHash(cfg2) {
-		t.Error("configHash should differ when overlay toggle changes")
+		t.Error("configHash should differ when mount mode changes")
 	}
 }
 
@@ -768,9 +768,10 @@ func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
 
 	argsStr := strings.Join(result.Args, " ")
 
-	// Should have cache volume mount
-	if !strings.Contains(argsStr, "-v devsandbox-cache:/cache") {
-		t.Error("Build args missing cache volume mount")
+	// Should have per-project cache volume mount
+	expectedVolume := CacheVolumeName(cfg.ProjectDir) + ":" + CacheMountPath
+	if !strings.Contains(argsStr, "-v "+expectedVolume) {
+		t.Errorf("Build args missing per-project cache volume mount, want %q in args", expectedVolume)
 	}
 
 	// Should have mise cache env vars
@@ -1161,7 +1162,7 @@ func TestGetToolBindings_DockerHostRemapped(t *testing.T) {
 		},
 	}
 
-	_, envVars := iso.getToolBindings(cfg)
+	_, envVars, _ := iso.getToolBindings(cfg)
 
 	// Find DOCKER_HOST in env vars
 	var dockerHost string
@@ -1182,6 +1183,75 @@ func TestGetToolBindings_DockerHostRemapped(t *testing.T) {
 	}
 	if !strings.Contains(dockerHost, "/home/sandboxuser/docker.sock") {
 		t.Errorf("DOCKER_HOST should point to /home/sandboxuser/docker.sock, got: %s", dockerHost)
+	}
+}
+
+func TestGetToolBindings_OverlayBindingsProduceROAndManifest(t *testing.T) {
+	// Create temp dirs to simulate tool source paths
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "testuser")
+	fishConfig := filepath.Join(homeDir, ".config", "fish")
+	for _, d := range []string{
+		fishConfig,
+		filepath.Join(fishConfig, "functions"),
+		filepath.Join(fishConfig, "completions"),
+		filepath.Join(fishConfig, "conf.d"),
+	} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Create config.fish file (file, not dir — should NOT appear in manifest)
+	if err := os.WriteFile(filepath.Join(fishConfig, "config.fish"), []byte("# fish"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+	if err := os.MkdirAll(sandboxHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	iso := NewDockerIsolator(DockerConfig{})
+
+	cfg := &Config{
+		ProjectDir:       filepath.Join(tmpDir, "project"),
+		SandboxHome:      sandboxHome,
+		HomeDir:          homeDir,
+		Shell:            "fish",
+		DefaultMountMode: "split", // default — config gets tmpoverlay
+	}
+
+	mounts, _, manifest := iso.getToolBindings(cfg)
+
+	// Check that directory mounts for config category are :ro
+	for _, m := range mounts {
+		if strings.Contains(m, fishConfig+"/functions") {
+			if !strings.HasSuffix(m, ":ro") {
+				t.Errorf("expected :ro mount for functions dir, got: %s", m)
+			}
+		}
+	}
+
+	// Check that directory paths appear in manifest
+	if manifest == nil {
+		t.Fatal("expected non-nil manifest")
+	}
+
+	manifestPaths := make(map[string]bool)
+	for _, entry := range manifest.Overlays {
+		manifestPaths[entry.Path] = true
+	}
+
+	// Directories should be in manifest
+	remappedFunctions := "/home/sandboxuser/.config/fish/functions"
+	if !manifestPaths[remappedFunctions] {
+		t.Errorf("expected %s in manifest, got entries: %v", remappedFunctions, manifest.Overlays)
+	}
+
+	// Files should NOT be in manifest (overlayfs only works on dirs)
+	remappedConfigFish := "/home/sandboxuser/.config/fish/config.fish"
+	if manifestPaths[remappedConfigFish] {
+		t.Errorf("file path %s should not be in manifest", remappedConfigFish)
 	}
 }
 
@@ -1225,5 +1295,100 @@ func TestBuildCommonArgs_EnvSorted(t *testing.T) {
 
 	if appleIdx >= mangoIdx || mangoIdx >= zebraIdx {
 		t.Errorf("Environment variables should be sorted: APPLE(%d) < MANGO(%d) < ZEBRA(%d)", appleIdx, mangoIdx, zebraIdx)
+	}
+}
+
+func TestGetToolBindings_ReadonlyMode_NoManifest(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "testuser")
+	fishConfig := filepath.Join(homeDir, ".config", "fish")
+	if err := os.MkdirAll(filepath.Join(fishConfig, "functions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	iso := NewDockerIsolator(DockerConfig{})
+
+	cfg := &Config{
+		ProjectDir:       filepath.Join(tmpDir, "project"),
+		SandboxHome:      filepath.Join(tmpDir, "sandbox"),
+		HomeDir:          homeDir,
+		Shell:            "fish",
+		DefaultMountMode: "readonly",
+	}
+
+	_, _, manifest := iso.getToolBindings(cfg)
+
+	// Readonly mode should not produce any manifest entries
+	if len(manifest.Overlays) != 0 {
+		t.Errorf("readonly mode should produce empty manifest, got %d entries", len(manifest.Overlays))
+	}
+}
+
+func TestGetToolBindings_ReadwriteMode_NoManifest(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "testuser")
+	fishConfig := filepath.Join(homeDir, ".config", "fish")
+	if err := os.MkdirAll(filepath.Join(fishConfig, "functions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	iso := NewDockerIsolator(DockerConfig{})
+
+	cfg := &Config{
+		ProjectDir:       filepath.Join(tmpDir, "project"),
+		SandboxHome:      filepath.Join(tmpDir, "sandbox"),
+		HomeDir:          homeDir,
+		Shell:            "fish",
+		DefaultMountMode: "readwrite",
+	}
+
+	mounts, _, manifest := iso.getToolBindings(cfg)
+
+	// Readwrite mode should not produce manifest entries
+	if len(manifest.Overlays) != 0 {
+		t.Errorf("readwrite mode should produce empty manifest, got %d entries", len(manifest.Overlays))
+	}
+
+	// Mounts should NOT have :ro suffix (except explicitly ReadOnly bindings)
+	for _, m := range mounts {
+		if strings.Contains(m, ".config/fish/functions") && strings.HasSuffix(m, ":ro") {
+			t.Errorf("readwrite mode should not produce :ro mounts, got: %s", m)
+		}
+	}
+}
+
+func TestGetToolBindings_SplitMode_OverlayBindingsAreRO(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "testuser")
+
+	// Create dirs for cache (CategoryData) and config (CategoryConfig)
+	miseConfig := filepath.Join(homeDir, ".config", "mise")
+	miseData := filepath.Join(homeDir, ".local", "share", "mise")
+	if err := os.MkdirAll(miseConfig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(miseData, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	iso := NewDockerIsolator(DockerConfig{})
+
+	cfg := &Config{
+		ProjectDir:       filepath.Join(tmpDir, "project"),
+		SandboxHome:      filepath.Join(tmpDir, "sandbox"),
+		HomeDir:          homeDir,
+		Shell:            "bash",
+		DefaultMountMode: "split",
+	}
+
+	mounts, _, _ := iso.getToolBindings(cfg)
+
+	// Both config (tmpoverlay) and data (overlay) should be :ro in Docker
+	for _, m := range mounts {
+		if strings.Contains(m, ".config/mise") || strings.Contains(m, "share/mise") {
+			if !strings.HasSuffix(m, ":ro") {
+				t.Errorf("split mode: overlay binding should be :ro in Docker, got: %s", m)
+			}
+		}
 	}
 }

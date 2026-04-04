@@ -133,8 +133,8 @@ func mergeConfigs(base, overlay *Config) *Config {
 	}
 
 	// Overlay settings
-	if overlay.Overlay.Enabled != nil {
-		result.Overlay.Enabled = overlay.Overlay.Enabled
+	if overlay.Overlay.Default != "" {
+		result.Overlay.Default = overlay.Overlay.Default
 	}
 
 	// Proxy credentials: deep merge (same pattern as tools)

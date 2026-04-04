@@ -100,7 +100,7 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Println()
 
 			fmt.Println("[overlay]")
-			fmt.Printf("  enabled = %v\n", cfg.Overlay.IsEnabled())
+			fmt.Printf("  default = %q\n", cfg.Overlay.GetDefault())
 			fmt.Println()
 
 			// Print tool configurations dynamically

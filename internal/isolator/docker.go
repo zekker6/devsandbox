@@ -25,11 +25,16 @@ const (
 )
 
 const (
-	// CacheVolumeName is the shared cache volume name
-	CacheVolumeName = "devsandbox-cache"
 	// CacheMountPath is where the cache volume is mounted
 	CacheMountPath = "/cache"
 )
+
+// CacheVolumeName returns a per-project cache volume name.
+// Each project gets its own cache volume to prevent cross-project cache poisoning.
+func CacheVolumeName(projectDir string) string {
+	hash := sha256.Sum256([]byte(projectDir))
+	return fmt.Sprintf("devsandbox-cache-%x", hash[:4])
+}
 
 // Docker labels for devsandbox containers and volumes
 const (
@@ -76,11 +81,12 @@ type DockerConfig struct {
 
 // DockerIsolator implements Isolator using Docker containers.
 type DockerIsolator struct {
-	config      DockerConfig
-	imageTag    string // set after buildImage
-	networkName string // per-session Docker network
-	gatewayIP   string // per-session network gateway IP (proxy bind address)
-	logger      *logging.ComponentLogger
+	config       DockerConfig
+	imageTag     string // set after buildImage
+	networkName  string // per-session Docker network
+	gatewayIP    string // per-session network gateway IP (proxy bind address)
+	logger       *logging.ComponentLogger
+	manifestPath string // host path to overlay manifest temp file
 }
 
 // SetLogger configures the logger for the Docker isolator.
@@ -254,22 +260,22 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 
 	// Build isolator config from RunConfig
 	isoCfg := &Config{
-		ProjectDir:      sandboxCfg.ProjectDir,
-		SandboxHome:     sandboxCfg.SandboxHome,
-		HomeDir:         sandboxCfg.HomeDir,
-		Shell:           string(sandboxCfg.Shell),
-		ShellPath:       sandboxCfg.ShellPath,
-		Command:         cfg.Command,
-		Interactive:     cfg.Interactive,
-		ProxyEnabled:    sandboxCfg.ProxyEnabled,
-		ProxyPort:       cfg.ProxyPort,
-		ProxyExtraEnv:   sandboxCfg.ProxyExtraEnv,
-		ProxyExtraCAEnv: sandboxCfg.ProxyExtraCAEnv,
-		EnvPassthrough:  sandboxCfg.EnvPassthrough,
-		Environment:     make(map[string]string),
-		ToolsConfig:     sandboxCfg.ToolsConfig,
-		OverlayEnabled:  sandboxCfg.OverlayEnabled,
-		HideEnvFiles:    sandboxCfg.HideEnvFiles,
+		ProjectDir:       sandboxCfg.ProjectDir,
+		SandboxHome:      sandboxCfg.SandboxHome,
+		HomeDir:          sandboxCfg.HomeDir,
+		Shell:            string(sandboxCfg.Shell),
+		ShellPath:        sandboxCfg.ShellPath,
+		Command:          cfg.Command,
+		Interactive:      cfg.Interactive,
+		ProxyEnabled:     sandboxCfg.ProxyEnabled,
+		ProxyPort:        cfg.ProxyPort,
+		ProxyExtraEnv:    sandboxCfg.ProxyExtraEnv,
+		ProxyExtraCAEnv:  sandboxCfg.ProxyExtraCAEnv,
+		EnvPassthrough:   sandboxCfg.EnvPassthrough,
+		Environment:      make(map[string]string),
+		ToolsConfig:      sandboxCfg.ToolsConfig,
+		DefaultMountMode: sandboxCfg.DefaultMountMode,
+		HideEnvFiles:     sandboxCfg.HideEnvFiles,
 	}
 
 	// Add CA path if proxy is enabled and MITM generated a CA
@@ -656,7 +662,7 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	}
 
 	// Tool bindings (nvim, mise, git, starship, etc.)
-	toolMounts, toolEnvVars := d.getToolBindings(cfg)
+	toolMounts, toolEnvVars, overlayManifest := d.getToolBindings(cfg)
 	for _, mount := range toolMounts {
 		args = append(args, "-v", mount)
 	}
@@ -664,10 +670,19 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-e", env)
 	}
 
-	// Shared cache volume for tools (mise, go, etc.)
+	// Write overlay manifest if any tmpoverlay bindings exist
+	if len(overlayManifest.Overlays) > 0 {
+		manifestPath, err := d.writeOverlayManifest(overlayManifest)
+		if err != nil {
+			return nil, fmt.Errorf("write overlay manifest: %w", err)
+		}
+		args = append(args, "-v", manifestPath+":"+OverlayManifestPath+":ro")
+	}
+
+	// Per-project cache volume for tools (mise, go, etc.)
 	cacheMounts := tools.CollectCacheMounts()
 	if len(cacheMounts) > 0 {
-		args = append(args, "-v", CacheVolumeName+":"+CacheMountPath)
+		args = append(args, "-v", CacheVolumeName(cfg.ProjectDir)+":"+CacheMountPath)
 		for _, cm := range cacheMounts {
 			args = append(args, "-e", cm.EnvVar+"="+cm.FullPath())
 		}
@@ -818,8 +833,11 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 }
 
 // Cleanup performs any post-sandbox cleanup.
-// Removes the per-session Docker network if one was created.
+// Removes the per-session Docker network if one was created and cleans up temp files.
 func (d *DockerIsolator) Cleanup() error {
+	if d.manifestPath != "" {
+		_ = os.Remove(d.manifestPath)
+	}
 	if d.networkName != "" {
 		rmNet := exec.Command("docker", "network", "rm", d.networkName)
 		if output, err := rmNet.CombinedOutput(); err != nil {
@@ -827,6 +845,23 @@ func (d *DockerIsolator) Cleanup() error {
 		}
 	}
 	return nil
+}
+
+// writeOverlayManifest writes the manifest to a temp file and returns the host path.
+func (d *DockerIsolator) writeOverlayManifest(manifest *OverlayManifest) (string, error) {
+	f, err := os.CreateTemp("", "devsandbox-overlay-manifest-*.json")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	_ = f.Close()
+
+	if err := manifest.Write(path); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	d.manifestPath = path
+	return path, nil
 }
 
 // NetworkName returns the per-session Docker network name, if any.
@@ -873,11 +908,13 @@ func (d *DockerIsolator) remapToContainerHome(hostPath, homeDir, projectDir stri
 
 // getToolBindings retrieves bindings from registered tools and converts them
 // to Docker volume mount strings.
-func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars []string) {
+func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars []string, manifest *OverlayManifest) {
+	manifest = &OverlayManifest{}
+
 	globalCfg := tools.GlobalConfig{
-		OverlayEnabled: cfg.OverlayEnabled,
-		ProjectDir:     cfg.ProjectDir,
-		HomeDir:        cfg.HomeDir,
+		DefaultMountMode: cfg.DefaultMountMode,
+		ProjectDir:       cfg.ProjectDir,
+		HomeDir:          cfg.HomeDir,
 	}
 
 	for _, tool := range tools.Available(cfg.HomeDir) {
@@ -892,6 +929,12 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 			if err := setupTool.Setup(cfg.HomeDir, cfg.SandboxHome); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: tool %s setup: %v\n", tool.Name(), err)
 			}
+		}
+
+		// Skip disabled tools
+		toolMountMode := getToolMountMode(cfg.ToolsConfig, tool.Name())
+		if toolMountMode == "disabled" {
+			continue
 		}
 
 		// Get Docker-specific bindings if available
@@ -915,6 +958,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 			// Convert regular bindings to Docker mounts
 			toolBindings = tool.Bindings(cfg.HomeDir, cfg.SandboxHome)
 			for _, b := range toolBindings {
+				sandbox.ResolveBindingType(&b, toolMountMode, cfg.DefaultMountMode)
 				if b.Source == "" {
 					continue
 				}
@@ -929,11 +973,31 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 					// Paths under project dir stay unchanged (project mounted at host path)
 					dest = d.remapToContainerHome(b.Source, cfg.HomeDir, cfg.ProjectDir)
 				}
+
+				// Determine if this is a tmpoverlay candidate
+				isTmpOverlay := b.Type == tools.MountTmpOverlay
+				isDir := false
+				if info, err := os.Stat(b.Source); err == nil {
+					isDir = info.IsDir()
+				}
+
 				mount := b.Source + ":" + dest
-				if b.ReadOnly {
+				if isTmpOverlay || b.Type == tools.MountOverlay {
+					// Both overlay types mount as :ro in Docker;
+					// shim applies overlayfs on top for tmpoverlay dirs.
+					mount += ":ro"
+				} else if b.ReadOnly {
 					mount += ":ro"
 				}
 				mounts = append(mounts, mount)
+
+				// Add to manifest if it's a tmpoverlay directory
+				if isTmpOverlay && isDir {
+					manifest.Overlays = append(manifest.Overlays, OverlayEntry{
+						Path: dest,
+						Type: "tmpoverlay",
+					})
+				}
 			}
 		}
 
@@ -952,7 +1016,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		}
 	}
 
-	return mounts, envVars
+	return mounts, envVars, manifest
 }
 
 // getToolConfig extracts tool-specific config from the tools map.
@@ -966,6 +1030,16 @@ func getToolConfig(toolsConfig map[string]any, toolName string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// getToolMountMode extracts mount_mode from the tool's config section.
+func getToolMountMode(toolsConfig map[string]any, toolName string) string {
+	cfg := getToolConfig(toolsConfig, toolName)
+	if cfg == nil {
+		return ""
+	}
+	mode, _ := cfg["mount_mode"].(string)
+	return mode
 }
 
 // containerName generates a Docker container name for the sandbox.
@@ -1002,7 +1076,7 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 	_, _ = fmt.Fprintf(h, "cpu=%s\n", d.config.CPULimit)
 
 	// Bindings — volume mounts passed to docker create.
-	_, _ = fmt.Fprintf(h, "overlay=%t\n", cfg.OverlayEnabled)
+	_, _ = fmt.Fprintf(h, "mount_mode=%s\n", cfg.DefaultMountMode)
 	for _, b := range cfg.Bindings {
 		_, _ = fmt.Fprintf(h, "bind=%s:%s:ro=%t:opt=%t\n", b.Source, b.Dest, b.ReadOnly, b.Optional)
 	}
@@ -1031,6 +1105,12 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 	envFiles := sandbox.FindEnvFiles(cfg.ProjectDir, 3)
 	for _, f := range envFiles {
 		_, _ = fmt.Fprintf(h, "envhide=%s\n", f)
+	}
+
+	// Overlay manifest — changes in overlay paths require container recreation.
+	_, _, overlayManifest := d.getToolBindings(cfg)
+	for _, entry := range overlayManifest.Overlays {
+		_, _ = fmt.Fprintf(h, "overlay=%s:%s\n", entry.Path, entry.Type)
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil)[:8])

@@ -108,6 +108,13 @@ Proxy Mode (--proxy):
 }
 
 func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
+	// Prevent recursive sandboxing — running devsandbox inside an existing
+	// sandbox fails because bwrap cannot overlay-mount paths that are already
+	// overlay mounts ("Resource busy").
+	if os.Getenv("DEVSANDBOX") == "1" {
+		return fmt.Errorf("already inside a devsandbox session (recursive sandboxing is not supported)")
+	}
+
 	// Track proxy result at function scope so the deferred signal check
 	// can suppress errors from signaled child processes.
 	var proxyRes *proxyResult
@@ -216,7 +223,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		appCfg.Tools["git"] = gitCfg
 	}
 
-	cfg.OverlayEnabled = appCfg.Overlay.IsEnabled()
+	cfg.DefaultMountMode = appCfg.Overlay.GetDefault()
 	cfg.ToolsConfig = appCfg.Tools
 	cfg.ConfigVisibility = string(appCfg.Sandbox.GetConfigVisibility())
 	cfg.MountsConfig = mounts.NewEngine(appCfg.Sandbox.Mounts, cfg.HomeDir)
@@ -238,11 +245,43 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
+	// Detect concurrent sessions (bwrap only — Docker containers are inherently isolated).
+	if cfg.Isolation == sandbox.IsolationBwrap && sandbox.IsSessionActive(cfg.SandboxRoot) {
+		sessionID, err := sandbox.GenerateSessionID()
+		if err != nil {
+			return err
+		}
+		cfg.SessionID = sessionID
+		cfg.IsConcurrent = true
+		fmt.Fprintf(os.Stderr, "Note: Another session is active. Running in concurrent mode (overlay changes will be discarded on exit).\n")
+	}
+
+	// Primary session: clean up stale session overlay dirs from crashed concurrent sessions.
+	if !cfg.IsConcurrent {
+		if removed, err := sandbox.CleanupStaleSessionDirs(cfg.SandboxHome); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to clean stale session dirs: %v\n", err)
+		} else if removed > 0 {
+			fmt.Fprintf(os.Stderr, "Cleaned up %d stale session overlay dir(s).\n", removed)
+		}
+	}
+
 	// When --rm is set, remove sandbox state after exit (both backends).
-	if rmFlag {
+	// Concurrent sessions skip this — they only clean their own session overlay dirs
+	// via the defer below. Removing the entire sandbox root would destroy the
+	// primary session's persistent state.
+	if rmFlag && !cfg.IsConcurrent {
 		defer func() {
 			if err := sandbox.RemoveSandbox(cfg.SandboxRoot); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to remove sandbox: %v\n", err)
+			}
+		}()
+	}
+
+	// Concurrent session: clean up session-scoped overlay dirs on exit.
+	if cfg.IsConcurrent {
+		defer func() {
+			if err := sandbox.CleanupSessionOverlays(cfg.SandboxHome, cfg.SessionID); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to clean session overlays: %v\n", err)
 			}
 		}()
 	}
@@ -378,9 +417,6 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 }
 
 func printInfo(cfg *sandbox.Config) {
-	// Extract mise config from ToolsConfig
-	miseWritable, misePersistent := getMiseConfig(cfg)
-
 	fmt.Println("Sandbox Configuration:")
 	fmt.Printf("  Project:      %s\n", cfg.ProjectName)
 	fmt.Printf("  Project Dir:  %s\n", cfg.ProjectDir)
@@ -422,14 +458,10 @@ func printInfo(cfg *sandbox.Config) {
 		fmt.Printf("  Gateway:  %s\n", cfg.GatewayIP)
 	}
 
-	if cfg.OverlayEnabled && miseWritable {
+	if cfg.DefaultMountMode != "readonly" && cfg.DefaultMountMode != "readwrite" {
 		fmt.Println()
-		fmt.Println("Overlay Mode:")
-		fmt.Printf("  Mise Writable:   %v\n", miseWritable)
-		fmt.Printf("  Mise Persistent: %v\n", misePersistent)
-		if misePersistent {
-			fmt.Printf("  Overlay Dir:     %s/overlay/\n", cfg.SandboxHome)
-		}
+		fmt.Printf("Mount Mode: %s\n", cfg.DefaultMountMode)
+		fmt.Printf("  Overlay Dir: %s/overlay/\n", cfg.SandboxHome)
 	}
 }
 
@@ -440,9 +472,9 @@ func printToolMounts(cfg *sandbox.Config) {
 
 	// Configure tools that support it (same as builder)
 	globalCfg := tools.GlobalConfig{
-		OverlayEnabled: cfg.OverlayEnabled,
-		ProjectDir:     cfg.ProjectDir,
-		HomeDir:        cfg.HomeDir,
+		DefaultMountMode: cfg.DefaultMountMode,
+		ProjectDir:       cfg.ProjectDir,
+		HomeDir:          cfg.HomeDir,
 	}
 	for _, tool := range tools.Available(homeDir) {
 		if configurable, ok := tool.(tools.ToolWithConfig); ok {
@@ -502,28 +534,6 @@ func printToolMounts(cfg *sandbox.Config) {
 			}
 		}
 	}
-}
-
-// getMiseConfig extracts mise configuration from ToolsConfig.
-func getMiseConfig(cfg *sandbox.Config) (writable, persistent bool) {
-	if cfg.ToolsConfig == nil {
-		return false, false
-	}
-	miseSection, ok := cfg.ToolsConfig["mise"]
-	if !ok {
-		return false, false
-	}
-	m, ok := miseSection.(map[string]any)
-	if !ok {
-		return false, false
-	}
-	if v, ok := m["writable"].(bool); ok {
-		writable = v
-	}
-	if v, ok := m["persistent"].(bool); ok {
-		persistent = v
-	}
-	return
 }
 
 // buildFilterConfig builds filter configuration from config file and CLI flags.
@@ -740,11 +750,11 @@ func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Contex
 	}
 
 	toolsCfg := tools.ActiveToolsConfig{
-		HomeDir:        cfg.HomeDir,
-		SandboxHome:    cfg.SandboxHome,
-		OverlayEnabled: cfg.OverlayEnabled,
-		ProjectDir:     cfg.ProjectDir,
-		ToolsConfig:    cfg.ToolsConfig,
+		HomeDir:          cfg.HomeDir,
+		SandboxHome:      cfg.SandboxHome,
+		DefaultMountMode: cfg.DefaultMountMode,
+		ProjectDir:       cfg.ProjectDir,
+		ToolsConfig:      cfg.ToolsConfig,
 	}
 
 	return tools.NewActiveToolsRunner(toolsCfg, errorLogger)
