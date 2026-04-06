@@ -67,7 +67,13 @@ tasks:
       - go mod tidy
 
   build:
-    desc: Build binary for local development
+    desc: Build all binaries for local development
+    deps:
+      - build:devsandbox
+      - build:shim
+
+  build:devsandbox:
+    desc: Build main devsandbox binary
     cmds:
       - mkdir -p bin
       - >-
@@ -80,6 +86,12 @@ tasks:
         -X devsandbox/internal/embed.BwrapVersion={{.BWRAP_TAG}}
         -X devsandbox/internal/embed.PastaVersion={{.PASTA_TAG}}"
         -o bin/devsandbox ./cmd/devsandbox
+
+  build:shim:
+    desc: Build devsandbox-shim binary
+    cmds:
+      - mkdir -p bin
+      - go build -o bin/devsandbox-shim ./cmd/devsandbox-shim
 
   release:snapshot:
     desc: Build snapshot release using goreleaser (for testing)

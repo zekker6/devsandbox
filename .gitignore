@@ -8,5 +8,5 @@ coverage.out
 claudedocs/
 docs/plans/
 docs/summaries/
-devsandbox-shim
+bin/devsandbox-shim
 
