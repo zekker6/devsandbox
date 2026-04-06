@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     libatomic1 \
     openssh-client \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Install mise
