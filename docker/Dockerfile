@@ -7,7 +7,7 @@ COPY cmd/devsandbox-shim/ ./cmd/devsandbox-shim/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /devsandbox-shim ./cmd/devsandbox-shim
 
 # ---- Stage 2: Runtime ----
-FROM debian:bookworm-slim
+FROM debian:13-slim
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
