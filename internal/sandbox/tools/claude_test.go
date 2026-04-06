@@ -14,10 +14,20 @@ func TestClaude_Bindings_DefaultPaths(t *testing.T) {
 	bindings := c.Bindings("/home/test", "/tmp/sandbox")
 
 	foundDotClaude := false
+	foundProjects := false
 	foundClaudeJSON := false
 	for _, b := range bindings {
 		if b.Source == "/home/test/.claude" {
 			foundDotClaude = true
+			if b.Category != CategoryConfig {
+				t.Errorf("~/.claude binding: expected category %q, got %q", CategoryConfig, b.Category)
+			}
+		}
+		if b.Source == "/home/test/.claude/projects" {
+			foundProjects = true
+			if b.Category != CategoryData {
+				t.Errorf("~/.claude/projects binding: expected category %q, got %q", CategoryData, b.Category)
+			}
 		}
 		if b.Source == "/home/test/.claude.json" {
 			foundClaudeJSON = true
@@ -26,6 +36,9 @@ func TestClaude_Bindings_DefaultPaths(t *testing.T) {
 
 	if !foundDotClaude {
 		t.Error("expected ~/.claude binding when CLAUDE_CONFIG_DIR is not set")
+	}
+	if !foundProjects {
+		t.Error("expected ~/.claude/projects binding for persistent session history")
 	}
 	if !foundClaudeJSON {
 		t.Error("expected ~/.claude.json binding when CLAUDE_CONFIG_DIR is not set")
@@ -40,6 +53,7 @@ func TestClaude_Bindings_CustomConfigDir(t *testing.T) {
 	bindings := c.Bindings("/home/test", "/tmp/sandbox")
 
 	foundCustom := false
+	foundProjects := false
 	foundDotClaude := false
 	foundClaudeJSON := false
 	foundClaudeJSONBackup := false
@@ -51,6 +65,12 @@ func TestClaude_Bindings_CustomConfigDir(t *testing.T) {
 			}
 			if !b.Optional {
 				t.Error("custom config dir binding should be optional")
+			}
+		}
+		if b.Source == filepath.Join(customDir, "projects") {
+			foundProjects = true
+			if b.Category != CategoryData {
+				t.Errorf("custom config dir projects binding: expected category %q, got %q", CategoryData, b.Category)
 			}
 		}
 		if b.Source == "/home/test/.claude" {
@@ -66,6 +86,9 @@ func TestClaude_Bindings_CustomConfigDir(t *testing.T) {
 
 	if !foundCustom {
 		t.Error("expected CLAUDE_CONFIG_DIR binding when env var is set")
+	}
+	if !foundProjects {
+		t.Error("expected projects subdirectory binding for persistent session history")
 	}
 	if foundDotClaude {
 		t.Error("~/.claude should NOT be mounted when CLAUDE_CONFIG_DIR is set")

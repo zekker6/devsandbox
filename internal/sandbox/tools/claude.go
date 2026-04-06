@@ -11,7 +11,8 @@ func init() {
 }
 
 // Claude provides Claude AI tool integration.
-// Mounts Claude config and credential directories read-write.
+// Mounts Claude config directory with tmpoverlay (protects settings/credentials)
+// and projects subdirectory with persistent overlay (preserves session history and memory).
 type Claude struct{}
 
 func (c *Claude) Name() string {
@@ -68,18 +69,32 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 	}
 
 	if dir := c.configDir(); dir != "" {
-		// Custom config directory from CLAUDE_CONFIG_DIR
-		bindings = append(bindings, Binding{
-			Source:   dir,
-			Category: CategoryConfig,
-			Optional: true,
-		})
+		// Custom config directory from CLAUDE_CONFIG_DIR — tmpoverlay protects config,
+		// persistent overlay on projects/ preserves session history and memory.
+		bindings = append(bindings,
+			Binding{
+				Source:   dir,
+				Category: CategoryConfig,
+				Optional: true,
+			},
+			Binding{
+				Source:   filepath.Join(dir, "projects"),
+				Category: CategoryData,
+				Optional: true,
+			},
+		)
 	} else {
-		// Default config paths
+		// Default config paths — tmpoverlay on ~/.claude protects settings/credentials,
+		// persistent overlay on projects/ preserves session history and memory.
 		bindings = append(bindings,
 			Binding{
 				Source:   filepath.Join(homeDir, ".claude"),
 				Category: CategoryConfig,
+				Optional: true,
+			},
+			Binding{
+				Source:   filepath.Join(homeDir, ".claude", "projects"),
+				Category: CategoryData,
 				Optional: true,
 			},
 			// .claude.json files must be rw bind mounts — they are files (not dirs)
