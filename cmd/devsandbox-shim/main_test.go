@@ -161,6 +161,38 @@ func TestLoadOverlayManifest_Malformed(t *testing.T) {
 	}
 }
 
+func TestLoadOverlayManifest_CopyOverlay(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create target and source directories
+	targetDir := filepath.Join(dir, "target")
+	sourceDir := filepath.Join(dir, "source")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, "overlays.json")
+	data := fmt.Sprintf(`{"overlays":[{"path":"%s","type":"copyoverlay","source":"%s"}]}`,
+		targetDir, sourceDir)
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := loadOverlayManifest(path)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Type != "copyoverlay" {
+		t.Errorf("type = %q, want copyoverlay", entries[0].Type)
+	}
+	if entries[0].Source != sourceDir {
+		t.Errorf("source = %q, want %q", entries[0].Source, sourceDir)
+	}
+}
+
 func TestLoadOverlayManifest_SkipsFiles(t *testing.T) {
 	dir := t.TempDir()
 

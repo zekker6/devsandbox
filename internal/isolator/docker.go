@@ -906,6 +906,13 @@ func (d *DockerIsolator) remapToContainerHome(hostPath, homeDir, projectDir stri
 	return hostPath
 }
 
+// copyOverlayShadowPath returns a deterministic shadow mount path for a container destination.
+// Used on macOS where overlayfs is unavailable inside Docker Desktop containers.
+func copyOverlayShadowPath(containerDest string) string {
+	h := sha256.Sum256([]byte(containerDest))
+	return fmt.Sprintf("/tmp/.overlay-shadow/%x", h[:8])
+}
+
 // getToolBindings retrieves bindings from registered tools and converts them
 // to Docker volume mount strings.
 func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars []string, manifest *OverlayManifest) {
@@ -981,22 +988,34 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 					isDir = info.IsDir()
 				}
 
-				mount := b.Source + ":" + dest
-				if isTmpOverlay || b.Type == tools.MountOverlay {
-					// Both overlay types mount as :ro in Docker;
-					// shim applies overlayfs on top for tmpoverlay dirs.
-					mount += ":ro"
-				} else if b.ReadOnly {
-					mount += ":ro"
-				}
-				mounts = append(mounts, mount)
-
-				// Add to manifest if it's a tmpoverlay directory
-				if isTmpOverlay && isDir {
+				if isTmpOverlay && isDir && runtime.GOOS == "darwin" {
+					// macOS: overlayfs unavailable in Docker Desktop.
+					// Mount source read-only at a shadow path; shim copies to target.
+					shadowDest := copyOverlayShadowPath(dest)
+					mounts = append(mounts, b.Source+":"+shadowDest+":ro")
 					manifest.Overlays = append(manifest.Overlays, OverlayEntry{
-						Path: dest,
-						Type: "tmpoverlay",
+						Path:   dest,
+						Source: shadowDest,
+						Type:   "copyoverlay",
 					})
+				} else {
+					mount := b.Source + ":" + dest
+					if isTmpOverlay || b.Type == tools.MountOverlay {
+						// Both overlay types mount as :ro in Docker;
+						// shim applies overlayfs on top for tmpoverlay dirs.
+						mount += ":ro"
+					} else if b.ReadOnly {
+						mount += ":ro"
+					}
+					mounts = append(mounts, mount)
+
+					// Add to manifest if it's a tmpoverlay directory
+					if isTmpOverlay && isDir {
+						manifest.Overlays = append(manifest.Overlays, OverlayEntry{
+							Path: dest,
+							Type: "tmpoverlay",
+						})
+					}
 				}
 			}
 		}

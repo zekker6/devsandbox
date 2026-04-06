@@ -20,8 +20,10 @@ type OverlayManifest struct {
 type OverlayEntry struct {
 	// Path is the container-side mount point (must be a directory).
 	Path string `json:"path"`
-	// Type is the overlay type. Currently only "tmpoverlay" is supported.
+	// Type is the overlay type: "tmpoverlay" (overlayfs) or "copyoverlay" (copy-based fallback).
 	Type string `json:"type"`
+	// Source is the container-side shadow path for copyoverlay entries.
+	Source string `json:"source,omitempty"`
 }
 
 // Write serializes the manifest to a file.

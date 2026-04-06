@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -48,6 +49,76 @@ func TestBuildOverlayMountOptions(t *testing.T) {
 	expected := "lowerdir=/lower,upperdir=/upper,workdir=/work"
 	if opts != expected {
 		t.Errorf("got %q, want %q", opts, expected)
+	}
+}
+
+func TestCopyDir(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	// Create source structure: file, subdir/nested, symlink
+	if err := os.MkdirAll(filepath.Join(src, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "subdir", "nested.txt"), []byte("world"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("file.txt", filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyDir(src, dst); err != nil {
+		t.Fatalf("copyDir: %v", err)
+	}
+
+	// Verify file content
+	data, err := os.ReadFile(filepath.Join(dst, "file.txt"))
+	if err != nil {
+		t.Fatalf("read copied file: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Errorf("file content = %q, want %q", data, "hello")
+	}
+
+	// Verify nested file
+	data, err = os.ReadFile(filepath.Join(dst, "subdir", "nested.txt"))
+	if err != nil {
+		t.Fatalf("read nested file: %v", err)
+	}
+	if string(data) != "world" {
+		t.Errorf("nested content = %q, want %q", data, "world")
+	}
+
+	// Verify symlink
+	link, err := os.Readlink(filepath.Join(dst, "link"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if link != "file.txt" {
+		t.Errorf("symlink target = %q, want %q", link, "file.txt")
+	}
+
+	// Verify permissions preserved
+	info, _ := os.Stat(filepath.Join(dst, "subdir", "nested.txt"))
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("permissions = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestCopyDir_EmptySrc(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	if err := copyDir(src, dst); err != nil {
+		t.Fatalf("copyDir empty: %v", err)
+	}
+
+	entries, _ := os.ReadDir(dst)
+	if len(entries) != 0 {
+		t.Errorf("expected empty dst, got %d entries", len(entries))
 	}
 }
 

@@ -50,8 +50,28 @@ func main() {
 	writeReadySentinel()
 
 	// Load overlay manifest — the Docker isolator writes this when tmpoverlay
-	// bindings exist. If present, we fork into a user namespace to mount overlayfs.
+	// bindings exist. If present, we either copy (macOS) or fork with overlayfs (Linux).
 	overlays := loadOverlayManifest(overlayManifestPath)
+
+	// Separate overlay types: copyoverlay (macOS) vs tmpoverlay (Linux overlayfs)
+	var copyOverlays, fsOverlays []overlayEntry
+	for _, entry := range overlays {
+		if entry.Type == "copyoverlay" {
+			copyOverlays = append(copyOverlays, entry)
+		} else {
+			fsOverlays = append(fsOverlays, entry)
+		}
+	}
+
+	// Apply copy overlays — no namespaces needed, just copy from shadow source.
+	for _, entry := range copyOverlays {
+		if err := copyDir(entry.Source, entry.Path); err != nil {
+			fatal("copy overlay %s → %s: %v", entry.Source, entry.Path, err)
+		}
+		if err := chownRecursive(entry.Path, uid, gid); err != nil {
+			warn("chown copy overlay %s: %v", entry.Path, err)
+		}
+	}
 
 	// The remaining args after the entrypoint are the command to run
 	args := os.Args[1:]
@@ -59,8 +79,8 @@ func main() {
 		args = []string{"/bin/bash"}
 	}
 
-	if len(overlays) > 0 {
-		execWithOverlays(uid, gid, overlays, args)
+	if len(fsOverlays) > 0 {
+		execWithOverlays(uid, gid, fsOverlays, args)
 		// execWithOverlays does not return on success
 	}
 
@@ -323,8 +343,9 @@ func chownRecursive(path string, uid, gid int) error {
 }
 
 type overlayEntry struct {
-	Path string `json:"path"`
-	Type string `json:"type"`
+	Path   string `json:"path"`
+	Type   string `json:"type"`
+	Source string `json:"source,omitempty"`
 }
 
 type overlayManifest struct {
