@@ -1301,3 +1301,58 @@ func TestMergeConfigs_RedactionMostRestrictiveAction(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfigWithOptions_SkipLocalConfig(t *testing.T) {
+	// Arrange: create a temp dir, chdir into it, drop a .devsandbox.toml
+	// that would normally be merged into the config.
+	tmp := t.TempDir()
+	localPath := filepath.Join(tmp, LocalConfigFile)
+	localContent := []byte("[sandbox]\nbase_path = \"/should/not/appear\"\n")
+	if err := os.WriteFile(localPath, localContent, 0o600); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Act: load with SkipLocalConfig.
+	cfg, _, projectDir, err := LoadConfigWithOptions(&LoadOptions{SkipLocalConfig: true})
+	if err != nil {
+		t.Fatalf("LoadConfigWithOptions: %v", err)
+	}
+
+	// Assert: the local override did NOT land in the merged config.
+	if cfg.Sandbox.BasePath == "/should/not/appear" {
+		t.Error("SkipLocalConfig=true did not skip local config")
+	}
+	if projectDir != tmp {
+		t.Errorf("projectDir = %q, want %q", projectDir, tmp)
+	}
+}
+
+func TestLoadConfigWithOptions_NilMatchesLoadConfig(t *testing.T) {
+	tmp := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	a, _, _, errA := LoadConfig()
+	b, _, _, errB := LoadConfigWithOptions(nil)
+	if (errA == nil) != (errB == nil) {
+		t.Fatalf("error mismatch: LoadConfig=%v LoadConfigWithOptions=%v", errA, errB)
+	}
+	if errA == nil && a.Sandbox.BasePath != b.Sandbox.BasePath {
+		t.Errorf("base_path mismatch: %q vs %q", a.Sandbox.BasePath, b.Sandbox.BasePath)
+	}
+}

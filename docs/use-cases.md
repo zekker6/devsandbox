@@ -108,6 +108,29 @@ devsandbox code .
 
 Any CLI-based AI coding tool works in the sandbox. Electron-based desktop apps (Cursor, VS Code) may require the Docker backend with additional configuration.
 
+## Scratchpads
+
+Managed throwaway workspaces for one-off experiments and agent sessions.
+
+```bash
+# Interactive shell in the default scratchpad
+devsandbox scratchpad
+
+# Named scratchpad with an agent
+devsandbox scratchpad experiments claude --dangerously-skip-permissions
+
+# Ephemeral — wipe on exit
+devsandbox scratchpad --rm experiments bun init
+
+# See what you have
+devsandbox scratchpad list
+
+# Clean up
+devsandbox scratchpad rm experiments
+```
+
+Scratchpads live under `~/.local/share/devsandbox-scratchpads/` and preserve state between runs. They always start with a clean config baseline (no project-local `.devsandbox.toml` is loaded).
+
 ## Shell Autocompletion
 
 ### Bash

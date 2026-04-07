@@ -128,3 +128,45 @@ func TestGenerateSandboxName(t *testing.T) {
 		t.Errorf("Name should include hash suffix: %s", name)
 	}
 }
+
+func TestScratchpadBasePath(t *testing.T) {
+	got := ScratchpadBasePath("/home/alice")
+	want := "/home/alice/.local/share/devsandbox-scratchpads"
+	if got != want {
+		t.Errorf("ScratchpadBasePath = %q, want %q", got, want)
+	}
+}
+
+func TestScratchpadDir(t *testing.T) {
+	got := ScratchpadDir("/home/alice", "foo")
+	want := "/home/alice/.local/share/devsandbox-scratchpads/scratchpad-foo"
+	if got != want {
+		t.Errorf("ScratchpadDir = %q, want %q", got, want)
+	}
+}
+
+func TestValidateScratchpadName(t *testing.T) {
+	valid := []string{"default", "foo", "foo-bar", "foo.bar", "a_b", "A1", "x"}
+	for _, name := range valid {
+		if err := ValidateScratchpadName(name); err != nil {
+			t.Errorf("ValidateScratchpadName(%q) = %v, want nil", name, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		".",
+		"..",
+		"foo/bar",
+		"foo bar",
+		"foo\x00bar",
+		"-foo", // leading dash risks being parsed as a flag
+		"foo\n",
+		"scratchpad-foo", // reserved prefix (avoids double-prefix on disk)
+	}
+	for _, name := range invalid {
+		if err := ValidateScratchpadName(name); err == nil {
+			t.Errorf("ValidateScratchpadName(%q) = nil, want error", name)
+		}
+	}
+}

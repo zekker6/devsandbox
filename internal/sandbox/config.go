@@ -228,3 +228,61 @@ func (c *Config) GetSandboxBase() string {
 func SandboxBasePath(homeDir string) string {
 	return filepath.Join(homeDir, ".local", "share", SandboxBaseDir)
 }
+
+// Scratchpad directory layout.
+const (
+	// ScratchpadBaseDir is the directory under ~/.local/share for scratchpad
+	// working directories. Deliberately separate from SandboxBaseDir so that
+	// ListSandboxes does not enumerate scratchpad working dirs as bogus
+	// sandbox entries.
+	ScratchpadBaseDir = "devsandbox-scratchpads"
+
+	// ScratchpadPrefix is prepended to the scratchpad name to form the
+	// on-disk directory basename. The prefix flows through
+	// GenerateSandboxName so sandbox state is visibly tagged in
+	// `sandboxes list`.
+	ScratchpadPrefix = "scratchpad-"
+
+	// DefaultScratchpadName is used when the user runs
+	// `devsandbox scratchpad` with no name argument.
+	DefaultScratchpadName = "default"
+)
+
+// validScratchpadNameRe permits only characters that are safe as a
+// filesystem path component and not confusable with flag syntax. Leading
+// dashes are additionally rejected by ValidateScratchpadName.
+var validScratchpadNameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// ScratchpadBasePath returns the base directory for scratchpad working dirs
+// given a home directory. This location is outside SandboxBasePath on
+// purpose (see ScratchpadBaseDir).
+func ScratchpadBasePath(homeDir string) string {
+	return filepath.Join(homeDir, ".local", "share", ScratchpadBaseDir)
+}
+
+// ScratchpadDir returns the working directory for a named scratchpad. The
+// name must be validated with ValidateScratchpadName first.
+func ScratchpadDir(homeDir, name string) string {
+	return filepath.Join(ScratchpadBasePath(homeDir), ScratchpadPrefix+name)
+}
+
+// ValidateScratchpadName enforces the [a-zA-Z0-9._-]+ rule and rejects a
+// few additional unsafe or confusing shapes.
+func ValidateScratchpadName(name string) error {
+	if name == "" {
+		return fmt.Errorf("scratchpad name must not be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("scratchpad name %q is reserved", name)
+	}
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("scratchpad name must not start with '-'")
+	}
+	if strings.HasPrefix(name, ScratchpadPrefix) {
+		return fmt.Errorf("scratchpad name must not start with %q (reserved prefix)", ScratchpadPrefix)
+	}
+	if !validScratchpadNameRe.MatchString(name) {
+		return fmt.Errorf("scratchpad name %q contains invalid characters (allowed: a-z, A-Z, 0-9, '.', '_', '-')", name)
+	}
+	return nil
+}

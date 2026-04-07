@@ -82,6 +82,48 @@ Run `devsandbox doctor` to verify your setup.
 
 > **macOS:** devsandbox runs your code inside a lightweight Linux container (Debian slim) via Docker. Your project files are mounted into the container, so edits sync bidirectionally. Ensure your Docker runtime is running before using devsandbox. The first start downloads a base Docker image (~200MB); subsequent starts reuse Docker layer caching and complete in 1-2 seconds.
 
+## Scratchpads
+
+Sometimes you want to run a sandboxed tool in an empty working directory — try a library, give an AI agent a clean slate, or quickly build something unrelated to your current project. `devsandbox scratchpad` gives you a managed, persistent scratch workspace without having to mkdir under `/tmp` by hand.
+
+```bash
+# Interactive shell in the default scratchpad
+devsandbox scratchpad
+
+# Named scratchpad "experiments", interactive shell
+devsandbox scratchpad experiments
+
+# Named scratchpad with a command
+devsandbox scratchpad experiments claude --dangerously-skip-permissions
+
+# Command in the default scratchpad (name it explicitly)
+devsandbox scratchpad default bun init
+
+# Ephemeral run — wipe state on exit
+devsandbox scratchpad --rm experiments bun init
+```
+
+Scratchpad working directories live at `~/.local/share/devsandbox-scratchpads/scratchpad-<name>/` and persist between runs. The sandbox state (home overlay, tool caches) lives in the usual `~/.local/share/devsandbox/` tree alongside your project sandboxes.
+
+Local `.devsandbox.toml` files are never loaded inside a scratchpad — the baseline is always global config only, so scratchpads stay uncontaminated by project-specific overrides.
+
+### Managing scratchpads
+
+```bash
+# List all scratchpads
+devsandbox scratchpad list
+devsandbox scratchpad list --json
+
+# Remove one (cleans working dir + sandbox state)
+devsandbox scratchpad rm experiments
+
+# Wipe the working dir but keep the sandbox home overlay
+devsandbox scratchpad rm experiments --keep-state
+
+# Remove everything
+devsandbox scratchpad rm --all --force
+```
+
 ## What Your AI Agent CAN and CANNOT Do
 
 **CAN:** Read/write your project files, run build commands, install dependencies, make API calls (logged in proxy mode).

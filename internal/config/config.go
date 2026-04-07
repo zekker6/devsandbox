@@ -1084,6 +1084,13 @@ const LocalConfigFile = ".devsandbox.toml"
 // It loads the trust store and config together, reducing boilerplate.
 // Returns the config, trust store, and the resolved project directory.
 func LoadConfig() (*Config, *TrustStore, string, error) {
+	return LoadConfigWithOptions(nil)
+}
+
+// LoadConfigWithOptions is like LoadConfig but accepts explicit load options
+// (e.g., to skip local .devsandbox.toml loading for scratchpad sessions).
+// A nil opts argument is equivalent to calling LoadConfig.
+func LoadConfigWithOptions(opts *LoadOptions) (*Config, *TrustStore, string, error) {
 	projectDir, err := os.Getwd()
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to get current directory: %w", err)
@@ -1094,9 +1101,16 @@ func LoadConfig() (*Config, *TrustStore, string, error) {
 		return nil, nil, "", fmt.Errorf("failed to load trust store: %w", err)
 	}
 
-	cfg, err := LoadWithProjectDir(ConfigPath(), projectDir, &LoadOptions{
-		TrustStore: trustStore,
-	})
+	merged := &LoadOptions{TrustStore: trustStore}
+	if opts != nil {
+		merged.SkipLocalConfig = opts.SkipLocalConfig
+		// TrustStore from caller takes precedence if provided.
+		if opts.TrustStore != nil {
+			merged.TrustStore = opts.TrustStore
+		}
+	}
+
+	cfg, err := LoadWithProjectDir(ConfigPath(), projectDir, merged)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to load config: %w", err)
 	}

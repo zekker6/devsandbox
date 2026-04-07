@@ -26,6 +26,33 @@ import (
 	"devsandbox/internal/version"
 )
 
+// addSandboxFlags registers the flags that control a sandbox session. Both
+// the root command and the scratchpad subcommand register this identical
+// set, so they can share the runSandbox entry point.
+func addSandboxFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("info", false, "Show sandbox configuration")
+	cmd.Flags().Bool("proxy", false, "Enable proxy mode (route traffic through MITM proxy)")
+	cmd.Flags().Int("proxy-port", proxy.DefaultProxyPort, "Proxy server port")
+	cmd.Flags().Bool("no-mitm", false, "Disable HTTPS MITM interception (transparent CONNECT tunneling)")
+
+	// Tool flags
+	cmd.Flags().String("git-mode", "", "Override git tool mode for this session (readonly, readwrite, disabled)")
+
+	// Filter flags
+	cmd.Flags().String("filter-default", "", "Default filter action for unmatched requests: allow, block, or ask")
+	cmd.Flags().StringSlice("allow-domain", nil, "Allow domain pattern (can be repeated)")
+	cmd.Flags().StringSlice("block-domain", nil, "Block domain pattern (can be repeated)")
+
+	// Isolation backend flag
+	cmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker")
+
+	// Sandbox lifecycle flag
+	cmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
+
+	// Security flags
+	cmd.Flags().Bool("no-hide-env", false, "Disable .env file hiding (exposes .env files inside the sandbox)")
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "devsandbox [command...]",
@@ -63,27 +90,7 @@ Proxy Mode (--proxy):
 
 	rootCmd.Flags().SetInterspersed(false)
 
-	rootCmd.Flags().Bool("info", false, "Show sandbox configuration")
-	rootCmd.Flags().Bool("proxy", false, "Enable proxy mode (route traffic through MITM proxy)")
-	rootCmd.Flags().Int("proxy-port", proxy.DefaultProxyPort, "Proxy server port")
-	rootCmd.Flags().Bool("no-mitm", false, "Disable HTTPS MITM interception (transparent CONNECT tunneling)")
-
-	// Tool flags
-	rootCmd.Flags().String("git-mode", "", "Override git tool mode for this session (readonly, readwrite, disabled)")
-
-	// Filter flags
-	rootCmd.Flags().String("filter-default", "", "Default filter action for unmatched requests: allow, block, or ask")
-	rootCmd.Flags().StringSlice("allow-domain", nil, "Allow domain pattern (can be repeated)")
-	rootCmd.Flags().StringSlice("block-domain", nil, "Block domain pattern (can be repeated)")
-
-	// Isolation backend flag
-	rootCmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker")
-
-	// Sandbox lifecycle flag
-	rootCmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
-
-	// Security flags
-	rootCmd.Flags().Bool("no-hide-env", false, "Disable .env file hiding (exposes .env files inside the sandbox)")
+	addSandboxFlags(rootCmd)
 
 	// Add subcommands
 	rootCmd.AddCommand(newSandboxesCmd())
@@ -92,6 +99,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newToolsCmd())
 	rootCmd.AddCommand(newProxyCmd())
+	rootCmd.AddCommand(newScratchpadCmd())
 	rootCmd.AddCommand(newTrustCmd())
 	rootCmd.AddCommand(newImageCmd())
 
@@ -132,8 +140,13 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	allowDomains, _ := cmd.Flags().GetStringSlice("allow-domain")
 	blockDomains, _ := cmd.Flags().GetStringSlice("block-domain")
 
-	// Load configuration file with project-specific overrides
-	appCfg, _, projectDir, err := config.LoadConfig()
+	// Load configuration file with project-specific overrides. The
+	// scratchpad subcommand sets the "scratchpad" annotation on itself so
+	// that we can skip any local .devsandbox.toml and keep a clean baseline.
+	loadOpts := &config.LoadOptions{
+		SkipLocalConfig: cmd.Annotations["scratchpad"] == "true",
+	}
+	appCfg, _, projectDir, err := config.LoadConfigWithOptions(loadOpts)
 	if err != nil {
 		return err
 	}

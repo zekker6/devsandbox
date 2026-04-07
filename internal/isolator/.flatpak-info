@@ -1,0 +1,3 @@
+[Application]
+name=dev.devsandbox.App
+runtime=dev.devsandbox.Platform/x86_64/1.0
