@@ -7,9 +7,13 @@ import (
 )
 
 // CleanupSessionOverlays removes the overlay directories for a specific session.
+//
+// Session overlays may contain read-only directories (e.g. Go module caches
+// created by tooling running inside the sandbox), so removal must use
+// forceRemoveAll rather than a plain os.RemoveAll.
 func CleanupSessionOverlays(sandboxHome, sessionID string) error {
 	sessionDir := filepath.Join(sandboxHome, "overlay", "sessions", sessionID)
-	if err := os.RemoveAll(sessionDir); err != nil {
+	if err := forceRemoveAll(sessionDir); err != nil {
 		return fmt.Errorf("failed to remove session overlay dir: %w", err)
 	}
 	return nil
@@ -34,7 +38,7 @@ func CleanupStaleSessionDirs(sandboxHome string) (int, error) {
 			continue
 		}
 		sessionDir := filepath.Join(sessionsDir, entry.Name())
-		if err := os.RemoveAll(sessionDir); err != nil {
+		if err := forceRemoveAll(sessionDir); err != nil {
 			return removed, fmt.Errorf("failed to remove stale session %s: %w", entry.Name(), err)
 		}
 		removed++

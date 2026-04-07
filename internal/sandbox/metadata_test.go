@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -302,5 +304,47 @@ func TestSelectForPruning_SkipsActive(t *testing.T) {
 	}
 	if toPrune[0].Name != "inactive" {
 		t.Errorf("Expected inactive to be pruned, got %s", toPrune[0].Name)
+	}
+}
+
+// TestRemoveSandbox_ReadOnlyDirs verifies that RemoveSandbox can delete a
+// sandbox tree containing read-only directories, as produced by Go's module
+// cache ($GOPATH/pkg/mod has directories with mode 0555). A naive os.RemoveAll
+// fails with "permission denied" on unlinkat because write permission on the
+// parent directory is required to remove its entries.
+func TestRemoveSandbox_ReadOnlyDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	sandboxRoot := filepath.Join(tmpDir, "sandbox")
+
+	// Build a Go-module-cache-like layout: a nested file with its parent
+	// directory set to 0555 (read+exec only), matching how `go mod download`
+	// writes the module cache.
+	modDir := filepath.Join(sandboxRoot, "home", "go", "pkg", "mod", "gopkg.in", "yaml.v3@v3.0.1")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	filePath := filepath.Join(modDir, "scannerc.go")
+	if err := os.WriteFile(filePath, []byte("package yaml\n"), 0o444); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(modDir, 0o555); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	// On failure, restore write permission so t.TempDir cleanup succeeds.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(sandboxRoot, func(p string, d fs.DirEntry, walkErr error) error {
+			if walkErr == nil && d.IsDir() {
+				_ = os.Chmod(p, 0o700)
+			}
+			return nil
+		})
+	})
+
+	if err := RemoveSandbox(sandboxRoot); err != nil {
+		t.Fatalf("RemoveSandbox failed on read-only tree: %v", err)
+	}
+	if _, err := os.Stat(sandboxRoot); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("sandboxRoot still present after RemoveSandbox: err=%v", err)
 	}
 }
