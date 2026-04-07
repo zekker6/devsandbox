@@ -113,13 +113,14 @@ func TestGit_Bindings_ReadOnly_WithGitDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	sandboxHome := "/sandbox/home"
 	g := &Git{}
 	g.Configure(GlobalConfig{ProjectDir: tmpDir}, map[string]any{"mode": "readonly"})
 
-	bindings := g.Bindings("/home/user", "/sandbox/home")
+	bindings := g.Bindings("/home/user", sandboxHome)
 
 	// With projectDir containing .git + config, should have 3 bindings:
-	// gitconfig.safe, .git (ro), .git/config (hidden with /dev/null)
+	// gitconfig.safe, .git (ro), and the sanitized .git-config.safe overlaid on .git/config
 	if len(bindings) != 3 {
 		t.Fatalf("expected 3 bindings for readonly mode with .git, got %d", len(bindings))
 	}
@@ -153,17 +154,23 @@ func TestGit_Bindings_ReadOnly_WithGitDir(t *testing.T) {
 		t.Error(".git binding should not be optional")
 	}
 
-	// Find the .git/config hidden binding
+	// Find the sanitized .git/config binding — must be the safe file from sandbox home,
+	// NOT /dev/null (which would break `git log`, pre-commit hooks, and any other git command).
+	expectedSafeRepoConfig := filepath.Join(sandboxHome, ".git-config.safe")
 	var configBinding *Binding
 	for i := range bindings {
-		if bindings[i].Source == "/dev/null" && bindings[i].Dest == gitConfig {
+		if bindings[i].Dest == gitConfig {
 			configBinding = &bindings[i]
 			break
 		}
 	}
 
 	if configBinding == nil {
-		t.Fatal("expected .git/config hidden binding (overlaid with /dev/null)")
+		t.Fatal("expected sanitized .git/config binding")
+	}
+
+	if configBinding.Source != expectedSafeRepoConfig {
+		t.Errorf(".git/config binding source: expected %q, got %q", expectedSafeRepoConfig, configBinding.Source)
 	}
 
 	if configBinding.Type != MountBind {
@@ -172,6 +179,10 @@ func TestGit_Bindings_ReadOnly_WithGitDir(t *testing.T) {
 
 	if !configBinding.ReadOnly {
 		t.Error(".git/config binding should be read-only")
+	}
+
+	if !configBinding.Optional {
+		t.Error(".git/config binding should be optional (Setup may have skipped if source unreadable)")
 	}
 }
 
@@ -570,6 +581,332 @@ func TestGit_ShellInit(t *testing.T) {
 	}
 	if g.ShellInit("fish") != "" {
 		t.Error("expected empty shell init")
+	}
+}
+
+func TestStripURLCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "https with embedded token",
+			in:   "https://ghp_abc123@github.com/user/repo.git",
+			want: "https://github.com/user/repo.git",
+		},
+		{
+			name: "https with username and password",
+			in:   "https://alice:s3cret@gitlab.example.com/group/proj.git",
+			want: "https://gitlab.example.com/group/proj.git",
+		},
+		{
+			name: "http with embedded token",
+			in:   "http://token@example.com/repo.git",
+			want: "http://example.com/repo.git",
+		},
+		{
+			name: "https without credentials passes through",
+			in:   "https://github.com/user/repo.git",
+			want: "https://github.com/user/repo.git",
+		},
+		{
+			name: "ssh URL with git user is preserved (user is required for auth)",
+			in:   "ssh://git@github.com/user/repo.git",
+			want: "ssh://git@github.com/user/repo.git",
+		},
+		{
+			name: "scp-style git URL passes through unchanged",
+			in:   "git@github.com:user/repo.git",
+			want: "git@github.com:user/repo.git",
+		},
+		{
+			name: "local path passes through",
+			in:   "/srv/git/repo.git",
+			want: "/srv/git/repo.git",
+		},
+		{
+			name: "file URL passes through",
+			in:   "file:///srv/git/repo.git",
+			want: "file:///srv/git/repo.git",
+		},
+		{
+			name: "url-encoded password is stripped",
+			in:   "https://user:p%40ss@example.com/repo.git",
+			want: "https://example.com/repo.git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripURLCredentials(tt.in)
+			if got != tt.want {
+				t.Errorf("stripURLCredentials(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateSafeRepoConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		mustContain    []string
+		mustNotContain []string
+	}{
+		{
+			name: "remote url with embedded token is sanitized",
+			input: `[remote "origin"]
+	url = https://ghp_secret123@github.com/user/repo.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+`,
+			mustContain: []string{
+				`[remote "origin"]`,
+				"https://github.com/user/repo.git",
+				"fetch = +refs/heads/*:refs/remotes/origin/*",
+			},
+			mustNotContain: []string{
+				"ghp_secret123",
+			},
+		},
+		{
+			name: "pushurl is also sanitized",
+			input: `[remote "origin"]
+	url = https://github.com/user/repo.git
+	pushurl = https://token@github.com/user/repo.git
+`,
+			mustContain: []string{
+				"pushurl = https://github.com/user/repo.git",
+			},
+			mustNotContain: []string{
+				"token@",
+			},
+		},
+		{
+			name: "credential section is dropped entirely",
+			input: `[core]
+	repositoryformatversion = 0
+[credential]
+	helper = store
+[remote "origin"]
+	url = https://github.com/user/repo.git
+`,
+			mustContain: []string{
+				"[core]",
+				"repositoryformatversion = 0",
+				`[remote "origin"]`,
+				"https://github.com/user/repo.git",
+			},
+			mustNotContain: []string{
+				"[credential]",
+				"helper = store",
+			},
+		},
+		{
+			name: "credential subsection is dropped",
+			input: `[credential "https://github.com"]
+	username = alice
+	helper = !gh auth git-credential
+[branch "main"]
+	remote = origin
+`,
+			mustContain: []string{
+				`[branch "main"]`,
+				"remote = origin",
+			},
+			mustNotContain: []string{
+				"credential",
+				"alice",
+				"gh auth",
+			},
+		},
+		{
+			name: "core, branch, and other sections are preserved verbatim",
+			input: `[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+[remote "origin"]
+	url = git@github.com:user/repo.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+`,
+			mustContain: []string{
+				"repositoryformatversion = 0",
+				"filemode = true",
+				"logallrefupdates = true",
+				`[branch "main"]`,
+				"merge = refs/heads/main",
+				"git@github.com:user/repo.git",
+			},
+		},
+		{
+			name: "ssh url with embedded user is preserved",
+			input: `[remote "origin"]
+	url = ssh://git@github.com/user/repo.git
+`,
+			mustContain: []string{
+				"ssh://git@github.com/user/repo.git",
+			},
+		},
+		{
+			name:        "empty config produces empty output",
+			input:       "",
+			mustContain: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			src := filepath.Join(tmp, "config")
+			dst := filepath.Join(tmp, "config.safe")
+			if err := os.WriteFile(src, []byte(tt.input), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := generateSafeRepoConfig(src, dst); err != nil {
+				t.Fatalf("generateSafeRepoConfig: %v", err)
+			}
+
+			data, err := os.ReadFile(dst)
+			if err != nil {
+				t.Fatalf("read result: %v", err)
+			}
+			got := string(data)
+
+			for _, want := range tt.mustContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("output missing %q\nfull output:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range tt.mustNotContain {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("output contains forbidden %q\nfull output:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestGit_Setup_ReadOnlyMode_GeneratesSafeRepoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+	projectDir := filepath.Join(tmpDir, "project")
+	gitDir := filepath.Join(projectDir, ".git")
+
+	for _, d := range []string{homeDir, sandboxHome, gitDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Source .git/config with an embedded token in a remote URL.
+	repoConfig := filepath.Join(gitDir, "config")
+	repoConfigContent := `[core]
+	repositoryformatversion = 0
+[remote "origin"]
+	url = https://ghp_supersecret@github.com/user/repo.git
+[credential]
+	helper = store
+`
+	if err := os.WriteFile(repoConfig, []byte(repoConfigContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A user gitconfig so the existing safe-gitconfig path also runs.
+	gitconfig := filepath.Join(homeDir, ".gitconfig")
+	if err := os.WriteFile(gitconfig, []byte("[user]\n\tname = Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: projectDir}, map[string]any{"mode": "readonly"})
+
+	if err := g.Setup(homeDir, sandboxHome); err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+
+	safePath := filepath.Join(sandboxHome, ".git-config.safe")
+	data, err := os.ReadFile(safePath)
+	if err != nil {
+		t.Fatalf("safe repo config not generated: %v", err)
+	}
+	got := string(data)
+
+	if !strings.Contains(got, "repositoryformatversion = 0") {
+		t.Error("safe repo config should preserve [core] settings so git can open the repo")
+	}
+	if !strings.Contains(got, "https://github.com/user/repo.git") {
+		t.Error("safe repo config should keep the sanitized remote URL")
+	}
+	if strings.Contains(got, "ghp_supersecret") {
+		t.Errorf("safe repo config leaked credentials:\n%s", got)
+	}
+	if strings.Contains(got, "[credential]") || strings.Contains(got, "helper = store") {
+		t.Errorf("safe repo config should drop credential section:\n%s", got)
+	}
+}
+
+func TestGit_Setup_ReadOnlyMode_NoRepoConfig(t *testing.T) {
+	// When projectDir has no .git/config, Setup should still succeed (no-op for repo config).
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+	projectDir := filepath.Join(tmpDir, "project")
+	for _, d := range []string{homeDir, sandboxHome, projectDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: projectDir}, map[string]any{"mode": "readonly"})
+
+	if err := g.Setup(homeDir, sandboxHome); err != nil {
+		t.Errorf("Setup should succeed when .git/config is missing, got: %v", err)
+	}
+
+	safePath := filepath.Join(sandboxHome, ".git-config.safe")
+	if _, err := os.Stat(safePath); !os.IsNotExist(err) {
+		t.Error("safe repo config should not be created when source is missing")
+	}
+}
+
+func TestGit_Setup_ReadOnlyMode_NonRegularRepoConfig(t *testing.T) {
+	// Recursive-sandbox case: .git/config is a device file (e.g., /dev/null).
+	// Setup must not crash; it should silently skip safe-config generation.
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+	projectDir := filepath.Join(tmpDir, "project")
+	gitDir := filepath.Join(projectDir, ".git")
+	for _, d := range []string{homeDir, sandboxHome, gitDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Symlink .git/config to /dev/null to simulate the device-file case.
+	repoConfig := filepath.Join(gitDir, "config")
+	if err := os.Symlink("/dev/null", repoConfig); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: projectDir}, map[string]any{"mode": "readonly"})
+
+	if err := g.Setup(homeDir, sandboxHome); err != nil {
+		t.Errorf("Setup should tolerate non-regular .git/config, got: %v", err)
+	}
+
+	safePath := filepath.Join(sandboxHome, ".git-config.safe")
+	if _, err := os.Stat(safePath); !os.IsNotExist(err) {
+		t.Error("safe repo config should not be created when source is non-regular")
 	}
 }
 

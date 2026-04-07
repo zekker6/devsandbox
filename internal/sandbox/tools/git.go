@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,15 +131,20 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 				Category: CategoryConfig,
 			})
 
-			// Hide .git/config — it may contain embedded credentials in remote URLs
-			// (e.g., https://ghp_xxxx@github.com/user/repo.git)
+			// Overlay .git/config with a sanitized copy. Embedded credentials in
+			// remote URLs (e.g., https://ghp_xxxx@github.com/user/repo.git) and
+			// any [credential] sections are stripped, but the rest of the config
+			// is preserved verbatim so git itself can still read the repo —
+			// otherwise even `git log` and pre-commit hooks fail with "unable to
+			// access '.git/config': Permission denied".
 			gitConfig := filepath.Join(gitDir, "config")
-			if _, err := os.Stat(gitConfig); err == nil {
+			if info, err := os.Stat(gitConfig); err == nil && info.Mode().IsRegular() {
 				bindings = append(bindings, Binding{
-					Source:   "/dev/null",
+					Source:   filepath.Join(sandboxHome, ".git-config.safe"),
 					Dest:     gitConfig,
 					Type:     MountBind,
 					ReadOnly: true,
+					Optional: true, // Setup may have skipped if source unreadable
 					Category: CategoryConfig,
 				})
 			}
@@ -194,29 +200,152 @@ func (g *Git) ShellInit(shell string) string {
 	return ""
 }
 
-// Setup implements ToolWithSetup to generate the safe gitconfig.
+// Setup implements ToolWithSetup to generate the safe gitconfig and the
+// sanitized per-repo .git/config used by readonly mode.
 func (g *Git) Setup(homeDir, sandboxHome string) error {
-	// Only generate safe gitconfig for readonly mode
+	// Only generate safe configs for readonly mode
 	if g.mode != GitModeReadOnly {
 		return nil
 	}
 
+	if err := g.setupUserGitconfig(homeDir, sandboxHome); err != nil {
+		return err
+	}
+
+	return g.setupRepoGitconfig(sandboxHome)
+}
+
+// setupUserGitconfig generates the sanitized ~/.gitconfig overlay.
+func (g *Git) setupUserGitconfig(homeDir, sandboxHome string) error {
 	gitconfigPath := filepath.Join(homeDir, ".gitconfig")
 	safeGitconfigPath := filepath.Join(sandboxHome, ".gitconfig.safe")
 
-	// Check if gitconfig exists
 	if _, err := os.Stat(gitconfigPath); os.IsNotExist(err) {
 		return nil
 	}
 
-	// Check if safe config already exists and is newer than source
+	// Skip if safe config is already up to date.
 	srcInfo, _ := os.Stat(gitconfigPath)
-	dstInfo, err := os.Stat(safeGitconfigPath)
-	if err == nil && dstInfo.ModTime().After(srcInfo.ModTime()) {
-		return nil // Safe config is up to date
+	if dstInfo, err := os.Stat(safeGitconfigPath); err == nil && srcInfo != nil && dstInfo.ModTime().After(srcInfo.ModTime()) {
+		return nil
 	}
 
 	return generateSafeGitconfig(gitconfigPath, safeGitconfigPath)
+}
+
+// setupRepoGitconfig generates the sanitized per-repo .git/config overlay.
+// Skips silently if there's no project, no .git/config, or the source is not
+// a regular file (e.g. /dev/null overlay from a nested sandbox).
+func (g *Git) setupRepoGitconfig(sandboxHome string) error {
+	if g.projectDir == "" {
+		return nil
+	}
+
+	repoConfigPath := filepath.Join(g.projectDir, ".git", "config")
+	safeRepoConfigPath := filepath.Join(sandboxHome, ".git-config.safe")
+
+	srcInfo, err := os.Stat(repoConfigPath)
+	if err != nil || !srcInfo.Mode().IsRegular() {
+		return nil
+	}
+
+	if dstInfo, err := os.Stat(safeRepoConfigPath); err == nil && dstInfo.ModTime().After(srcInfo.ModTime()) {
+		return nil
+	}
+
+	return generateSafeRepoConfig(repoConfigPath, safeRepoConfigPath)
+}
+
+// generateSafeRepoConfig writes a sanitized copy of a repo's .git/config to dst.
+//
+// It strips embedded credentials from remote URLs and drops any [credential]
+// sections, but otherwise preserves the file verbatim — including [core],
+// [branch], [remote] (minus credentials), and any custom sections — so that
+// git operations like `git log`, `git status`, and pre-commit hooks continue
+// to function inside the sandbox.
+func generateSafeRepoConfig(src, dst string) error {
+	file, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+
+	var out strings.Builder
+	scanner := bufio.NewScanner(file)
+
+	inRemote := false
+	inCredential := false
+
+	for scanner.Scan() {
+		raw := scanner.Text()
+		trimmed := strings.TrimSpace(raw)
+
+		if strings.HasPrefix(trimmed, "[") {
+			lower := strings.ToLower(trimmed)
+			inRemote = strings.HasPrefix(lower, "[remote")
+			inCredential = strings.HasPrefix(lower, "[credential")
+			if inCredential {
+				continue // drop the section header itself
+			}
+			out.WriteString(raw)
+			out.WriteByte('\n')
+			continue
+		}
+
+		if inCredential {
+			continue // drop section body
+		}
+
+		if inRemote {
+			if key, value, ok := splitConfigKV(trimmed); ok {
+				lk := strings.ToLower(key)
+				if lk == "url" || lk == "pushurl" {
+					indent := raw[:len(raw)-len(strings.TrimLeft(raw, " \t"))]
+					out.WriteString(indent)
+					out.WriteString(key)
+					out.WriteString(" = ")
+					out.WriteString(stripURLCredentials(value))
+					out.WriteByte('\n')
+					continue
+				}
+			}
+		}
+
+		out.WriteString(raw)
+		out.WriteByte('\n')
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	return os.WriteFile(dst, []byte(out.String()), 0o644)
+}
+
+// splitConfigKV splits a "key = value" line. Returns ok=false if there's no '='.
+func splitConfigKV(line string) (key, value string, ok bool) {
+	k, v, found := strings.Cut(line, "=")
+	if !found {
+		return "", "", false
+	}
+	return strings.TrimSpace(k), strings.TrimSpace(v), true
+}
+
+// stripURLCredentials removes embedded credentials (userinfo) from http/https/ftp
+// URLs. SSH/git URLs are returned unchanged because the user component there is
+// the SSH login, not a secret. Non-URL strings (scp-style git refs, local paths)
+// are also passed through.
+func stripURLCredentials(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.User == nil {
+		return rawURL
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "ftp", "ftps":
+		u.User = nil
+		return u.String()
+	}
+	return rawURL
 }
 
 // generateSafeGitconfig creates a sanitized gitconfig with only safe settings.
