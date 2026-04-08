@@ -167,6 +167,18 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 	entry.StatusCode = resp.StatusCode
 	entry.ResponseHeaders = redactHeaders(cloneHeaders(resp.Header))
 
+	// HEAD responses must preserve their upstream Content-Length verbatim
+	// (RFC 9110 §9.3.2). Replacing resp.Body — even with an empty reader —
+	// causes goproxy to detect the body identity changed and strip the
+	// Content-Length header (see goproxy http.go), after which Go's net/http
+	// falls back to Transfer-Encoding: chunked. That breaks OCI/registry
+	// clients (oras-go, crane, helm, BuildKit, skopeo) which use HEAD for
+	// manifest size validation. The HEAD body is empty by spec, so there is
+	// nothing to capture for logging anyway.
+	if resp.Request != nil && resp.Request.Method == http.MethodHead {
+		return nil
+	}
+
 	// Read and restore response body
 	var respBody []byte
 	if resp.Body != nil {

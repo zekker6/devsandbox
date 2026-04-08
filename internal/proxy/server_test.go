@@ -350,3 +350,172 @@ func TestServerHTTPS_NoMITM_Tunnels(t *testing.T) {
 		t.Errorf("unexpected body: %s", body)
 	}
 }
+
+// TestServerHEAD_PreservesContentLength is a regression test for a bug where
+// the proxy stripped the upstream Content-Length header from HEAD responses
+// and substituted Transfer-Encoding: chunked. That breaks OCI/registry clients
+// (oras-go, helm, crane, BuildKit, skopeo) which rely on HEAD for manifest
+// size validation per RFC 9110 §9.3.2. The root cause was LogResponse
+// replacing resp.Body with a fresh NopCloser; goproxy detects the body
+// identity changed and drops Content-Length, after which Go's net/http
+// switches to chunked encoding. The fix skips body replacement for HEAD.
+func TestServerHEAD_PreservesContentLength(t *testing.T) {
+	const upstreamLen = "1048576"
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate an OCI registry manifest endpoint: HEAD returns headers
+		// that describe what the eventual GET would return.
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		w.Header().Set("Docker-Content-Digest", "sha256:deadbeef")
+		w.Header().Set("Content-Length", upstreamLen)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	tmpDir, err := os.MkdirTemp("", "proxy-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	cfg := NewConfig(tmpDir, 18085)
+	proxyServer, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer func() { _ = proxyServer.Stop() }()
+
+	time.Sleep(100 * time.Millisecond)
+
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	req, err := http.NewRequest(http.MethodHead, testServer.URL+"/v2/repo/manifests/v1", nil)
+	if err != nil {
+		t.Fatalf("NewRequest failed: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HEAD through proxy failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	// Critical assertion: Content-Length must equal what upstream sent.
+	if got := resp.Header.Get("Content-Length"); got != upstreamLen {
+		t.Errorf("Content-Length: got %q, want %q (upstream value must be preserved verbatim)", got, upstreamLen)
+	}
+
+	// Critical assertion: must NOT be chunked. resp.TransferEncoding is the
+	// authoritative field — Go's transport already consumed the header.
+	for _, te := range resp.TransferEncoding {
+		if te == "chunked" {
+			t.Errorf("HEAD response was chunk-encoded; upstream Content-Length must be preserved instead")
+		}
+	}
+
+	// resp.ContentLength should also reflect the upstream value.
+	if resp.ContentLength != 1048576 {
+		t.Errorf("resp.ContentLength: got %d, want 1048576", resp.ContentLength)
+	}
+
+	// Header passthrough sanity check.
+	if got := resp.Header.Get("Docker-Content-Digest"); got != "sha256:deadbeef" {
+		t.Errorf("Docker-Content-Digest: got %q, want %q", got, "sha256:deadbeef")
+	}
+}
+
+// TestServerHEAD_PreservesContentLength_MITM is the same regression test but
+// over HTTPS with MITM enabled — the actual configuration where the bug was
+// reported (devsandbox MITM proxy in front of an OCI registry). HTTPS MITM
+// runs through the same filterResponse code path as plain HTTP, so the fix
+// must hold here too.
+func TestServerHEAD_PreservesContentLength_MITM(t *testing.T) {
+	const upstreamLen = "524"
+
+	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		w.Header().Set("Docker-Content-Digest", "sha256:cafebabe")
+		w.Header().Set("Content-Length", upstreamLen)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	tmpDir, err := os.MkdirTemp("", "proxy-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	cfg := NewConfig(tmpDir, 18086)
+	proxyServer, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer func() { _ = proxyServer.Stop() }()
+
+	time.Sleep(100 * time.Millisecond)
+
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(proxyServer.CA().Certificate)
+	certPool.AddCert(testServer.Certificate())
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				RootCAs:            certPool,
+				InsecureSkipVerify: true, //nolint:gosec // test only
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	req, err := http.NewRequest(http.MethodHead, testServer.URL+"/v2/repo/manifests/v1", nil)
+	if err != nil {
+		t.Fatalf("NewRequest failed: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HEAD through MITM proxy failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("Content-Length"); got != upstreamLen {
+		t.Errorf("Content-Length: got %q, want %q (upstream value must be preserved verbatim)", got, upstreamLen)
+	}
+
+	for _, te := range resp.TransferEncoding {
+		if te == "chunked" {
+			t.Errorf("HEAD response was chunk-encoded; upstream Content-Length must be preserved instead")
+		}
+	}
+
+	if resp.ContentLength != 524 {
+		t.Errorf("resp.ContentLength: got %d, want 524", resp.ContentLength)
+	}
+
+	if got := resp.Header.Get("Docker-Content-Digest"); got != "sha256:cafebabe" {
+		t.Errorf("Docker-Content-Digest: got %q, want %q", got, "sha256:cafebabe")
+	}
+}
