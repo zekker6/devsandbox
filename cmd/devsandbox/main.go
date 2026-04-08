@@ -276,6 +276,16 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		} else if removed > 0 {
 			fmt.Fprintf(os.Stderr, "Cleaned up %d stale session overlay dir(s).\n", removed)
 		}
+
+		// Clean up overlay upper-dirs left behind when ~/.local/bin and
+		// ~/.local/share/claude were migrated from persistent overlays to
+		// read-only bind mounts. Stale shadow files in those upper-dirs can
+		// mask real host binaries (see CHANGELOG Unreleased / Fixed).
+		if removed, err := sandbox.CleanupLegacyReadonlyBindOverlays(cfg.SandboxHome, cfg.HomeDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to clean legacy overlay dirs: %v\n", err)
+		} else if removed > 0 {
+			fmt.Fprintf(os.Stderr, "Cleaned up %d legacy overlay dir(s).\n", removed)
+		}
 	}
 
 	// When --rm is set, remove sandbox state after exit (both backends).

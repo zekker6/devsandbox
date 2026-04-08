@@ -19,6 +19,47 @@ func CleanupSessionOverlays(sandboxHome, sessionID string) error {
 	return nil
 }
 
+// legacyReadonlyBindOverlayDests lists paths that used to be persistent overlays
+// but are now mounted as read-only bind mounts. Their per-project overlay
+// upper-dirs can contain stale shadow files (e.g. 0-byte copies of a tool's
+// binary from a failed in-sandbox self-update) that override the real host
+// content even after the code switched to a bind mount. Values are joined
+// with the caller-supplied homeDir at cleanup time.
+var legacyReadonlyBindOverlayDests = []string{
+	".local/bin",
+	".local/share/claude",
+}
+
+// CleanupLegacyReadonlyBindOverlays removes persistent overlay upper-dirs for
+// paths that were migrated from persistent overlays to read-only bind mounts.
+// Safe to call on every primary-session startup — it is a no-op once the
+// legacy dirs are gone. Missing sandboxHome is not an error. Returns the
+// number of legacy dirs removed.
+func CleanupLegacyReadonlyBindOverlays(sandboxHome, homeDir string) (int, error) {
+	removed := 0
+	for _, rel := range legacyReadonlyBindOverlayDests {
+		dest := filepath.Join(homeDir, rel)
+		// Derive the overlay dir path from persistentOverlayUpperDir so both
+		// the cleanup and the mount code use the same safePath encoding.
+		overlayDir := filepath.Dir(persistentOverlayUpperDir(sandboxHome, dest, ""))
+		info, err := os.Stat(overlayDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return removed, fmt.Errorf("stat legacy overlay %s: %w", overlayDir, err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if err := forceRemoveAll(overlayDir); err != nil {
+			return removed, fmt.Errorf("remove legacy overlay %s: %w", overlayDir, err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 // CleanupStaleSessionDirs removes all session overlay directories.
 // Called by the primary session on startup when no other sessions are active.
 // Returns the number of session dirs removed.

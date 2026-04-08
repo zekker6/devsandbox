@@ -75,8 +75,10 @@ func TestMise_Bindings_Categories(t *testing.T) {
 	m := &Mise{}
 	bindings := m.Bindings("/home/test", "/tmp/sandbox")
 
+	// Category-based bindings follow the split-mode mount policy.
+	// ~/.local/bin is intentionally NOT in this list — it is a read-only
+	// bind mount (see TestMise_Bindings_LocalBinReadOnly).
 	expected := map[string]BindingCategory{
-		"/home/test/.local/bin":        CategoryData,
 		"/home/test/.config/mise":      CategoryConfig,
 		"/home/test/.local/share/mise": CategoryData,
 		"/home/test/.cache/mise":       CategoryCache,
@@ -84,6 +86,10 @@ func TestMise_Bindings_Categories(t *testing.T) {
 	}
 
 	for _, b := range bindings {
+		// ~/.local/bin is covered by a separate test.
+		if b.Source == "/home/test/.local/bin" {
+			continue
+		}
 		want, ok := expected[b.Source]
 		if !ok {
 			t.Errorf("unexpected binding source: %s", b.Source)
@@ -99,6 +105,41 @@ func TestMise_Bindings_Categories(t *testing.T) {
 	}
 	for src := range expected {
 		t.Errorf("missing binding for %s", src)
+	}
+}
+
+// TestMise_Bindings_LocalBinReadOnly verifies ~/.local/bin is mounted as a
+// read-only bind, not a category-based overlay. Persistent overlays on this
+// path accumulate stale writes from tool self-updaters (e.g. claude's own
+// updater writing to versions/), which can leave 0-byte shadow files that
+// break execution across sessions. Read-only bind mounts also close the H6
+// persistent PATH hijack finding in docs/security-assessment-2026-04-04.md.
+func TestMise_Bindings_LocalBinReadOnly(t *testing.T) {
+	m := &Mise{}
+	bindings := m.Bindings("/home/test", "/tmp/sandbox")
+
+	var localBin *Binding
+	for i := range bindings {
+		if bindings[i].Source == "/home/test/.local/bin" {
+			localBin = &bindings[i]
+			break
+		}
+	}
+
+	if localBin == nil {
+		t.Fatal("Bindings() missing ~/.local/bin")
+	}
+	if localBin.Type != MountBind {
+		t.Errorf("~/.local/bin Type = %q, want %q", localBin.Type, MountBind)
+	}
+	if !localBin.ReadOnly {
+		t.Error("~/.local/bin must be ReadOnly to prevent overlay shadowing of host binaries")
+	}
+	if localBin.Category != "" {
+		t.Errorf("~/.local/bin Category should be empty (explicit Type takes precedence), got %q", localBin.Category)
+	}
+	if !localBin.Optional {
+		t.Error("~/.local/bin should be Optional (user may not have one)")
 	}
 }
 

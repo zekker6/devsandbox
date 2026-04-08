@@ -31,9 +31,15 @@ func (m *Mise) Available(homeDir string) bool {
 
 func (m *Mise) Bindings(homeDir, sandboxHome string) []Binding {
 	return []Binding{
+		// ~/.local/bin is a read-only bind, not a category-based overlay.
+		// A persistent overlay here lets tool self-updaters (e.g. claude's)
+		// write partial binaries into the upper-dir that shadow the real
+		// host files across sessions, and creates a persistent PATH hijack
+		// attack surface (H6 in docs/security-assessment-2026-04-04.md).
 		{
 			Source:   filepath.Join(homeDir, ".local", "bin"),
-			Category: CategoryData,
+			Type:     MountBind,
+			ReadOnly: true,
 			Optional: true,
 		},
 		{

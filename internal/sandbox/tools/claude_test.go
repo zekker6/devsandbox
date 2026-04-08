@@ -138,6 +138,44 @@ func TestClaude_Bindings_CustomConfigDir_KeepsOtherBindings(t *testing.T) {
 	}
 }
 
+// TestClaude_Bindings_LocalShareClaudeReadOnly verifies ~/.local/share/claude
+// is mounted as a read-only bind, not a writable persistent overlay. Claude
+// Code's in-sandbox auto-updater writes binaries to versions/<X> under this
+// path; when those writes go to a persistent overlay upper-dir, partial or
+// failed updates leave 0-byte shadow files that break execution across
+// sessions (the real host binary is masked by the stub in the upper layer).
+// Read-only keeps the host's installation as the single source of truth.
+func TestClaude_Bindings_LocalShareClaudeReadOnly(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	c := &Claude{}
+	bindings := c.Bindings("/home/test", "/tmp/sandbox")
+
+	var localShareClaude *Binding
+	for i := range bindings {
+		if bindings[i].Source == "/home/test/.local/share/claude" {
+			localShareClaude = &bindings[i]
+			break
+		}
+	}
+
+	if localShareClaude == nil {
+		t.Fatal("Bindings() missing ~/.local/share/claude")
+	}
+	if localShareClaude.Type != MountBind {
+		t.Errorf("~/.local/share/claude Type = %q, want %q", localShareClaude.Type, MountBind)
+	}
+	if !localShareClaude.ReadOnly {
+		t.Error("~/.local/share/claude must be ReadOnly to prevent overlay shadowing from failed in-sandbox updates")
+	}
+	if localShareClaude.Category != "" {
+		t.Errorf("~/.local/share/claude Category should be empty (explicit Type takes precedence), got %q", localShareClaude.Category)
+	}
+	if !localShareClaude.Optional {
+		t.Error("~/.local/share/claude should be Optional (user may not have claude installed)")
+	}
+}
+
 func TestClaude_Environment_NoConfigDir(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
