@@ -1306,6 +1306,12 @@ func TestLoadConfigWithOptions_SkipLocalConfig(t *testing.T) {
 	// Arrange: create a temp dir, chdir into it, drop a .devsandbox.toml
 	// that would normally be merged into the config.
 	tmp := t.TempDir()
+	// On macOS, t.TempDir() returns a /var/folders/... path but os.Getwd()
+	// after chdir returns the canonical /private/var/folders/... path because
+	// /var is a symlink to /private/var. Resolve upfront so comparisons match.
+	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = resolved
+	}
 	localPath := filepath.Join(tmp, LocalConfigFile)
 	localContent := []byte("[sandbox]\nbase_path = \"/should/not/appear\"\n")
 	if err := os.WriteFile(localPath, localContent, 0o600); err != nil {
