@@ -4,11 +4,52 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [v0.9.2] - 2026-04-08
+
+### Fixed
+
+- HTTP proxy no longer intercepts the body of HEAD requests. The previous behavior broke `Content-Length` handling and caused errors for some clients (e.g. Helm pulling OCI charts).
+
+## [v0.9.1] - 2026-04-07
+
+### Fixed
+
+- Sandbox removal now `chmod`s files recursively before deletion. Go populates its build cache with `0500` files, which previously caused sandbox cleanup to fail.
+
+## [v0.9.0] - 2026-04-07
+
 ### Added
 
 - `devsandbox scratchpad [name] [command...]` subcommand for running sandboxes in managed, clean working directories under `~/.local/share/devsandbox-scratchpads/`. State persists between runs. Name defaults to `default`.
 - `devsandbox scratchpad list` and `devsandbox scratchpad list --json` list scratchpads with size and state info.
 - `devsandbox scratchpad rm <name>` (with `--all`, `--keep-state`, `--force`) removes scratchpads and their sandbox state.
+
+### Fixed
+
+- Git tool now strips sensitive fields from `.git/config` in place instead of replacing the file wholesale. The previous full replacement caused the git CLI to refuse to operate even for read-only commands inside the sandbox.
+
+## [v0.8.2] - 2026-04-06
+
+### Fixed
+
+- Claude tool stores project knowledge under the `data` section so chat history persists between sandbox runs.
+
+## [v0.8.1] - 2026-04-06
+
+### Added
+
+- macOS support for the devsandbox shim via a platform-specific copy-on-start overlay implementation, split from the Linux path.
+- `jq` is now included in the default Docker image.
+
+### Changed
+
+- Debian base image bumped in the Docker image.
+- mise-managed tool dependencies bumped.
+- Docker and lint CI workflows limit concurrency to avoid redundant runs.
+
+### Fixed
+
+- Restored shim source files that were missing from the v0.8.0 release and added CI coverage so the shim is built and verified on every run.
 
 ## [v0.8.0] - 2026-04-05
 
