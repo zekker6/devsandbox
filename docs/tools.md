@@ -520,6 +520,51 @@ Example output:
     mode: enabled (read-only + exec)
 ```
 
+## Kitty Terminal
+
+When running inside [kitty](https://sw.kovidgoyal.net/kitty/) with remote control enabled, devsandbox mounts the kitty listen socket into the sandbox. This allows tools like [revdiff](https://github.com/umputun/revdiff) to open overlay terminal panes from inside the sandbox.
+
+### Prerequisites
+
+Add to your `~/.config/kitty/kitty.conf`:
+
+```
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty-{kitty_pid}
+```
+
+Restart kitty after changing the config.
+
+### What Gets Mounted
+
+| Resource | Mode | Purpose |
+|----------|------|---------|
+| Kitty listen socket (`KITTY_LISTEN_ON`) | read-write | `kitty @` remote control communication |
+| `kitty` binary | read-only | CLI for `kitty @ launch`, `kitty @ ls`, etc. |
+
+### Environment Variables
+
+Passed through from host: `KITTY_LISTEN_ON`, `KITTY_WINDOW_ID`, `KITTY_PID`.
+
+### Security Note
+
+The kitty listen socket allows the sandboxed process to control the terminal (open panes, read content). For untrusted projects, disable it:
+
+```toml
+[tools.kitty]
+mode = "disabled"
+```
+
+### Verification
+
+```bash
+# Check if kitty tool is detected
+devsandbox tools check kitty
+
+# Inside sandbox, verify remote control works
+kitty @ ls
+```
+
 ## XDG Desktop Portal (Linux only)
 
 Sandboxed applications can send desktop notifications to the host via [XDG Desktop Portal](https://flatpak.github.io/xdg-desktop-portal/). This uses `xdg-dbus-proxy` to expose only the notification portal interface — no other D-Bus access is granted.
