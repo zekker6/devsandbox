@@ -49,6 +49,7 @@ func (k *Kitty) Bindings(_ string, _ string) []Binding {
 		{
 			Source:   sockPath,
 			Dest:     sockPath,
+			Type:     MountBind, // socket mount — overlay would hide the socket
 			Category: CategoryRuntime,
 			ReadOnly: false, // kitty @ needs bidirectional socket access
 		},

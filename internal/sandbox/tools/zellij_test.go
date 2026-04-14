@@ -42,21 +42,34 @@ func TestZellij_Available_NoBinary(t *testing.T) {
 	}
 }
 
-func TestZellijSocketDir(t *testing.T) {
-	t.Run("from env", func(t *testing.T) {
-		t.Setenv("ZELLIJ_SOCK_DIR", "/custom/sock/dir")
-		got := zellijSocketDir()
-		if got != "/custom/sock/dir" {
-			t.Errorf("expected /custom/sock/dir, got %q", got)
+func TestZellijSocketDirs(t *testing.T) {
+	t.Run("ZELLIJ_SOCKET_DIR overrides everything", func(t *testing.T) {
+		t.Setenv("ZELLIJ_SOCKET_DIR", "/custom/sock/dir")
+		t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+		got := zellijSocketDirs()
+		if len(got) != 1 || got[0] != "/custom/sock/dir" {
+			t.Errorf("expected [/custom/sock/dir], got %v", got)
 		}
 	})
 
-	t.Run("default", func(t *testing.T) {
-		t.Setenv("ZELLIJ_SOCK_DIR", "")
+	t.Run("XDG_RUNTIME_DIR + /tmp fallback", func(t *testing.T) {
+		t.Setenv("ZELLIJ_SOCKET_DIR", "")
+		t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+		got := zellijSocketDirs()
+		wantXDG := "/run/user/1000/zellij"
+		wantTmp := fmt.Sprintf("/tmp/zellij-%d", os.Getuid())
+		if len(got) != 2 || got[0] != wantXDG || got[1] != wantTmp {
+			t.Errorf("expected [%q, %q], got %v", wantXDG, wantTmp, got)
+		}
+	})
+
+	t.Run("no XDG_RUNTIME_DIR", func(t *testing.T) {
+		t.Setenv("ZELLIJ_SOCKET_DIR", "")
+		t.Setenv("XDG_RUNTIME_DIR", "")
+		got := zellijSocketDirs()
 		want := fmt.Sprintf("/tmp/zellij-%d", os.Getuid())
-		got := zellijSocketDir()
-		if got != want {
-			t.Errorf("expected %q, got %q", want, got)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("expected [%q], got %v", want, got)
 		}
 	})
 }
@@ -67,7 +80,7 @@ func TestZellij_Bindings(t *testing.T) {
 	// Create a fake socket directory.
 	sockDir := t.TempDir()
 	t.Setenv("ZELLIJ", "0")
-	t.Setenv("ZELLIJ_SOCK_DIR", sockDir)
+	t.Setenv("ZELLIJ_SOCKET_DIR", sockDir)
 
 	bindings := z.Bindings("/home/user", "/sandbox/home")
 
@@ -88,6 +101,38 @@ func TestZellij_Bindings(t *testing.T) {
 	if sock.Category != CategoryRuntime {
 		t.Errorf("expected CategoryRuntime, got %q", sock.Category)
 	}
+	if sock.Type != MountBind {
+		t.Errorf("expected MountBind (sockets cannot use overlay), got %q", sock.Type)
+	}
+}
+
+func TestZellij_Bindings_XDGAndTmp(t *testing.T) {
+	z := &Zellij{}
+
+	xdgRuntime := t.TempDir()
+	xdgZellij := filepath.Join(xdgRuntime, "zellij")
+	if err := os.Mkdir(xdgZellij, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ZELLIJ", "0")
+	t.Setenv("ZELLIJ_SOCKET_DIR", "")
+	t.Setenv("XDG_RUNTIME_DIR", xdgRuntime)
+
+	bindings := z.Bindings("/home/user", "/sandbox/home")
+
+	var sawXDG bool
+	for _, b := range bindings {
+		if b.Source == xdgZellij {
+			sawXDG = true
+			if b.Type != MountBind {
+				t.Errorf("XDG socket dir must be MountBind, got %q", b.Type)
+			}
+		}
+	}
+	if !sawXDG {
+		t.Errorf("expected XDG zellij dir (%s) to be mounted, got bindings: %+v", xdgZellij, bindings)
+	}
 }
 
 func TestZellij_Bindings_NoEnv(t *testing.T) {
@@ -103,7 +148,7 @@ func TestZellij_Bindings_NoEnv(t *testing.T) {
 func TestZellij_Bindings_NoSocketDir(t *testing.T) {
 	z := &Zellij{}
 	t.Setenv("ZELLIJ", "0")
-	t.Setenv("ZELLIJ_SOCK_DIR", "/nonexistent/zellij/sock/dir")
+	t.Setenv("ZELLIJ_SOCKET_DIR", "/nonexistent/zellij/sock/dir")
 
 	bindings := z.Bindings("/home/user", "/sandbox/home")
 	// Should have no socket dir binding, but may still have binary binding.
@@ -192,7 +237,8 @@ func TestZellij_Check_NoSocketDir(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 	t.Setenv("ZELLIJ", "0")
-	t.Setenv("ZELLIJ_SOCK_DIR", "/nonexistent-zellij-sock-12345")
+	t.Setenv("ZELLIJ_SOCKET_DIR", "/nonexistent-zellij-sock-12345")
+	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	result := z.Check("/home/user")
 	if result.Available {
@@ -222,7 +268,7 @@ func TestZellij_Check_OK(t *testing.T) {
 
 	t.Setenv("PATH", dir)
 	t.Setenv("ZELLIJ", "0")
-	t.Setenv("ZELLIJ_SOCK_DIR", sockDir)
+	t.Setenv("ZELLIJ_SOCKET_DIR", sockDir)
 	t.Setenv("ZELLIJ_SESSION_NAME", "test-session")
 
 	result := z.Check("/home/user")

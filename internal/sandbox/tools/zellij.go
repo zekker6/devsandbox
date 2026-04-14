@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 func init() {
@@ -29,13 +30,21 @@ func (z *Zellij) Available(_ string) bool {
 	return err == nil
 }
 
-// zellijSocketDir returns the directory containing Zellij session sockets.
-// Checks ZELLIJ_SOCK_DIR first, then falls back to /tmp/zellij-<uid>.
-func zellijSocketDir() string {
-	if dir := os.Getenv("ZELLIJ_SOCK_DIR"); dir != "" {
-		return dir
+// zellijSocketDirs returns candidate directories containing Zellij session sockets.
+// Modern zellij (0.41+) stores the IPC socket under $XDG_RUNTIME_DIR/zellij; older
+// versions and cache/log files use /tmp/zellij-<uid>. ZELLIJ_SOCKET_DIR overrides
+// the default. We mount every candidate that exists so CLI commands resolve.
+func zellijSocketDirs() []string {
+	if dir := os.Getenv("ZELLIJ_SOCKET_DIR"); dir != "" {
+		return []string{dir}
 	}
-	return fmt.Sprintf("/tmp/zellij-%d", os.Getuid())
+
+	var dirs []string
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+		dirs = append(dirs, filepath.Join(runtimeDir, "zellij"))
+	}
+	dirs = append(dirs, fmt.Sprintf("/tmp/zellij-%d", os.Getuid()))
+	return dirs
 }
 
 func (z *Zellij) Bindings(_ string, _ string) []Binding {
@@ -45,14 +54,20 @@ func (z *Zellij) Bindings(_ string, _ string) []Binding {
 
 	var bindings []Binding
 
-	// Mount the zellij socket directory so CLI commands work inside the sandbox.
-	sockDir := zellijSocketDir()
-	if _, err := os.Stat(sockDir); err == nil {
+	// Mount zellij socket directories as real bind mounts. Unix sockets cannot be
+	// exposed through an overlayfs lower layer, so MountBind is mandatory here —
+	// the default "split" policy maps CategoryRuntime to tmpoverlay, which hides
+	// the socket and breaks `zellij run`.
+	for _, sockDir := range zellijSocketDirs() {
+		if _, err := os.Stat(sockDir); err != nil {
+			continue
+		}
 		bindings = append(bindings, Binding{
 			Source:   sockDir,
 			Dest:     sockDir,
+			Type:     MountBind,
 			Category: CategoryRuntime,
-			ReadOnly: false, // zellij CLI needs bidirectional socket access
+			ReadOnly: false,
 		})
 	}
 
@@ -90,19 +105,24 @@ func (z *Zellij) Check(_ string) CheckResult {
 		return result
 	}
 
-	sockDir := zellijSocketDir()
-	if _, err := os.Stat(sockDir); err != nil {
-		result.Available = false
-		result.AddIssue("zellij socket directory not found: " + sockDir)
-		return result
-	}
-
-	// List session sockets for info.
-	entries, err := os.ReadDir(sockDir)
-	if err == nil {
-		for _, e := range entries {
-			result.AddInfo("session socket: " + filepath.Join(sockDir, e.Name()))
+	var foundAny bool
+	for _, sockDir := range zellijSocketDirs() {
+		if _, err := os.Stat(sockDir); err != nil {
+			continue
 		}
+		foundAny = true
+		result.AddInfo("socket dir: " + sockDir)
+		entries, err := os.ReadDir(sockDir)
+		if err == nil {
+			for _, e := range entries {
+				result.AddInfo("session socket: " + filepath.Join(sockDir, e.Name()))
+			}
+		}
+	}
+	if !foundAny {
+		result.Available = false
+		result.AddIssue("zellij socket directory not found in any of: " + strings.Join(zellijSocketDirs(), ", "))
+		return result
 	}
 
 	if name := os.Getenv("ZELLIJ_SESSION_NAME"); name != "" {

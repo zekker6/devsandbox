@@ -82,6 +82,9 @@ func TestKitty_Bindings(t *testing.T) {
 	if sock.Category != CategoryRuntime {
 		t.Errorf("expected CategoryRuntime, got %q", sock.Category)
 	}
+	if sock.Type != MountBind {
+		t.Errorf("expected MountBind (sockets cannot use overlay), got %q", sock.Type)
+	}
 }
 
 func TestKitty_Bindings_NoEnv(t *testing.T) {
