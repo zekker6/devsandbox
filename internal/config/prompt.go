@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"devsandbox/internal/notice"
 	"golang.org/x/term"
 )
 
@@ -56,7 +57,7 @@ func promptTrust(input io.Reader, output io.Writer, projectDir, configContent st
 // PromptTrustStdio is a convenience wrapper that uses os.Stdin/os.Stderr.
 func PromptTrustStdio(projectDir, configContent string, changed bool) (bool, error) {
 	if !isInteractive() {
-		_, _ = fmt.Fprintf(os.Stderr, "Warning: skipping .devsandbox.toml (non-interactive, run 'devsandbox trust' to approve)\n")
+		notice.Warn("skipping .devsandbox.toml (non-interactive, run 'devsandbox trust' to approve)")
 		return false, nil
 	}
 	return promptTrust(os.Stdin, os.Stderr, projectDir, configContent, changed)

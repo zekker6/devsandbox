@@ -9,7 +9,7 @@
 // Note: .env file hiding is handled at container creation via Docker volume
 // mounts (no CAP_SYS_ADMIN needed). See internal/isolator/docker.go.
 //
-// This is a standalone binary — no internal/ imports, pure stdlib + syscall.
+// This binary uses internal/notice for warning output; all other deps are stdlib + syscall.
 package main
 
 import (
@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"devsandbox/internal/notice"
 )
 
 const (
@@ -32,6 +34,9 @@ const (
 )
 
 func main() {
+	_ = notice.Setup("/tmp/devsandbox-shim.log", os.Getenv("DEVSANDBOX_DEBUG") != "", nil)
+	defer notice.Flush()
+
 	// Check if this is a re-exec as the overlay child process
 	if os.Getenv("__DEVSANDBOX_OVERLAY_CHILD") == "1" {
 		overlayChild()
@@ -387,9 +392,11 @@ func loadOverlayManifest(path string) []overlayEntry {
 }
 
 func warn(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "devsandbox-shim: warning: "+format+"\n", args...)
+	notice.Warn("devsandbox-shim: "+format, args...)
 }
 
+// fatal writes directly to stderr (bypassing notice) because it calls os.Exit(1)
+// immediately after — buffered or log-routed output may never flush in time.
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "devsandbox-shim: fatal: "+format+"\n", args...)
 	os.Exit(1)

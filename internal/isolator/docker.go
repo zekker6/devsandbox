@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"devsandbox/internal/logging"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
@@ -94,19 +95,19 @@ func (d *DockerIsolator) SetLogger(l *logging.ComponentLogger) {
 	d.logger = l
 }
 
-// logInfo logs an informational message to stderr and the logger.
+// logInfo logs an informational message through notice and the logger.
 func (d *DockerIsolator) logInfo(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintln(os.Stderr, msg)
+	notice.Info("%s", msg)
 	if d.logger != nil {
 		d.logger.Infof("%s", msg)
 	}
 }
 
-// logWarn logs a warning message to stderr and the logger.
+// logWarn logs a warning message through notice and the logger.
 func (d *DockerIsolator) logWarn(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
+	notice.Warn("%s", msg)
 	if d.logger != nil {
 		d.logger.Warnf("%s", msg)
 	}
@@ -300,47 +301,41 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		return cmd.Run()
 
 	case DockerActionCreate:
-		fmt.Fprint(os.Stderr, "Creating container...")
 		createCmd := exec.Command(result.BinaryPath, result.Args...)
 		if out, err := createCmd.CombinedOutput(); err != nil {
-			fmt.Fprintln(os.Stderr, " failed")
 			return fmt.Errorf("failed to create container: %s", strings.TrimSpace(string(out)))
 		}
-		fmt.Fprintln(os.Stderr, " done")
+		notice.Info("Created container")
 
-		fmt.Fprint(os.Stderr, "Starting container...")
 		startCmd := exec.Command(result.BinaryPath, "start", result.ContainerName)
 		if out, err := startCmd.CombinedOutput(); err != nil {
-			fmt.Fprintln(os.Stderr, " failed")
 			return fmt.Errorf("failed to start container: %s", strings.TrimSpace(string(out)))
 		}
-		fmt.Fprintln(os.Stderr, " done")
+		notice.Info("Started container")
 
-		fmt.Fprint(os.Stderr, "Waiting for setup...")
 		if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
-			fmt.Fprintln(os.Stderr, " timeout")
+			notice.Warn("Container setup timeout")
 			return fmt.Errorf("container setup timed out after %s", readinessTimeout)
 		}
-		fmt.Fprintln(os.Stderr, " ready")
+		notice.Info("Container setup ready")
 
 		if err := d.installMiseTools(result.BinaryPath, result.ContainerName, isoCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to install tools: %v\n", err)
+			notice.Warn("failed to install tools: %v", err)
 		}
 
 		return d.execIntoContainer(result.BinaryPath, result.ContainerName, isoCfg.Interactive, isoCfg.Shell, cfg.Command)
 
 	case DockerActionExec:
 		if result.ContainerJustStarted {
-			fmt.Fprint(os.Stderr, "Waiting for container setup...")
 			if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
-				fmt.Fprintln(os.Stderr, " timeout")
+				notice.Warn("Container setup timeout")
 				return fmt.Errorf("container startup failed: %w", err)
 			}
-			fmt.Fprintln(os.Stderr, " ready")
+			notice.Info("Container setup ready")
 		}
 
 		if err := d.installMiseTools(result.BinaryPath, result.ContainerName, isoCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to install tools: %v\n", err)
+			notice.Warn("failed to install tools: %v", err)
 		}
 
 		return d.execIntoContainer(result.BinaryPath, result.ContainerName, isoCfg.Interactive, isoCfg.Shell, cfg.Command)
@@ -424,7 +419,7 @@ func (d *DockerIsolator) installMiseTools(dockerBinary, containerName string, cf
 		return nil
 	}
 
-	fmt.Fprintln(os.Stderr, "Installing tools...")
+	notice.Info("Installing tools")
 	installArgs := []string{
 		"exec",
 		"-u", userSpec,
@@ -934,7 +929,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		// Run setup if tool requires it (e.g., generate safe gitconfig)
 		if setupTool, ok := tool.(tools.ToolWithSetup); ok {
 			if err := setupTool.Setup(cfg.HomeDir, cfg.SandboxHome); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: tool %s setup: %v\n", tool.Name(), err)
+				notice.Warn("tool %s setup: %v", tool.Name(), err)
 			}
 		}
 

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
 )
 
@@ -255,7 +256,7 @@ func resolveSource(src *RedactionSource, envFileValues map[string]string) string
 		path := expandHome(src.File)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to read redaction secret file %q: %v\n", src.File, err)
+			notice.Warn("failed to read redaction secret file %q: %v", src.File, err)
 			return ""
 		}
 		return strings.TrimSpace(string(data))

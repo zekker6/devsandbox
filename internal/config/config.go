@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"devsandbox/internal/notice"
 	"github.com/BurntSushi/toml"
 )
 
@@ -1200,7 +1201,7 @@ func applyIncludes(cfg *Config, projectDir string) (*Config, error) {
 		includeCfg, err := loadIncludeFile(includePath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				fmt.Fprintf(os.Stderr, "Warning: include file %s not found, skipping\n", includePath)
+				notice.Warn("include file %s not found, skipping", includePath)
 				continue
 			}
 			return nil, fmt.Errorf("failed to load include %s: %w", includePath, err)
@@ -1233,7 +1234,7 @@ func loadIncludeFile(path string) (*Config, error) {
 
 	// Warn if include file has nested includes
 	if len(cfg.Include) > 0 {
-		fmt.Fprintf(os.Stderr, "Warning: nested includes in %s are ignored\n", path)
+		notice.Warn("nested includes in %s are ignored", path)
 		cfg.Include = nil
 	}
 
@@ -1273,7 +1274,7 @@ func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
 	}
 
 	if len(cfg.Include) > 0 {
-		fmt.Fprintf(os.Stderr, "Warning: includes in local config are ignored\n")
+		notice.Warn("includes in local config are ignored")
 		cfg.Include = nil
 	}
 
@@ -1299,7 +1300,7 @@ func ensureTrusted(projectDir, hash string, data []byte, opts *LoadOptions) erro
 		return fmt.Errorf("trust prompt failed: %w", err)
 	}
 	if !approved {
-		fmt.Fprintf(os.Stderr, "Skipping local config (not trusted)\n")
+		notice.Info("Skipping local config (not trusted)")
 		return errConfigNotTrusted
 	}
 

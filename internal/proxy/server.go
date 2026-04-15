@@ -20,6 +20,7 @@ import (
 	"github.com/elazarl/goproxy"
 
 	"devsandbox/internal/logging"
+	"devsandbox/internal/notice"
 )
 
 const (
@@ -466,7 +467,7 @@ func (s *Server) Start() error {
 	go func() {
 		defer s.wg.Done()
 		if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-			log.Printf("proxy server error: %v", err)
+			notice.Error("proxy server error: %v", err)
 		}
 	}()
 

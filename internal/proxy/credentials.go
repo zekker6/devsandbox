@@ -1,12 +1,13 @@
 package proxy
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"devsandbox/internal/notice"
 )
 
 // CredentialInjector adds authentication to requests for specific domains.
@@ -62,7 +63,7 @@ func BuildCredentialInjectors(credentials map[string]any) []CredentialInjector {
 		rawCfg := credentials[name]
 		factory, ok := credentialRegistry[name]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "Warning: unknown credential injector %q, skipping\n", name)
+			notice.Warn("unknown credential injector %q, skipping", name)
 			continue
 		}
 
@@ -101,7 +102,7 @@ func (s *CredentialSource) Resolve() string {
 		path := expandHome(s.File)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to read credential file %q: %v\n", s.File, err)
+			notice.Warn("failed to read credential file %q: %v", s.File, err)
 			return ""
 		}
 		return strings.TrimSpace(string(data))

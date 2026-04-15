@@ -11,6 +11,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 
+	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
 )
 
@@ -91,7 +92,7 @@ func newListCmd() *cobra.Command {
 					} else {
 						size, err := sandbox.GetSandboxSize(s.SandboxRoot)
 						if err != nil {
-							fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+							notice.Warn("failed to calculate size for %s: %v", s.Name, err)
 						}
 						s.SizeBytes = size
 					}
@@ -209,7 +210,7 @@ directory no longer exists) are removed.`,
 				} else {
 					size, err := sandbox.GetSandboxSize(s.SandboxRoot)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: failed to calculate size for %s: %v\n", s.Name, err)
+						notice.Warn("failed to calculate size for %s: %v", s.Name, err)
 					}
 					s.SizeBytes = size
 				}
@@ -266,7 +267,7 @@ directory no longer exists) are removed.`,
 			var removed, failed int
 			for _, s := range toPrune {
 				if err := sandbox.RemoveSandboxByType(s, volumes); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to remove %s: %v\n", s.Name, err)
+					notice.Error("Failed to remove %s: %v", s.Name, err)
 					failed++
 				} else {
 					removed++

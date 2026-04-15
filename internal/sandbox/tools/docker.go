@@ -2,13 +2,13 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"devsandbox/internal/dockerproxy"
+	"devsandbox/internal/notice"
 )
 
 func init() {
@@ -150,8 +150,8 @@ func (d *Docker) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		return nil
 	}
 
-	fmt.Fprintln(os.Stderr, "WARNING: Docker socket proxy enabled. The sandbox can access ALL existing Docker containers on this host.")
-	fmt.Fprintln(os.Stderr, "         This might allow accessing host resources. Ensure you trust the sandbox content.")
+	notice.Warn("Docker socket proxy enabled. The sandbox can access ALL existing Docker containers on this host.")
+	notice.Warn("This might allow accessing host resources. Ensure you trust the sandbox content.")
 
 	listenPath := d.socketPath(sandboxHome)
 	d.proxy = dockerproxy.New(d.hostSocket, listenPath)

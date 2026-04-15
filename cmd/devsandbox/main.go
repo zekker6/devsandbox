@@ -20,6 +20,7 @@ import (
 	"devsandbox/internal/embed"
 	"devsandbox/internal/isolator"
 	"devsandbox/internal/logging"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/portforward"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
@@ -56,6 +57,7 @@ func addSandboxFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("no-hide-env", false, "Disable .env file hiding (exposes .env files inside the sandbox)")
 
 	cmd.Flags().String("name", "", "Session name for this sandbox (used by 'forward' and 'sessions' commands)")
+	cmd.Flags().Bool("verbose", false, "Print wrapper diagnostic messages to stderr even while the child owns the terminal")
 }
 
 func main() {
@@ -119,12 +121,22 @@ Proxy Mode (--proxy):
 	rootCmd.SetVersionTemplate(versionTpl)
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		notice.Error("%v", err)
 		os.Exit(1)
 	}
 }
 
 func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	if os.Getenv("DEVSANDBOX_DEBUG") != "" {
+		verbose = true
+	}
+	if err := notice.Setup(wrapperLogPath(), verbose, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer notice.Flush()
+
 	// Prevent recursive sandboxing — running devsandbox inside an existing
 	// sandbox fails because bwrap cannot overlay-mount paths that are already
 	// overlay mounts ("Resource busy").
@@ -276,15 +288,15 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		cfg.SessionID = sessionID
 		cfg.IsConcurrent = true
-		fmt.Fprintf(os.Stderr, "Note: Another session is active. Running in concurrent mode (overlay changes will be discarded on exit).\n")
+		notice.Info("Another session is active. Running in concurrent mode (overlay changes will be discarded on exit).")
 	}
 
 	// Primary session: clean up stale session overlay dirs from crashed concurrent sessions.
 	if !cfg.IsConcurrent {
 		if removed, err := sandbox.CleanupStaleSessionDirs(cfg.SandboxHome); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to clean stale session dirs: %v\n", err)
+			notice.Warn("failed to clean stale session dirs: %v", err)
 		} else if removed > 0 {
-			fmt.Fprintf(os.Stderr, "Cleaned up %d stale session overlay dir(s).\n", removed)
+			notice.Info("cleaned up %d stale session overlay dir(s)", removed)
 		}
 
 		// Clean up overlay upper-dirs left behind when ~/.local/bin and
@@ -292,9 +304,9 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		// read-only bind mounts. Stale shadow files in those upper-dirs can
 		// mask real host binaries (see CHANGELOG Unreleased / Fixed).
 		if removed, err := sandbox.CleanupLegacyReadonlyBindOverlays(cfg.SandboxHome, cfg.HomeDir); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to clean legacy overlay dirs: %v\n", err)
+			notice.Warn("failed to clean legacy overlay dirs: %v", err)
 		} else if removed > 0 {
-			fmt.Fprintf(os.Stderr, "Cleaned up %d legacy overlay dir(s).\n", removed)
+			notice.Info("cleaned up %d legacy overlay dir(s)", removed)
 		}
 	}
 
@@ -305,7 +317,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	if rmFlag && !cfg.IsConcurrent {
 		defer func() {
 			if err := sandbox.RemoveSandbox(cfg.SandboxRoot); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to remove sandbox: %v\n", err)
+				notice.Warn("failed to remove sandbox: %v", err)
 			}
 		}()
 	}
@@ -314,7 +326,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	if cfg.IsConcurrent {
 		defer func() {
 			if err := sandbox.CleanupSessionOverlays(cfg.SandboxHome, cfg.SessionID); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to clean session overlays: %v\n", err)
+				notice.Warn("failed to clean session overlays: %v", err)
 			}
 		}()
 	}
@@ -373,40 +385,38 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		cfg.ProxyPort = proxyRes.port
 		proxyServer = proxyRes.server
 
-		fmt.Fprintf(os.Stderr, "Proxy server started on %s:%d\n", pCfg.GetBindAddress(), proxyRes.port)
+		notice.Info("Proxy server started on %s:%d", pCfg.GetBindAddress(), proxyRes.port)
 		if proxyRes.port != proxyPort {
-			fmt.Fprintf(os.Stderr, "Note: Using port %d (requested port %d was busy)\n", proxyRes.port, proxyPort)
+			notice.Info("Using port %d (requested port %d was busy)", proxyRes.port, proxyPort)
 		}
 		if cfg.ProxyMITM {
-			fmt.Fprintf(os.Stderr, "CA certificate: %s\n", proxyRes.caPath)
+			notice.Info("CA certificate: %s", proxyRes.caPath)
 		}
 
 		if pCfg.Filter != nil && pCfg.Filter.IsEnabled() {
 			if pCfg.Filter.DefaultAction == proxy.FilterActionAsk {
-				fmt.Fprintf(os.Stderr, "Filter: ask mode (default action for unmatched requests)\n")
-				fmt.Fprintf(os.Stderr, "\nRun in another terminal to approve/deny requests:\n")
-				fmt.Fprintf(os.Stderr, "  devsandbox proxy monitor\n\n")
-				fmt.Fprintf(os.Stderr, "Requests without response within 30s will be rejected.\n")
+				notice.Info("Filter: ask mode (default action for unmatched requests)")
+				notice.Info("\nRun in another terminal to approve/deny requests:\n  devsandbox proxy monitor\n\nRequests without response within 30s will be rejected.")
 			} else {
-				fmt.Fprintf(os.Stderr, "Filter: %d rules, default action: %s\n", len(pCfg.Filter.Rules), pCfg.Filter.DefaultAction)
+				notice.Info("Filter: %d rules, default action: %s", len(pCfg.Filter.Rules), pCfg.Filter.DefaultAction)
 			}
 		}
 
 		if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
-			fmt.Fprintf(os.Stderr, "Redaction: %d rules, default action: %s\n",
+			notice.Info("Redaction: %d rules, default action: %s",
 				len(pCfg.Redaction.Rules), pCfg.Redaction.GetDefaultAction())
 		}
 
 		if !cfg.ProxyMITM {
-			fmt.Fprintf(os.Stderr, "MITM: disabled (transparent CONNECT tunneling)\n")
+			notice.Info("MITM: disabled (transparent CONNECT tunneling)")
 			if len(pCfg.CredentialInjectors) > 0 {
-				fmt.Fprintf(os.Stderr, "WARN: MITM disabled — HTTPS credential injection will not work. Credentials are only injected for plain HTTP requests.\n")
+				notice.Warn("MITM disabled — HTTPS credential injection will not work. Credentials are only injected for plain HTTP requests.")
 			}
 			if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
-				fmt.Fprintf(os.Stderr, "WARN: MITM disabled — HTTPS request bodies and headers cannot be inspected for secrets. Redaction only applies to plain HTTP requests.\n")
+				notice.Warn("MITM disabled — HTTPS request bodies and headers cannot be inspected for secrets. Redaction only applies to plain HTTP requests.")
 			}
 			if pCfg.Filter != nil && pCfg.Filter.IsEnabled() {
-				fmt.Fprintf(os.Stderr, "WARN: MITM disabled — HTTPS request filtering is limited to host-level matching. Path/header/body matching only works for plain HTTP.\n")
+				notice.Warn("MITM disabled — HTTPS request filtering is limited to host-level matching. Path/header/body matching only works for plain HTTP.")
 			}
 		}
 	}
@@ -461,7 +471,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	runCfg.OnSandboxStart = func(nsPID int, nsPath string) {
 		sessionStore, err := session.DefaultStore()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[devsandbox] Warning: failed to create session store: %v\n", err)
+			notice.Warn("[devsandbox] failed to create session store: %v", err)
 			return
 		}
 
@@ -475,11 +485,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		if err := sessionStore.Register(sess); err != nil {
-			fmt.Fprintf(os.Stderr, "[devsandbox] Warning: failed to register session: %v\n", err)
+			notice.Warn("[devsandbox] failed to register session: %v", err)
 			return
 		}
 
-		fmt.Fprintf(os.Stderr, "Session: %s (use 'devsandbox forward %s <port>' to forward ports)\n", sandboxName, sandboxName)
+		notice.Info("Session: %s (use 'devsandbox forward %s <port>' to forward ports)", sandboxName, sandboxName)
 
 		// Start port auto-detection if enabled.
 		//
@@ -493,11 +503,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		if appCfg.PortForwarding.IsAutoDetectEnabled() {
 			shared, err := portforward.SharesHostNetNS(nsPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[devsandbox] Warning: cannot determine sandbox network namespace (%v); skipping port auto-detect\n", err)
+				notice.Warn("[devsandbox] cannot determine sandbox network namespace (%v); skipping port auto-detect", err)
 				return
 			}
 			if shared {
-				fmt.Fprintln(os.Stderr, "[devsandbox] Port auto-detect skipped: sandbox shares host network namespace; sandbox listeners are already accessible on 127.0.0.1 (enable proxy mode for netns isolation and auto-forward)")
+				notice.Info("[devsandbox] port auto-detect skipped: sandbox shares host network namespace; sandbox listeners are already accessible on 127.0.0.1 (enable proxy mode for netns isolation and auto-forward)")
 				return
 			}
 
@@ -525,7 +535,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 					}
 					hostPort, fellBack, err := fwd.StartWithFallback(cmd.Context())
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "[devsandbox] Warning: cannot forward port %d: %v (try: devsandbox forward %d:<alt_port>)\n", port, err, port)
+						notice.Warn("[devsandbox] cannot forward port %d: %v (try: devsandbox forward %d:<alt_port>)", port, err, port)
 						return
 					}
 					fwdMu.Lock()
@@ -533,9 +543,9 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 					fwdMu.Unlock()
 
 					if fellBack {
-						fmt.Fprintf(os.Stderr, "[devsandbox] Auto-forwarding port %d → 127.0.0.1:%d (host port %d was in use)\n", port, hostPort, port)
+						notice.Info("[devsandbox] auto-forwarding port %d → 127.0.0.1:%d (host port %d was in use)", port, hostPort, port)
 					} else {
-						fmt.Fprintf(os.Stderr, "[devsandbox] Auto-forwarding port %d → 127.0.0.1:%d\n", port, hostPort)
+						notice.Info("[devsandbox] auto-forwarding port %d → 127.0.0.1:%d", port, hostPort)
 					}
 
 					// Update session registry
@@ -552,7 +562,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 					}
 					fwdMu.Unlock()
 
-					fmt.Fprintf(os.Stderr, "[devsandbox] Stopped forwarding port %d\n", port)
+					notice.Info("[devsandbox] stopped forwarding port %d", port)
 				},
 			}
 
@@ -568,6 +578,8 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		}()
 	}
 
+	notice.SetRunning()
+	defer notice.SetTeardown()
 	return iso.Run(cmd.Context(), runCfg)
 }
 
@@ -858,19 +870,20 @@ func ensureMiseTrust(projectDir string) error {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Mise config is not trusted for this project.\n")
-	fmt.Fprintf(os.Stderr, "Trust cannot be persisted inside the sandbox (read-only mounts),\n")
-	fmt.Fprintf(os.Stderr, "so mise will prompt on every launch without this.\n\n")
+	notice.Info("Mise config is not trusted for this project.")
+	notice.Info("Trust cannot be persisted inside the sandbox (read-only mounts),\nso mise will prompt on every launch without this.")
 	for _, path := range untrusted {
-		fmt.Fprintf(os.Stderr, "  untrusted: %s\n", path)
+		notice.Info("  untrusted: %s", path)
 	}
-	fmt.Fprintln(os.Stderr)
 
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprintf(os.Stderr, "Warning: run 'mise trust' in the project directory to fix this\n")
+		notice.Warn("run 'mise trust' in the project directory to fix this")
 		return nil
 	}
 
+	// The lines below write to stderr directly because they form an interactive
+	// prompt (fmt.Scanln reads the response). Routing them through notice would
+	// split the prompt text from the input cursor.
 	fmt.Fprintf(os.Stderr, "Trust mise config? [Y/n]: ")
 	var response string
 	if _, err := fmt.Scanln(&response); err != nil {
@@ -880,15 +893,30 @@ func ensureMiseTrust(projectDir string) error {
 	response = strings.ToLower(strings.TrimSpace(response))
 
 	if response != "" && response != "y" && response != "yes" {
-		fmt.Fprintf(os.Stderr, "Skipped. Run 'mise trust' manually to avoid repeated prompts.\n")
+		notice.Info("Skipped. Run 'mise trust' manually to avoid repeated prompts.")
 		return nil
 	}
 
 	if err := tools.TrustMiseConfig(projectDir); err != nil {
 		return fmt.Errorf("failed to trust mise config: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "Mise config trusted.\n\n")
+	notice.Info("Mise config trusted.")
 	return nil
+}
+
+// wrapperLogPath returns the path to the current wrapper log file, creating
+// parent directories on demand. Honors XDG_STATE_HOME, falls back to
+// ~/.local/state/devsandbox/wrapper.log.
+func wrapperLogPath() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Join(os.TempDir(), "devsandbox-wrapper.log")
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "devsandbox", "wrapper.log")
 }
 
 // createActiveToolsRunner creates an active tools runner with the sandbox configuration.

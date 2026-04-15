@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -13,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"devsandbox/internal/notice"
 )
 
 // DockerVolumePrefix is the prefix used for devsandbox Docker volumes
@@ -144,7 +145,7 @@ func RemoveDockerContainer(containerName string, removeVolumes bool) error {
 	// Remove volumes BEFORE container removal (need container to exist for inspect)
 	if removeVolumes {
 		if err := removeContainerVolumes(containerName); err != nil {
-			log.Printf("warning: failed to remove volumes for %s: %v", containerName, err)
+			notice.Warn("failed to remove volumes for %s: %v", containerName, err)
 		}
 	}
 
@@ -180,7 +181,7 @@ func removeDockerNetworks(containerName string) {
 	if rmOutput, err := rmNet.CombinedOutput(); err != nil {
 		outStr := string(rmOutput)
 		if !strings.Contains(outStr, "not found") && !strings.Contains(outStr, "No such") {
-			log.Printf("warning: failed to remove network %s: %s", networkName, outStr)
+			notice.Warn("failed to remove network %s: %s", networkName, outStr)
 		}
 	}
 }
@@ -372,7 +373,7 @@ func RemoveSandboxByType(m *Metadata, removeVolumes bool) error {
 				return err
 			}
 			// Log but don't fail — still clean up the disk directory.
-			log.Printf("warning: failed to remove docker container %s: %v", containerName, err)
+			notice.Warn("failed to remove docker container %s: %v", containerName, err)
 		}
 
 		// Clean up on-disk metadata directory if present.

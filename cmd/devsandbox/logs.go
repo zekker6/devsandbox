@@ -22,6 +22,7 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 
+	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 )
@@ -389,7 +390,7 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 
 		fileEntries, err := readProxyLogFileWithLimit(file, last)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to read %s: %v\n", filepath.Base(file), err)
+			notice.Warn("failed to read %s: %v", filepath.Base(file), err)
 			continue
 		}
 
@@ -467,7 +468,7 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, showBody
 			}
 			data, err := json.Marshal(out)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to marshal log entry: %v\n", err)
+				notice.Warn("failed to marshal log entry: %v", err)
 				return
 			}
 			fmt.Println(string(data))
@@ -493,7 +494,7 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, showBody
 	if currentFile != "" {
 		entries, err := readUncompressedProxyLogFile(currentFile, 10)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to read recent entries: %v\n", err)
+			notice.Warn("failed to read recent entries: %v", err)
 		}
 		for i := range entries {
 			printEntry(&entries[i])
@@ -515,7 +516,7 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, showBody
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	fmt.Fprintf(os.Stderr, "Following logs in %s (Ctrl+C to stop)...\n", logDir)
+	notice.Info("Following logs in %s (Ctrl+C to stop)...", logDir)
 
 	for {
 		select {
@@ -1053,14 +1054,14 @@ func viewInternalLogs(logDir, logType string, last int, since time.Time) error {
 		// Read logging errors
 		l1, err := readLoggingErrorsLog(filepath.Join(logDir, "logging-errors.log"), since)
 		if err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			notice.Warn("%v", err)
 		}
 		lines = append(lines, l1...)
 
 		// Read proxy internal logs
 		l2, err := readProxyInternalLogs(logDir, since)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			notice.Warn("%v", err)
 		}
 		lines = append(lines, l2...)
 
@@ -1175,7 +1176,7 @@ func followInternalLogs(logDir, logType string, since time.Time) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Fprintf(os.Stderr, "Following internal logs in %s (Ctrl+C to stop)...\n", logDir)
+	notice.Info("Following internal logs in %s (Ctrl+C to stop)...", logDir)
 
 	loggingErrorsPath := filepath.Join(logDir, "logging-errors.log")
 	var lastLoggingPos int64

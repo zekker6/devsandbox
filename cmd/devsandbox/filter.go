@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 )
@@ -129,7 +130,7 @@ func runFilterGenerate(fromLogs, project string, minRequests int, outputFile, de
 		return fmt.Errorf("failed to analyze logs: %w", err)
 	}
 	if len(stats) == 0 {
-		fmt.Fprintln(os.Stderr, "No requests found in logs.")
+		notice.Info("No requests found in logs.")
 		return nil
 	}
 
@@ -182,7 +183,7 @@ func writeOutput(output, outputFile string) error {
 	if err := os.WriteFile(outputFile, []byte(output), 0o644); err != nil {
 		return fmt.Errorf("failed to write output: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "Filter configuration written to: %s\n", outputFile)
+	notice.Info("Filter configuration written to: %s", outputFile)
 	return nil
 }
 
@@ -205,7 +206,7 @@ func analyzeProxyLogs(logDir string) ([]DomainStats, error) {
 
 		logPath := filepath.Join(logDir, entry.Name())
 		if err := processLogFile(logPath, domainMap); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to process %s: %v\n", entry.Name(), err)
+			notice.Warn("failed to process %s: %v", entry.Name(), err)
 		}
 	}
 

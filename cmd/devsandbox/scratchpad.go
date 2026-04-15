@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
 )
 
@@ -98,7 +99,7 @@ func runScratchpad(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to enter scratchpad dir %q: %w", workDir, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Scratchpad: %s (%s)\n", name, workDir)
+	notice.Info("Scratchpad: %s (%s)", name, workDir)
 
 	return runSandbox(cmd, cmdArgs)
 }
@@ -316,7 +317,7 @@ Refuses to remove scratchpads with an active session.`,
 
 				// Refuse if the session is active.
 				if t.HasState && sandbox.IsSessionActive(sandboxRoot) {
-					fmt.Fprintf(os.Stderr, "Skipping %q: active session\n", t.Name)
+					notice.Info("Skipping %q: active session", t.Name)
 					skipped++
 					continue
 				}
@@ -327,13 +328,13 @@ Refuses to remove scratchpads with an active session.`,
 					if loadErr != nil {
 						// Fall back to plain directory removal if metadata is missing.
 						if rmErr := sandbox.RemoveSandbox(sandboxRoot); rmErr != nil {
-							fmt.Fprintf(os.Stderr, "Failed to remove sandbox state for %q: %v\n", t.Name, rmErr)
+							notice.Error("Failed to remove sandbox state for %q: %v", t.Name, rmErr)
 							failed++
 							continue
 						}
 					} else {
 						if rmErr := sandbox.RemoveSandboxByType(m, true); rmErr != nil {
-							fmt.Fprintf(os.Stderr, "Failed to remove sandbox state for %q: %v\n", t.Name, rmErr)
+							notice.Error("Failed to remove sandbox state for %q: %v", t.Name, rmErr)
 							failed++
 							continue
 						}
@@ -342,7 +343,7 @@ Refuses to remove scratchpads with an active session.`,
 
 				// Remove the working directory.
 				if err := os.RemoveAll(t.WorkingDir); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to remove working dir for %q: %v\n", t.Name, err)
+					notice.Error("Failed to remove working dir for %q: %v", t.Name, err)
 					failed++
 					continue
 				}

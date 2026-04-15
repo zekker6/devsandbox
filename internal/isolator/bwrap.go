@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"devsandbox/internal/bwrap"
 	"devsandbox/internal/embed"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/network"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 )
@@ -113,13 +115,15 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 
 	// Debug output
 	if os.Getenv("DEVSANDBOX_DEBUG") != "" {
-		fmt.Fprintln(os.Stderr, "=== Sandbox Debug ===")
-		fmt.Fprintln(os.Stderr, "bwrap \\")
+		var sb strings.Builder
+		sb.WriteString("=== Sandbox Debug ===\n")
+		sb.WriteString("bwrap \\\n")
 		for _, arg := range bwrapArgs {
-			fmt.Fprintf(os.Stderr, "    %s \\\n", arg)
+			fmt.Fprintf(&sb, "    %s \\\n", arg)
 		}
-		fmt.Fprintf(os.Stderr, "    -- %v\n", shellCmd)
-		fmt.Fprintln(os.Stderr, "===================")
+		fmt.Fprintf(&sb, "    -- %v\n", shellCmd)
+		sb.WriteString("===================")
+		notice.Info("%s", sb.String())
 	}
 
 	// Validate port forwarding requirements

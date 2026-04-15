@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"devsandbox/internal/notice"
 	"devsandbox/internal/portforward"
 	"devsandbox/internal/session"
 )
@@ -187,7 +188,7 @@ func runForward(_ context.Context, name, bind string, portSpecs []string) error 
 			return fmt.Errorf("failed to forward port %d: %w", m.hostPort, err)
 		}
 		forwarders = append(forwarders, fwd)
-		fmt.Fprintf(os.Stderr, "Forwarding %s:%d → sandbox:%d (%s)\n",
+		notice.Info("Forwarding %s:%d → sandbox:%d (%s)",
 			bind, fwd.ActualHostPort(), m.sandboxPort, sess.Name)
 	}
 
@@ -203,7 +204,7 @@ func runForward(_ context.Context, name, bind string, portSpecs []string) error 
 	_ = store.Update(sess)
 
 	// 6. Wait for signal or sandbox exit.
-	fmt.Fprintf(os.Stderr, "\nPress Ctrl+C to stop forwarding.\n")
+	notice.Info("\nPress Ctrl+C to stop forwarding.")
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -232,9 +233,9 @@ func runForward(_ context.Context, name, bind string, portSpecs []string) error 
 
 	select {
 	case <-sigChan:
-		fmt.Fprintf(os.Stderr, "\nStopping port forwards...\n")
+		notice.Info("\nStopping port forwards...")
 	case <-done:
-		fmt.Fprintf(os.Stderr, "\nSandbox exited, stopping port forwards...\n")
+		notice.Info("\nSandbox exited, stopping port forwards...")
 	}
 
 	// 7. Stop all forwarders concurrently.
