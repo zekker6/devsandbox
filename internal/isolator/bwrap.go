@@ -139,7 +139,14 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 
 	// Execute the sandbox
 	if sandboxCfg.ProxyEnabled {
-		return bwrap.ExecWithPasta(bwrapArgs, shellCmd, portForwardArgs)
+		proc, err := bwrap.StartWithPasta(bwrapArgs, shellCmd, portForwardArgs)
+		if err != nil {
+			return err
+		}
+		if cfg.OnSandboxStart != nil {
+			cfg.OnSandboxStart(proc.NamespacePID, proc.NamespacePath())
+		}
+		return proc.Wait()
 	}
 
 	if cfg.HasActiveTools || cfg.RemoveOnExit || sandboxCfg.IsConcurrent {

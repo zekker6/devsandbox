@@ -47,6 +47,14 @@ type RunConfig struct {
 	// Logging
 	SandboxLogger *logging.ErrorLogger
 	LogDispatcher *logging.Dispatcher
+
+	// OnSandboxStart is called after the sandbox process starts but before Wait.
+	// Receives the PID of a process inside the sandbox network namespace and
+	// the namespace path. Can be nil.
+	OnSandboxStart func(nsPID int, nsPath string)
+
+	// SandboxName is the human-readable session name (from --name or auto-generated).
+	SandboxName string
 }
 
 // Isolator is the interface for sandbox backends.

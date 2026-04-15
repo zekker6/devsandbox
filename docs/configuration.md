@@ -459,6 +459,64 @@ sandbox_port = 5432
 
 Inside sandbox, connect to `10.0.2.2:5432` (pasta gateway IP on Linux) or `host.docker.internal:5432` (Docker backend on macOS).
 
+#### Dynamic Port Forwarding
+
+Instead of pre-configuring port rules, you can forward ports to a running sandbox on demand.
+
+**Auto-detect listening ports** (opt-in, disabled by default for security):
+
+```toml
+[port_forwarding]
+# Automatically detect and forward listening ports inside the sandbox
+auto_detect = false
+
+# How often to scan for new listening ports
+scan_interval = "2s"
+
+# Ports to never auto-forward (e.g., internal services)
+exclude_ports = [22, 80, 443]
+```
+
+When `auto_detect = true`, devsandbox monitors the sandbox for new TCP listeners and automatically forwards them to the same port on `127.0.0.1`. Auto-detect requires proxy mode: without an isolated network namespace the sandbox and host share the same kernel port space, so a userland forwarder would collide with the sandbox listener on the same port (and the port is already directly accessible on `127.0.0.1` anyway). If auto-detect is enabled without proxy mode, devsandbox logs a notice and skips auto-forward at session start. When the preferred host port genuinely happens to be in use on the host under proxy mode, devsandbox falls back to an ephemeral host port chosen by the OS and logs the mapping (e.g. `Auto-forwarding port 37127 → 127.0.0.1:45821 (host port 37127 was in use)`); the actual host port is recorded in the session registry and visible via `devsandbox sessions`. Ports below 1024 are always excluded.
+
+**Manual forwarding to a running sandbox:**
+
+```bash
+# Forward a single port (host:3000 → sandbox:3000)
+devsandbox forward 3000
+
+# Forward sandbox port 3000 to host port 8080
+devsandbox forward 3000:8080
+
+# Target a specific sandbox by name
+devsandbox forward --name myapp 3000
+
+# Bind to all interfaces (for LAN access)
+devsandbox forward --bind 0.0.0.0 3000
+
+# Forward multiple ports at once
+devsandbox forward 3000 5173 9090
+```
+
+Port spec format: `<sandbox_port>[:<host_port>]`. The sandbox port (the dev server you want to reach) comes first. If `host_port` is omitted, it defaults to the same as `sandbox_port`.
+
+**Named sessions:**
+
+Use `--name` when starting a sandbox to give it a human-readable identifier:
+
+```bash
+devsandbox --proxy --name myapp
+```
+
+If omitted, the name is auto-generated from the working directory basename.
+
+**List running sessions:**
+
+```bash
+devsandbox sessions
+devsandbox sessions --json
+```
+
 ### Overlay Settings
 
 Global overlayfs settings control the default mount mode for all tool bindings:

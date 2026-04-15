@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -19,10 +20,12 @@ import (
 	"devsandbox/internal/embed"
 	"devsandbox/internal/isolator"
 	"devsandbox/internal/logging"
+	"devsandbox/internal/portforward"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/mounts"
 	"devsandbox/internal/sandbox/tools"
+	"devsandbox/internal/session"
 	"devsandbox/internal/version"
 )
 
@@ -51,6 +54,8 @@ func addSandboxFlags(cmd *cobra.Command) {
 
 	// Security flags
 	cmd.Flags().Bool("no-hide-env", false, "Disable .env file hiding (exposes .env files inside the sandbox)")
+
+	cmd.Flags().String("name", "", "Session name for this sandbox (used by 'forward' and 'sessions' commands)")
 }
 
 func main() {
@@ -102,6 +107,9 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newScratchpadCmd())
 	rootCmd.AddCommand(newTrustCmd())
 	rootCmd.AddCommand(newImageCmd())
+	rootCmd.AddCommand(newSessionsCmd())
+	rootCmd.AddCommand(newForwardCmd())
+	rootCmd.AddCommand(newNSDialCmd())
 
 	versionTpl := fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date)
 	if runtime.GOOS == "linux" {
@@ -139,6 +147,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	filterDefault, _ := cmd.Flags().GetString("filter-default")
 	allowDomains, _ := cmd.Flags().GetStringSlice("allow-domain")
 	blockDomains, _ := cmd.Flags().GetStringSlice("block-domain")
+	sandboxName, _ := cmd.Flags().GetString("name")
 
 	// Load configuration file with project-specific overrides. The
 	// scratchpad subcommand sets the "scratchpad" annotation on itself so
@@ -416,6 +425,17 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	defer func() { _ = lockFile.Close() }()
 
+	// Resolve session name for port forwarding registry
+	if cfg.ProxyEnabled {
+		sessionStore, storeErr := session.DefaultStore()
+		if storeErr == nil {
+			sessionStore.CleanStale()
+			if sandboxName == "" {
+				sandboxName = sessionStore.AutoName(projectDir)
+			}
+		}
+	}
+
 	// Build RunConfig and delegate to the isolator
 	var proxyCAPath string
 	if proxyRes != nil && cfg.ProxyMITM {
@@ -434,6 +454,117 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		ProxyPort:      cfg.ProxyPort,
 		SandboxLogger:  sandboxLogger,
 		LogDispatcher:  logDispatcher,
+		SandboxName:    sandboxName,
+	}
+
+	runCfg.OnSandboxStart = func(nsPID int, nsPath string) {
+		sessionStore, err := session.DefaultStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[devsandbox] Warning: failed to create session store: %v\n", err)
+			return
+		}
+
+		sess := &session.Session{
+			Name:      sandboxName,
+			PID:       nsPID,
+			NetworkNS: nsPath,
+			StartedAt: time.Now(),
+			WorkDir:   projectDir,
+			ProxyPort: cfg.ProxyPort,
+		}
+
+		if err := sessionStore.Register(sess); err != nil {
+			fmt.Fprintf(os.Stderr, "[devsandbox] Warning: failed to register session: %v\n", err)
+			return
+		}
+
+		fmt.Fprintf(os.Stderr, "Session: %s (use 'devsandbox forward %s <port>' to forward ports)\n", sandboxName, sandboxName)
+
+		// Start port auto-detection if enabled.
+		//
+		// Only meaningful when the sandbox has its own network namespace (i.e.
+		// proxy mode via pasta). If the sandbox shares the host netns, a tool
+		// listener inside the sandbox and a forwarder bind on the host are the
+		// same kernel socket — trying to "forward" produces an EADDRINUSE
+		// collision against the very tool we detected. In that configuration
+		// the sandbox port is already directly accessible on 127.0.0.1, so
+		// skip auto-forwarding entirely rather than fail loudly on each port.
+		if appCfg.PortForwarding.IsAutoDetectEnabled() {
+			shared, err := portforward.SharesHostNetNS(nsPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[devsandbox] Warning: cannot determine sandbox network namespace (%v); skipping port auto-detect\n", err)
+				return
+			}
+			if shared {
+				fmt.Fprintln(os.Stderr, "[devsandbox] Port auto-detect skipped: sandbox shares host network namespace; sandbox listeners are already accessible on 127.0.0.1 (enable proxy mode for netns isolation and auto-forward)")
+				return
+			}
+
+			dialer := portforward.NewNamespaceDialer(nsPID)
+			scanner := portforward.NewProcNetScanner(nsPID)
+
+			excludePorts := make(map[int]bool)
+			for _, p := range appCfg.PortForwarding.ExcludePorts {
+				excludePorts[p] = true
+			}
+
+			forwarders := make(map[int]*portforward.Forwarder)
+			var fwdMu sync.Mutex
+
+			mon := &portforward.Monitor{
+				Scanner:      scanner,
+				Interval:     appCfg.PortForwarding.GetScanInterval(),
+				ExcludePorts: excludePorts,
+				OnPortAdded: func(port int) {
+					fwd := &portforward.Forwarder{
+						HostPort:    port,
+						SandboxPort: port,
+						Bind:        "127.0.0.1",
+						Dialer:      dialer,
+					}
+					hostPort, fellBack, err := fwd.StartWithFallback(cmd.Context())
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "[devsandbox] Warning: cannot forward port %d: %v (try: devsandbox forward %d:<alt_port>)\n", port, err, port)
+						return
+					}
+					fwdMu.Lock()
+					forwarders[port] = fwd
+					fwdMu.Unlock()
+
+					if fellBack {
+						fmt.Fprintf(os.Stderr, "[devsandbox] Auto-forwarding port %d → 127.0.0.1:%d (host port %d was in use)\n", port, hostPort, port)
+					} else {
+						fmt.Fprintf(os.Stderr, "[devsandbox] Auto-forwarding port %d → 127.0.0.1:%d\n", port, hostPort)
+					}
+
+					// Update session registry
+					sess.ForwardedPorts = append(sess.ForwardedPorts, session.ForwardedPort{
+						HostPort: hostPort, SandboxPort: port, Bind: "127.0.0.1", Protocol: "tcp",
+					})
+					_ = sessionStore.Update(sess)
+				},
+				OnPortRemoved: func(port int) {
+					fwdMu.Lock()
+					if fwd, ok := forwarders[port]; ok {
+						fwd.Stop()
+						delete(forwarders, port)
+					}
+					fwdMu.Unlock()
+
+					fmt.Fprintf(os.Stderr, "[devsandbox] Stopped forwarding port %d\n", port)
+				},
+			}
+
+			mon.Start(cmd.Context())
+		}
+	}
+
+	if cfg.ProxyEnabled && sandboxName != "" {
+		defer func() {
+			if store, err := session.DefaultStore(); err == nil {
+				_ = store.Remove(sandboxName)
+			}
+		}()
 	}
 
 	return iso.Run(cmd.Context(), runCfg)

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -414,6 +415,17 @@ type PortForwardingConfig struct {
 	// Enabled enables port forwarding.
 	Enabled *bool `toml:"enabled"`
 
+	// AutoDetect enables automatic detection of listening ports in the sandbox.
+	// Disabled by default for security.
+	AutoDetect *bool `toml:"auto_detect"`
+
+	// ScanInterval is how often to scan for new listening ports (e.g., "2s").
+	// Defaults to "2s".
+	ScanInterval string `toml:"scan_interval"`
+
+	// ExcludePorts is a list of ports to never auto-forward.
+	ExcludePorts []int `toml:"exclude_ports"`
+
 	// Rules is the list of port forwarding rules.
 	Rules []PortForwardingRule `toml:"rules"`
 }
@@ -424,6 +436,26 @@ func (p PortForwardingConfig) IsEnabled() bool {
 		return false
 	}
 	return *p.Enabled
+}
+
+// IsAutoDetectEnabled returns whether auto-detect is enabled (defaults to false).
+func (p PortForwardingConfig) IsAutoDetectEnabled() bool {
+	if p.AutoDetect == nil {
+		return false
+	}
+	return *p.AutoDetect
+}
+
+// GetScanInterval returns the scan interval, defaulting to 2s.
+func (p PortForwardingConfig) GetScanInterval() time.Duration {
+	if p.ScanInterval == "" {
+		return 2 * time.Second
+	}
+	d, err := time.ParseDuration(p.ScanInterval)
+	if err != nil {
+		return 2 * time.Second
+	}
+	return d
 }
 
 // PortForwardingRule defines a single port forwarding rule.
@@ -662,6 +694,12 @@ func (c *Config) Validate() error {
 
 // validatePortForwarding validates port forwarding configuration.
 func (c *Config) validatePortForwarding() error {
+	if c.PortForwarding.ScanInterval != "" {
+		if _, err := time.ParseDuration(c.PortForwarding.ScanInterval); err != nil {
+			return fmt.Errorf("port_forwarding.scan_interval: invalid duration %q: %w", c.PortForwarding.ScanInterval, err)
+		}
+	}
+
 	if !c.PortForwarding.IsEnabled() {
 		return nil
 	}

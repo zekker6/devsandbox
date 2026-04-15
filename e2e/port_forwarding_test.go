@@ -1,14 +1,19 @@
 package e2e
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"devsandbox/internal/portforward"
 )
 
 // TestPortForwarding_RequiresNetworkIsolation verifies that port forwarding
@@ -558,4 +563,228 @@ sandbox_port = 8500
 	if !strings.Contains(string(output), "protocol-test") {
 		t.Errorf("expected echo output, got: %s", output)
 	}
+}
+
+// TestPortForwarding_DynamicForward exercises the dynamic port-forwarding
+// path (session registry + NamespaceDialer). This is the code path used by
+// the `devsandbox forward` command and by auto-detection. It is intentionally
+// decomposed so a failure tells us exactly which stage broke:
+//  1. Session file is written (PID capture + Register).
+//  2. sess.PID is a host-visible process (kill -0 succeeds).
+//  3. sess.PID is inside the sandbox netns (/proc/<pid>/net/tcp shows the
+//     listener we started).
+//  4. A NamespaceDialer can setns into sess.NetworkNS.
+//  5. A TCP dial inside the ns to 127.0.0.1:<sandboxPort> succeeds and we
+//     get the expected response.
+func TestPortForwarding_DynamicForward(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+	if !networkProviderAvailable() {
+		t.Skip("pasta not available")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available on host")
+	}
+
+	// Pick an ephemeral port from the host. The sandbox's netns is fresh, so
+	// a port free on the host is almost certainly free in there too. This
+	// avoids collisions with leftover processes from prior test runs.
+	ephemeral, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve ephemeral port: %v", err)
+	}
+	sandboxPort := ephemeral.Addr().(*net.TCPAddr).Port
+	_ = ephemeral.Close()
+
+	// Isolated XDG_STATE_HOME so we don't collide with the user's real sessions.
+	tmpState, err := os.MkdirTemp("", "sandbox-dynfwd-state-*")
+	if err != nil {
+		t.Fatalf("mkdtemp state: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpState) })
+
+	// Config: proxy on (required for session registration + netns), no static
+	// port_forwarding rules — we'll forward dynamically.
+	tmpConfig, err := os.MkdirTemp("", "sandbox-dynfwd-config-*")
+	if err != nil {
+		t.Fatalf("mkdtemp config: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpConfig) })
+
+	configPath := filepath.Join(tmpConfig, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	configContent := `[proxy]
+enabled = true
+port = 17180
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tmpProject, err := os.MkdirTemp("", "sandbox-dynfwd-project-*")
+	if err != nil {
+		t.Fatalf("mkdtemp project: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpProject) })
+
+	// Start a sandbox with a listener that responds PONG on connection and
+	// then sits reading until closed. The "READY" marker on stdout lets us
+	// know the listener is up before we try to forward.
+	// Use a Python TCP listener rather than nc to avoid cross-distro netcat
+	// flag differences (GNU netcat 0.7.1 rejects trailing bind addresses and
+	// has no -4, openbsd-netcat has different -l syntax, etc.). Explicitly
+	// binds AF_INET so pasta's lack of IPv6 routes doesn't matter.
+	pyListener := fmt.Sprintf(`
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('0.0.0.0', %d))
+s.listen(1)
+print('READY', flush=True)
+conn, _ = s.accept()
+conn.sendall(b'PONG\n')
+try:
+    conn.recv(4096)
+finally:
+    conn.close()
+`, sandboxPort)
+	sandboxCmd := exec.Command(binaryPath, "python3", "-c", pyListener)
+	sandboxCmd.Dir = tmpProject
+	sandboxCmd.Env = append(os.Environ(),
+		"XDG_CONFIG_HOME="+tmpConfig,
+		"XDG_STATE_HOME="+tmpState,
+	)
+	stdout, err := sandboxCmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	sandboxCmd.Stderr = os.Stderr
+	if err := sandboxCmd.Start(); err != nil {
+		t.Fatalf("start sandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sandboxCmd.Process.Kill()
+		_ = sandboxCmd.Wait()
+	})
+
+	// Wait for READY from the listener, with a timeout goroutine.
+	readyCh := make(chan string, 1)
+	readyErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, err := stdout.Read(buf)
+		if err != nil {
+			readyErr <- err
+			return
+		}
+		readyCh <- string(buf[:n])
+	}()
+	select {
+	case data := <-readyCh:
+		if !strings.Contains(data, "READY") {
+			t.Skipf("sandbox listener did not signal READY: got %q", data)
+		}
+	case err := <-readyErr:
+		t.Skipf("sandbox listener stdout closed before READY: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Skip("timed out waiting for sandbox listener to signal READY")
+	}
+
+	// Stage 1: session file exists.
+	sessDir := filepath.Join(tmpState, "devsandbox", "sessions")
+	var sessionFile string
+	sessDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(sessDeadline) {
+		entries, _ := os.ReadDir(sessDir)
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".json") {
+				sessionFile = filepath.Join(sessDir, e.Name())
+				break
+			}
+		}
+		if sessionFile != "" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if sessionFile == "" {
+		t.Fatalf("stage 1 FAIL: no session file appeared under %s", sessDir)
+	}
+	raw, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatalf("read session file: %v", err)
+	}
+	var sess struct {
+		Name      string `json:"name"`
+		PID       int    `json:"pid"`
+		NetworkNS string `json:"network_ns"`
+	}
+	if err := json.Unmarshal(raw, &sess); err != nil {
+		t.Fatalf("parse session file: %v\nraw=%s", err, raw)
+	}
+	t.Logf("stage 1 OK: session %s pid=%d ns=%s", sess.Name, sess.PID, sess.NetworkNS)
+
+	// Stage 2: sess.PID is host-alive (this is the regression we just fixed).
+	if sess.PID <= 1 {
+		t.Fatalf("stage 2 FAIL: session PID %d is not a host PID (PID-namespace leak)", sess.PID)
+	}
+	if err := syscall.Kill(sess.PID, 0); err != nil {
+		t.Fatalf("stage 2 FAIL: kill -0 %d: %v", sess.PID, err)
+	}
+	t.Logf("stage 2 OK: PID %d is host-alive", sess.PID)
+
+	// Stage 3: PID is inside the sandbox netns. /proc/<pid>/net/tcp should
+	// list our listener.
+	scanner := portforward.NewProcNetScanner(sess.PID)
+	var gotListener bool
+	for range 30 {
+		listening, scanErr := scanner.ListeningPorts()
+		if scanErr == nil {
+			for _, e := range listening {
+				if e.Port == sandboxPort {
+					gotListener = true
+					break
+				}
+			}
+		}
+		if gotListener {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !gotListener {
+		t.Fatalf("stage 3 FAIL: port %d not seen in /proc/%d/net/tcp — PID is not in sandbox netns",
+			sandboxPort, sess.PID)
+	}
+	t.Logf("stage 3 OK: listener on %d visible via /proc/%d/net/tcp", sandboxPort, sess.PID)
+
+	// Stages 4+5: NamespaceDialer enters netns and dials the listener.
+	// Point the dialer at the built devsandbox binary (which carries the
+	// `__nsdial` subcommand); otherwise it would default to os.Executable(),
+	// i.e. the test binary, which has no such subcommand.
+	dialer := portforward.NewNamespaceDialer(sess.PID)
+	dialer.HelperBinary = binaryPath
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", sandboxPort))
+	if err != nil {
+		t.Fatalf("stage 4/5 FAIL: dial via NamespaceDialer: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	t.Logf("stage 4/5 OK: dial via NamespaceDialer succeeded")
+
+	// Read PONG.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 32)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read from sandbox service: %v", err)
+	}
+	if !strings.Contains(string(buf[:n]), "PONG") {
+		t.Errorf("expected PONG, got %q", string(buf[:n]))
+	}
+	t.Logf("end-to-end OK: got response %q", strings.TrimSpace(string(buf[:n])))
 }

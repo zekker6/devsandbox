@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -1360,5 +1361,47 @@ func TestLoadConfigWithOptions_NilMatchesLoadConfig(t *testing.T) {
 	}
 	if errA == nil && a.Sandbox.BasePath != b.Sandbox.BasePath {
 		t.Errorf("base_path mismatch: %q vs %q", a.Sandbox.BasePath, b.Sandbox.BasePath)
+	}
+}
+
+func TestPortForwardingConfig_AutoDetect(t *testing.T) {
+	input := `
+[port_forwarding]
+enabled = true
+auto_detect = true
+scan_interval = "3s"
+exclude_ports = [22, 80, 443]
+`
+	var cfg Config
+	if _, err := toml.Decode(input, &cfg); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !cfg.PortForwarding.IsAutoDetectEnabled() {
+		t.Error("expected auto_detect to be true")
+	}
+	if cfg.PortForwarding.GetScanInterval() != 3*time.Second {
+		t.Errorf("scan_interval = %v, want 3s", cfg.PortForwarding.GetScanInterval())
+	}
+	if len(cfg.PortForwarding.ExcludePorts) != 3 {
+		t.Errorf("exclude_ports len = %d, want 3", len(cfg.PortForwarding.ExcludePorts))
+	}
+}
+
+func TestPortForwardingConfig_AutoDetectDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.PortForwarding.IsAutoDetectEnabled() {
+		t.Error("auto_detect should default to false")
+	}
+	if cfg.PortForwarding.GetScanInterval() != 2*time.Second {
+		t.Errorf("default scan_interval = %v, want 2s", cfg.PortForwarding.GetScanInterval())
+	}
+}
+
+func TestValidate_PortForwardingScanInterval(t *testing.T) {
+	cfg := &Config{}
+	cfg.PortForwarding.ScanInterval = "invalid"
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("expected validation error for invalid scan_interval")
 	}
 }
