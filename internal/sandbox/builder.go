@@ -641,8 +641,10 @@ func (b *Builder) applyPersistentOverlay(binding tools.Binding, dest string, san
 	// For concurrent sessions, add the primary session's persistent upper dir
 	// as an additional lower layer so the concurrent session sees installed tools/caches.
 	if b.cfg.IsConcurrent {
-		persistentUpper := persistentOverlayUpperDir(sandboxHome, dest, "")
-		if pathExists(persistentUpper) {
+		persistentUpper, err := persistentOverlayUpperDir(sandboxHome, dest, "")
+		if err != nil {
+			b.logWarnf("mounts: %v", err)
+		} else if pathExists(persistentUpper) {
 			b.OverlaySrc(persistentUpper)
 		}
 	}
@@ -818,8 +820,10 @@ func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) 
 
 	// For concurrent sessions, add primary session's persistent upper as lower layer
 	if b.cfg.IsConcurrent {
-		persistentUpper := persistentOverlayUpperDir(b.cfg.SandboxHome, path, "custom")
-		if pathExists(persistentUpper) {
+		persistentUpper, err := persistentOverlayUpperDir(b.cfg.SandboxHome, path, "custom")
+		if err != nil {
+			b.logWarnf("mounts: %v", err)
+		} else if pathExists(persistentUpper) {
 			b.OverlaySrc(persistentUpper)
 		}
 	}

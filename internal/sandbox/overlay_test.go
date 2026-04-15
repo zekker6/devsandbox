@@ -68,24 +68,15 @@ func TestCreateOverlayDirs_InvalidPath(t *testing.T) {
 	}
 }
 
-func TestCreateOverlayDirs_PathTraversalResolved(t *testing.T) {
-	// Absolute paths with .. are resolved by filepath.Clean to valid paths
-	// This is expected behavior - /path/with/../traversal becomes /path/traversal
+func TestCreateOverlayDirs_PathTraversalRejected(t *testing.T) {
+	// Absolute paths with ".." segments are now rejected — SafePath rejects them
+	// before filepath.Clean can silently resolve them.
 	tmpDir := t.TempDir()
 	sandboxHome := filepath.Join(tmpDir, "sandbox")
 
-	upper, work, err := createOverlayDirs(sandboxHome, "/path/with/../traversal", "", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Clean resolves /path/with/../traversal to /path/traversal
-	expectedBase := filepath.Join(sandboxHome, "overlay", "path_traversal")
-	if upper != filepath.Join(expectedBase, "upper") {
-		t.Errorf("unexpected upper path: %s, expected: %s", upper, filepath.Join(expectedBase, "upper"))
-	}
-	if work != filepath.Join(expectedBase, "work") {
-		t.Errorf("unexpected work path: %s", work)
+	_, _, err := createOverlayDirs(sandboxHome, "/path/with/../traversal", "", "")
+	if err == nil {
+		t.Error("expected error for path containing '..' segment")
 	}
 }
 

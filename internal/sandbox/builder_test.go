@@ -867,7 +867,10 @@ func TestBuilder_ApplyPersistentOverlay_ConcurrentSession(t *testing.T) {
 
 	// Compute the persistent upper dir path the same way persistentOverlayUpperDir does
 	sandboxHome := filepath.Join(tmpDir, "sandbox", "home")
-	persistentUpper := persistentOverlayUpperDir(sandboxHome, srcDir, "")
+	persistentUpper, err := persistentOverlayUpperDir(sandboxHome, srcDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(persistentUpper, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -41,7 +41,14 @@ func CleanupLegacyReadonlyBindOverlays(sandboxHome, homeDir string) (int, error)
 		dest := filepath.Join(homeDir, rel)
 		// Derive the overlay dir path from persistentOverlayUpperDir so both
 		// the cleanup and the mount code use the same safePath encoding.
-		overlayDir := filepath.Dir(persistentOverlayUpperDir(sandboxHome, dest, ""))
+		// dest comes from legacyReadonlyBindOverlayDests (hardcoded valid
+		// relative paths), so SafePath errors here indicate a bad entry in
+		// that list — surface it rather than silently skipping.
+		upperDir, err := persistentOverlayUpperDir(sandboxHome, dest, "")
+		if err != nil {
+			return removed, fmt.Errorf("legacy overlay path for %s: %w", dest, err)
+		}
+		overlayDir := filepath.Dir(upperDir)
 		info, err := os.Stat(overlayDir)
 		if err != nil {
 			if os.IsNotExist(err) {

@@ -108,6 +108,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newTrustCmd())
 	rootCmd.AddCommand(newImageCmd())
 	rootCmd.AddCommand(newSessionsCmd())
+	rootCmd.AddCommand(newOverlayCmd())
 	rootCmd.AddCommand(newForwardCmd())
 	rootCmd.AddCommand(newNSDialCmd())
 

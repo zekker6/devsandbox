@@ -588,6 +588,51 @@ Valid per-tool values: `split`, `overlay`, `tmpoverlay`, `readonly`, `readwrite`
 
 The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely — the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox.
 
+#### Migrating Overlay Data to Host
+
+Under the default `split` policy, category-`data` and category-`cache` bindings mount as persistent overlays. Writes made inside the sandbox (e.g. Claude Code session JSONLs under `~/.claude/projects`, installed mise tools under `~/.local/share/mise`) accumulate in the sandbox's overlay upper directory under `~/.local/share/devsandbox/<sandbox>/home/overlay/…/upper/` and are **never** promoted to the real host path.
+
+If you want to flip a binding from `overlay`/`split` to `readwrite` — or just surface accumulated sandbox state onto the host — use `devsandbox overlay migrate`:
+
+```bash
+# Preview (dry-run, default): shows what would be written, overwritten, deleted.
+devsandbox overlay migrate --sandbox my-project --tool claude
+
+# Apply for real:
+devsandbox overlay migrate --sandbox my-project --tool claude --apply
+
+# Promote overlay data from every sandbox into the host path in one go:
+devsandbox overlay migrate --all-sandboxes --tool claude --apply
+
+# Target an arbitrary host path rather than a tool:
+devsandbox overlay migrate --sandbox my-project --path ~/.local/share/mise --apply
+
+# After migration, flip the binding to readwrite so future writes go straight to host:
+devsandbox overlay migrate --sandbox my-project --tool claude --apply --set-mode readwrite
+```
+
+Flags:
+
+| Flag | Purpose |
+|---|---|
+| `--sandbox NAME` | Operate on one sandbox (mutually exclusive with `--all-sandboxes`). |
+| `--all-sandboxes` | Iterate every sandbox under `~/.local/share/devsandbox/`. |
+| `--path HOST_PATH` | Promote a specific host path (mutually exclusive with `--tool`). |
+| `--tool NAME` | Shorthand: expand to every overlay binding the named tool declares. |
+| `--primary-only` | Ignore per-session uppers; only promote the primary persistent upper. |
+| `--apply` | Actually perform the migration (default is dry-run). |
+| `--set-mode MODE` | After a successful apply, set the tool's `mount_mode` in `.devsandbox.toml`. Requires `--tool`. |
+| `--force` | Proceed even if a targeted sandbox appears to have an active session (racy — only use when you're sure). |
+| `--yes` | Skip the multi-sandbox confirmation prompt when `--set-mode` would touch more than one config file. |
+
+Safety model:
+
+- **Dry-run by default.** Nothing is written without `--apply`. The preview lists every create / overwrite / delete the apply phase would perform.
+- **Stopped-sandbox check.** The command refuses to run if any targeted sandbox has an active session (`--force` bypasses).
+- **Last-write-wins across stacked uppers.** The primary persistent upper comes first, followed by per-session uppers in mtime order. The most recent upper's version of any file wins.
+- **Whiteouts honored.** Files the sandbox deleted (overlayfs char-device whiteouts) become host-file deletions on apply.
+- **No automatic host backup.** If you want one, make it yourself before passing `--apply`.
+
 #### Mise
 
 ```toml
