@@ -53,7 +53,13 @@ func TestManagerEnsureCreatesNewBranch(t *testing.T) {
 	if h.Path == "" || h.Branch != "feat/foo" {
 		t.Fatalf("bad handle: %+v", h)
 	}
-	wantPath := WorktreePath(sbox, "feat/foo")
+	// Resolve symlinks on sbox so the expected path matches what Ensure
+	// returns (on macOS /var → /private/var).
+	resolvedSbox, err := filepath.EvalSymlinks(sbox)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", sbox, err)
+	}
+	wantPath := WorktreePath(resolvedSbox, "feat/foo")
 	if h.Path != wantPath {
 		t.Errorf("h.Path = %q, want %q", h.Path, wantPath)
 	}
