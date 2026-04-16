@@ -41,5 +41,5 @@ func netNSIdent(path string) (ino uint64, dev uint64, err error) {
 	if !ok {
 		return 0, 0, fmt.Errorf("%s: stat returned unexpected type %T", path, info.Sys())
 	}
-	return st.Ino, st.Dev, nil
+	return uint64(st.Ino), uint64(st.Dev), nil
 }

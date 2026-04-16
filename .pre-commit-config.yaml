@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cross-compile
+        name: cross-compile check
+        entry: task cross-compile
+        language: system
+        pass_filenames: false
+        types: [go]

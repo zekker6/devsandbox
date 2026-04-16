@@ -34,6 +34,7 @@ tasks:
       - vet
       - fmt
       - golangci
+      - cross-compile
 
   vet:
     cmds:
@@ -46,6 +47,14 @@ tasks:
   golangci:
     cmds:
       - golangci-lint run
+
+  cross-compile:
+    desc: Verify build compiles for all release targets (linux/darwin × amd64/arm64)
+    cmds:
+      - GOOS=linux GOARCH=amd64 go build ./...
+      - GOOS=linux GOARCH=arm64 go build ./...
+      - GOOS=darwin GOARCH=amd64 go build ./...
+      - GOOS=darwin GOARCH=arm64 go build ./...
 
   test:
     cmds:
