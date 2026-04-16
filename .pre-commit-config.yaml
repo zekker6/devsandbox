@@ -1,9 +1,23 @@
 repos:
   - repo: local
     hooks:
-      - id: cross-compile
-        name: cross-compile check
-        entry: task cross-compile
+      - id: lint
+        name: lint
+        entry: task lint
+        language: system
+        pass_filenames: false
+        types: [go]
+
+      - id: cross-test
+        name: cross-platform test compile
+        entry: task cross-test
+        language: system
+        pass_filenames: false
+        types: [go]
+
+      - id: cross-build
+        name: cross-platform build
+        entry: task cross-build
         language: system
         pass_filenames: false
         types: [go]
