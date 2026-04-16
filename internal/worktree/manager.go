@@ -89,6 +89,14 @@ func (m *Manager) Ensure(ctx context.Context, req EnsureRequest) (*Handle, error
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("worktree: git %s failed: %w\n%s", strings.Join(argv, " "), err, strings.TrimSpace(string(out)))
 	}
+
+	// Re-normalize now that the directory exists — on macOS the pre-creation
+	// normalization falls back to filepath.Clean (e.g. /var/folders/...) but
+	// post-creation EvalSymlinks resolves to /private/var/folders/... .
+	if resolved, err := normalizePath(path); err == nil {
+		path = resolved
+	}
+
 	return &Handle{Path: path, Branch: req.Branch, Created: true}, nil
 }
 

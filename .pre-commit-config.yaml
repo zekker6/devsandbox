@@ -1,9 +1,16 @@
 repos:
   - repo: local
     hooks:
-      - id: lint
-        name: lint
-        entry: task lint
+      - id: vet
+        name: go vet
+        entry: task vet
+        language: system
+        pass_filenames: false
+        types: [go]
+
+      - id: fmt
+        name: gofmt
+        entry: task fmt
         language: system
         pass_filenames: false
         types: [go]
