@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## [v0.12.0] - 2026-04-16
 
 ### Changed
 
@@ -11,13 +11,18 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `--worktree` and `--worktree-base` flags: opt-in git-worktree mode. Bare `--worktree` auto-generates `devsandbox/<session-or-timestamp>` off HEAD; `--worktree=<branch>` reuses or creates a named branch. The sandbox CWD is the worktree; the main checkout is untouched. With `--git-mode=readwrite`, commits land on the worktree branch only. `--rm` removes the worktree on exit via `git worktree remove --force` + `prune`. `--worktree` + `--git-mode=disabled` is rejected at flag-parse time. Worktrees live at `~/.local/share/devsandbox/<project-slug>/worktrees/<branch>/` and the slug is derived from the main repo root so sibling worktrees share sandbox state. `devsandbox sandboxes prune` and the `doctor` command are worktree-aware.
-- `zellij` tool forwards an active Zellij session into the sandbox by mounting the session socket directory and the `zellij` binary. Auto-detected when `ZELLIJ` is set and the binary is on `PATH`, so `zellij` commands run inside the sandbox attach to the host multiplexer.
-- `zellij` tool now also mounts `$XDG_RUNTIME_DIR/zellij/`, which is where zellij 0.41+ stores its IPC socket (the legacy `/tmp/zellij-$UID/` holds only cache/log files on modern releases). The override env var is `ZELLIJ_SOCKET_DIR` (previously the tool checked the incorrect `ZELLIJ_SOCK_DIR`).
 
 ### Fixed
 
 - `zellij` and `kitty` tool socket bindings are now explicit bind mounts (`Type: MountBind`) instead of inheriting the default tmpoverlay from `CategoryRuntime`. Overlayfs cannot expose a unix socket from its lower layer, so under the previous policy the host socket was invisible inside the sandbox and `zellij list-sessions` / `kitten @` silently failed.
 - Auto port-forwarding no longer tries (and fails) to forward when the sandbox shares the host network namespace. Without proxy mode the sandbox uses bwrap's `--share-net`, so a tool listener inside the sandbox is the same kernel socket as the "host" bind the forwarder would attempt — producing a spurious `bind: address already in use` error for every detected port. Auto-detect now inspects the sandbox netns inode and skips forwarding (with a one-line explanatory message) when it matches the host; the sandbox ports are already directly reachable on `127.0.0.1`. For the rare case where auto-forward runs in a properly isolated netns but the host happens to already have that port in use, the forwarder falls back to an ephemeral host port and logs the mapping instead of silently dropping the service.
+
+## [v0.11.0] - 2026-04-14
+
+### Added
+
+- `zellij` tool forwards an active Zellij session into the sandbox by mounting the session socket directory and the `zellij` binary. Auto-detected when `ZELLIJ` is set and the binary is on `PATH`, so `zellij` commands run inside the sandbox attach to the host multiplexer.
+- `zellij` tool now also mounts `$XDG_RUNTIME_DIR/zellij/`, which is where zellij 0.41+ stores its IPC socket (the legacy `/tmp/zellij-$UID/` holds only cache/log files on modern releases). The override env var is `ZELLIJ_SOCKET_DIR` (previously the tool checked the incorrect `ZELLIJ_SOCK_DIR`).
 
 ## [v0.10.0] - 2026-04-10
 
