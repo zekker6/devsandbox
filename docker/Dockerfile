@@ -4,6 +4,7 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/devsandbox-shim/ ./cmd/devsandbox-shim/
+COPY internal/notice/ ./internal/notice/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /devsandbox-shim ./cmd/devsandbox-shim
 
 # ---- Stage 2: Runtime ----
