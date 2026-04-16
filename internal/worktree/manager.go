@@ -39,15 +39,16 @@ func (m *Manager) Ensure(ctx context.Context, req EnsureRequest) (*Handle, error
 	if req.RepoRoot == "" || req.SandboxRoot == "" || req.Branch == "" {
 		return nil, fmt.Errorf("worktree: Ensure requires RepoRoot, SandboxRoot, Branch")
 	}
-	path := WorktreePath(req.SandboxRoot, req.Branch)
 
-	// Normalize early so the Handle always carries a canonical path matching
-	// what git records internally (important on macOS where /tmp → /private/tmp).
-	// normalizePath falls back to filepath.Clean when the target does not yet exist.
-	path, err := normalizePath(path)
+	// Resolve symlinks on SandboxRoot (which already exists) so that
+	// WorktreePath returns a canonical path from the start. This avoids the
+	// macOS /var → /private/var mismatch where the pre-creation fallback to
+	// filepath.Clean would leave the symlink unresolved.
+	sandboxRoot, err := normalizePath(req.SandboxRoot)
 	if err != nil {
-		return nil, fmt.Errorf("worktree: normalize path: %w", err)
+		return nil, fmt.Errorf("worktree: normalize sandbox root: %w", err)
 	}
+	path := WorktreePath(sandboxRoot, req.Branch)
 
 	existing, err := m.findWorktree(ctx, req.RepoRoot, path)
 	if err != nil {
@@ -88,13 +89,6 @@ func (m *Manager) Ensure(ctx context.Context, req EnsureRequest) (*Handle, error
 	cmd := exec.CommandContext(ctx, "git", argv...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("worktree: git %s failed: %w\n%s", strings.Join(argv, " "), err, strings.TrimSpace(string(out)))
-	}
-
-	// Re-normalize now that the directory exists — on macOS the pre-creation
-	// normalization falls back to filepath.Clean (e.g. /var/folders/...) but
-	// post-creation EvalSymlinks resolves to /private/var/folders/... .
-	if resolved, err := normalizePath(path); err == nil {
-		path = resolved
 	}
 
 	return &Handle{Path: path, Branch: req.Branch, Created: true}, nil
