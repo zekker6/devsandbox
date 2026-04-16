@@ -14,6 +14,26 @@ devsandbox config init
 
 This creates `~/.config/devsandbox/config.toml` with documented defaults.
 
+## Quick Reference
+
+| Section | Key Fields | Details |
+|---|---|---|
+| `[proxy]` | `enabled`, `port`, `mitm`, `extra_env`, `extra_ca_env` | [Proxy Settings](#proxy-settings) |
+| `[proxy.credentials.<name>]` | `enabled`, `source.env/file/value` | [Proxy Credentials](#proxy-credentials) |
+| `[proxy.redaction]` | `enabled`, `default_action`, `rules` | [Content Redaction](#content-redaction) |
+| `[proxy.filter]` | `default_action`, `ask_timeout`, `cache_decisions`, `rules` | [Proxy Mode docs](proxy.md#http-filtering) |
+| `[sandbox]` | `isolation`, `base_path`, `use_embedded`, `config_visibility` | [Sandbox Settings](#sandbox-settings) |
+| `[sandbox.docker]` | `dockerfile`, `keep_container`, `resources` | [Isolation Backend](#isolation-backend) |
+| `[sandbox.mounts.rules]` | `pattern`, `mode` | [Custom Mounts](#custom-mounts) |
+| `[overlay]` | `default` | [Overlay Settings](#overlay-settings) |
+| `[port_forwarding]` | `enabled`, `auto_detect`, `rules` | [Port Forwarding](#port-forwarding) |
+| `[tools.git]` | `mode`, `mount_mode` | [Tool Settings](#tool-specific-configuration) |
+| `[tools.mise]` | `mount_mode` | [Tool Settings](#tool-specific-configuration) |
+| `[tools.docker]` | `enabled`, `socket` | [Tool Settings](#tool-specific-configuration) |
+| `[tools.portal]` | `notifications` | [Tool Settings](#tool-specific-configuration) |
+| `[logging]` | `attributes`, `receivers` | [Remote Logging](#remote-logging) |
+| `[[include]]` | `if`, `path` | [Per-Project Configuration](#per-project-configuration) |
+
 ## Configuration Reference
 
 ### Proxy Settings
@@ -63,233 +83,76 @@ when proxy mode is active.
 
 ### Proxy Credentials
 
-The proxy can inject authentication credentials into requests for specific domains, keeping tokens out of the sandbox environment. Credentials are read from host environment variables and added to matching requests transparently.
+Inject authentication credentials into requests for specific domains. Credentials are read from host environment variables and added to matching requests. The token never enters the sandbox.
+
+See [Proxy: Credential Injection](proxy.md#credential-injection) for how this works and when to use it.
 
 ```toml
 [proxy.credentials.github]
-# Inject GitHub API token into requests to api.github.com.
-# Reads from GITHUB_TOKEN or GH_TOKEN environment variable on the host.
-# The token is added as a Bearer Authorization header if not already present.
 enabled = true
 
-# Optional: override the default token source.
-# When configured, this takes precedence over the default environment variables.
-# Exactly one of env, file, or value should be set.
-#
+# Optional: override the default token source
 # [proxy.credentials.github.source]
-# env = "DEVSANDBOX_GITHUB_TOKEN"    # Read from a custom environment variable
-# file = "~/.config/devsandbox/github-token"  # Read from a file (~ expanded)
-# value = "github_pat_..."           # Static value (use env or file instead when possible)
+# env = "DEVSANDBOX_GITHUB_TOKEN"
+# file = "~/.config/devsandbox/github-token"
+# value = "github_pat_..."
 ```
-
-**How it works:**
-
-1. The proxy intercepts outgoing requests from the sandbox.
-2. For each registered credential injector, it checks if the request matches (e.g., host is `api.github.com`).
-3. If matched and no `Authorization` header is already present, the injector adds the credential header.
-4. The sandbox process never sees the token -- it stays on the host side.
 
 **Available injectors:**
 
-| Name     | Matches              | Default Environment Variable  | Header                        |
-|----------|----------------------|-------------------------------|-------------------------------|
+| Name     | Matches              | Default Env Var               | Header                          |
+|----------|----------------------|-------------------------------|---------------------------------|
 | `github` | `api.github.com`     | `GITHUB_TOKEN` or `GH_TOKEN`  | `Authorization: Bearer <token>` |
 
-Default environment variables are used when no `[proxy.credentials.<name>.source]` is configured. When a source is configured, it takes precedence and defaults are ignored.
-
-**Source types:**
-
-| Field   | Description                                | Example                                      |
-|---------|--------------------------------------------|----------------------------------------------|
-| `env`   | Read from an environment variable          | `env = "DEVSANDBOX_GITHUB_TOKEN"`            |
-| `file`  | Read from a file (supports `~` expansion, whitespace trimmed) | `file = "~/.config/devsandbox/github-token"` |
-| `value` | Static value in config                     | `value = "github_pat_..."`                   |
-
-When multiple fields are set, priority is: `value` > `env` > `file`. Set exactly one for clarity.
-
-**Notes:**
-
-- Credential injection requires proxy mode (`--proxy`).
-- Injectors are only active when explicitly `enabled = true` and the credential resolves to a non-empty value.
-- Unknown injector names in the config produce a warning and are skipped.
-- The injector never overwrites an existing `Authorization` header on the request.
-
-> **AI agent workflow:** Credential injection is particularly useful for AI coding assistants like Claude Code that need GitHub API access. The token stays on the host -- the AI agent never sees it, but its API requests to github.com are automatically authenticated.
+**Source priority:** `value` > `env` > `file`. Set exactly one for clarity.
 
 ### Content Redaction
 
-The proxy can scan outgoing requests for secrets and take action before they leave your machine. Redaction scanning checks request bodies, headers, and URLs against configured rules.
+Scan outgoing requests for secrets and block or replace them. See [Proxy: Content Redaction](proxy.md#content-redaction) for actions, behavior, and when to use each.
 
 ```toml
 [proxy.redaction]
-# Enable content redaction scanning (requires proxy mode)
 enabled = true
-
-# Action when a secret is detected and the rule has no override
-# "block" (default) - reject the request with HTTP 403
-# "redact" - replace the secret with [REDACTED:<rule-name>] and forward
-# "log" - allow the request but log a warning
-default_action = "block"
+default_action = "block"  # "block", "redact", or "log"
 ```
 
 #### Rule Types
 
-Rules detect secrets using either a **source** (exact value lookup) or a **pattern** (regex match). Each rule can optionally override the default action.
-
-**Source-based rules** — resolve a secret value and scan for exact matches:
+**Source-based** — match exact secret values:
 
 ```toml
-# From environment variable
 [[proxy.redaction.rules]]
 name = "api-key"
-action = "block"
+action = "block"          # Optional: override default_action
 [proxy.redaction.rules.source]
-env = "API_SECRET_KEY"
-
-# From file (whitespace trimmed, supports ~ expansion)
-[[proxy.redaction.rules]]
-name = "db-password"
-[proxy.redaction.rules.source]
-file = "~/.config/myapp/db-password"
-
-# From .env file in project directory
-[[proxy.redaction.rules]]
-name = "app-secret"
-[proxy.redaction.rules.source]
-env_file_key = "APP_SECRET"
-
-# Static value (prefer env or file for real secrets)
-[[proxy.redaction.rules]]
-name = "test-token"
-[proxy.redaction.rules.source]
-value = "test-secret-value"
+env = "API_SECRET_KEY"    # Or: file, env_file_key, value
 ```
 
-**Source types:**
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| `env` | Environment variable on the host | `env = "API_SECRET_KEY"` |
-| `file` | File path (supports `~`, whitespace trimmed) | `file = "~/.secrets/token"` |
-| `env_file_key` | Key in project `.env` file | `env_file_key = "DB_PASSWORD"` |
-| `value` | Static value in config | `value = "literal-secret"` |
-
-**Pattern-based rules** — match regex patterns anywhere in the request:
+**Pattern-based** — match regex patterns:
 
 ```toml
 [[proxy.redaction.rules]]
 name = "openai-keys"
 action = "redact"
 pattern = "sk-[a-zA-Z0-9]{20,}"
-
-[[proxy.redaction.rules]]
-name = "aws-keys"
-action = "block"
-pattern = "AKIA[0-9A-Z]{16}"
 ```
 
-#### Actions
+**Source types:**
 
-| Action | Behavior | Request | Logged |
-|--------|----------|---------|--------|
-| `block` | Reject with HTTP 403 | Not forwarded | Yes (redacted) |
-| `redact` | Replace secret with `[REDACTED:<name>]` | Forwarded (modified) | Yes (redacted) |
-| `log` | Allow unmodified | Forwarded (original) | Yes (original) |
+| Field | Description |
+|---|---|
+| `env` | Host environment variable |
+| `file` | File path (supports `~`, whitespace trimmed) |
+| `env_file_key` | Key in project `.env` file |
+| `value` | Static value in config |
 
-When multiple rules match, the most severe action wins: **block > redact > log**.
+Redaction rules are always additive when merging configs. The `default_action` uses most-restrictive-wins (`block` > `redact` > `log`).
 
-#### AI Agent Example
+### Avoiding GitHub Rate Limits
 
-Prevent an AI coding assistant from leaking your API keys:
+On macOS, mise downloads tool releases from GitHub inside a Docker container. Unauthenticated requests are limited to 60/hour. Enable credential injection with a read-only GitHub token to raise this to 5,000/hour.
 
-```toml
-[proxy]
-enabled = true
-
-[proxy.redaction]
-enabled = true
-default_action = "block"
-
-# Block if any of these secrets appear in outgoing requests
-[[proxy.redaction.rules]]
-name = "anthropic-key"
-[proxy.redaction.rules.source]
-env = "ANTHROPIC_API_KEY"
-
-[[proxy.redaction.rules]]
-name = "openai-pattern"
-pattern = "sk-[a-zA-Z0-9]{20,}"
-
-# Redact GitHub token (allow request with token replaced)
-[[proxy.redaction.rules]]
-name = "github-token"
-action = "redact"
-[proxy.redaction.rules.source]
-env = "GITHUB_TOKEN"
-```
-
-**Notes:**
-
-- Content redaction requires proxy mode (`--proxy`).
-- All source values must resolve at startup. If an environment variable is missing or a file is unreadable, devsandbox exits with an error (fail-closed).
-- Log entries for blocked and redacted requests have secrets replaced — secrets never appear in proxy logs.
-- Redaction rules are always additive when merging configs. The default action uses most-restrictive-wins (see [Config Priority](#config-priority)).
-- Redaction rules must not match values used by credential injectors. If a redaction rule (source or pattern) would match an injected credential, devsandbox exits with an error at startup. This prevents the confusing situation where credential injection adds a token and redaction immediately blocks it.
-
-### Avoiding GitHub Rate Limits (Recommended for macOS)
-
-This is optional but strongly recommended. Without it, tool installation via mise inside the sandbox may hit GitHub's 60 requests/hour limit, causing transient failures during initial setup.
-
-On macOS, devsandbox uses the Docker backend. When [mise](tools.md#tool-management-with-mise) installs or updates tools inside the sandbox, it downloads releases from GitHub. Unauthenticated GitHub API requests are limited to **60 per hour** — easily exhausted when populating the tool cache for the first time.
-
-Enabling credential injection with a **read-only** GitHub token raises this limit to **5,000 requests per hour**. A token with no permissions granted is sufficient — it only needs to authenticate requests, not access private resources.
-
-**Step 1: Create a fine-grained personal access token**
-
-1. Go to [GitHub Settings → Fine-grained tokens](https://github.com/settings/personal-access-tokens/new)
-2. Set a descriptive name (e.g., `devsandbox-mise`)
-3. Set expiration as desired
-4. Under **Repository access**, select "Public Repositories (read-only)"
-5. Under **Permissions**, grant nothing — leave all permissions at "No access"
-6. Click **Generate token**
-
-**Step 2: Set the environment variable**
-
-Add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
-
-```bash
-export GITHUB_TOKEN="github_pat_..."
-```
-
-**Step 3: Enable credential injection**
-
-In `~/.config/devsandbox/config.toml`:
-
-```toml
-[proxy]
-enabled = true
-
-[proxy.credentials.github]
-enabled = true
-```
-
-The proxy injects the token into GitHub API requests automatically. The token never enters the sandbox environment — it stays on the host side and is added to matching requests by the proxy.
-
-> **Tip:** To avoid conflicts with `gh` CLI or other tools that read `GITHUB_TOKEN`, use a dedicated environment variable:
->
-> ```bash
-> export DEVSANDBOX_GITHUB_TOKEN="github_pat_..."
-> ```
->
-> ```toml
-> [proxy.credentials.github]
-> enabled = true
->
-> [proxy.credentials.github.source]
-> env = "DEVSANDBOX_GITHUB_TOKEN"
-> ```
-
-> **Security note:** A fine-grained token with no permissions granted provides only public read access. This is the minimum needed to avoid rate limits. Do not use tokens with write permissions for this purpose.
+See [Use Cases: Avoiding GitHub Rate Limits](use-cases.md#avoiding-github-rate-limits) for setup instructions.
 
 ### Isolation Backend
 
@@ -340,49 +203,21 @@ config_visibility = "hidden"
 
 ### Custom Mounts
 
-Control how specific paths are mounted in the sandbox. Use this to:
-
-- Mount additional host directories (e.g., app configs)
-- Hide sensitive files within your project
-- Set up overlay mounts for caches
+Control how specific paths are mounted. See [Sandboxing: Custom Mounts](sandboxing.md#custom-mounts) for mount modes, pattern syntax, and mount ordering.
 
 ```toml
-# Mount app configuration as read-only
 [[sandbox.mounts.rules]]
 pattern = "~/.config/myapp"
 mode = "readonly"
 
-# Hide secrets directory within the project
 [[sandbox.mounts.rules]]
 pattern = "**/secrets/**"
 mode = "hidden"
 
-# Mount cache with overlay (persistent writes)
 [[sandbox.mounts.rules]]
 pattern = "~/.cache/myapp"
 mode = "overlay"
 ```
-
-#### Mount Modes
-
-| Mode         | Description                                                  |
-|--------------|--------------------------------------------------------------|
-| `readonly`   | Bind mount as read-only (default)                            |
-| `readwrite`  | Bind mount as read-write                                     |
-| `hidden`     | Overlay with `/dev/null` (files only, not directories)       |
-| `overlay`    | Persistent overlayfs (writes saved to sandbox home)          |
-| `tmpoverlay` | Temporary overlayfs (writes discarded on sandbox exit)       |
-
-#### Pattern Syntax
-
-Patterns support glob syntax with home directory expansion:
-
-| Pattern             | Matches                                          |
-|---------------------|--------------------------------------------------|
-| `~/.config/myapp`   | Exact path with home expansion                   |
-| `*.conf`            | Single-level wildcard                            |
-| `**/secrets/**`     | Recursive match (any depth)                      |
-| `/opt/tools`        | Absolute path                                    |
 
 **Note:** The `hidden` mode only works for files. To hide a directory, use `readonly` or `tmpoverlay` instead.
 
@@ -461,10 +296,6 @@ Inside sandbox, connect to `10.0.2.2:5432` (pasta gateway IP on Linux) or `host.
 
 #### Dynamic Port Forwarding
 
-Instead of pre-configuring port rules, you can forward ports to a running sandbox on demand.
-
-**Auto-detect listening ports** (opt-in, disabled by default for security):
-
 ```toml
 [port_forwarding]
 # Automatically detect and forward listening ports inside the sandbox
@@ -477,45 +308,7 @@ scan_interval = "2s"
 exclude_ports = [22, 80, 443]
 ```
 
-When `auto_detect = true`, devsandbox monitors the sandbox for new TCP listeners and automatically forwards them to the same port on `127.0.0.1`. Auto-detect requires proxy mode: without an isolated network namespace the sandbox and host share the same kernel port space, so a userland forwarder would collide with the sandbox listener on the same port (and the port is already directly accessible on `127.0.0.1` anyway). If auto-detect is enabled without proxy mode, devsandbox logs a notice and skips auto-forward at session start. When the preferred host port genuinely happens to be in use on the host under proxy mode, devsandbox falls back to an ephemeral host port chosen by the OS and logs the mapping (e.g. `Auto-forwarding port 37127 → 127.0.0.1:45821 (host port 37127 was in use)`); the actual host port is recorded in the session registry and visible via `devsandbox sessions`. Ports below 1024 are always excluded.
-
-**Manual forwarding to a running sandbox:**
-
-```bash
-# Forward a single port (host:3000 → sandbox:3000)
-devsandbox forward 3000
-
-# Forward sandbox port 3000 to host port 8080
-devsandbox forward 3000:8080
-
-# Target a specific sandbox by name
-devsandbox forward --name myapp 3000
-
-# Bind to all interfaces (for LAN access)
-devsandbox forward --bind 0.0.0.0 3000
-
-# Forward multiple ports at once
-devsandbox forward 3000 5173 9090
-```
-
-Port spec format: `<sandbox_port>[:<host_port>]`. The sandbox port (the dev server you want to reach) comes first. If `host_port` is omitted, it defaults to the same as `sandbox_port`.
-
-**Named sessions:**
-
-Use `--name` when starting a sandbox to give it a human-readable identifier:
-
-```bash
-devsandbox --proxy --name myapp
-```
-
-If omitted, the name is auto-generated from the working directory basename.
-
-**List running sessions:**
-
-```bash
-devsandbox sessions
-devsandbox sessions --json
-```
+Ports can also be forwarded on-the-fly to running sandboxes. See [Sandboxing: Runtime Port Forwarding](sandboxing.md#runtime-port-forwarding) for `devsandbox forward` and auto-detect behavior.
 
 ### Overlay Settings
 
@@ -590,48 +383,7 @@ The `disabled` value prevents the tool's config/cache/data directories from bein
 
 #### Migrating Overlay Data to Host
 
-Under the default `split` policy, category-`data` and category-`cache` bindings mount as persistent overlays. Writes made inside the sandbox (e.g. Claude Code session JSONLs under `~/.claude/projects`, installed mise tools under `~/.local/share/mise`) accumulate in the sandbox's overlay upper directory under `~/.local/share/devsandbox/<sandbox>/home/overlay/…/upper/` and are **never** promoted to the real host path.
-
-If you want to flip a binding from `overlay`/`split` to `readwrite` — or just surface accumulated sandbox state onto the host — use `devsandbox overlay migrate`:
-
-```bash
-# Preview (dry-run, default): shows what would be written, overwritten, deleted.
-devsandbox overlay migrate --sandbox my-project --tool claude
-
-# Apply for real:
-devsandbox overlay migrate --sandbox my-project --tool claude --apply
-
-# Promote overlay data from every sandbox into the host path in one go:
-devsandbox overlay migrate --all-sandboxes --tool claude --apply
-
-# Target an arbitrary host path rather than a tool:
-devsandbox overlay migrate --sandbox my-project --path ~/.local/share/mise --apply
-
-# After migration, flip the binding to readwrite so future writes go straight to host:
-devsandbox overlay migrate --sandbox my-project --tool claude --apply --set-mode readwrite
-```
-
-Flags:
-
-| Flag | Purpose |
-|---|---|
-| `--sandbox NAME` | Operate on one sandbox (mutually exclusive with `--all-sandboxes`). |
-| `--all-sandboxes` | Iterate every sandbox under `~/.local/share/devsandbox/`. |
-| `--path HOST_PATH` | Promote a specific host path (mutually exclusive with `--tool`). |
-| `--tool NAME` | Shorthand: expand to every overlay binding the named tool declares. |
-| `--primary-only` | Ignore per-session uppers; only promote the primary persistent upper. |
-| `--apply` | Actually perform the migration (default is dry-run). |
-| `--set-mode MODE` | After a successful apply, set the tool's `mount_mode` in `.devsandbox.toml`. Requires `--tool`. |
-| `--force` | Proceed even if a targeted sandbox appears to have an active session (racy — only use when you're sure). |
-| `--yes` | Skip the multi-sandbox confirmation prompt when `--set-mode` would touch more than one config file. |
-
-Safety model:
-
-- **Dry-run by default.** Nothing is written without `--apply`. The preview lists every create / overwrite / delete the apply phase would perform.
-- **Stopped-sandbox check.** The command refuses to run if any targeted sandbox has an active session (`--force` bypasses).
-- **Last-write-wins across stacked uppers.** The primary persistent upper comes first, followed by per-session uppers in mtime order. The most recent upper's version of any file wins.
-- **Whiteouts honored.** Files the sandbox deleted (overlayfs char-device whiteouts) become host-file deletions on apply.
-- **No automatic host backup.** If you want one, make it yourself before passing `--apply`.
+Accumulated overlay data can be promoted to the host filesystem. See [Sandboxing: Migrating Overlay Data](sandboxing.md#migrating-overlay-data-to-host) for the `devsandbox overlay migrate` command reference.
 
 #### Mise
 

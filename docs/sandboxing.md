@@ -6,6 +6,8 @@ devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux 
 isolated environments for running untrusted code. On Linux, bwrap and pasta binaries are embedded — no system packages
 required. To use system-installed binaries instead, see [configuration](configuration.md).
 
+> **macOS users:** devsandbox uses the Docker backend on macOS. Skip to [How It Works (Docker)](#how-it-works-docker) for platform-relevant details, or see [Platform Differences](#platform-differences) for a comparison table.
+
 ## Isolation Backends
 
 devsandbox supports two isolation backends:
@@ -39,6 +41,15 @@ Or configure in `~/.config/devsandbox/config.toml`:
 [sandbox]
 isolation = "docker"  # "auto", "bwrap", or "docker"
 ```
+
+### Choosing a Backend (Linux)
+
+| Choose bwrap when | Choose Docker when |
+|---|---|
+| You want sub-second startup | SELinux/AppArmor blocks namespace operations |
+| You prefer minimal dependencies | You need Dockerfile customization |
+| You want native filesystem performance | You want consistency with macOS teammates |
+| You're on a standard kernel with user namespaces | You prefer container-based isolation |
 
 ## Security Model
 
@@ -203,6 +214,66 @@ devsandbox sandboxes prune --all
 devsandbox sandboxes prune --dry-run
 ```
 
+## Port Forwarding
+
+### Runtime Port Forwarding
+
+Instead of pre-configuring static port rules, you can forward ports to a running sandbox on demand.
+
+**Auto-detect listening ports** (opt-in, disabled by default for security):
+
+```toml
+[port_forwarding]
+# Automatically detect and forward listening ports inside the sandbox
+auto_detect = false
+
+# How often to scan for new listening ports
+scan_interval = "2s"
+
+# Ports to never auto-forward (e.g., internal services)
+exclude_ports = [22, 80, 443]
+```
+
+When `auto_detect = true`, devsandbox monitors the sandbox for new TCP listeners and automatically forwards them to the same port on `127.0.0.1`. Auto-detect requires proxy mode: without an isolated network namespace the sandbox and host share the same kernel port space, so a userland forwarder would collide with the sandbox listener on the same port (and the port is already directly accessible on `127.0.0.1` anyway). If auto-detect is enabled without proxy mode, devsandbox logs a notice and skips auto-forward at session start. When the preferred host port is already in use, devsandbox falls back to an ephemeral host port chosen by the OS and logs the mapping; the actual host port is recorded in the session registry and visible via `devsandbox sessions`. Ports below 1024 are always excluded.
+
+**Manual forwarding to a running sandbox:**
+
+```bash
+# Forward a single port (host:3000 → sandbox:3000)
+devsandbox forward 3000
+
+# Forward sandbox port 3000 to host port 8080
+devsandbox forward 3000:8080
+
+# Target a specific sandbox by name
+devsandbox forward --name myapp 3000
+
+# Bind to all interfaces (for LAN access)
+devsandbox forward --bind 0.0.0.0 3000
+
+# Forward multiple ports at once
+devsandbox forward 3000 5173 9090
+```
+
+Port spec format: `<sandbox_port>[:<host_port>]`. The sandbox port (the dev server you want to reach) comes first. If `host_port` is omitted, it defaults to the same as `sandbox_port`.
+
+**Named sessions:**
+
+Use `--name` when starting a sandbox to give it a human-readable identifier:
+
+```bash
+devsandbox --proxy --name myapp
+```
+
+If omitted, the name is auto-generated from the working directory basename.
+
+**List running sessions:**
+
+```bash
+devsandbox sessions
+devsandbox sessions --json
+```
+
 ## Troubleshooting
 
 ### Checking Installation
@@ -294,17 +365,21 @@ devsandbox does not include SELinux or AppArmor handling. On systems with these 
 
 ## Overlay Filesystem
 
-By default, mise directories are mounted read-only. Use overlayfs to allow installing tools inside the sandbox without
-modifying host files.
+By default, tool directories use the `split` mount mode: config paths get a tmpoverlay (discarded on exit) while caches and data get a persistent overlay. This protects host configs from supply chain attacks while preserving expensive caches across sessions. Use the `[overlay]` section to change the global default, or per-tool `mount_mode` overrides to fine-tune individual tools.
 
-### Enabling Writable Mise
+### Configuration
 
-Configure in `~/.config/devsandbox/config.toml`:
+Set the global default in `~/.config/devsandbox/config.toml`:
 
 ```toml
+[overlay]
+# Default mount mode for all tool bindings
+# split (default): configs → tmpoverlay, caches/data → persistent overlay
+default = "split"
+
 [tools.mise]
-writable = true    # Allow installing tools
-persistent = false # Discard on exit (or true to persist)
+# Override for mise: persist all state across sessions
+mount_mode = "overlay"
 ```
 
 ### How Overlay Works
@@ -321,28 +396,71 @@ Overlayfs creates a layered filesystem:
 └─────────────────────────────────────┘
 ```
 
-- **tmpoverlay** (default): Upper layer is tmpfs, discarded on exit
+- **tmpoverlay**: Upper layer is tmpfs, discarded on exit
 - **overlay** (persistent): Upper layer stored in `~/.local/share/devsandbox/<project>/home/overlay/`
 
-### Configuration
+### Choosing an Overlay Mode
 
-Set defaults in `~/.config/devsandbox/config.toml`:
-
-```toml
-[overlay]
-# Master switch - disable to force read-only everywhere
-enabled = true
-
-[tools.mise]
-writable = true    # Allow mise to install tools
-persistent = false # Discard changes on exit (safer)
-```
+| Mode | Writes persist? | Host modified? | Use when |
+|---|---|---|---|
+| `split` (default) | Caches/data: yes. Configs: no | Never | Default — protects host configs from supply chain attacks |
+| `overlay` | Yes (all) | Never | You want all tool state to persist across sessions |
+| `tmpoverlay` | No | Never | Disposable experiments, CI, untrusted code |
+| `readonly` | No (writes fail) | Never | Maximum lockdown, no tool installation |
+| `readwrite` | Yes | Yes | Trusted projects where you want write-through to host |
 
 ### Use Cases
 
-- Install project-specific tool versions without polluting host
-- Test new tool versions before committing to them
-- Allow AI assistants to install tools they need temporarily
+- Install project-specific tool versions without polluting host (`overlay` or `split`)
+- Test new tool versions before committing to them (`tmpoverlay`)
+- Allow AI assistants to install tools they need temporarily (`split` keeps caches, discards config changes)
+- Run untrusted code with no persistent state (`tmpoverlay`)
+- Trusted projects where you want direct host access (`readwrite`)
+
+### Migrating Overlay Data to Host
+
+Under the default `split` policy, category-`data` and category-`cache` bindings mount as persistent overlays. Writes made inside the sandbox (e.g. Claude Code session JSONLs under `~/.claude/projects`, installed mise tools under `~/.local/share/mise`) accumulate in the sandbox's overlay upper directory under `~/.local/share/devsandbox/<sandbox>/home/overlay/.../upper/` and are **never** promoted to the real host path.
+
+If you want to flip a binding from `overlay`/`split` to `readwrite` — or just surface accumulated sandbox state onto the host — use `devsandbox overlay migrate`:
+
+```bash
+# Preview (dry-run, default): shows what would be written, overwritten, deleted.
+devsandbox overlay migrate --sandbox my-project --tool claude
+
+# Apply for real:
+devsandbox overlay migrate --sandbox my-project --tool claude --apply
+
+# Promote overlay data from every sandbox into the host path in one go:
+devsandbox overlay migrate --all-sandboxes --tool claude --apply
+
+# Target an arbitrary host path rather than a tool:
+devsandbox overlay migrate --sandbox my-project --path ~/.local/share/mise --apply
+
+# After migration, flip the binding to readwrite so future writes go straight to host:
+devsandbox overlay migrate --sandbox my-project --tool claude --apply --set-mode readwrite
+```
+
+**Flags:**
+
+| Flag | Purpose |
+|---|---|
+| `--sandbox NAME` | Operate on one sandbox (mutually exclusive with `--all-sandboxes`). |
+| `--all-sandboxes` | Iterate every sandbox under `~/.local/share/devsandbox/`. |
+| `--path HOST_PATH` | Promote a specific host path (mutually exclusive with `--tool`). |
+| `--tool NAME` | Shorthand: expand to every overlay binding the named tool declares. |
+| `--primary-only` | Ignore per-session uppers; only promote the primary persistent upper. |
+| `--apply` | Actually perform the migration (default is dry-run). |
+| `--set-mode MODE` | After a successful apply, set the tool's `mount_mode` in `.devsandbox.toml`. Requires `--tool`. |
+| `--force` | Proceed even if a targeted sandbox appears to have an active session (racy — only use when you're sure). |
+| `--yes` | Skip the multi-sandbox confirmation prompt when `--set-mode` would touch more than one config file. |
+
+**Safety model:**
+
+- **Dry-run by default.** Nothing is written without `--apply`. The preview lists every create / overwrite / delete the apply phase would perform.
+- **Stopped-sandbox check.** The command refuses to run if any targeted sandbox has an active session (`--force` bypasses).
+- **Last-write-wins across stacked uppers.** The primary persistent upper comes first, followed by per-session uppers in mtime order. The most recent upper's version of any file wins.
+- **Whiteouts honored.** Files the sandbox deleted (overlayfs char-device whiteouts) become host-file deletions on apply.
+- **No automatic host backup.** If you want one, make it yourself before passing `--apply`.
 
 ## Custom Mounts
 
@@ -438,24 +556,7 @@ The Docker backend provides isolation via containers, enabling macOS support and
 
 ### Docker-Specific Configuration
 
-Configure Docker settings in `~/.config/devsandbox/config.toml`:
-
-```toml
-[sandbox]
-isolation = "docker"
-
-[sandbox.docker]
-# Path to Dockerfile (default: ~/.config/devsandbox/Dockerfile, auto-created)
-# dockerfile = "/path/to/custom/Dockerfile"
-
-# Keep container after exit for fast restarts (default: true)
-keep_container = true
-
-# Resource limits
-[sandbox.docker.resources]
-memory = "4g"
-cpus = "2"
-```
+Configure Docker settings in `~/.config/devsandbox/config.toml`. See [Configuration: Isolation Backend](configuration.md#isolation-backend) for the full TOML reference.
 
 ### Container Persistence
 

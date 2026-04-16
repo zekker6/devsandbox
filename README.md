@@ -338,9 +338,9 @@ devsandbox image build              # Build Docker image (macOS)
 | Page | Contents |
 |---|---|
 | [Sandboxing](docs/sandboxing.md) | Isolation backends, security model, filesystem layout, overlay mounts, custom mounts, Docker backend details |
-| [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, content redaction, remote logging |
+| [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, content redaction, credential injection, remote logging |
 | [Tools](docs/tools.md) | mise integration, shell/editor/prompt setup, AI assistant configs, Git modes, Docker socket proxy |
-| [Configuration](docs/configuration.md) | Config file reference, per-project configs, conditional includes, port forwarding, credential injection |
+| [Configuration](docs/configuration.md) | Config file reference, per-project configs, conditional includes, port forwarding, overlay settings |
 | [Use Cases](docs/use-cases.md) | Shell aliases, autocompletion, development workflows, security monitoring scripts |
 
 ## Limitations

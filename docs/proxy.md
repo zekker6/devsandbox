@@ -13,6 +13,16 @@ mechanisms — see [Backend-Specific Behavior](#backend-specific-behavior) for d
 - **Security monitoring** - Detect unexpected network connections
 - **Compliance** - Log all external communications for review
 
+## When to Enable Proxy Mode
+
+| Enable proxy when | Skip proxy when |
+|---|---|
+| You want to monitor AI agent network activity | You trust the code and don't need traffic visibility |
+| You need credential injection (GitHub tokens) | Tools use certificate pinning that breaks MITM |
+| You need port forwarding (requires network isolation) | You want the fastest possible startup |
+| You need content redaction (secret scanning) | You only need filesystem isolation |
+| You need HTTP filtering (domain whitelist/blacklist) | |
+
 ## Requirements (bwrap backend)
 
 Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt—basic sandboxing works without it.
@@ -101,6 +111,13 @@ mitm = false
 
 When MITM is disabled, the proxy logs warnings at startup if credential injectors, redaction rules, or filter rules are configured — since these features cannot inspect encrypted HTTPS traffic.
 
+**When to disable MITM:**
+- Tools with certificate pinning that reject the proxy CA
+- You only need network isolation and HTTP (not HTTPS) logging
+- You don't need credential injection, content redaction, or HTTPS filtering
+
+If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM enabled — it's required for credential injection and secret scanning.
+
 ## Backend-Specific Behavior
 
 The proxy achieves the same goal on both backends — intercept and log HTTP/HTTPS traffic — but the underlying mechanisms differ.
@@ -170,7 +187,7 @@ A CA certificate is automatically generated for HTTPS interception and stored at
 ~/.local/share/devsandbox/<project>/.ca/ca.crt
 ```
 
-Inside the sandbox, the certificate is available at `/tmp/devsandbox-ca.crt` and automatically configured via
+Inside the sandbox, the certificate is available at `/tmp/devsandbox-ca.crt` (bwrap backend) or `/etc/ssl/certs/devsandbox-ca.crt` (Docker backend) and automatically configured via
 environment variables:
 
 | Variable              | Purpose         |
@@ -561,6 +578,46 @@ Filter decisions are logged with requests:
 }
 ```
 
+## Credential Injection
+
+The proxy can inject authentication credentials into requests for specific domains, keeping tokens completely out of the sandbox environment. The sandboxed process never sees the token — it stays on the host side.
+
+### How It Works
+
+1. **Intercept** — The proxy intercepts outgoing requests from the sandbox.
+2. **Match** — For each registered credential injector, it checks if the request matches a known domain (e.g., host is `api.github.com`).
+3. **Inject** — If matched and no `Authorization` header is already present, the injector adds the credential header.
+4. **Isolate** — The sandbox process never sees the token. It is read from the host environment and added transparently.
+
+### Available Injectors
+
+| Name | Matches | Default Environment Variable | Header |
+|------|---------|------------------------------|--------|
+| `github` | `api.github.com` | `GITHUB_TOKEN` or `GH_TOKEN` | `Authorization: Bearer <token>` |
+
+Default environment variables are used when no explicit source is configured. When a source is configured, it takes precedence and defaults are ignored.
+
+### Source Types
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `env` | Read from an environment variable | `env = "DEVSANDBOX_GITHUB_TOKEN"` |
+| `file` | Read from a file (supports `~` expansion, whitespace trimmed) | `file = "~/.config/devsandbox/github-token"` |
+| `value` | Static value in config | `value = "github_pat_..."` |
+
+When multiple fields are set, priority is: `value` > `env` > `file`. Set exactly one for clarity.
+
+> **AI agent workflow:** Credential injection is particularly useful for AI coding assistants like Claude Code that need GitHub API access. The token stays on the host — the AI agent never sees it, but its API requests to github.com are automatically authenticated.
+
+**Notes:**
+
+- Credential injection requires proxy mode (`--proxy`) with MITM enabled (the default).
+- Injectors are only active when explicitly `enabled = true` and the credential resolves to a non-empty value.
+- The injector never overwrites an existing `Authorization` header on the request.
+- Unknown injector names in the config produce a warning and are skipped.
+
+See [Configuration: Proxy Credentials](configuration.md#proxy-credentials) for the complete TOML reference.
+
 ## Content Redaction
 
 Content redaction scans outgoing requests for secrets before they leave your machine. It checks request bodies, headers, and URLs against configured rules.
@@ -594,6 +651,22 @@ env = "API_SECRET_KEY"
 
 Any outgoing request containing the value of `$API_SECRET_KEY` is blocked with HTTP 403.
 
+### Source Types
+
+Rules detect secrets using either a **source** (exact value lookup) or a **pattern** (regex match).
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `env` | Environment variable on the host | `env = "API_SECRET_KEY"` |
+| `file` | File path (supports `~`, whitespace trimmed) | `file = "~/.secrets/token"` |
+| `env_file_key` | Key in project `.env` file | `env_file_key = "DB_PASSWORD"` |
+| `value` | Static value in config | `value = "literal-secret"` |
+
+**Choosing an action:**
+- **Block** when the secret must never leave your machine (most secure, may break the tool's request)
+- **Redact** when the request should proceed but without the secret (destination sees `[REDACTED:rule-name]`)
+- **Log** when you want visibility without enforcement (monitoring only)
+
 ### Log Entries
 
 Redaction events appear in proxy logs with additional fields:
@@ -617,9 +690,18 @@ View redaction events:
 devsandbox logs proxy --json | jq 'select(.redaction_action != null)'
 ```
 
+### Important Behavior
+
+- Content redaction requires proxy mode (`--proxy`) with MITM enabled.
+- All source values must resolve at startup. If an environment variable is missing or a file is unreadable, devsandbox exits with an error (**fail-closed**).
+- Log entries for blocked and redacted requests have secrets replaced — secrets never appear in proxy logs.
+- Redaction rules are always **additive** when merging configs. The default action uses most-restrictive-wins.
+- Redaction rules must not match values used by credential injectors. If a redaction rule (source or pattern) would match an injected credential, devsandbox exits with an error at startup. This prevents the confusing situation where credential injection adds a token and redaction immediately blocks it.
+- When multiple rules match, the most severe action wins: **block > redact > log**.
+
 ### Configuration Reference
 
-See [Configuration: Content Redaction](configuration.md#content-redaction) for the full TOML reference, source types, pattern rules, and merge behavior.
+See [Configuration: Content Redaction](configuration.md#content-redaction) for the full TOML reference, pattern rules, and merge behavior.
 
 ## Troubleshooting
 

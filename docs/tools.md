@@ -137,12 +137,12 @@ This means:
 
 ### Writable Mise (Overlay Mode)
 
-Enable overlayfs to allow installing tools inside the sandbox by configuring `~/.config/devsandbox/config.toml`:
+Configure the overlay mount mode for mise to allow installing tools inside the sandbox. In `~/.config/devsandbox/config.toml`:
 
 ```toml
 [tools.mise]
-writable = true    # Allow installing tools
-persistent = false # Discard on exit (safer)
+mount_mode = "overlay"    # Persist tool installations across sessions
+# mount_mode = "tmpoverlay"  # Discard on exit (safer)
 ```
 
 With overlay enabled:
@@ -151,7 +151,7 @@ With overlay enabled:
 - Host mise directories remain unchanged
 - Changes are isolated to the sandbox
 
-See [sandboxing.md](sandboxing.md#overlay-filesystem) for more details on overlay configuration.
+The global `[overlay] default` setting controls all tools. Per-tool `mount_mode` overrides the global default. See [Sandboxing: Overlay Filesystem](sandboxing.md#overlay-filesystem) for details on overlay modes and how layering works.
 
 ### Supported Tools
 

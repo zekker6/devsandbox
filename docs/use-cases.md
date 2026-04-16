@@ -19,21 +19,9 @@ devsandbox claude --dangerously-skip-permissions
 devsandbox --proxy claude --dangerously-skip-permissions
 ```
 
-Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts -- safe inside the sandbox because devsandbox provides the security boundary.
+`--dangerously-skip-permissions` is a Claude Code flag — safe inside the sandbox because devsandbox provides the security boundary. See [Tools: Claude Code](tools.md#claude-code) for details.
 
-**What's protected:**
-
-- SSH keys are not available (by default)
-- Cloud credentials are not mounted
-- `.env` secrets are hidden
-- Network activity can be monitored (proxy mode)
-
-**What Claude can do:**
-
-- Read/write project files
-- Run build commands
-- Install dependencies
-- Make API calls (visible in proxy logs)
+See [Security Model](sandboxing.md#security-model) for full details on what's accessible inside the sandbox.
 
 #### Running Claude Code Autonomously
 
@@ -73,7 +61,7 @@ devsandbox logs proxy --stats
 devsandbox logs proxy --errors
 ```
 
-See [Configuration: AI Agent Config](../docs/configuration.md#ai-agent-recommended-config) for a complete config example.
+See [Configuration: Complete Example](configuration.md#complete-example) for a full config file.
 
 ### aider
 
@@ -110,26 +98,7 @@ Any CLI-based AI coding tool works in the sandbox. Electron-based desktop apps (
 
 ## Scratchpads
 
-Managed throwaway workspaces for one-off experiments and agent sessions.
-
-```bash
-# Interactive shell in the default scratchpad
-devsandbox scratchpad
-
-# Named scratchpad with an agent
-devsandbox scratchpad experiments claude --dangerously-skip-permissions
-
-# Ephemeral — wipe on exit
-devsandbox scratchpad --rm experiments bun init
-
-# See what you have
-devsandbox scratchpad list
-
-# Clean up
-devsandbox scratchpad rm experiments
-```
-
-Scratchpads live under `~/.local/share/devsandbox-scratchpads/` and preserve state between runs. They always start with a clean config baseline (no project-local `.devsandbox.toml` is loaded).
+Managed throwaway workspaces for one-off experiments. See [Scratchpads](../README.md#scratchpads) in the README for full usage and management commands.
 
 ## Shell Autocompletion
 
@@ -387,43 +356,65 @@ if [ -n "$suspicious" ]; then
 fi
 ```
 
-## Troubleshooting Common Issues
+## Avoiding GitHub Rate Limits
 
-### "Tool X not found"
+This is particularly relevant on macOS where mise runs inside a Docker container and cannot reuse the host's GitHub authentication.
 
-The tool might not be installed via mise:
+Without a token, tool installation via mise inside the sandbox may hit GitHub's 60 requests/hour limit, causing transient failures during initial setup. Enabling credential injection with a **read-only** GitHub token raises this limit to **5,000 requests per hour**. A token with no permissions granted is sufficient — it only needs to authenticate requests, not access private resources.
 
-```bash
-# Check if installed
-mise list
+**Step 1: Create a fine-grained personal access token**
 
-# Install the tool
-mise install node@20  # example
-```
+1. Go to [GitHub Settings → Fine-grained tokens](https://github.com/settings/personal-access-tokens/new)
+2. Set a descriptive name (e.g., `devsandbox-mise`)
+3. Set expiration as desired
+4. Under **Repository access**, select "Public Repositories (read-only)"
+5. Under **Permissions**, grant nothing — leave all permissions at "No access"
+6. Click **Generate token**
 
-### "Permission denied" in sandbox
+**Step 2: Set the environment variable**
 
-Check if the path is mounted:
-
-```bash
-devsandbox --info
-```
-
-### Slow startup
-
-First run for a project creates sandbox directories. Subsequent runs are faster.
-
-### Network timeout in proxy mode
-
-Check if the service allows proxy connections:
+Add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
 ```bash
-# Test outside sandbox first
-curl https://api.example.com
-
-# Then in sandbox
-devsandbox --proxy curl https://api.example.com
+export GITHUB_TOKEN="github_pat_..."
 ```
+
+**Step 3: Enable credential injection**
+
+In `~/.config/devsandbox/config.toml`:
+
+```toml
+[proxy]
+enabled = true
+
+[proxy.credentials.github]
+enabled = true
+```
+
+The proxy injects the token into GitHub API requests automatically. The token never enters the sandbox environment — it stays on the host side and is added to matching requests by the proxy.
+
+> **Tip:** To avoid conflicts with `gh` CLI or other tools that read `GITHUB_TOKEN`, use a dedicated environment variable:
+>
+> ```bash
+> export DEVSANDBOX_GITHUB_TOKEN="github_pat_..."
+> ```
+>
+> ```toml
+> [proxy.credentials.github]
+> enabled = true
+>
+> [proxy.credentials.github.source]
+> env = "DEVSANDBOX_GITHUB_TOKEN"
+> ```
+
+> **Security note:** Use minimum-permission tokens. A fine-grained token with "Public Repositories (read-only)" and no additional permissions is all that's needed. The token never enters the sandbox — it stays on the host and is injected by the proxy into matching requests only.
+
+## Troubleshooting
+
+See the dedicated troubleshooting sections:
+
+- [Sandbox troubleshooting](sandboxing.md#troubleshooting) -- installation checks, user namespaces, permissions, SELinux/AppArmor
+- [Proxy troubleshooting](proxy.md#troubleshooting) -- pasta, timeouts, certificates, missing logs
 
 ## See Also
 
