@@ -12,6 +12,7 @@ type ActiveToolsConfig struct {
 	SandboxHome      string
 	DefaultMountMode string
 	ProjectDir       string
+	GitRepoRoot      string
 	ToolsConfig      map[string]any
 }
 
@@ -55,6 +56,7 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 				DefaultMountMode: r.cfg.DefaultMountMode,
 				ProjectDir:       r.cfg.ProjectDir,
 				HomeDir:          r.cfg.HomeDir,
+				GitRepoRoot:      r.cfg.GitRepoRoot,
 			}
 			var toolCfg map[string]any
 			if r.cfg.ToolsConfig != nil {

@@ -910,6 +910,112 @@ func TestGit_Setup_ReadOnlyMode_NonRegularRepoConfig(t *testing.T) {
 	}
 }
 
+func TestGitReadOnlyBindingsUsesGitRepoRootForWorktree(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	sandboxHome := t.TempDir()
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: wt, GitRepoRoot: repo}, map[string]any{"mode": "readonly"})
+	bindings := g.Bindings(home, sandboxHome)
+
+	// Exactly one binding targets <repo>/.git, readonly, with Dest pinned to host path.
+	want := filepath.Join(repo, ".git")
+	found := false
+	for _, b := range bindings {
+		if b.Source == want && b.Dest == want && b.ReadOnly {
+			found = true
+		}
+		// Must NOT bind <wt>/.git as a directory — it's a file in worktree mode.
+		if b.Source == filepath.Join(wt, ".git") {
+			t.Errorf("unexpectedly bound worktree .git as directory: %+v", b)
+		}
+	}
+	if !found {
+		t.Errorf("expected readonly binding of %s with Dest pinned to host path; got %+v", want, bindings)
+	}
+}
+
+func TestGitReadWriteBindingsWorktreeMountsMainGitDir(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wt := t.TempDir()
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: wt, GitRepoRoot: repo}, map[string]any{"mode": "readwrite"})
+	bindings := g.Bindings(t.TempDir(), t.TempDir())
+
+	// In readwrite worktree mode, main repo's .git must be bound writable
+	// with Dest pinned to host path so the gitdir: pointer resolves.
+	want := filepath.Join(repo, ".git")
+	found := false
+	for _, b := range bindings {
+		if b.Source == want && b.Dest == want {
+			if b.ReadOnly {
+				t.Errorf("readwrite worktree .git binding should be writable, got ReadOnly=true")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected writable binding of %s with Dest pinned; got %+v", want, bindings)
+	}
+}
+
+func TestGitReadWriteBindingsNoWorktreeNoExtraMount(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: repo, GitRepoRoot: ""}, map[string]any{"mode": "readwrite"})
+	bindings := g.Bindings(t.TempDir(), t.TempDir())
+
+	// Non-worktree readwrite: should have exactly 4 bindings (gitconfig, credentials, ssh, gnupg).
+	// No extra .git binding — it's included in the project dir mount.
+	if len(bindings) != 4 {
+		t.Errorf("expected 4 bindings for non-worktree readwrite, got %d: %+v", len(bindings), bindings)
+	}
+	for _, b := range bindings {
+		if b.Source == filepath.Join(repo, ".git") {
+			t.Errorf("non-worktree readwrite should not have explicit .git binding: %+v", b)
+		}
+	}
+}
+
+func TestGitReadOnlyBindingsMainRepoUnchanged(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: repo, GitRepoRoot: ""}, map[string]any{"mode": "readonly"})
+	bindings := g.Bindings(t.TempDir(), t.TempDir())
+	for _, b := range bindings {
+		if b.Source == filepath.Join(repo, ".git") && b.ReadOnly {
+			return
+		}
+	}
+	t.Errorf("expected readonly binding of %s/.git in non-worktree mode; got %+v", repo, bindings)
+}
+
 func TestGit_Bindings_Categories(t *testing.T) {
 	t.Run("readonly mode", func(t *testing.T) {
 		tmpDir := t.TempDir()

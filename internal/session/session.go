@@ -22,6 +22,17 @@ type Session struct {
 	WorkDir        string          `json:"work_dir"`
 	ProxyPort      int             `json:"proxy_port,omitempty"`
 	ForwardedPorts []ForwardedPort `json:"forwarded_ports,omitempty"`
+	Worktree       *WorktreeInfo   `json:"worktree,omitempty"`
+}
+
+// WorktreeInfo records the git worktree this session is rooted at, if any.
+// When RemoveOnExit is true the session's --rm teardown runs
+// `git worktree remove` on Path before deleting sandbox state.
+type WorktreeInfo struct {
+	Path         string `json:"path"`
+	Branch       string `json:"branch"`
+	RepoRoot     string `json:"repo_root"`
+	RemoveOnExit bool   `json:"remove_on_exit"`
 }
 
 // ForwardedPort describes a port forwarding rule active for a session.
@@ -137,6 +148,34 @@ func (s *Store) ListLive() ([]*Session, error) {
 		}
 	}
 	return live, nil
+}
+
+// ListForSandbox returns sessions whose WorkDir or registered worktree path
+// is inside sandboxRoot. Used by `sandboxes prune` to find worktrees to
+// remove alongside sandbox state. Paths are symlink-resolved before comparison
+// so /tmp/x and /private/tmp/x match on macOS.
+func (s *Store) ListForSandbox(sandboxRoot string) ([]*Session, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	normRoot := resolvePath(sandboxRoot)
+	prefix := normRoot + string(os.PathSeparator)
+	var out []*Session
+	for _, sess := range all {
+		normWork := resolvePath(sess.WorkDir)
+		if normWork == normRoot || strings.HasPrefix(normWork, prefix) {
+			out = append(out, sess)
+			continue
+		}
+		if sess.Worktree != nil {
+			normWt := resolvePath(sess.Worktree.Path)
+			if normWt == normRoot || strings.HasPrefix(normWt, prefix) {
+				out = append(out, sess)
+			}
+		}
+	}
+	return out, nil
 }
 
 // Update overwrites the session file with the provided data.

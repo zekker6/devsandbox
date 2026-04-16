@@ -399,3 +399,57 @@ func TestDefaultStore(t *testing.T) {
 	}
 	_ = store
 }
+
+func TestStore_ListForSandbox(t *testing.T) {
+	store := newTestStore(t)
+	a := makeSession("a")
+	a.WorkDir = "/tmp/sbox/home"
+	b := makeSession("b")
+	b.WorkDir = "/other"
+	b.Worktree = &session.WorktreeInfo{Path: "/tmp/sbox/worktrees/x"}
+	c := makeSession("c")
+	c.WorkDir = "/nope"
+	for _, s := range []*session.Session{a, b, c} {
+		if err := store.Register(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.ListForSandbox("/tmp/sbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, s := range got {
+		names[s.Name] = true
+	}
+	if !names["a"] || !names["b"] || names["c"] {
+		t.Errorf("got names = %v, want {a, b}", names)
+	}
+}
+
+func TestStore_RoundTripWorktree(t *testing.T) {
+	store := newTestStore(t)
+	sess := makeSession("wtbox")
+	sess.Worktree = &session.WorktreeInfo{
+		Path:         "/home/alice/.local/share/devsandbox/myproj-abcd/worktrees/feat-x",
+		Branch:       "feat/x",
+		RepoRoot:     "/home/alice/code/myproj",
+		RemoveOnExit: true,
+	}
+	if err := store.Register(sess); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	got, err := store.Get(sess.Name)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Worktree == nil {
+		t.Fatalf("Worktree lost on round trip")
+	}
+	if got.Worktree.Branch != "feat/x" || !got.Worktree.RemoveOnExit {
+		t.Errorf("bad Worktree: %+v", got.Worktree)
+	}
+	if got.Worktree.Path != sess.Worktree.Path || got.Worktree.RepoRoot != sess.Worktree.RepoRoot {
+		t.Errorf("path/repo mismatch: %+v", got.Worktree)
+	}
+}

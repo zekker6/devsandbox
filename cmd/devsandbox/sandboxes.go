@@ -13,6 +13,8 @@ import (
 
 	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
+	"devsandbox/internal/session"
+	"devsandbox/internal/worktree"
 )
 
 func newSandboxesCmd() *cobra.Command {
@@ -265,7 +267,32 @@ directory no longer exists) are removed.`,
 
 			// Remove sandboxes (handles both bwrap and docker)
 			var removed, failed int
+			sessionStore, sessErr := session.DefaultStore()
+			if sessErr != nil {
+				notice.Warn("session store unavailable; worktree cleanup skipped: %v", sessErr)
+			}
+			wtMgr := worktree.NewManager()
 			for _, s := range toPrune {
+				// Remove any worktrees registered under this sandbox root before
+				// wiping its on-disk state. Best-effort: warnings only.
+				if sessionStore != nil {
+					sessions, err := sessionStore.ListForSandbox(s.SandboxRoot)
+					if err != nil {
+						notice.Warn("list sessions for %s: %v", s.Name, err)
+					}
+					for _, sess := range sessions {
+						if sess.Worktree != nil && sess.Worktree.RepoRoot != "" {
+							if err := wtMgr.Remove(cmd.Context(), sess.Worktree.RepoRoot, sess.Worktree.Path); err != nil {
+								notice.Warn("worktree cleanup for %s: %v", sess.Name, err)
+							}
+						}
+						// Remove the session file — the sandbox state dir it
+						// references is about to be deleted.
+						if err := sessionStore.Remove(sess.Name); err != nil {
+							notice.Warn("session cleanup for %s: %v", sess.Name, err)
+						}
+					}
+				}
 				if err := sandbox.RemoveSandboxByType(s, volumes); err != nil {
 					notice.Error("Failed to remove %s: %v", s.Name, err)
 					failed++

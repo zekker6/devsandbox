@@ -215,6 +215,40 @@ By default, `.git` is mounted read-only -- you can view history, diff, and statu
 mode = "readwrite"  # for trusted projects that need push/sign
 ```
 
+### Worktree-aware mode
+
+`devsandbox --worktree` creates (or reuses) a git worktree and enters the sandbox rooted there. Agent edits land on a dedicated branch without touching your main checkout.
+
+| Flag | Behavior |
+|---|---|
+| `--worktree` | Auto-generate `devsandbox/<session-or-timestamp>` off `HEAD`. |
+| `--worktree=<branch>` | Reuse the branch if it exists; otherwise create it off `--worktree-base`. |
+| `--worktree-base=<ref>` | Base ref when creating a new branch. Defaults to `HEAD`. Ignored if the branch already exists. |
+
+Interaction with `--git-mode`:
+
+| Combination | Effect |
+|---|---|
+| `--worktree` + `--git-mode=readonly` (default) | `git status`/`log`/`diff` work; commits fail. |
+| `--worktree` + `--git-mode=readwrite` | Commits land on the worktree's branch only. Main checkout untouched. |
+| `--worktree` + `--git-mode=disabled` | Rejected at flag parse time. |
+| `--worktree` + `--rm` | Worktree removed on exit (`git worktree remove --force` + `prune`). |
+| `--worktree` outside a git repo | Rejected before sandbox spin-up. |
+
+Worktrees live under the per-project sandbox state dir:
+
+```
+~/.local/share/devsandbox/<project-slug>/worktrees/<sanitized-branch>/
+```
+
+The slug is derived from the main repo root so worktrees of the same repo share sandbox state (overlays, logs). Branch names with slashes are stored as dashes in the filesystem leaf; the git branch name is preserved verbatim.
+
+Known limitations:
+
+- Submodule init inside a readonly sandbox fails — not worked around.
+- If git already has the canonical path registered to a different branch, invocation fails with git's own error plus a hint; run `git worktree list` to investigate.
+- A stale directory at the canonical path (git has no record) causes `devsandbox` to refuse to clobber — remove it manually.
+
 ## Proxy Mode -- Monitor Your AI Agent's Network Activity
 
 Route all HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request.

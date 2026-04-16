@@ -971,3 +971,44 @@ func TestResolveBindingType(t *testing.T) {
 		})
 	}
 }
+
+// TestBuilder_AddProjectBindings_WorktreeLeavesMainRepoAlone verifies that
+// when ProjectDir is a worktree path (GitRepoRoot set and distinct), the
+// project bindings mount only the worktree — the main repo tree must not
+// appear in the mount plan. The git tool handles the .git mount separately.
+func TestBuilder_AddProjectBindings_WorktreeLeavesMainRepoAlone(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wt := t.TempDir()
+
+	cfg := &Config{
+		HomeDir:     t.TempDir(),
+		ProjectDir:  wt,
+		GitRepoRoot: repo,
+		SandboxHome: t.TempDir(),
+		XDGRuntime:  filepath.Join(t.TempDir(), "runtime"),
+	}
+	b := NewBuilder(cfg)
+	b.AddProjectBindings()
+	args := b.Build()
+	joined := strings.Join(args, " ")
+
+	// Worktree path is bound rw at its host path.
+	wantBind := "--bind " + wt + " " + wt
+	if !strings.Contains(joined, wantBind) {
+		t.Errorf("expected %q in args; got:\n%s", wantBind, joined)
+	}
+	// Chdir targets the worktree, not the repo.
+	wantChdir := "--chdir " + wt
+	if !strings.Contains(joined, wantChdir) {
+		t.Errorf("expected %q in args; got:\n%s", wantChdir, joined)
+	}
+	// Main repo path must not appear as a bind source. Since the repo path
+	// is a tempdir, a simple substring check is safe — it won't collide with
+	// unrelated builder args.
+	if strings.Contains(joined, repo) {
+		t.Errorf("main repo %q leaked into project bindings:\n%s", repo, joined)
+	}
+}

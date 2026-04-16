@@ -77,6 +77,7 @@ func runDoctor() error {
 
 	// Universal checks
 	results = append(results, checkShell())
+	results = append(results, checkGit())
 	results = append(results, checkDirectories())
 	results = append(results, checkConfigFile())
 	results = append(results, checkRecentLogs())
@@ -124,6 +125,8 @@ func getBinaryVersion(name string) string {
 		cmd = exec.Command(name, "--version")
 	case "docker":
 		cmd = exec.Command(name, "--version")
+	case "git":
+		cmd = exec.Command(name, "--version")
 	default:
 		return ""
 	}
@@ -159,6 +162,26 @@ func checkShell() checkResult {
 		status:  "ok",
 		message: msg,
 	}
+}
+
+// checkGit reports whether the host has a usable `git` binary. Required for
+// --worktree; optional otherwise, so missing git is a warning rather than an
+// error.
+func checkGit() checkResult {
+	path, err := exec.LookPath("git")
+	if err != nil {
+		return checkResult{
+			name:    "git",
+			status:  "warn",
+			message: "git binary not found on PATH — --worktree mode will fail if used",
+		}
+	}
+	version := getBinaryVersion("git")
+	msg := path
+	if version != "" {
+		msg = fmt.Sprintf("%s (%s)", path, version)
+	}
+	return checkResult{name: "git", status: "ok", message: msg}
 }
 
 func checkUserNamespaces() checkResult {

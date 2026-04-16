@@ -45,8 +45,9 @@ func ValidGitMode(mode string) bool {
 // Git provides configurable git configuration.
 // Supports three modes: readonly (default), readwrite, and disabled.
 type Git struct {
-	mode       GitMode
-	projectDir string
+	mode        GitMode
+	projectDir  string
+	gitRepoRoot string // main repo root when projectDir is a worktree; empty otherwise
 }
 
 func (g *Git) Name() string {
@@ -75,6 +76,7 @@ func (g *Git) Available(homeDir string) bool {
 func (g *Git) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	g.mode = GitModeReadOnly // default
 	g.projectDir = globalCfg.ProjectDir
+	g.gitRepoRoot = globalCfg.GitRepoRoot
 
 	if toolCfg == nil {
 		return
@@ -107,6 +109,15 @@ func (g *Git) Bindings(homeDir, sandboxHome string) []Binding {
 	}
 }
 
+// gitDirSource returns the directory holding the real .git metadata.
+// In worktree mode that is the main repo; otherwise it is the project dir.
+func (g *Git) gitDirSource() string {
+	if g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir {
+		return g.gitRepoRoot
+	}
+	return g.projectDir
+}
+
 // readOnlyBindings returns bindings for readonly mode (safe gitconfig + read-only .git).
 func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 	safeGitconfig := filepath.Join(sandboxHome, ".gitconfig.safe")
@@ -120,16 +131,29 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 		},
 	}
 
-	// Mount .git as read-only to prevent commits
-	if g.projectDir != "" {
-		gitDir := filepath.Join(g.projectDir, ".git")
-		if _, err := os.Stat(gitDir); err == nil {
-			bindings = append(bindings, Binding{
+	// Mount .git as read-only to prevent commits. In worktree mode the
+	// worktree's .git is a regular file pointing at the main repo's
+	// .git/worktrees/<name>; we mount the main repo's .git so the
+	// absolute gitdir: pointer resolves correctly inside the sandbox.
+	gitDirHost := g.gitDirSource()
+	isWorktree := g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir
+	if gitDirHost != "" {
+		gitDir := filepath.Join(gitDirHost, ".git")
+		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
+			b := Binding{
 				Source:   gitDir,
 				Type:     MountBind, // Explicit: must be ro bind, not overlay
 				ReadOnly: true,      // Security constraint of readonly mode
 				Category: CategoryConfig,
-			})
+			}
+			// In worktree mode, pin Dest to the host path so the Docker
+			// backend does not remap it under /home/sandboxuser. The
+			// worktree's .git file contains an absolute gitdir: pointer
+			// that must resolve inside the container.
+			if isWorktree {
+				b.Dest = gitDir
+			}
+			bindings = append(bindings, b)
 
 			// Overlay .git/config with a sanitized copy. Embedded credentials in
 			// remote URLs (e.g., https://ghp_xxxx@github.com/user/repo.git) and
@@ -156,7 +180,7 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 
 // readWriteBindings returns bindings for readwrite mode (full git access).
 func (g *Git) readWriteBindings(homeDir, _ string) []Binding {
-	return []Binding{
+	bindings := []Binding{
 		{
 			Source:   filepath.Join(homeDir, ".gitconfig"),
 			Category: CategoryConfig,
@@ -178,6 +202,24 @@ func (g *Git) readWriteBindings(homeDir, _ string) []Binding {
 			Optional: true,
 		},
 	}
+
+	// In worktree mode the project mount only contains the worktree
+	// directory. The worktree's .git is a file whose gitdir: pointer
+	// references the main repo's .git — which must also be mounted
+	// (writable, so commits can land). Pin Dest to the host path so
+	// the Docker backend does not remap it under /home/sandboxuser.
+	if g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir {
+		gitDir := filepath.Join(g.gitRepoRoot, ".git")
+		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
+			bindings = append(bindings, Binding{
+				Source:   gitDir,
+				Dest:     gitDir,
+				Category: CategoryConfig,
+			})
+		}
+	}
+
+	return bindings
 }
 
 func (g *Git) Environment(homeDir, sandboxHome string) []EnvVar {
@@ -237,11 +279,12 @@ func (g *Git) setupUserGitconfig(homeDir, sandboxHome string) error {
 // Skips silently if there's no project, no .git/config, or the source is not
 // a regular file (e.g. /dev/null overlay from a nested sandbox).
 func (g *Git) setupRepoGitconfig(sandboxHome string) error {
-	if g.projectDir == "" {
+	src := g.gitDirSource()
+	if src == "" {
 		return nil
 	}
 
-	repoConfigPath := filepath.Join(g.projectDir, ".git", "config")
+	repoConfigPath := filepath.Join(src, ".git", "config")
 	safeRepoConfigPath := filepath.Join(sandboxHome, ".git-config.safe")
 
 	srcInfo, err := os.Stat(repoConfigPath)

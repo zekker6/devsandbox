@@ -28,6 +28,7 @@ import (
 	"devsandbox/internal/sandbox/tools"
 	"devsandbox/internal/session"
 	"devsandbox/internal/version"
+	"devsandbox/internal/worktree"
 )
 
 // addSandboxFlags registers the flags that control a sandbox session. Both
@@ -52,6 +53,11 @@ func addSandboxFlags(cmd *cobra.Command) {
 
 	// Sandbox lifecycle flag
 	cmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
+
+	// Worktree mode
+	cmd.Flags().String("worktree", "", "Enter the sandbox in a git worktree. Bare flag auto-generates 'devsandbox/<session-or-timestamp>'; pass =<branch> to reuse or create a named branch.")
+	cmd.Flags().Lookup("worktree").NoOptDefVal = " "
+	cmd.Flags().String("worktree-base", "", "Base ref when creating a new worktree branch. Defaults to HEAD. Ignored when the branch already exists.")
 
 	// Security flags
 	cmd.Flags().Bool("no-hide-env", false, "Disable .env file hiding (exposes .env files inside the sandbox)")
@@ -276,6 +282,72 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		return nil
 	}
 
+	// Resolve --worktree. Validation happens up-front; the actual
+	// `git worktree add` is deferred until after validation succeeds.
+	worktreeRaw, _ := cmd.Flags().GetString("worktree")
+	worktreeBase, _ := cmd.Flags().GetString("worktree-base")
+	wtEnabled := cmd.Flags().Changed("worktree")
+	explicitBranch := strings.TrimSpace(worktreeRaw)
+
+	resolvedGitMode := "readonly"
+	if gitCfg, ok := appCfg.Tools["git"].(map[string]any); ok {
+		if s, ok := gitCfg["mode"].(string); ok && s != "" {
+			resolvedGitMode = s
+		}
+	}
+
+	if err := worktree.Validate(worktree.Options{
+		Enabled: wtEnabled,
+		Branch:  explicitBranch,
+		Base:    worktreeBase,
+		GitMode: resolvedGitMode,
+	}); err != nil {
+		return err
+	}
+
+	var worktreeHandle *worktree.Handle
+	var worktreeRepoRoot string
+	if wtEnabled {
+		repoRoot, err := worktree.RepoRoot(cfg.ProjectDir)
+		if err != nil {
+			return fmt.Errorf("--worktree: %w", err)
+		}
+		worktreeRepoRoot = repoRoot
+
+		// Re-derive sandbox state dir from repo root so worktrees of the same
+		// repo share overlays/logs/state rather than forking per-branch.
+		cfg.ProjectName = sandbox.GenerateSandboxName(repoRoot)
+		cfg.SandboxRoot = filepath.Join(cfg.SandboxBase, cfg.ProjectName)
+		cfg.SandboxHome = filepath.Join(cfg.SandboxRoot, "home")
+
+		if err := os.MkdirAll(cfg.SandboxRoot, 0o755); err != nil {
+			return fmt.Errorf("--worktree: create sandbox root: %w", err)
+		}
+
+		branch := explicitBranch
+		if branch == "" {
+			branch = worktree.AutoBranchName(sandboxName)
+		}
+
+		mgr := worktree.NewManager()
+		handle, err := mgr.Ensure(cmd.Context(), worktree.EnsureRequest{
+			RepoRoot:    repoRoot,
+			SandboxRoot: cfg.SandboxRoot,
+			Branch:      branch,
+			Base:        worktreeBase,
+		})
+		if err != nil {
+			return err
+		}
+		worktreeHandle = handle
+
+		cfg.ProjectDir = handle.Path
+		cfg.GitRepoRoot = repoRoot
+		projectDir = handle.Path
+
+		notice.Info("worktree: %s (branch %s)", handle.Path, handle.Branch)
+	}
+
 	if err := cfg.EnsureSandboxDirs(); err != nil {
 		return err
 	}
@@ -320,6 +392,20 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 				notice.Warn("failed to remove sandbox: %v", err)
 			}
 		}()
+		// Registered AFTER the sandbox-removal defer so that LIFO ordering
+		// runs the worktree teardown FIRST, while the directory still exists.
+		if worktreeHandle != nil {
+			handle := worktreeHandle
+			repoRoot := worktreeRepoRoot
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				mgr := worktree.NewManager()
+				if err := mgr.Remove(ctx, repoRoot, handle.Path); err != nil {
+					notice.Warn("failed to remove worktree: %v", err)
+				}
+			}()
+		}
 	}
 
 	// Concurrent session: clean up session-scoped overlay dirs on exit.
@@ -483,6 +569,14 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 			WorkDir:   projectDir,
 			ProxyPort: cfg.ProxyPort,
 		}
+		if worktreeHandle != nil {
+			sess.Worktree = &session.WorktreeInfo{
+				Path:         worktreeHandle.Path,
+				Branch:       worktreeHandle.Branch,
+				RepoRoot:     worktreeRepoRoot,
+				RemoveOnExit: rmFlag && !cfg.IsConcurrent,
+			}
+		}
 
 		if err := sessionStore.Register(sess); err != nil {
 			notice.Warn("[devsandbox] failed to register session: %v", err)
@@ -642,6 +736,7 @@ func printToolMounts(cfg *sandbox.Config) {
 		DefaultMountMode: cfg.DefaultMountMode,
 		ProjectDir:       cfg.ProjectDir,
 		HomeDir:          cfg.HomeDir,
+		GitRepoRoot:      cfg.GitRepoRoot,
 	}
 	for _, tool := range tools.Available(homeDir) {
 		if configurable, ok := tool.(tools.ToolWithConfig); ok {
@@ -937,6 +1032,7 @@ func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Contex
 		SandboxHome:      cfg.SandboxHome,
 		DefaultMountMode: cfg.DefaultMountMode,
 		ProjectDir:       cfg.ProjectDir,
+		GitRepoRoot:      cfg.GitRepoRoot,
 		ToolsConfig:      cfg.ToolsConfig,
 	}
 

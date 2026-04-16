@@ -170,3 +170,18 @@ func TestValidateScratchpadName(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigHasWorktree(t *testing.T) {
+	c := &Config{ProjectDir: "/tmp/wt", GitRepoRoot: ""}
+	if c.HasWorktree() {
+		t.Error("HasWorktree() = true with empty GitRepoRoot")
+	}
+	c.GitRepoRoot = "/tmp/repo"
+	if !c.HasWorktree() {
+		t.Error("HasWorktree() = false with GitRepoRoot set")
+	}
+	c = &Config{ProjectDir: "/tmp/repo", GitRepoRoot: "/tmp/repo"}
+	if c.HasWorktree() {
+		t.Error("HasWorktree() = true when ProjectDir == GitRepoRoot")
+	}
+}

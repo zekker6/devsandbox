@@ -89,6 +89,18 @@ type Config struct {
 	// IsConcurrent is true when another session is already active for this project.
 	// Concurrent sessions use session-scoped overlay dirs that are cleaned up on exit.
 	IsConcurrent bool
+
+	// GitRepoRoot is the main git repo root when ProjectDir is a worktree path.
+	// Empty in non-worktree mode. When set, the sandbox binds <GitRepoRoot>/.git
+	// at its host path (subject to git-mode semantics) so that the worktree's
+	// .git file (which stores an absolute gitdir: pointer) resolves correctly.
+	GitRepoRoot string
+}
+
+// HasWorktree reports whether this Config is rooted at a git worktree
+// distinct from the main repo root.
+func (c *Config) HasWorktree() bool {
+	return c.GitRepoRoot != "" && c.GitRepoRoot != c.ProjectDir
 }
 
 // Options allows customizing sandbox configuration.

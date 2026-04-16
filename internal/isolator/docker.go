@@ -262,6 +262,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	// Build isolator config from RunConfig
 	isoCfg := &Config{
 		ProjectDir:       sandboxCfg.ProjectDir,
+		GitRepoRoot:      sandboxCfg.GitRepoRoot,
 		SandboxHome:      sandboxCfg.SandboxHome,
 		HomeDir:          sandboxCfg.HomeDir,
 		Shell:            string(sandboxCfg.Shell),
@@ -917,6 +918,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		DefaultMountMode: cfg.DefaultMountMode,
 		ProjectDir:       cfg.ProjectDir,
 		HomeDir:          cfg.HomeDir,
+		GitRepoRoot:      cfg.GitRepoRoot,
 	}
 
 	for _, tool := range tools.Available(cfg.HomeDir) {

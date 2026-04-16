@@ -473,6 +473,7 @@ func (b *Builder) configureTool(tool tools.ToolWithConfig, toolName string) {
 		DefaultMountMode: b.cfg.DefaultMountMode,
 		ProjectDir:       b.cfg.ProjectDir,
 		HomeDir:          b.cfg.HomeDir,
+		GitRepoRoot:      b.cfg.GitRepoRoot,
 	}
 
 	// Get tool's config section from ToolsConfig

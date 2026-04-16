@@ -79,6 +79,9 @@ type Isolator interface {
 type Config struct {
 	// ProjectDir is the directory to sandbox.
 	ProjectDir string
+	// GitRepoRoot is the main git repo root when ProjectDir is a worktree.
+	// Empty in non-worktree mode.
+	GitRepoRoot string
 	// SandboxHome is the per-project sandbox home directory.
 	SandboxHome string
 	// HomeDir is the user's home directory.

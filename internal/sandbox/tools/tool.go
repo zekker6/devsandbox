@@ -133,6 +133,12 @@ type GlobalConfig struct {
 
 	// HomeDir is the user's home directory on the host.
 	HomeDir string
+
+	// GitRepoRoot is the main repo root when ProjectDir is a git worktree path.
+	// Empty otherwise. Tools that need to reach git metadata (e.g. the git
+	// tool's .git bindings) should prefer this over ProjectDir whenever it is
+	// non-empty and different from ProjectDir.
+	GitRepoRoot string
 }
 
 // ToolWithConfig extends Tool with configuration support.
