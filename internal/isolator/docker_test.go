@@ -1392,3 +1392,42 @@ func TestGetToolBindings_SplitMode_OverlayBindingsAreRO(t *testing.T) {
 		}
 	}
 }
+
+func TestDockerIsolator_Build_EnvVarsOverridePassthrough(t *testing.T) {
+	skipIfNoDocker(t)
+	t.Setenv("PASSTHROUGH_CONFLICT", "host-value")
+
+	configDir := setupTestDockerfile(t)
+	iso := NewDockerIsolator(DockerConfig{ConfigDir: configDir, KeepContainer: false})
+
+	cfg := &Config{
+		ProjectDir:     "/tmp/test-project",
+		SandboxHome:    "/tmp/test-sandbox",
+		HomeDir:        "/home/testuser",
+		Shell:          "/bin/bash",
+		Environment:    map[string]string{},
+		EnvPassthrough: []string{"PASSTHROUGH_CONFLICT"},
+		EnvVars: map[string]string{
+			"PASSTHROUGH_CONFLICT": "config-value",
+			"LITERAL":              "yes",
+		},
+	}
+
+	result, err := iso.BuildDocker(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("BuildDocker: %v", err)
+	}
+	joined := strings.Join(result.Args, " ")
+
+	if !strings.Contains(joined, "LITERAL=yes") {
+		t.Error("expected LITERAL to be set")
+	}
+	configIdx := strings.LastIndex(joined, "PASSTHROUGH_CONFLICT=config-value")
+	hostIdx := strings.LastIndex(joined, "PASSTHROUGH_CONFLICT=host-value")
+	if configIdx == -1 {
+		t.Errorf("expected PASSTHROUGH_CONFLICT=config-value in args; got %s", joined)
+	}
+	if hostIdx != -1 && hostIdx > configIdx {
+		t.Errorf("EnvVars must appear after EnvPassthrough; host=%d config=%d", hostIdx, configIdx)
+	}
+}

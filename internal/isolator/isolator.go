@@ -108,6 +108,9 @@ type Config struct {
 	ProxyExtraCAEnv []string
 	// EnvPassthrough is a list of host env var names to pass through to the sandbox.
 	EnvPassthrough []string
+	// EnvVars are explicit name→value env vars, applied last so they override
+	// Environment and EnvPassthrough on conflict.
+	EnvVars map[string]string
 	// Environment variables to set.
 	Environment map[string]string
 	// Bindings are filesystem mounts (translated per-backend).

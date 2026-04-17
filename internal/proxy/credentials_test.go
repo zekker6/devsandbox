@@ -351,6 +351,24 @@ func TestGitHubCredentialInjector_Configure_WithSource(t *testing.T) {
 			t.Errorf("token = %q, want %q", injector.token, "file-github-token")
 		}
 	})
+
+	t.Run("disabled when file source cannot be read", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "")
+		t.Setenv("GH_TOKEN", "")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled": true,
+			"source":  map[string]any{"file": "/nonexistent/devsandbox-test-path/xyzzy"},
+		})
+
+		if injector.Enabled() {
+			t.Error("expected disabled when file source is unreadable")
+		}
+		if injector.token != "" {
+			t.Errorf("token = %q, want empty on file-read failure", injector.token)
+		}
+	})
 }
 
 func TestParseCredentialSource(t *testing.T) {
@@ -431,7 +449,11 @@ func TestCredentialSource_Resolve(t *testing.T) {
 		t.Setenv("TEST_CRED_TOKEN", "resolved-value")
 
 		src := &CredentialSource{Env: "TEST_CRED_TOKEN"}
-		if got := src.Resolve(); got != "resolved-value" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "resolved-value" {
 			t.Errorf("Resolve() = %q, want %q", got, "resolved-value")
 		}
 	})
@@ -440,21 +462,33 @@ func TestCredentialSource_Resolve(t *testing.T) {
 		t.Setenv("TEST_CRED_MISSING", "")
 
 		src := &CredentialSource{Env: "TEST_CRED_MISSING"}
-		if got := src.Resolve(); got != "" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "" {
 			t.Errorf("Resolve() = %q, want empty", got)
 		}
 	})
 
 	t.Run("returns empty when all fields empty", func(t *testing.T) {
 		src := &CredentialSource{}
-		if got := src.Resolve(); got != "" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "" {
 			t.Errorf("Resolve() = %q, want empty", got)
 		}
 	})
 
 	t.Run("resolves static value", func(t *testing.T) {
 		src := &CredentialSource{Value: "static-secret"}
-		if got := src.Resolve(); got != "static-secret" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "static-secret" {
 			t.Errorf("Resolve() = %q, want %q", got, "static-secret")
 		}
 	})
@@ -467,15 +501,20 @@ func TestCredentialSource_Resolve(t *testing.T) {
 		}
 
 		src := &CredentialSource{File: path}
-		if got := src.Resolve(); got != "file-secret" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "file-secret" {
 			t.Errorf("Resolve() = %q, want %q (should trim whitespace)", got, "file-secret")
 		}
 	})
 
-	t.Run("returns empty when file does not exist", func(t *testing.T) {
+	t.Run("returns error when file does not exist", func(t *testing.T) {
 		src := &CredentialSource{File: "/nonexistent/path/to/token"}
-		if got := src.Resolve(); got != "" {
-			t.Errorf("Resolve() = %q, want empty", got)
+		got, err := src.Resolve()
+		if err == nil {
+			t.Errorf("Resolve() expected error for missing file, got %q", got)
 		}
 	})
 
@@ -483,7 +522,11 @@ func TestCredentialSource_Resolve(t *testing.T) {
 		t.Setenv("TEST_CRED_PRIORITY", "from-env")
 
 		src := &CredentialSource{Value: "from-value", Env: "TEST_CRED_PRIORITY"}
-		if got := src.Resolve(); got != "from-value" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "from-value" {
 			t.Errorf("Resolve() = %q, want %q (value should take priority)", got, "from-value")
 		}
 	})
@@ -497,7 +540,11 @@ func TestCredentialSource_Resolve(t *testing.T) {
 		}
 
 		src := &CredentialSource{Env: "TEST_CRED_ENV_PRIO", File: path}
-		if got := src.Resolve(); got != "from-env" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "from-env" {
 			t.Errorf("Resolve() = %q, want %q (env should take priority over file)", got, "from-env")
 		}
 	})
@@ -517,7 +564,11 @@ func TestCredentialSource_Resolve(t *testing.T) {
 
 		// Test absolute path works (no expansion needed)
 		src := &CredentialSource{File: path}
-		if got := src.Resolve(); got != "token-with-spaces" {
+		got, err := src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "token-with-spaces" {
 			t.Errorf("Resolve() = %q, want %q", got, "token-with-spaces")
 		}
 
@@ -529,7 +580,11 @@ func TestCredentialSource_Resolve(t *testing.T) {
 		t.Cleanup(func() { _ = os.Remove(testFile) })
 
 		src = &CredentialSource{File: "~/.devsandbox-test-cred-resolve"}
-		if got := src.Resolve(); got != "home-token" {
+		got, err = src.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+		if got != "home-token" {
 			t.Errorf("Resolve() = %q, want %q (tilde should expand)", got, "home-token")
 		}
 	})

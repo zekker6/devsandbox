@@ -796,6 +796,38 @@ func TestBuilder_AddEnvironment_EnvPassthrough(t *testing.T) {
 	}
 }
 
+func TestBuilder_AddEnvironment_EnvVars(t *testing.T) {
+	t.Setenv("PASSTHROUGH_CONFLICT", "from-host")
+
+	cfg := &Config{
+		HomeDir:        "/home/testuser",
+		SandboxHome:    "/tmp/sandbox/home",
+		Shell:          ShellBash,
+		ShellPath:      "/bin/bash",
+		EnvPassthrough: []string{"PASSTHROUGH_CONFLICT"},
+		EnvVars: map[string]string{
+			"PASSTHROUGH_CONFLICT": "from-config",
+			"LITERAL_ONLY":         "hello",
+		},
+	}
+
+	b := NewBuilder(cfg)
+	b.AddEnvironment()
+
+	args := b.Build()
+	argsStr := strings.Join(args, " ")
+
+	if !strings.Contains(argsStr, "--setenv LITERAL_ONLY hello") {
+		t.Error("expected LITERAL_ONLY=hello to be set from EnvVars")
+	}
+	if !strings.Contains(argsStr, "--setenv PASSTHROUGH_CONFLICT from-config") {
+		t.Error("expected PASSTHROUGH_CONFLICT=from-config (EnvVars value) to be present")
+	}
+	if strings.Contains(argsStr, "--setenv PASSTHROUGH_CONFLICT from-host") {
+		t.Error("PASSTHROUGH_CONFLICT=from-host should not appear (EnvVars must override passthrough)")
+	}
+}
+
 func TestBuilder_AddProxyEnvironment_NoMITM(t *testing.T) {
 	cfg := &Config{
 		ProxyEnabled: true,

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"devsandbox/internal/source"
+
 	"github.com/BurntSushi/toml"
 )
 
@@ -1403,5 +1405,85 @@ func TestValidate_PortForwardingScanInterval(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil {
 		t.Error("expected validation error for invalid scan_interval")
+	}
+}
+
+func TestSandboxEnvironment_Parse(t *testing.T) {
+	raw := `
+[sandbox.environment.GH_TOKEN]
+value = "placeholder"
+
+[sandbox.environment.FROM_HOST]
+env = "HOST_VAR"
+
+[sandbox.environment.FROM_FILE]
+file = "~/.secret"
+`
+	var cfg Config
+	if _, err := toml.Decode(raw, &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := cfg.Sandbox.Environment
+	if len(got) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(got))
+	}
+	if got["GH_TOKEN"].Value != "placeholder" {
+		t.Errorf("GH_TOKEN.Value = %q", got["GH_TOKEN"].Value)
+	}
+	if got["FROM_HOST"].Env != "HOST_VAR" {
+		t.Errorf("FROM_HOST.Env = %q", got["FROM_HOST"].Env)
+	}
+	if got["FROM_FILE"].File != "~/.secret" {
+		t.Errorf("FROM_FILE.File = %q", got["FROM_FILE"].File)
+	}
+}
+
+func TestSandboxEnvironment_ConflictWithPassthrough(t *testing.T) {
+	cfg := &Config{
+		Sandbox: SandboxConfig{
+			EnvPassthrough: []string{"GH_TOKEN", "OTHER"},
+			Environment: map[string]source.Source{
+				"GH_TOKEN": {Value: "placeholder"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for var present in both env_passthrough and environment")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "GH_TOKEN") {
+		t.Errorf("error should name the conflicting var; got %q", msg)
+	}
+	if !strings.Contains(msg, "env_passthrough") || !strings.Contains(msg, "environment") {
+		t.Errorf("error should mention both sources; got %q", msg)
+	}
+}
+
+func TestSandboxEnvironment_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]source.Source
+		want string // substring of expected error message
+	}{
+		{
+			name: "empty key",
+			env:  map[string]source.Source{"": {Value: "x"}},
+			want: "empty",
+		},
+		{
+			name: "all source fields empty",
+			env:  map[string]source.Source{"X": {}},
+			want: "must set value, env, or file",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Sandbox: SandboxConfig{Environment: tt.env}}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Validate() err = %v, want substring %q", err, tt.want)
+			}
+		})
 	}
 }

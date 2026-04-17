@@ -302,6 +302,15 @@ func (b *Builder) Chdir(path string) *Builder {
 }
 
 func (b *Builder) SetEnv(name, value string) *Builder {
+	// If a --setenv entry for this name already exists, update its value in
+	// place rather than appending a duplicate. Env vars are a map by name, so
+	// later callers logically replace earlier ones.
+	for i := 0; i < len(b.args)-2; i++ {
+		if b.args[i] == "--setenv" && b.args[i+1] == name {
+			b.args[i+2] = value
+			return b
+		}
+	}
 	b.add("--setenv", name, value)
 	return b
 }
@@ -967,6 +976,11 @@ func (b *Builder) AddEnvironment() *Builder {
 	// Pass through user-configured host environment variables
 	for _, name := range b.cfg.EnvPassthrough {
 		b.SetEnvIfSet(name)
+	}
+
+	// Explicit env vars from config.sandbox.environment; override everything above.
+	for name, value := range b.cfg.EnvVars {
+		b.SetEnv(name, value)
 	}
 
 	// Add proxy environment if enabled

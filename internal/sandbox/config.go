@@ -55,6 +55,10 @@ type Config struct {
 	ProxyExtraCAEnv []string
 	// EnvPassthrough is a list of host env var names to pass through to the sandbox.
 	EnvPassthrough []string
+	// EnvVars maps env var names to explicit values resolved from
+	// config.SandboxConfig.Environment. Names here must be disjoint from
+	// EnvPassthrough — overlap is rejected at config validation time.
+	EnvVars map[string]string
 
 	// True if network namespace is isolated (pasta)
 	NetworkIsolated bool

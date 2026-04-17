@@ -611,9 +611,12 @@ When multiple fields are set, priority is: `value` > `env` > `file`. Set exactly
 
 By default the injector never replaces an existing `Authorization` header — the sandboxed tool wins. That's safe, but breaks the pattern where a CLI inside the sandbox needs a token set in its environment to start (e.g. `gh` CLI refuses to run without `GH_TOKEN`).
 
-To handle this, set `overwrite = true`:
+To handle this, set `overwrite = true` and inject a placeholder env var into the sandbox so the CLI starts:
 
 ```toml
+[sandbox.environment.GH_TOKEN]
+value = "placeholder"
+
 [proxy.credentials.github]
 enabled = true
 overwrite = true
@@ -622,19 +625,7 @@ overwrite = true
 env = "GH_RO_TOKEN"   # real read-only token on the host
 ```
 
-Pair it with a placeholder token passed into the sandbox so the CLI is happy:
-
-```toml
-[sandbox]
-env_passthrough = ["GH_TOKEN"]   # placeholder set on the host
-```
-
-```bash
-export GH_TOKEN="placeholder"     # fake, satisfies gh CLI startup checks
-export GH_RO_TOKEN="ghp_real..."  # real token, never enters the sandbox
-```
-
-The sandbox sees `GH_TOKEN=placeholder`. `gh` adds `Authorization: Bearer placeholder` to its requests. The proxy intercepts requests to `api.github.com` and replaces the header with the real token from `GH_RO_TOKEN` before forwarding.
+Export `GH_RO_TOKEN` on the host only. The sandbox sees `GH_TOKEN=placeholder`; `gh` adds `Authorization: Bearer placeholder` to its requests; the proxy replaces the header with the real token from `GH_RO_TOKEN` before forwarding to `api.github.com`.
 
 > **Security trade-off:** the sandbox sees a non-functional placeholder, not the real token — leaking the placeholder is harmless. This preserves the core guarantee: the real credential never enters the sandbox.
 

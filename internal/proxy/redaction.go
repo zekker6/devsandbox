@@ -10,6 +10,7 @@ import (
 
 	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
+	"devsandbox/internal/source"
 )
 
 // RedactionEngine scans outgoing requests for secrets.
@@ -253,7 +254,7 @@ func resolveSource(src *RedactionSource, envFileValues map[string]string) string
 		return os.Getenv(src.Env)
 	}
 	if src.File != "" {
-		path := expandHome(src.File)
+		path := source.ExpandHome(src.File)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			notice.Warn("failed to read redaction secret file %q: %v", src.File, err)

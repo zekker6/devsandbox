@@ -99,7 +99,7 @@ enabled = true
 
 # Optional: replace any Authorization header already on the request.
 # Useful when a CLI inside the sandbox (e.g. `gh`) refuses to run without a
-# token set — pass a placeholder via env_passthrough while the real token
+# token set - pass a placeholder via env_passthrough while the real token
 # stays on the host and is swapped in by the proxy.
 # overwrite = true
 ```
@@ -112,7 +112,7 @@ enabled = true
 
 **Source priority:** `value` > `env` > `file`. Set exactly one for clarity.
 
-**Overwrite:** `overwrite = false` (default) preserves any existing `Authorization` header on outgoing requests — safer, but does nothing when the sandboxed tool sets its own Authorization. `overwrite = true` unconditionally replaces the header with the injected token. Combine with a placeholder `GH_TOKEN` in `sandbox.env_passthrough` to satisfy tools that refuse to start without a token.
+**Overwrite:** `overwrite = false` (default) preserves any existing `Authorization` header on outgoing requests - safer, but does nothing when the sandboxed tool sets its own Authorization. `overwrite = true` unconditionally replaces the header with the injected token. Combine with a placeholder `GH_TOKEN` in `sandbox.env_passthrough` to satisfy tools that refuse to start without a token.
 
 ### Content Redaction
 
@@ -126,7 +126,7 @@ default_action = "block"  # "block", "redact", or "log"
 
 #### Rule Types
 
-**Source-based** — match exact secret values:
+**Source-based** - match exact secret values:
 
 ```toml
 [[proxy.redaction.rules]]
@@ -136,7 +136,7 @@ action = "block"          # Optional: override default_action
 env = "API_SECRET_KEY"    # Or: file, env_file_key, value
 ```
 
-**Pattern-based** — match regex patterns:
+**Pattern-based** - match regex patterns:
 
 ```toml
 [[proxy.redaction.rules]]
@@ -202,12 +202,40 @@ cpus = "2"
 # When false, only system-installed binaries are used.
 # use_embedded = true
 
+# Pass host environment variables into the sandbox.
+# Listed variables are copied from the host; unset variables are silently skipped.
+# env_passthrough = ["MY_API_KEY", "CUSTOM_TOOL_CONFIG"]
+
 # Control visibility of .devsandbox.toml inside the sandbox
 # - "hidden" (default): config file is not visible to sandboxed processes
 # - "readonly": config file is visible but read-only
 # - "readwrite": config file is visible and writable
 config_visibility = "hidden"
 ```
+
+### Sandbox Environment Variables
+
+`[sandbox.environment.<NAME>]` sets explicit env vars inside the sandbox using the same source model as proxy credentials (`value` / `env` / `file`, priority `value > env > file`).
+
+```toml
+[sandbox.environment.GH_TOKEN]
+value = "placeholder"
+
+[sandbox.environment.PINNED_TOKEN]
+env = "HOST_VAR_NAME"
+
+[sandbox.environment.FROM_FILE]
+file = "~/.config/devsandbox/token"
+```
+
+**Resolution semantics:**
+
+- `value = "x"` - literal string passed to the sandbox.
+- `env = "X"` with host `X` unset - variable is skipped entirely (same as `env_passthrough`).
+- `env = "X"` with host `X` set - the host value is passed (empty string is passed as empty).
+- `file = "..."` that cannot be read - startup error.
+
+**Conflict with `env_passthrough`:** declaring the same variable name in both `env_passthrough` and `environment` is a configuration error - devsandbox fails startup with a message naming the variable. Declare each variable in exactly one place.
 
 ### Custom Mounts
 
@@ -337,7 +365,7 @@ default = "split"
 
 #### Why `split` Is the Default (Supply Chain Security)
 
-The `split` default protects your host from malicious packages installed inside the sandbox. A compromised package running under a sandboxed package manager (npm, pip, cargo, mise, etc.) could attempt to poison your host configs — for example, injecting a backdoor into `~/.gitconfig`, `~/.npmrc`, or shell startup files.
+The `split` default protects your host from malicious packages installed inside the sandbox. A compromised package running under a sandboxed package manager (npm, pip, cargo, mise, etc.) could attempt to poison your host configs - for example, injecting a backdoor into `~/.gitconfig`, `~/.npmrc`, or shell startup files.
 
 With `split`, config directories are mounted via `tmpoverlay`: any writes to them are discarded when the sandbox exits. Caches, data, and state directories use a persistent overlay so tool installations survive across sessions without touching your real host paths. Your host config files are never modified by sandboxed processes.
 
@@ -387,7 +415,7 @@ mount_mode = "disabled"   # Don't mount any claude config into the sandbox
 
 Valid per-tool values: `split`, `overlay`, `tmpoverlay`, `readonly`, `readwrite`, `disabled`.
 
-The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely — the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox.
+The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely - the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox.
 
 #### Migrating Overlay Data to Host
 
@@ -812,7 +840,7 @@ devsandbox --proxy          # Enable even if config has enabled = false
 # Override port
 devsandbox --proxy --proxy-port 9090
 
-# Ephemeral mode — remove sandbox state after exit
+# Ephemeral mode - remove sandbox state after exit
 devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbox home
 ```
 
@@ -821,7 +849,7 @@ devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbo
 - Scalar values: later source wins
 - Maps (`[tools]`): deep merge
 - Arrays (`[[proxy.filter.rules]]`): concatenate (later rules have higher priority)
-- Redaction: most-restrictive-wins — later configs can enable but never disable; `default_action` takes the higher severity (`block` > `redact` > `log`); rules are always additive
+- Redaction: most-restrictive-wins - later configs can enable but never disable; `default_action` takes the higher severity (`block` > `redact` > `log`); rules are always additive
 
 ## See Also
 

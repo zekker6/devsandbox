@@ -3,6 +3,8 @@ package proxy
 import (
 	"net/http"
 	"os"
+
+	"devsandbox/internal/notice"
 )
 
 func init() {
@@ -43,7 +45,13 @@ func (g *GitHubCredentialInjector) Configure(cfg map[string]any) {
 
 	if enabled, ok := cfg["enabled"].(bool); ok && enabled {
 		if src := ParseCredentialSource(cfg); src != nil {
-			g.token = src.Resolve()
+			val, err := src.Resolve()
+			if err != nil {
+				notice.Warn("github credential source: %v", err)
+				g.token = ""
+			} else {
+				g.token = val
+			}
 		} else {
 			g.token = os.Getenv("GITHUB_TOKEN")
 			if g.token == "" {

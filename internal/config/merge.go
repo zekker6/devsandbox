@@ -1,6 +1,10 @@
 // internal/config/merge.go
 package config
 
+import (
+	"devsandbox/internal/source"
+)
+
 // mergeConfigs merges overlay config into base config.
 // Scalars: overlay wins if non-zero
 // Maps: deep merge
@@ -119,6 +123,16 @@ func mergeConfigs(base, overlay *Config) *Config {
 			overlay.Sandbox.EnvPassthrough,
 			result.Sandbox.EnvPassthrough...,
 		)
+	}
+
+	// Sandbox environment: merge by key, overlay wins per key.
+	if len(overlay.Sandbox.Environment) > 0 {
+		if result.Sandbox.Environment == nil {
+			result.Sandbox.Environment = make(map[string]source.Source, len(overlay.Sandbox.Environment))
+		}
+		for k, v := range overlay.Sandbox.Environment {
+			result.Sandbox.Environment[k] = v
+		}
 	}
 
 	// Port forwarding settings

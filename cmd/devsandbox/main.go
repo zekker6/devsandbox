@@ -246,6 +246,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		cfg.ProxyMITM = false
 	}
 	cfg.EnvPassthrough = appCfg.Sandbox.EnvPassthrough
+	resolvedEnv, envErr := config.ResolveSandboxEnvironment(appCfg.Sandbox.Environment)
+	if envErr != nil {
+		return fmt.Errorf("resolve sandbox environment: %w", envErr)
+	}
+	cfg.EnvVars = resolvedEnv
 
 	// CLI override for git mode
 	if cmd.Flags().Changed("git-mode") {

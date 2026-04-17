@@ -3,6 +3,8 @@ package config
 
 import (
 	"testing"
+
+	"devsandbox/internal/source"
 )
 
 func Test_mergeConfigs_ScalarOverride(t *testing.T) {
@@ -356,5 +358,37 @@ func Test_mergeConfigs_MITMNilNotOverride(t *testing.T) {
 
 	if result.Proxy.IsMITMEnabled() {
 		t.Error("nil overlay should not override base MITM=false")
+	}
+}
+
+func TestMergeConfigs_SandboxEnvironment(t *testing.T) {
+	base := &Config{}
+	base.Sandbox.Environment = map[string]source.Source{
+		"ONLY_BASE": {Value: "base"},
+		"SHARED":    {Value: "base-value"},
+	}
+	overlay := &Config{
+		Sandbox: SandboxConfig{
+			Environment: map[string]source.Source{
+				"ONLY_OVERLAY": {Value: "overlay"},
+				"SHARED":       {Value: "overlay-value"},
+			},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	got := result.Sandbox.Environment
+	if len(got) != 3 {
+		t.Fatalf("expected 3 keys, got %d: %+v", len(got), got)
+	}
+	if got["ONLY_BASE"].Value != "base" {
+		t.Errorf("ONLY_BASE: %+v", got["ONLY_BASE"])
+	}
+	if got["ONLY_OVERLAY"].Value != "overlay" {
+		t.Errorf("ONLY_OVERLAY: %+v", got["ONLY_OVERLAY"])
+	}
+	if got["SHARED"].Value != "overlay-value" {
+		t.Errorf("SHARED: %+v (expected overlay to win)", got["SHARED"])
 	}
 }

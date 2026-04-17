@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"devsandbox/internal/notice"
+	"devsandbox/internal/source"
 	"github.com/BurntSushi/toml"
 )
 
@@ -275,6 +276,12 @@ type SandboxConfig struct {
 	// EnvPassthrough is a list of host environment variable names to pass through
 	// to the sandbox. Variables not set on the host are silently skipped.
 	EnvPassthrough []string `toml:"env_passthrough"`
+
+	// Environment sets env vars inside the sandbox. Each key is a variable
+	// name; each value is a resolved source (value / env / file). Declaring
+	// the same variable name in both EnvPassthrough and Environment is a
+	// validation error.
+	Environment map[string]source.Source `toml:"environment"`
 
 	// Docker contains Docker-specific settings.
 	Docker DockerConfig `toml:"docker"`
@@ -576,6 +583,23 @@ func (c *Config) Validate() error {
 	for i, name := range c.Sandbox.EnvPassthrough {
 		if name == "" {
 			return fmt.Errorf("sandbox.env_passthrough[%d]: variable name cannot be empty", i)
+		}
+	}
+
+	// Validate environment variable sources
+	passthroughSet := make(map[string]struct{}, len(c.Sandbox.EnvPassthrough))
+	for _, name := range c.Sandbox.EnvPassthrough {
+		passthroughSet[name] = struct{}{}
+	}
+	for name, src := range c.Sandbox.Environment {
+		if name == "" {
+			return fmt.Errorf("sandbox.environment: variable name cannot be empty")
+		}
+		if src.Value == "" && src.Env == "" && src.File == "" {
+			return fmt.Errorf("sandbox.environment[%q]: must set value, env, or file", name)
+		}
+		if _, dup := passthroughSet[name]; dup {
+			return fmt.Errorf("sandbox.environment[%q]: also listed in sandbox.env_passthrough; declare this variable in exactly one place", name)
 		}
 	}
 
@@ -960,6 +984,18 @@ port = 8080
 # Pass host environment variables into the sandbox.
 # Listed variables are copied from the host; unset variables are silently skipped.
 # env_passthrough = ["MY_API_KEY", "CUSTOM_TOOL_CONFIG"]
+
+# Set env vars inside the sandbox. Each key is a variable name; each
+# sub-table is a source (value / env / file, priority: value > env > file).
+# On conflict with env_passthrough, explicit values win.
+# [sandbox.environment.GH_TOKEN]
+# value = "placeholder"
+#
+# [sandbox.environment.PINNED_TOKEN]
+# env = "HOST_VAR_NAME"   # rename on passthrough
+#
+# [sandbox.environment.FROM_FILE]
+# file = "~/.config/devsandbox/token"
 
 # Control visibility of .devsandbox.toml inside the sandbox
 # - "hidden" (default): config file is not visible to sandboxed processes
