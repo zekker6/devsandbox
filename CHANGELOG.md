@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.13.0] - 2026-04-17
+
+### Added
+
+- `[sandbox.environment.<NAME>]` config block: declare sandbox environment variables using the same source model as proxy credentials (`value` / `env` / `file`, priority `value > env > file`). `env = "X"` with `X` unset on the host silently skips the variable; an unreadable `file = "..."` is a startup error. Declaring the same variable in both `env_passthrough` and `environment` fails at startup with a message naming the variable — each variable belongs in exactly one place.
+- `pi` tool: integrates [Pi Coding Agent](https://github.com/badlogic/pi-mono). `~/.pi/agent` is mounted with credential protection; `~/.pi/agent/sessions` persists across runs.
+- `[proxy.credentials.github] overwrite = true`: force-replace any existing `Authorization` header on outgoing `api.github.com` requests. Intended for the pattern where a sandboxed CLI (e.g. `gh`) refuses to start without a token in its environment — pass a placeholder through `env_passthrough` / `sandbox.environment` while the real token stays on the host and is swapped in by the proxy. Default remains `false` (existing tool-set headers are preserved).
+- `revdiff` tool now provides a shared IPC directory (`~/.cache/devsandbox/revdiff-ipc/<session>/`) bind-mounted at the same path on both sides and exported as `TMPDIR`. The kitty-spawned overlay shell runs on the host and receives sentinel/output paths as literal strings, so host and sandbox must agree on the string — argv-shipped paths need `Source == Dest` equality, not just a shared inode.
+
+### Changed
+
+- **Kitty tool now runs a capability-filtering proxy instead of bind-mounting the host socket.** The host kitty remote-control socket is no longer exposed inside the sandbox; a local proxy at `$HOME/.kitty.sock` is exposed instead, and `KITTY_LISTEN_ON` is rewritten to point at it. Sandboxed processes can only issue kitty commands declared as capabilities by an enabled tool (`launch_overlay`, `launch_window`, `launch_tab`, `launch_os_window`, `close_owned`, `wait_owned`, `focus_owned`, `send_text_owned`, `get_text_owned`, `set_title_owned`, `list_owned`), and `*_owned` commands are scoped by ownership tracking to windows the sandbox itself opened. Shell metacharacters in `sh -c` payloads for `launch_*` are rejected outright. `remote_control_password` is unsupported — use `allow_remote_control = socket-only`. New `[tools.kitty]` fields: `mode` (`auto` default / `disabled` / `enforce`) and `extra_capabilities` (additive; `launch_*` entries rejected). Under `auto`, the proxy only starts when at least one enabled tool declares a capability — zero attack surface when no tool needs kitty. `revdiff` is the built-in consumer.
+
+### Fixed
+
+- macOS: shortened test directory names to stay under the platform's unix socket path length limit (affected `kittyproxy` and `kitty` tool tests).
+
 ## [v0.12.0] - 2026-04-16
 
 ### Changed
