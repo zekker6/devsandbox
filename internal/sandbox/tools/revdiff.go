@@ -58,11 +58,16 @@ func (r *Revdiff) Environment(homeDir, sandboxHome string) []EnvVar {
 
 func (r *Revdiff) ShellInit(_ string) string { return "" }
 
+// Start ensures the shared IPC dir exists. It MUST NOT wipe the directory:
+// the same path is exported as $TMPDIR for every sandboxed process, and
+// long-lived tenants (Claude Code's per-session task cache, Node's compile
+// cache, Go's build cache) populate subtrees under it. Wiping would yank state
+// out from under a running caller; a subsequent non-recursive mkdir (as Node's
+// fs.mkdirSync does) would then fail with ENOENT. Stale revdiff sentinels
+// left behind from crashes are harmless — the launcher uses mktemp with fresh
+// randomized names on every invocation.
 func (r *Revdiff) Start(_ context.Context, homeDir, sandboxHome string) error {
 	host := revdiffIpcPath(homeDir, sandboxHome)
-	if err := os.RemoveAll(host); err != nil {
-		return fmt.Errorf("revdiff: wipe stale ipc dir: %w", err)
-	}
 	if err := os.MkdirAll(host, 0o700); err != nil {
 		return fmt.Errorf("revdiff: create ipc dir: %w", err)
 	}
@@ -73,13 +78,10 @@ func (r *Revdiff) Start(_ context.Context, homeDir, sandboxHome string) error {
 	return nil
 }
 
+// Stop is a no-op for the same reason Start doesn't wipe: the dir hosts
+// long-lived tenants that must survive sandbox restarts for the same project
+// (sessionID is stable per sandboxHome).
 func (r *Revdiff) Stop() error {
-	if r.hostIpcDir == "" {
-		return nil
-	}
-	if err := os.RemoveAll(r.hostIpcDir); err != nil {
-		return err
-	}
 	r.hostIpcDir = ""
 	return nil
 }

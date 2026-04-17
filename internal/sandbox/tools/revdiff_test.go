@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -147,7 +146,7 @@ func TestRevdiff_Environment_EmptyArgs_ReturnsNil(t *testing.T) {
 	}
 }
 
-func TestRevdiff_Lifecycle_CreatesAndCleansHostDir(t *testing.T) {
+func TestRevdiff_Lifecycle_CreatesHostDirWithCorrectMode(t *testing.T) {
 	homeDir := t.TempDir()
 	sandboxHome := "/stable/host/sandboxhome/for/session-xyz"
 	r := &Revdiff{}
@@ -168,26 +167,31 @@ func TestRevdiff_Lifecycle_CreatesAndCleansHostDir(t *testing.T) {
 		t.Errorf("mode = %o, want 0700", got)
 	}
 
-	if err := os.WriteFile(filepath.Join(hostDir, "sentinel"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write sentinel: %v", err)
-	}
-
 	if err := r.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, err := os.Stat(hostDir); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("host dir still exists after Stop: err=%v", err)
+	if _, err := os.Stat(hostDir); err != nil {
+		t.Errorf("host dir must survive Stop (Claude Code and Node caches live under $TMPDIR): err=%v", err)
 	}
 }
 
-func TestRevdiff_Start_WipesStaleContent(t *testing.T) {
+// TestRevdiff_Start_PreservesExistingContent locks in the invariant that Start
+// must NOT wipe the shared dir. Because $TMPDIR points at this directory for
+// every sandboxed process, long-lived tenants (Claude Code's per-session task
+// cache, Node's compile cache, Go's build cache) may already have populated
+// subtrees by the time a later Start runs — wiping would rip state out from
+// under a running caller and cause non-recursive mkdir calls to fail with
+// ENOENT on the next write.
+func TestRevdiff_Start_PreservesExistingContent(t *testing.T) {
 	homeDir := t.TempDir()
 	sandboxHome := "/stable/host/sandboxhome/for/session-xyz"
-	stale := expectedIpcPath(homeDir, sandboxHome)
-	if err := os.MkdirAll(stale, 0o755); err != nil {
+	host := expectedIpcPath(homeDir, sandboxHome)
+	nested := filepath.Join(host, "claude-1000", "workspace", "session-uuid", "tasks")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stale, "old-sentinel"), []byte("x"), 0o600); err != nil {
+	marker := filepath.Join(nested, "preserve-me")
+	if err := os.WriteFile(marker, []byte("important"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -195,15 +199,47 @@ func TestRevdiff_Start_WipesStaleContent(t *testing.T) {
 	if err := r.Start(context.Background(), homeDir, sandboxHome); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(stale, "old-sentinel")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("stale content still present after Start: err=%v", err)
-	}
-	info, err := os.Stat(stale)
+
+	data, err := os.ReadFile(marker)
 	if err != nil {
-		t.Fatalf("stat: %v", err)
+		t.Fatalf("marker missing after Start: %v", err)
+	}
+	if string(data) != "important" {
+		t.Errorf("marker content changed after Start: %q", data)
+	}
+	info, err := os.Stat(host)
+	if err != nil {
+		t.Fatalf("stat host: %v", err)
 	}
 	if got := info.Mode().Perm(); got != 0o700 {
-		t.Errorf("mode = %o, want 0700 after Start wiped stale dir", got)
+		t.Errorf("mode = %o, want 0700", got)
+	}
+}
+
+// TestRevdiff_Stop_PreservesContent mirrors the above for Stop: a graceful
+// sandbox shutdown must leave the IPC dir intact so its long-lived tenants
+// survive a devsandbox restart for the same project.
+func TestRevdiff_Stop_PreservesContent(t *testing.T) {
+	homeDir := t.TempDir()
+	sandboxHome := "/stable/host/sandboxhome/for/session-xyz"
+	r := &Revdiff{}
+	if err := r.Start(context.Background(), homeDir, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	host := expectedIpcPath(homeDir, sandboxHome)
+	marker := filepath.Join(host, "claude-1000", "preserve-me")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("important"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("marker gone after Stop: %v", err)
 	}
 }
 
