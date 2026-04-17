@@ -96,6 +96,12 @@ enabled = true
 # env = "DEVSANDBOX_GITHUB_TOKEN"
 # file = "~/.config/devsandbox/github-token"
 # value = "github_pat_..."
+
+# Optional: replace any Authorization header already on the request.
+# Useful when a CLI inside the sandbox (e.g. `gh`) refuses to run without a
+# token set — pass a placeholder via env_passthrough while the real token
+# stays on the host and is swapped in by the proxy.
+# overwrite = true
 ```
 
 **Available injectors:**
@@ -105,6 +111,8 @@ enabled = true
 | `github` | `api.github.com`     | `GITHUB_TOKEN` or `GH_TOKEN`  | `Authorization: Bearer <token>` |
 
 **Source priority:** `value` > `env` > `file`. Set exactly one for clarity.
+
+**Overwrite:** `overwrite = false` (default) preserves any existing `Authorization` header on outgoing requests — safer, but does nothing when the sandboxed tool sets its own Authorization. `overwrite = true` unconditionally replaces the header with the injected token. Combine with a placeholder `GH_TOKEN` in `sandbox.env_passthrough` to satisfy tools that refuse to start without a token.
 
 ### Content Redaction
 

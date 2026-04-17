@@ -97,6 +97,84 @@ func TestGitHubCredentialInjector_Inject(t *testing.T) {
 			t.Errorf("Authorization = %q, want empty", auth)
 		}
 	})
+
+	t.Run("overrides existing auth when overwrite enabled", func(t *testing.T) {
+		injector := &GitHubCredentialInjector{token: "real-token", enabled: true, overwrite: true}
+		req, _ := http.NewRequest("GET", "https://api.github.com/repos/foo/bar", nil)
+		req.Header.Set("Authorization", "Bearer fake-token")
+
+		injector.Inject(req)
+
+		auth := req.Header.Get("Authorization")
+		if auth != "Bearer real-token" {
+			t.Errorf("Authorization = %q, want %q (overwrite should replace)", auth, "Bearer real-token")
+		}
+	})
+
+	t.Run("overwrite does not inject when token is empty", func(t *testing.T) {
+		injector := &GitHubCredentialInjector{token: "", enabled: true, overwrite: true}
+		req, _ := http.NewRequest("GET", "https://api.github.com/repos/foo/bar", nil)
+		req.Header.Set("Authorization", "Bearer existing")
+
+		injector.Inject(req)
+
+		auth := req.Header.Get("Authorization")
+		if auth != "Bearer existing" {
+			t.Errorf("Authorization = %q, want %q (empty token must not clobber)", auth, "Bearer existing")
+		}
+	})
+}
+
+func TestGitHubCredentialInjector_Configure_Overwrite(t *testing.T) {
+	t.Run("overwrite defaults to false when not set", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "t")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{"enabled": true})
+
+		if injector.overwrite {
+			t.Error("expected overwrite=false by default")
+		}
+	})
+
+	t.Run("overwrite=true is parsed", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "t")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled":   true,
+			"overwrite": true,
+		})
+
+		if !injector.overwrite {
+			t.Error("expected overwrite=true")
+		}
+	})
+
+	t.Run("overwrite=false is parsed", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "t")
+
+		injector := &GitHubCredentialInjector{}
+		injector.Configure(map[string]any{
+			"enabled":   true,
+			"overwrite": false,
+		})
+
+		if injector.overwrite {
+			t.Error("expected overwrite=false")
+		}
+	})
+
+	t.Run("overwrite cleared on reconfigure", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "t")
+
+		injector := &GitHubCredentialInjector{overwrite: true}
+		injector.Configure(map[string]any{"enabled": true})
+
+		if injector.overwrite {
+			t.Error("expected overwrite to be reset to false on reconfigure")
+		}
+	})
 }
 
 func TestGitHubCredentialInjector_Configure(t *testing.T) {

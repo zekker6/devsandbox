@@ -912,6 +912,12 @@ port = 8080
 # GitHub API token injection (reads GITHUB_TOKEN or GH_TOKEN from host)
 # [proxy.credentials.github]
 # enabled = true
+# # overwrite = true       # replace any Authorization header on api.github.com
+# #                         # requests; useful when the sandbox sees a placeholder
+# #                         # GH_TOKEN (e.g. to satisfy the gh CLI) while the real
+# #                         # token stays on the host.
+# # [proxy.credentials.github.source]
+# # env = "GH_RO_TOKEN"     # read the real token from this host env var
 
 # Content redaction (requires proxy mode)
 # Scans outgoing request bodies, headers, and URLs for secrets.
