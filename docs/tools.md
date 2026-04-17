@@ -36,6 +36,7 @@ Example output:
 │ oh-my-posh    │ missing   │ Oh My Posh prompt with sandbox indicator      │
 │ oh-my-zsh     │ missing   │ Oh My Zsh framework with sandbox indicator    │
 │ opencode      │ available │ OpenCode AI assistant                         │
+│ pi            │ available │ Pi coding agent AI assistant                  │
 │ portal        │ available │ XDG Desktop Portal (notifications)            │
 │ powerlevel10k │ missing   │ Powerlevel10k zsh theme                       │
 │ starship      │ available │ Starship prompt with sandbox indicator        │
@@ -318,6 +319,33 @@ devsandbox --proxy aider
 ```bash
 devsandbox opencode
 ```
+
+### Pi Coding Agent
+
+[Pi](https://github.com/badlogic/pi-mono) is fully supported:
+
+```bash
+# Run pi in sandbox
+devsandbox pi
+```
+
+Install via mise:
+
+```bash
+mise install npm:@mariozechner/pi-coding-agent
+```
+
+Configuration directories are mounted with credential protection:
+
+```
+~/.pi/agent           → Sandbox (protected: settings + auth credentials)
+~/.pi/agent/sessions  → Sandbox (persistent: session history preserved)
+```
+
+The `~/.pi/agent` directory (containing `settings.json` and `auth.json`) is
+mounted with tmpoverlay so API keys and settings are shielded from sandbox
+code. Session history in `~/.pi/agent/sessions` uses a persistent overlay so
+conversations survive across sandbox sessions for the same project.
 
 ### GitHub Copilot
 
