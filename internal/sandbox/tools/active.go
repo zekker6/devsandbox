@@ -94,10 +94,15 @@ func (r *ActiveToolsRunner) cleanup() {
 	}
 }
 
-// stopStarted stops all started tools in reverse order.
+// stopStarted stops all started tools in reverse order. Errors are logged but
+// do not abort teardown — callers have no useful remediation for a Stop
+// failure, but the operator should see them.
 func (r *ActiveToolsRunner) stopStarted() {
 	for i := len(r.started) - 1; i >= 0; i-- {
-		_ = r.started[i].Stop()
+		t := r.started[i]
+		if err := t.Stop(); err != nil && r.logger != nil {
+			r.logger.LogErrorf("tools", "stop %s: %v", t.Name(), err)
+		}
 	}
 	r.started = nil
 }
