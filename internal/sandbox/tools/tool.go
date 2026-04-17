@@ -3,7 +3,11 @@
 // and shell initialization commands.
 package tools
 
-import "context"
+import (
+	"context"
+
+	"devsandbox/internal/kittyproxy"
+)
 
 // MountType defines how a binding is mounted in the sandbox.
 type MountType string
@@ -222,4 +226,26 @@ type ToolWithCache interface {
 	// CacheMounts returns cache directories this tool needs.
 	// Each mount creates a subdirectory under /cache and sets an env var.
 	CacheMounts() []CacheMount
+}
+
+// ToolWithKittyRequirements is implemented by tools that need access to the
+// kitty remote-control socket. The kitty tool aggregates declarations from all
+// enabled tools to build the proxy capability allowlist.
+type ToolWithKittyRequirements interface {
+	Tool
+
+	// KittyCapabilities returns the kitty capabilities this tool needs.
+	// Returning an empty slice means "do not enable kitty for me."
+	KittyCapabilities() []kittyproxy.Capability
+}
+
+// ToolWithKittyLaunchPatterns is implemented by tools that declare any
+// launch_* capability and want their launchable commands restricted. A tool
+// that declares launch_* without also implementing this interface gets a
+// startup warning and is allowed to launch any command (audit-friendly degraded
+// mode rather than silent breakage).
+type ToolWithKittyLaunchPatterns interface {
+	Tool
+
+	KittyLaunchPatterns() []kittyproxy.CommandPattern
 }

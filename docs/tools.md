@@ -522,7 +522,7 @@ Example output:
 
 ## Kitty Terminal
 
-When running inside [kitty](https://sw.kovidgoyal.net/kitty/) with remote control enabled, devsandbox mounts the kitty listen socket into the sandbox. This allows tools like [revdiff](https://github.com/umputun/revdiff) to open overlay terminal panes from inside the sandbox.
+When running inside [kitty](https://sw.kovidgoyal.net/kitty/) with remote control enabled, devsandbox runs a **filtering proxy** for the kitty remote-control socket. The host kitty socket is **not** bind-mounted into the sandbox; only the proxy socket is. Sandboxed code can perform only the kitty operations declared by enabled tools, scoped to windows the sandbox itself opened (ownership tracking).
 
 ### Prerequisites
 
@@ -535,35 +535,68 @@ listen_on unix:/tmp/kitty-{kitty_pid}
 
 Restart kitty after changing the config.
 
+### Activation
+
+The proxy starts when all of the following hold:
+
+1. `KITTY_LISTEN_ON` is set on the host.
+2. The `kitty` binary is on PATH.
+3. At least one enabled tool declares a kitty capability (or `mode = "enforce"` is set).
+
+If no tool declares a capability and `mode = "auto"` (the default), the proxy stays inactive — zero attack surface when nothing needs it. `revdiff` is the built-in consumer: if the `revdiff` binary is on PATH, the proxy activates automatically.
+
+### Configuration
+
+```toml
+[tools.kitty]
+mode = "auto"                          # "auto" (default), "disabled", "enforce"
+extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rejected
+```
+
+| Mode | Behavior |
+|---|---|
+| `auto` | Proxy starts iff at least one enabled tool declares a capability. |
+| `enforce` | Proxy always starts; with no capabilities declared, every request is denied (useful to verify no tool silently uses kitty). |
+| `disabled` | Proxy never starts; `KITTY_LISTEN_ON` is not exposed inside the sandbox. |
+
+### Capabilities
+
+| Capability | Allows |
+|---|---|
+| `launch_overlay` | `kitty @ launch --type=overlay` |
+| `launch_window` | `kitty @ launch --type=window` |
+| `launch_tab` | `kitty @ launch --type=tab` |
+| `launch_os_window` | `kitty @ launch --type=os-window` |
+| `close_owned` | `close-window` scoped to windows the sandbox opened |
+| `wait_owned` | `wait` scoped to windows the sandbox opened |
+| `focus_owned` | `focus-window` scoped to windows the sandbox opened |
+| `send_text_owned` | `send-text` scoped to windows the sandbox opened |
+| `get_text_owned` | `get-text` scoped to windows the sandbox opened |
+| `set_title_owned` | `set-window-title` scoped to windows the sandbox opened |
+| `list_owned` | `ls` — response is filtered to owned windows only |
+
+`launch_*` capabilities equal arbitrary host code execution and must be paired with command patterns declared by the tool that requests them. Shell metacharacters (`;`, `&`, `|`, `` ` ``, `$()`, `<`, `>`, etc.) in `sh -c` payloads are rejected outright.
+
 ### What Gets Mounted
 
 | Resource | Mode | Purpose |
 |----------|------|---------|
-| Kitty listen socket (`KITTY_LISTEN_ON`) | read-write | `kitty @` remote control communication |
+| Proxy socket (`$HOME/.kitty.sock`) | read-write (proxy is local to the sandbox home) | kitty remote-control via the filtering proxy |
 | `kitty` binary | read-only | CLI for `kitty @ launch`, `kitty @ ls`, etc. |
+
+The host's real kitty socket is **not** bind-mounted into the sandbox.
 
 ### Environment Variables
 
-Passed through from host: `KITTY_LISTEN_ON`, `KITTY_WINDOW_ID`, `KITTY_PID`.
+- `KITTY_LISTEN_ON` — rewritten to `unix:$HOME/.kitty.sock` inside the sandbox. Host value is never exposed.
+- `KITTY_WINDOW_ID`, `KITTY_PID` — passed through from host (read-only signals about the host pane).
 
-### Security Note
+### Limitations
 
-The kitty listen socket allows the sandboxed process to control the terminal (open panes, read content). For untrusted projects, disable it:
+- Async / streaming kitty commands (`get-text --watcher`, async kittens) are denied in this MVP.
+- `remote_control_password` in `kitty.conf` is unsupported — use `allow_remote_control = socket-only` instead.
 
-```toml
-[tools.kitty]
-mode = "disabled"
-```
-
-### Verification
-
-```bash
-# Check if kitty tool is detected
-devsandbox tools check kitty
-
-# Inside sandbox, verify remote control works
-kitty @ ls
-```
+Run `devsandbox tools check kitty` to confirm the tool is detected and see the active mode.
 
 ## XDG Desktop Portal (Linux only)
 
@@ -630,6 +663,7 @@ Example output:
 To make additional tools available:
 
 1. **Install via mise** (recommended):
+
    ```bash
    mise install mytool@version
    ```

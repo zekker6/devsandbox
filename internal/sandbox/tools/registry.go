@@ -10,6 +10,11 @@ func Register(t Tool) {
 	registry[t.Name()] = t
 }
 
+// Unregister removes a tool by name. Used by tests to inject/remove mock tools.
+func Unregister(name string) {
+	delete(registry, name)
+}
+
 // All returns all registered tools, sorted by name for deterministic ordering.
 func All() []Tool {
 	tools := make([]Tool, 0, len(registry))

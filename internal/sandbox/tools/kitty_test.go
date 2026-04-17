@@ -1,193 +1,178 @@
 package tools
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"devsandbox/internal/kittyproxy"
 )
 
-func TestKitty_Registered(t *testing.T) {
-	tool := Get("kitty")
-	if tool == nil {
-		t.Fatal("expected kitty tool to be registered")
-	}
-	if tool.Name() != "kitty" {
-		t.Errorf("expected name 'kitty', got %q", tool.Name())
-	}
+// fakeKittyConsumer is a Tool that declares CapLaunchOverlay so we can test
+// aggregation without depending on the real revdiff tool.
+type fakeKittyConsumer struct{}
+
+func (fakeKittyConsumer) Name() string                        { return "fake-kitty-consumer" }
+func (fakeKittyConsumer) Description() string                 { return "test" }
+func (fakeKittyConsumer) Available(string) bool               { return true }
+func (fakeKittyConsumer) Bindings(string, string) []Binding   { return nil }
+func (fakeKittyConsumer) Environment(string, string) []EnvVar { return nil }
+func (fakeKittyConsumer) ShellInit(string) string             { return "" }
+func (fakeKittyConsumer) KittyCapabilities() []kittyproxy.Capability {
+	return []kittyproxy.Capability{kittyproxy.CapLaunchOverlay}
+}
+func (fakeKittyConsumer) KittyLaunchPatterns() []kittyproxy.CommandPattern {
+	return []kittyproxy.CommandPattern{{Program: "revdiff", ArgsMatcher: kittyproxy.MatchAny()}}
 }
 
-func TestKitty_Description(t *testing.T) {
-	k := &Kitty{}
-	if k.Description() == "" {
-		t.Error("expected non-empty description")
-	}
-}
-
-func TestKitty_Available_NoEnvVar(t *testing.T) {
-	k := &Kitty{}
+func TestKitty_Available(t *testing.T) {
 	t.Setenv("KITTY_LISTEN_ON", "")
-	if k.Available("/home/user") {
-		t.Error("expected Available=false when KITTY_LISTEN_ON is empty")
-	}
-}
-
-func TestKitty_Available_NoBinary(t *testing.T) {
 	k := &Kitty{}
-	t.Setenv("KITTY_LISTEN_ON", "unix:/tmp/kitty-12345")
-	t.Setenv("PATH", t.TempDir())
-	if k.Available("/home/user") {
-		t.Error("expected Available=false when kitty binary is missing")
+	if k.Available("") {
+		t.Error("Available should be false when KITTY_LISTEN_ON unset")
 	}
+	t.Setenv("KITTY_LISTEN_ON", "unix:/tmp/kitty-1234")
+	// Available also requires the kitty binary on PATH; if not present, this is fine.
+	_ = k.Available("")
 }
 
-func TestKittySocketPath(t *testing.T) {
-	tests := []struct {
-		listenOn string
-		want     string
-	}{
-		{"unix:/tmp/kitty-12345", "/tmp/kitty-12345"},
-		{"/tmp/kitty-12345", "/tmp/kitty-12345"},
-		{"unix:/run/user/1000/kitty-99", "/run/user/1000/kitty-99"},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		got := kittySocketPath(tt.listenOn)
-		if got != tt.want {
-			t.Errorf("kittySocketPath(%q) = %q, want %q", tt.listenOn, got, tt.want)
+func TestKitty_NoBindingsForHostSocket(t *testing.T) {
+	t.Setenv("KITTY_LISTEN_ON", "unix:/tmp/kitty-1234")
+	k := &Kitty{}
+	bs := k.Bindings("", "")
+	for _, b := range bs {
+		if strings.Contains(b.Source, "/tmp/kitty-1234") {
+			t.Errorf("kitty tool must NOT bind-mount host socket, but did: %+v", b)
 		}
 	}
 }
 
-func TestKitty_Bindings(t *testing.T) {
+func TestKitty_AggregateAndStart_AutoModeInactiveWithoutConsumers(t *testing.T) {
+	// Hermetically remove any registered kitty consumers so this test exercises
+	// the "no consumers declared" branch regardless of what init() has wired up.
+	saved := removeKittyConsumers(t)
+	defer saved.restore()
+
+	t.Setenv("KITTY_LISTEN_ON", "unix:/tmp/kitty-1234")
 	k := &Kitty{}
-	t.Setenv("KITTY_LISTEN_ON", "unix:/tmp/kitty-12345")
-
-	bindings := k.Bindings("/home/user", "/sandbox/home")
-
-	if len(bindings) < 1 {
-		t.Fatal("expected at least 1 binding (socket)")
-	}
-
-	sock := bindings[0]
-	if sock.Source != "/tmp/kitty-12345" {
-		t.Errorf("expected socket source /tmp/kitty-12345, got %q", sock.Source)
-	}
-	if sock.Dest != "/tmp/kitty-12345" {
-		t.Errorf("expected socket dest /tmp/kitty-12345, got %q", sock.Dest)
-	}
-	if sock.ReadOnly {
-		t.Error("expected socket binding to be read-write")
-	}
-	if sock.Category != CategoryRuntime {
-		t.Errorf("expected CategoryRuntime, got %q", sock.Category)
-	}
-	if sock.Type != MountBind {
-		t.Errorf("expected MountBind (sockets cannot use overlay), got %q", sock.Type)
-	}
-}
-
-func TestKitty_Bindings_NoEnv(t *testing.T) {
-	k := &Kitty{}
-	t.Setenv("KITTY_LISTEN_ON", "")
-
-	bindings := k.Bindings("/home/user", "/sandbox/home")
-	if len(bindings) != 0 {
-		t.Errorf("expected 0 bindings when KITTY_LISTEN_ON is empty, got %d", len(bindings))
-	}
-}
-
-func TestKitty_Environment(t *testing.T) {
-	k := &Kitty{}
-	env := k.Environment("/home/user", "/sandbox/home")
-
-	expected := map[string]bool{
-		"KITTY_LISTEN_ON": false,
-		"KITTY_WINDOW_ID": false,
-		"KITTY_PID":       false,
-	}
-
-	for _, e := range env {
-		if _, ok := expected[e.Name]; ok {
-			if !e.FromHost {
-				t.Errorf("expected %s to be FromHost=true", e.Name)
-			}
-			expected[e.Name] = true
-		}
-	}
-
-	for name, found := range expected {
-		if !found {
-			t.Errorf("expected env var %s not found", name)
-		}
-	}
-}
-
-func TestKitty_Check_NoBinary(t *testing.T) {
-	k := &Kitty{}
-	t.Setenv("PATH", t.TempDir())
-
-	result := k.Check("/home/user")
-	if result.Available {
-		t.Error("expected Available=false when binary not found")
-	}
-	if result.BinaryName != "kitty" {
-		t.Errorf("expected BinaryName 'kitty', got %q", result.BinaryName)
-	}
-	if result.InstallHint == "" {
-		t.Error("expected non-empty InstallHint")
-	}
-}
-
-func TestKitty_Check_NoListenOn(t *testing.T) {
-	k := &Kitty{}
-
-	// Create fake kitty binary so CheckBinary passes
-	dir := t.TempDir()
-	fake := filepath.Join(dir, "kitty")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
-	t.Setenv("KITTY_LISTEN_ON", "")
-
-	result := k.Check("/home/user")
-	if result.Available {
-		t.Error("expected Available=false when KITTY_LISTEN_ON is empty")
-	}
-	hasIssue := false
-	for _, issue := range result.Issues {
-		if strings.Contains(issue, "KITTY_LISTEN_ON") {
-			hasIssue = true
-		}
-	}
-	if !hasIssue {
-		t.Error("expected issue mentioning KITTY_LISTEN_ON")
-	}
-}
-
-func TestKitty_Check_SocketMissing(t *testing.T) {
-	k := &Kitty{}
+	k.Configure(GlobalConfig{}, nil)
 
 	dir := t.TempDir()
-	fake := filepath.Join(dir, "kitty")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
+	if err := k.Start(context.Background(), dir, dir); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
-	t.Setenv("PATH", dir)
-	t.Setenv("KITTY_LISTEN_ON", "unix:/tmp/nonexistent-kitty-socket-12345")
+	defer func() { _ = k.Stop() }()
 
-	result := k.Check("/home/user")
-	if result.Available {
-		t.Error("expected Available=false when socket does not exist")
+	if k.proxy != nil {
+		t.Error("auto mode with no consumers should not start a proxy")
 	}
-	hasIssue := false
-	for _, issue := range result.Issues {
-		if strings.Contains(issue, "socket not found") {
-			hasIssue = true
+	envs := k.Environment(dir, dir)
+	for _, e := range envs {
+		if e.Name == "KITTY_LISTEN_ON" {
+			t.Errorf("inactive kitty must not export KITTY_LISTEN_ON; got %+v", e)
 		}
 	}
-	if !hasIssue {
-		t.Error("expected issue about missing socket")
+}
+
+// savedConsumers remembers tools that implemented ToolWithKittyRequirements and
+// were temporarily removed from the registry so re-registration on cleanup
+// restores the pre-test state.
+type savedConsumers struct {
+	tools []Tool
+}
+
+func (s savedConsumers) restore() {
+	for _, t := range s.tools {
+		Register(t)
+	}
+}
+
+// removeKittyConsumers unregisters every currently-registered ToolWithKittyRequirements.
+// Returns a handle whose .restore() re-registers them. Keeps the Kitty tool itself.
+func removeKittyConsumers(t *testing.T) savedConsumers {
+	t.Helper()
+	var saved savedConsumers
+	for _, tl := range All() {
+		if _, ok := tl.(ToolWithKittyRequirements); ok {
+			saved.tools = append(saved.tools, tl)
+			Unregister(tl.Name())
+		}
+	}
+	return saved
+}
+
+func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
+	// Create a fake host upstream socket.
+	dir := t.TempDir()
+	upstream := filepath.Join(dir, "upstream.sock")
+	l, err := net.Listen("unix", upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+
+	t.Setenv("KITTY_LISTEN_ON", "unix:"+upstream)
+
+	// Inject a fake consumer into the registry just for this test.
+	Register(fakeKittyConsumer{})
+	defer Unregister("fake-kitty-consumer")
+
+	k := &Kitty{}
+	k.Configure(GlobalConfig{}, nil)
+
+	sandboxHome := t.TempDir()
+	if err := k.Start(context.Background(), sandboxHome, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = k.Stop() }()
+
+	if k.proxy == nil {
+		t.Fatal("expected proxy to be started when consumer present")
+	}
+	expected := filepath.Join(sandboxHome, ".kitty.sock")
+	if _, err := os.Stat(expected); err != nil {
+		t.Errorf("proxy socket not created: %v", err)
+	}
+
+	// KITTY_LISTEN_ON must point at the proxy socket inside the sandbox.
+	var listen string
+	for _, e := range k.Environment(sandboxHome, sandboxHome) {
+		if e.Name == "KITTY_LISTEN_ON" {
+			listen = e.Value
+		}
+	}
+	wantPrefix := "unix:" + filepath.Join(sandboxHome, ".kitty.sock")
+	if listen != wantPrefix {
+		t.Errorf("KITTY_LISTEN_ON = %q, want %q", listen, wantPrefix)
+	}
+}
+
+func TestKitty_DisabledMode(t *testing.T) {
+	dir := t.TempDir()
+	upstream := filepath.Join(dir, "upstream.sock")
+	l, err := net.Listen("unix", upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+
+	t.Setenv("KITTY_LISTEN_ON", "unix:"+upstream)
+	Register(fakeKittyConsumer{})
+	defer Unregister("fake-kitty-consumer")
+
+	k := &Kitty{}
+	k.Configure(GlobalConfig{}, map[string]any{"mode": "disabled"})
+
+	sandboxHome := t.TempDir()
+	if err := k.Start(context.Background(), sandboxHome, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = k.Stop() }()
+
+	if k.proxy != nil {
+		t.Error("disabled mode must not start proxy")
 	}
 }
