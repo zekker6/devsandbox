@@ -5,11 +5,25 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+// shortSocketDir returns a tempdir whose path is short enough for a UNIX
+// domain socket beneath it to fit within macOS's 104-byte sun_path limit.
+// t.TempDir() on macOS lives under /var/folders/... and easily exceeds it.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
 
 // fakeUpstream listens on a UDS and replies with canned responses keyed by cmd.
 type fakeUpstream struct {
@@ -134,7 +148,7 @@ func roundTrip(t *testing.T, sockPath string, payload []byte) []byte {
 }
 
 func TestProxy_AllowsAndForwards(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	upstreamPath := filepath.Join(dir, "upstream.sock")
 	listenPath := filepath.Join(dir, "proxy.sock")
 
@@ -177,7 +191,7 @@ func TestProxy_AllowsAndForwards(t *testing.T) {
 }
 
 func TestProxy_DeniesAndLogs(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	upstreamPath := filepath.Join(dir, "upstream.sock")
 	listenPath := filepath.Join(dir, "proxy.sock")
 
@@ -237,7 +251,7 @@ func TestProxy_DeniesAndLogs(t *testing.T) {
 }
 
 func TestProxy_OwnershipEnablesClose(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	upstreamPath := filepath.Join(dir, "upstream.sock")
 	listenPath := filepath.Join(dir, "proxy.sock")
 

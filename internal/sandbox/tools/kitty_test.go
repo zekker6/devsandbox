@@ -11,6 +11,19 @@ import (
 	"devsandbox/internal/kittyproxy"
 )
 
+// shortSocketDir returns a tempdir whose path is short enough for a UNIX
+// domain socket beneath it to fit within macOS's 104-byte sun_path limit.
+// t.TempDir() on macOS lives under /var/folders/... and easily exceeds it.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // fakeKittyConsumer is a Tool that declares CapLaunchOverlay so we can test
 // aggregation without depending on the real revdiff tool.
 type fakeKittyConsumer struct{}
@@ -106,7 +119,7 @@ func removeKittyConsumers(t *testing.T) savedConsumers {
 
 func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
 	// Create a fake host upstream socket.
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	upstream := filepath.Join(dir, "upstream.sock")
 	l, err := net.Listen("unix", upstream)
 	if err != nil {
@@ -123,7 +136,8 @@ func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
 	k := &Kitty{}
 	k.Configure(GlobalConfig{}, nil)
 
-	sandboxHome := t.TempDir()
+	// sandboxHome must also be short: kitty's proxy listens at <sandboxHome>/.kitty.sock.
+	sandboxHome := shortSocketDir(t)
 	if err := k.Start(context.Background(), sandboxHome, sandboxHome); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -151,7 +165,7 @@ func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
 }
 
 func TestKitty_DisabledMode(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	upstream := filepath.Join(dir, "upstream.sock")
 	l, err := net.Listen("unix", upstream)
 	if err != nil {
