@@ -7,46 +7,48 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"sync"
-	"time"
+
+	"devsandbox/internal/socketproxy"
 )
 
 // Logger matches dockerproxy.Logger and the existing tools.ErrorLogger.
-type Logger interface {
-	LogErrorf(component, format string, args ...any)
-	LogInfof(component, format string, args ...any)
-}
+type Logger = socketproxy.Logger
 
 // Proxy is a filtering proxy for the kitty remote-control socket.
 type Proxy struct {
 	upstreamPath string
-	listenPath   string
 
 	filter *Filter
 	owned  *OwnedSet
 
-	listener net.Listener
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	logger   Logger
+	server *socketproxy.Server
+	logger Logger
 }
 
 // New creates a proxy that listens at listenPath and forwards approved frames
 // to upstreamPath. The filter and owned set must be non-nil and shared with the
 // caller (the caller may inspect owned for tests).
 func New(upstreamPath, listenPath string, filter *Filter, owned *OwnedSet) *Proxy {
-	return &Proxy{
+	p := &Proxy{
 		upstreamPath: upstreamPath,
-		listenPath:   listenPath,
 		filter:       filter,
 		owned:        owned,
 	}
+	p.server = socketproxy.NewServer(listenPath, 0o600, "kitty-proxy", p.handle)
+	return p
 }
 
 // SetLogger sets the logger used for allow/deny records and errors.
-func (p *Proxy) SetLogger(l Logger) { p.logger = l }
+func (p *Proxy) SetLogger(l Logger) {
+	p.logger = l
+	p.server.SetLogger(l)
+}
+
+// Start begins listening. Returns an error if the socket cannot be created.
+func (p *Proxy) Start(ctx context.Context) error { return p.server.Start(ctx) }
+
+// Stop gracefully shuts down the proxy.
+func (p *Proxy) Stop() error { return p.server.Stop() }
 
 func (p *Proxy) logErr(format string, args ...any) {
 	if p.logger != nil {
@@ -59,64 +61,7 @@ func (p *Proxy) logInf(format string, args ...any) {
 	}
 }
 
-// Start begins listening. Returns an error if the socket cannot be created.
-func (p *Proxy) Start(ctx context.Context) error {
-	_ = os.Remove(p.listenPath)
-	l, err := net.Listen("unix", p.listenPath)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", p.listenPath, err)
-	}
-	if err := os.Chmod(p.listenPath, 0o600); err != nil {
-		_ = l.Close()
-		return fmt.Errorf("chmod %s: %w", p.listenPath, err)
-	}
-	p.listener = l
-	p.ctx, p.cancel = context.WithCancel(ctx)
-	p.wg.Add(1)
-	go p.acceptLoop()
-	return nil
-}
-
-// Stop gracefully shuts down the proxy.
-func (p *Proxy) Stop() error {
-	if p.cancel != nil {
-		p.cancel()
-	}
-	if p.listener != nil {
-		_ = p.listener.Close()
-	}
-	done := make(chan struct{})
-	go func() { p.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		return nil
-	case <-time.After(5 * time.Second):
-		return fmt.Errorf("kitty-proxy: timeout waiting for connections")
-	}
-}
-
-func (p *Proxy) acceptLoop() {
-	defer p.wg.Done()
-	for {
-		conn, err := p.listener.Accept()
-		if err != nil {
-			select {
-			case <-p.ctx.Done():
-				return
-			default:
-				p.logErr("accept: %v", err)
-				continue
-			}
-		}
-		p.wg.Add(1)
-		go p.handle(conn)
-	}
-}
-
-func (p *Proxy) handle(conn net.Conn) {
-	defer p.wg.Done()
-	defer func() { _ = conn.Close() }()
-
+func (p *Proxy) handle(_ context.Context, conn net.Conn) {
 	r := bufio.NewReader(conn)
 	payload, err := ReadFrame(r)
 	if err != nil {

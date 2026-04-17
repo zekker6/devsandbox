@@ -3,137 +3,59 @@ package dockerproxy
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"sync"
-	"time"
 
+	"devsandbox/internal/socketproxy"
 	"golang.org/x/sync/errgroup"
 )
 
 // Logger is an interface for logging proxy events.
 // This is compatible with logging.ErrorLogger.
-type Logger interface {
-	LogErrorf(component, format string, args ...any)
-	LogInfof(component, format string, args ...any)
-}
+type Logger = socketproxy.Logger
 
 // Proxy is a filtering proxy for the Docker socket.
 // It logs errors to the provided logger if set, otherwise errors are silent.
 type Proxy struct {
 	hostSocket string
-	listenPath string
-	listener   net.Listener
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
+	server     *socketproxy.Server
 	logger     Logger
 }
 
 // New creates a new Docker socket proxy.
 func New(hostSocket, listenPath string) *Proxy {
-	return &Proxy{
-		hostSocket: hostSocket,
-		listenPath: listenPath,
-	}
+	p := &Proxy{hostSocket: hostSocket}
+	p.server = socketproxy.NewServer(listenPath, 0o666, "docker-proxy", p.handleConnection)
+	return p
 }
 
 // SetLogger sets the logger for proxy errors.
 // If nil, errors are not logged.
 func (p *Proxy) SetLogger(logger Logger) {
 	p.logger = logger
+	p.server.SetLogger(logger)
 }
 
-// logError logs an error if a logger is configured.
+// Start begins listening and proxying requests.
+func (p *Proxy) Start(ctx context.Context) error { return p.server.Start(ctx) }
+
+// Stop gracefully shuts down the proxy.
+func (p *Proxy) Stop() error { return p.server.Stop() }
+
 func (p *Proxy) logError(format string, args ...any) {
 	if p.logger != nil {
 		p.logger.LogErrorf("docker-proxy", format, args...)
 	}
 }
 
-// logInfo logs an info message if a logger is configured.
 func (p *Proxy) logInfo(format string, args ...any) {
 	if p.logger != nil {
 		p.logger.LogInfof("docker-proxy", format, args...)
 	}
 }
 
-// Start begins listening and proxying requests.
-func (p *Proxy) Start(ctx context.Context) error {
-	// Remove existing socket if present
-	_ = os.Remove(p.listenPath)
-
-	listener, err := net.Listen("unix", p.listenPath)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", p.listenPath, err)
-	}
-	p.listener = listener
-
-	// Make socket accessible
-	if err := os.Chmod(p.listenPath, 0o666); err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("failed to chmod socket: %w", err)
-	}
-
-	p.ctx, p.cancel = context.WithCancel(ctx)
-
-	p.wg.Add(1)
-	go p.acceptLoop()
-
-	return nil
-}
-
-// Stop gracefully shuts down the proxy.
-func (p *Proxy) Stop() error {
-	if p.cancel != nil {
-		p.cancel()
-	}
-	if p.listener != nil {
-		_ = p.listener.Close()
-	}
-
-	// Wait for connections to drain with timeout
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-time.After(5 * time.Second):
-		return fmt.Errorf("timeout waiting for connections to close")
-	}
-}
-
-func (p *Proxy) acceptLoop() {
-	defer p.wg.Done()
-
-	for {
-		conn, err := p.listener.Accept()
-		if err != nil {
-			select {
-			case <-p.ctx.Done():
-				return
-			default:
-				p.logError("failed to accept connection: %v", err)
-				continue
-			}
-		}
-
-		p.wg.Add(1)
-		go p.handleConnection(conn)
-	}
-}
-
-func (p *Proxy) handleConnection(conn net.Conn) {
-	defer p.wg.Done()
-	defer func() { _ = conn.Close() }()
-
+func (p *Proxy) handleConnection(_ context.Context, conn net.Conn) {
 	// Parse HTTP request
 	reader := bufio.NewReader(conn)
 	req, err := http.ReadRequest(reader)
