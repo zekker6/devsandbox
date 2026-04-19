@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.13.1] - 2026-04-18
+
+### Fixed
+
+- `revdiff` tool no longer wipes its shared IPC directory on `Start`/`Stop`. Because the dir is exported as `$TMPDIR` for every sandboxed process, long-lived tenants (Claude Code's per-session task cache under `$TMPDIR/claude-<uid>/…/tasks/`, Node's compile cache, Go's build cache) populate subtrees that must survive sandbox restarts for the same project — and parallel sandboxes on the same project share the directory, so wiping it from one tore state out from under the others. The old `RemoveAll` on `Start` could yank state out from under a running caller; Node's non-recursive `fs.mkdirSync` then failed with `ENOENT`, breaking every subsequent Claude Code Bash tool call. `Start` now only ensures the dir exists (0700); `Stop` is a no-op. Stale revdiff sentinels are harmless — the launcher uses `mktemp` with fresh names.
+
 ## [v0.13.0] - 2026-04-17
 
 ### Added
@@ -18,7 +24,6 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - macOS: shortened test directory names to stay under the platform's unix socket path length limit (affected `kittyproxy` and `kitty` tool tests).
-- `revdiff` tool no longer wipes its shared IPC directory on `Start`/`Stop`. Because the dir is exported as `$TMPDIR` for every sandboxed process, long-lived tenants (Claude Code's per-session task cache under `$TMPDIR/claude-<uid>/…/tasks/`, Node's compile cache, Go's build cache) populate subtrees that must survive sandbox restarts for the same project. The old `RemoveAll` on `Start` could yank state out from under a running caller; Node's non-recursive `fs.mkdirSync` then failed with `ENOENT`, breaking every subsequent Claude Code Bash tool call. `Start` now only ensures the dir exists (0700); `Stop` is a no-op. Stale revdiff sentinels are harmless — the launcher uses `mktemp` with fresh names.
 
 ## [v0.12.0] - 2026-04-16
 
