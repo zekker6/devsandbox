@@ -63,6 +63,19 @@ func TestRevdiff_LaunchPatternsAcceptRevdiff(t *testing.T) {
 	if check([]string{"sh", "-c", evil}) {
 		t.Error("extra command after sentinel must not match")
 	}
+
+	// revdiff launcher v0.8.0+ wraps its command with `/usr/bin/env KEY=VAL ...`
+	// so the kitty-spawned overlay inherits EDITOR/VISUAL from the caller shell.
+	envWrapped := `'/usr/bin/env' 'EDITOR=nvim' 'VISUAL=nvim' '/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc'; touch '/tmp/revdiff-done-xyz'`
+	if !check([]string{"sh", "-c", envWrapped}) {
+		t.Error("env-wrapped revdiff launcher sentinel form should match")
+	}
+
+	// Same attacker append rejection for the env-wrapped form.
+	envEvil := `'/usr/bin/env' 'EDITOR=nvim' '/bin/cat' '/etc/passwd'; touch '/tmp/revdiff-done-xyz'`
+	if check([]string{"sh", "-c", envEvil}) {
+		t.Error("env-wrapped non-revdiff program must not match")
+	}
 }
 
 // expectedIpcPath mirrors the production path formula so assertion drift is

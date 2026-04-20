@@ -101,6 +101,10 @@ func (r *Revdiff) KittyLaunchPatterns() []kittyproxy.CommandPattern {
 		// produced by the upstream revdiff kitty launcher to signal completion
 		// back to the sandbox via a sentinel file.
 		{Program: "sh", ArgsMatcher: kittyproxy.MatchShellExecSentinel(innerRevdiff)},
+		// Same sentinel form but with a leading `/usr/bin/env KEY=VAL ...`
+		// prefix; emitted by the launcher (v0.8.0+) when EDITOR/VISUAL are
+		// set on the caller's shell so the overlay inherits them.
+		{Program: "sh", ArgsMatcher: kittyproxy.MatchShellExecEnvSentinel(innerRevdiff)},
 	}
 }
 

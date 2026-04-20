@@ -157,6 +157,84 @@ func MatchShellExecSentinel(inner CommandPattern) func([]string) bool {
 	}
 }
 
+// envVarNameRe accepts POSIX-safe env var names: leading letter/underscore,
+// then letters/digits/underscores. Case-sensitive uppercase only — the
+// launcher's ENV_PREFIX block only emits EDITOR/VISUAL, and restricting to
+// upper keeps the attack surface from pattern-abuse narrower.
+var envVarNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+// MatchShellExecEnvSentinel accepts the form:
+//
+//	["-c", "'/usr/bin/env' 'KEY=VAL' ... '<prog>' '<arg>'...; touch '<sentinel>'"]
+//
+// It is a narrow extension of MatchShellExecSentinel that tolerates an
+// `/usr/bin/env KEY=VAL ...` prefix before the inner program. The revdiff
+// launcher injects this wrapper (v0.8.0+) so the kitty-spawned overlay
+// inherits EDITOR/VISUAL from the caller's login shell.
+//
+// Rules:
+//   - argv[0] must basename-match "env".
+//   - Zero or more leading tokens shaped `KEY=VAL` where KEY matches
+//     envVarNameRe. Values can be any bytes parseSingleQuotedArgv allows
+//     (no backslash, quotes, or control characters).
+//   - The remaining tokens (at least one) form the inner argv and must
+//     satisfy inner.
+//   - The sentinel tail rules (path shape, canonicalization, no shell meta)
+//     are identical to MatchShellExecSentinel.
+func MatchShellExecEnvSentinel(inner CommandPattern) func([]string) bool {
+	return func(args []string) bool {
+		if len(args) != 2 || args[0] != "-c" {
+			return false
+		}
+		script := strings.TrimSpace(args[1])
+		if rest, ok := strings.CutPrefix(script, "exec "); ok {
+			script = strings.TrimLeft(rest, " ")
+		}
+		head, tailRaw, ok := strings.Cut(script, "; touch ")
+		if !ok {
+			return false
+		}
+		tail := strings.TrimSpace(tailRaw)
+
+		argv, ok := parseSingleQuotedArgv(head)
+		if !ok {
+			return false
+		}
+		if len(argv) == 0 || filepath.Base(argv[0]) != "env" {
+			return false
+		}
+
+		i := 1
+		for i < len(argv) {
+			tok := argv[i]
+			eq := strings.IndexByte(tok, '=')
+			if eq <= 0 {
+				break
+			}
+			if !envVarNameRe.MatchString(tok[:eq]) {
+				return false
+			}
+			i++
+		}
+		innerArgv := argv[i:]
+		if len(innerArgv) == 0 {
+			return false
+		}
+		if !inner.MatchesArgv(innerArgv) {
+			return false
+		}
+
+		sentinel, ok := unwrapSingleQuoted(tail)
+		if !ok {
+			return false
+		}
+		if !sentinelPathRe.MatchString(sentinel) {
+			return false
+		}
+		return filepath.Clean(sentinel) == sentinel
+	}
+}
+
 // parseSingleQuotedArgv parses a whitespace-separated sequence of single-quoted
 // tokens. Each token must start and end with a single quote and contain no
 // embedded single quotes, backslashes, or control characters. Returns the
