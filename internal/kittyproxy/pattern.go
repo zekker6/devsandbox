@@ -196,15 +196,32 @@ func MatchShellExecEnvSentinel(inner CommandPattern) func([]string) bool {
 		}
 		tail := strings.TrimSpace(tailRaw)
 
+		// The upstream revdiff launcher emits the `env` program unquoted:
+		//   /usr/bin/env 'EDITOR=nvim' '/path/to/revdiff' ...
+		// Strip the literal `/usr/bin/env ` prefix if present so the rest of
+		// the head parses as pure single-quoted argv. Restricting the
+		// unquoted form to this exact absolute path avoids PATH-relative
+		// lookup attacks.
+		envConsumed := false
+		if rest, ok := strings.CutPrefix(head, "/usr/bin/env "); ok {
+			head = rest
+			envConsumed = true
+		}
+
 		argv, ok := parseSingleQuotedArgv(head)
 		if !ok {
 			return false
 		}
-		if len(argv) == 0 || filepath.Base(argv[0]) != "env" {
-			return false
+		if !envConsumed {
+			if len(argv) == 0 || filepath.Base(argv[0]) != "env" {
+				return false
+			}
 		}
 
-		i := 1
+		i := 0
+		if !envConsumed {
+			i = 1
+		}
 		for i < len(argv) {
 			tok := argv[i]
 			eq := strings.IndexByte(tok, '=')

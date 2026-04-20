@@ -76,6 +76,33 @@ func TestRevdiff_LaunchPatternsAcceptRevdiff(t *testing.T) {
 	if check([]string{"sh", "-c", envEvil}) {
 		t.Error("env-wrapped non-revdiff program must not match")
 	}
+
+	// The actual launcher emits `/usr/bin/env` unquoted (only ENV_PREFIX and
+	// the inner argv are single-quoted). Matching must accept this shape too.
+	envUnquoted := `/usr/bin/env 'EDITOR=nvim' 'VISUAL=nvim' '/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc'; touch '/tmp/revdiff-done-xyz'`
+	if !check([]string{"sh", "-c", envUnquoted}) {
+		t.Error("unquoted-env revdiff launcher sentinel form should match")
+	}
+
+	// The unquoted-env form must still reject non-revdiff inner programs.
+	envUnquotedEvil := `/usr/bin/env 'EDITOR=nvim' '/bin/cat' '/etc/passwd'; touch '/tmp/revdiff-done-xyz'`
+	if check([]string{"sh", "-c", envUnquotedEvil}) {
+		t.Error("unquoted-env non-revdiff program must not match")
+	}
+
+	// Bare `env` (PATH-relative) must not match when unquoted — only the
+	// literal `/usr/bin/env` absolute prefix the launcher emits is accepted,
+	// so attackers can't rely on $PATH shadowing.
+	envBarePath := `env 'EDITOR=nvim' '/usr/local/bin/revdiff' '--output=/tmp/x'; touch '/tmp/revdiff-done-xyz'`
+	if check([]string{"sh", "-c", envBarePath}) {
+		t.Error("bare `env` (no absolute path) must not match")
+	}
+
+	// An unquoted first token that isn't `/usr/bin/env` must not match.
+	envUnquotedWrongProg := `/bin/curl 'EDITOR=nvim' '/usr/local/bin/revdiff' '--output=/tmp/x'; touch '/tmp/revdiff-done-xyz'`
+	if check([]string{"sh", "-c", envUnquotedWrongProg}) {
+		t.Error("unquoted first token must be /usr/bin/env only")
+	}
 }
 
 // expectedIpcPath mirrors the production path formula so assertion drift is

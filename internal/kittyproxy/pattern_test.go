@@ -171,6 +171,11 @@ func TestMatchShellExecEnvSentinel_AcceptsEnvWrappedRevdiffLauncherShape(t *test
 		// version could collapse to `env revdiff ...`. Accepting this costs
 		// nothing and keeps the matcher robust.
 		`'/usr/bin/env' 'revdiff' '--staged'; touch '/tmp/revdiff-done-3'`,
+		// Actual launcher output (v0.8.0+): `/usr/bin/env` is left unquoted
+		// while every subsequent token is single-quoted. Must match.
+		`/usr/bin/env 'EDITOR=nvim' 'VISUAL=nvim' '/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc'; touch '/tmp/revdiff-done-xyz'`,
+		`/usr/bin/env 'EDITOR=nvim' 'revdiff' '--staged'; touch '/tmp/revdiff-done-4'`,
+		`/usr/bin/env 'revdiff' '--staged'; touch '/tmp/revdiff-done-5'`,
 	}
 	for _, script := range cases {
 		t.Run(script, func(t *testing.T) {
@@ -209,6 +214,18 @@ func TestMatchShellExecEnvSentinel_RejectsAttacks(t *testing.T) {
 		`'/usr/bin/env' 'EDITOR=nvim' 'revdiff'; touch '/tmp/../etc/passwd'`,
 		// env prefix followed by a wrapping sh (nested shell).
 		`'/usr/bin/env' 'EDITOR=nvim' 'sh' '-c' 'revdiff'; touch '/tmp/revdiff-done-x'`,
+		// Unquoted form: only the literal `/usr/bin/env ` prefix is
+		// accepted. Bare `env` (PATH-relative) must be rejected so attackers
+		// can't shadow `env` via $PATH.
+		`env 'EDITOR=nvim' 'revdiff' '--staged'; touch '/tmp/revdiff-done-x'`,
+		// Unquoted form: a non-env absolute path must be rejected.
+		`/bin/curl 'EDITOR=nvim' 'revdiff' '--staged'; touch '/tmp/revdiff-done-x'`,
+		// Unquoted form: /usr/bin/env wrapping a non-revdiff inner program
+		// must still be rejected.
+		`/usr/bin/env 'EDITOR=nvim' '/bin/cat' '/etc/passwd'; touch '/tmp/revdiff-done-x'`,
+		// Unquoted form: symlink-like path ending in /env must be rejected —
+		// the prefix check is exact, not basename-matched.
+		`/tmp/evil/env 'EDITOR=nvim' 'revdiff'; touch '/tmp/revdiff-done-x'`,
 	}
 	for _, script := range rejects {
 		t.Run(script, func(t *testing.T) {
