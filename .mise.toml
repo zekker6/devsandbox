@@ -2,5 +2,5 @@
 go = "1.26.2"
 task = "3.50.0"
 golangci-lint = "2.11.4"
-goreleaser = "2.15.3"
+goreleaser = "2.15.4"
 pre-commit = "4.6.0"
