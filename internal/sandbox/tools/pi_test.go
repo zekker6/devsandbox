@@ -30,6 +30,8 @@ func TestPi_Available_NoBinary(t *testing.T) {
 }
 
 func TestPi_Bindings_Paths(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+
 	homeDir := "/home/test"
 	sandboxHome := "/tmp/sandbox"
 
@@ -70,10 +72,75 @@ func TestPi_Bindings_Paths(t *testing.T) {
 }
 
 func TestPi_Environment(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+
 	p := &Pi{}
 	envVars := p.Environment("/home/test", "/tmp/sandbox")
 	if len(envVars) != 0 {
 		t.Errorf("Environment() should return nil/empty, got %v", envVars)
+	}
+}
+
+func TestPi_Bindings_CustomAgentDir(t *testing.T) {
+	customDir := "/etc/pi-agent"
+	t.Setenv("PI_CODING_AGENT_DIR", customDir)
+
+	p := &Pi{}
+	bindings := p.Bindings("/home/test", "/tmp/sandbox")
+
+	defaultAgentDir := filepath.Join("/home/test", ".pi", "agent")
+	expectedSessionsDir := filepath.Join(customDir, "sessions")
+
+	var foundCustom, foundCustomSessions, foundDefault bool
+	for _, b := range bindings {
+		switch b.Source {
+		case customDir:
+			foundCustom = true
+			if b.Category != CategoryConfig {
+				t.Errorf("custom agent dir binding: want category %q, got %q", CategoryConfig, b.Category)
+			}
+			if !b.Optional {
+				t.Error("custom agent dir binding should be optional")
+			}
+		case expectedSessionsDir:
+			foundCustomSessions = true
+			if b.Category != CategoryData {
+				t.Errorf("custom sessions binding: want category %q, got %q", CategoryData, b.Category)
+			}
+		case defaultAgentDir:
+			foundDefault = true
+		}
+	}
+
+	if !foundCustom {
+		t.Error("expected PI_CODING_AGENT_DIR binding when env var is set")
+	}
+	if !foundCustomSessions {
+		t.Error("expected sessions/ subdirectory of PI_CODING_AGENT_DIR to be bound")
+	}
+	if foundDefault {
+		t.Error("default ~/.pi/agent should NOT be mounted when PI_CODING_AGENT_DIR is set")
+	}
+}
+
+func TestPi_Environment_WithCustomAgentDir(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", "/etc/pi-agent")
+
+	p := &Pi{}
+	envVars := p.Environment("/home/test", "/tmp/sandbox")
+
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "PI_CODING_AGENT_DIR" {
+			found = true
+			if !env.FromHost {
+				t.Error("PI_CODING_AGENT_DIR should use FromHost so the host value reaches the sandbox")
+			}
+		}
+	}
+
+	if !found {
+		t.Error("expected PI_CODING_AGENT_DIR env var when it is set on the host")
 	}
 }
 

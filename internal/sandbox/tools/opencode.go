@@ -12,6 +12,11 @@ func init() {
 
 // OpenCode provides OpenCode AI tool integration.
 // Mounts OpenCode config, data, and cache directories read-write.
+//
+// OPENCODE_CONFIG_DIR is loaded by opencode in addition to the standard
+// ~/.config/opencode directory (it does not replace it). When set, the host
+// value is passed through to the sandbox and the directory is mounted so
+// opencode finds the same agents/commands/modes/plugins inside.
 type OpenCode struct{}
 
 func (o *OpenCode) Name() string {
@@ -22,12 +27,20 @@ func (o *OpenCode) Description() string {
 	return "OpenCode AI assistant"
 }
 
+// extraConfigDir returns OPENCODE_CONFIG_DIR if set, or empty string.
+func (o *OpenCode) extraConfigDir() string {
+	return os.Getenv("OPENCODE_CONFIG_DIR")
+}
+
 func (o *OpenCode) Available(homeDir string) bool {
 	// Check if opencode directories exist
 	paths := []string{
 		filepath.Join(homeDir, ".config", "opencode"),
 		filepath.Join(homeDir, ".local", "share", "opencode"),
 		filepath.Join(homeDir, ".cache", "opencode"),
+	}
+	if dir := o.extraConfigDir(); dir != "" {
+		paths = append(paths, dir)
 	}
 
 	for _, p := range paths {
@@ -40,7 +53,7 @@ func (o *OpenCode) Available(homeDir string) bool {
 }
 
 func (o *OpenCode) Bindings(homeDir, sandboxHome string) []Binding {
-	return []Binding{
+	bindings := []Binding{
 		// OpenCode configuration
 		{
 			Source:   filepath.Join(homeDir, ".config", "opencode"),
@@ -66,9 +79,24 @@ func (o *OpenCode) Bindings(homeDir, sandboxHome string) []Binding {
 			Optional: true,
 		},
 	}
+
+	if dir := o.extraConfigDir(); dir != "" {
+		bindings = append(bindings, Binding{
+			Source:   dir,
+			Category: CategoryConfig,
+			Optional: true,
+		})
+	}
+
+	return bindings
 }
 
 func (o *OpenCode) Environment(homeDir, sandboxHome string) []EnvVar {
+	if o.extraConfigDir() != "" {
+		return []EnvVar{
+			{Name: "OPENCODE_CONFIG_DIR", FromHost: true},
+		}
+	}
 	return nil
 }
 
@@ -92,6 +120,9 @@ func (o *OpenCode) Check(homeDir string) CheckResult {
 		filepath.Join(homeDir, ".config", "opencode"),
 		filepath.Join(homeDir, ".local", "share", "opencode"),
 		filepath.Join(homeDir, ".cache", "opencode"),
+	}
+	if dir := o.extraConfigDir(); dir != "" {
+		configPaths = append(configPaths, dir)
 	}
 
 	for _, p := range configPaths {
