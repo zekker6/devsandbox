@@ -203,6 +203,7 @@ type PruneOptions struct {
 	All       bool          // Remove all sandboxes
 	Keep      int           // Keep N most recently used sandboxes
 	OlderThan time.Duration // Remove sandboxes not used in this duration
+	Orphaned  bool          // Restrict pruning to orphaned sandboxes only
 	DryRun    bool          // Don't actually remove, just report
 }
 
@@ -228,8 +229,14 @@ func SelectForPruning(sandboxes []*Metadata, opts PruneOptions) []*Metadata {
 			continue
 		}
 
-		// If --all, include everything (except active, handled above)
-		if opts.All {
+		// --orphaned restricts the candidate set across all other selectors.
+		if opts.Orphaned && !m.Orphaned {
+			continue
+		}
+
+		// If --all (or --orphaned alone), include everything that survived
+		// the filters above.
+		if opts.All || (opts.Orphaned && opts.Keep == 0 && opts.OlderThan == 0) {
 			toPrune = append(toPrune, m)
 			continue
 		}

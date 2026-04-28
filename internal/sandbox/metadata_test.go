@@ -291,6 +291,51 @@ func TestFormatSize(t *testing.T) {
 	}
 }
 
+func TestSelectForPruning_OrphanedFlag(t *testing.T) {
+	now := time.Now()
+	sandboxes := []*Metadata{
+		{Name: "live-recent", Orphaned: false, LastUsed: now.Add(-1 * time.Hour)},
+		{Name: "live-old", Orphaned: false, LastUsed: now.Add(-72 * time.Hour)},
+		{Name: "orphan-recent", Orphaned: true, LastUsed: now.Add(-2 * time.Hour)},
+		{Name: "orphan-old", Orphaned: true, LastUsed: now.Add(-72 * time.Hour)},
+	}
+
+	// --orphaned alone: every orphan, regardless of age.
+	toPrune := SelectForPruning(sandboxes, PruneOptions{Orphaned: true})
+	if len(toPrune) != 2 {
+		t.Fatalf("Expected 2 orphans to prune with --orphaned, got %d", len(toPrune))
+	}
+	for _, s := range toPrune {
+		if !s.Orphaned {
+			t.Errorf("--orphaned selected non-orphan %s", s.Name)
+		}
+	}
+
+	// --orphaned --older-than: intersection only.
+	toPrune = SelectForPruning(sandboxes, PruneOptions{
+		Orphaned:  true,
+		OlderThan: 24 * time.Hour,
+	})
+	if len(toPrune) != 1 || toPrune[0].Name != "orphan-old" {
+		names := make([]string, len(toPrune))
+		for i, s := range toPrune {
+			names[i] = s.Name
+		}
+		t.Errorf("Expected only orphan-old, got %v", names)
+	}
+
+	// --orphaned --all: every orphan still.
+	toPrune = SelectForPruning(sandboxes, PruneOptions{Orphaned: true, All: true})
+	if len(toPrune) != 2 {
+		t.Errorf("Expected 2 with --orphaned --all, got %d", len(toPrune))
+	}
+	for _, s := range toPrune {
+		if !s.Orphaned {
+			t.Errorf("--orphaned --all selected non-orphan %s", s.Name)
+		}
+	}
+}
+
 func TestSelectForPruning_SkipsActive(t *testing.T) {
 	sandboxes := []*Metadata{
 		{Name: "active", Active: true, Orphaned: true},

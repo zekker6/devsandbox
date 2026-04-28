@@ -124,6 +124,7 @@ func newPruneCmd() *cobra.Command {
 		all       bool
 		keep      int
 		olderThan string
+		orphaned  bool
 		dryRun    bool
 		force     bool
 		volumes   bool
@@ -135,12 +136,15 @@ func newPruneCmd() *cobra.Command {
 		Long: `Remove sandbox instances based on various criteria.
 
 Without any flags, only orphaned sandboxes (where the original project
-directory no longer exists) are removed.`,
-		Example: `  devsandbox sandboxes prune                   # Remove orphaned only
-  devsandbox sandboxes prune --all --volumes    # Remove all sandboxes and volumes
-  devsandbox sandboxes prune --keep 5           # Keep 5 most recently used
-  devsandbox sandboxes prune --older-than 30d   # Remove unused for 30 days
-  devsandbox sandboxes prune --dry-run          # Show what would be removed`,
+directory no longer exists) are removed. Pass --orphaned to restrict any
+other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
+		Example: `  devsandbox sandboxes prune                       # Remove orphaned only
+  devsandbox sandboxes prune --orphaned             # Same, explicit
+  devsandbox sandboxes prune --all --volumes        # Remove all sandboxes and volumes
+  devsandbox sandboxes prune --keep 5               # Keep 5 most recently used
+  devsandbox sandboxes prune --older-than 30d       # Remove unused for 30 days
+  devsandbox sandboxes prune --orphaned --older-than 30d  # Orphaned and unused for 30d
+  devsandbox sandboxes prune --dry-run              # Show what would be removed`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
@@ -177,6 +181,7 @@ directory no longer exists) are removed.`,
 				All:       all,
 				Keep:      keep,
 				OlderThan: duration,
+				Orphaned:  orphaned,
 				DryRun:    dryRun,
 			}
 
@@ -315,6 +320,7 @@ directory no longer exists) are removed.`,
 	cmd.Flags().BoolVar(&volumes, "volumes", false, "Also remove associated Docker volumes")
 	cmd.Flags().IntVar(&keep, "keep", 0, "Keep N most recently used sandboxes")
 	cmd.Flags().StringVar(&olderThan, "older-than", "", "Remove sandboxes not used in duration (e.g., 30d, 2w)")
+	cmd.Flags().BoolVar(&orphaned, "orphaned", false, "Restrict pruning to orphaned sandboxes only")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be removed without removing")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
 
