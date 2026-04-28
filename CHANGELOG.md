@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.14.1] - 2026-04-28
+
+### Changed
+
+- **`zellij` tool is now disabled by default.** Unlike `kitty`, the zellij socket has no capability filtering — exposing it lets sandboxed code drive the host multiplexer (run commands in any pane, read pane contents, etc.). Auto-detection of an active `ZELLIJ` session no longer mounts the socket or forwards `ZELLIJ*` env vars on its own. Set `[tools.zellij] enabled = true` to opt back in. `devsandbox tools check zellij` reports the opt-in requirement.
+
+## [v0.14.0] - 2026-04-27
+
+### Added
+
+- `codex`, `opencode`, and `pi` tools now honor their respective custom config-location env vars on the host and forward them into the sandbox so the CLIs resolve the same paths inside:
+  - `codex`: `CODEX_HOME` overrides `~/.codex`. When set, the host value is passed through and the directory is mounted at the same path.
+  - `opencode`: `OPENCODE_CONFIG_DIR` is mounted in addition to (not in place of) `~/.config/opencode`, matching opencode's load semantics; the env var is forwarded.
+  - `pi`: `PI_CODING_AGENT_DIR` overrides `~/.pi/agent`. The agent dir is still tmpoverlayed (settings/credentials are write-discarded) and the `sessions/` subdirectory is still persisted; the env var is forwarded.
+
+## [v0.13.3] - 2026-04-20
+
+### Fixed
+
+- `kitty` proxy revdiff launch pattern now accepts the unquoted `/usr/bin/env ` prefix the launcher actually emits (only `ENV_PREFIX` assignments and the inner argv are single-quoted). The literal absolute path is required — bare `env` (PATH-relative) still rejects, so `$PATH` shadowing can't be used to bypass the inner-program check.
+
+## [v0.13.2] - 2026-04-20
+
+### Fixed
+
+- `kitty` proxy revdiff launch pattern: added `MatchShellExecEnvSentinel`, accepting `sh -c "'/usr/bin/env' 'KEY=VAL' ... '<prog>' '<arg>'...; touch '<sentinel>'"`. The revdiff launcher injects an `env` wrapper so the kitty-spawned overlay inherits `EDITOR`/`VISUAL` from the caller's login shell; the previous pattern matched only the no-env form. Env-var names are restricted to `^[A-Z_][A-Z0-9_]*$`, the inner argv is still validated against the existing revdiff pattern, and the sentinel-tail rules (no shell metacharacters, canonical path) are unchanged.
+
 ## [v0.13.1] - 2026-04-18
 
 ### Fixed

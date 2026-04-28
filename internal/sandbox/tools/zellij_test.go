@@ -75,7 +75,7 @@ func TestZellijSocketDirs(t *testing.T) {
 }
 
 func TestZellij_Bindings(t *testing.T) {
-	z := &Zellij{}
+	z := &Zellij{enabled: true}
 
 	// Create a fake socket directory.
 	sockDir := t.TempDir()
@@ -107,7 +107,7 @@ func TestZellij_Bindings(t *testing.T) {
 }
 
 func TestZellij_Bindings_XDGAndTmp(t *testing.T) {
-	z := &Zellij{}
+	z := &Zellij{enabled: true}
 
 	xdgRuntime := t.TempDir()
 	xdgZellij := filepath.Join(xdgRuntime, "zellij")
@@ -136,13 +136,67 @@ func TestZellij_Bindings_XDGAndTmp(t *testing.T) {
 }
 
 func TestZellij_Bindings_NoEnv(t *testing.T) {
-	z := &Zellij{}
+	z := &Zellij{enabled: true}
 	t.Setenv("ZELLIJ", "")
 
 	bindings := z.Bindings("/home/user", "/sandbox/home")
 	if len(bindings) != 0 {
 		t.Errorf("expected 0 bindings when ZELLIJ is empty, got %d", len(bindings))
 	}
+}
+
+func TestZellij_Bindings_DisabledByDefault(t *testing.T) {
+	z := &Zellij{}
+
+	sockDir := t.TempDir()
+	t.Setenv("ZELLIJ", "0")
+	t.Setenv("ZELLIJ_SOCKET_DIR", sockDir)
+
+	bindings := z.Bindings("/home/user", "/sandbox/home")
+	if len(bindings) != 0 {
+		t.Errorf("expected no bindings when not enabled, got %d", len(bindings))
+	}
+}
+
+func TestZellij_Environment_DisabledByDefault(t *testing.T) {
+	z := &Zellij{}
+	if env := z.Environment("/home/user", "/sandbox/home"); env != nil {
+		t.Errorf("expected no environment forwarding when not enabled, got %v", env)
+	}
+}
+
+func TestZellij_Configure(t *testing.T) {
+	t.Run("nil config keeps default disabled", func(t *testing.T) {
+		z := &Zellij{enabled: true}
+		z.Configure(GlobalConfig{}, nil)
+		if z.enabled {
+			t.Error("expected enabled=false after Configure with nil")
+		}
+	})
+
+	t.Run("enabled = true opts in", func(t *testing.T) {
+		z := &Zellij{}
+		z.Configure(GlobalConfig{}, map[string]any{"enabled": true})
+		if !z.enabled {
+			t.Error("expected enabled=true")
+		}
+	})
+
+	t.Run("enabled = false stays disabled", func(t *testing.T) {
+		z := &Zellij{enabled: true}
+		z.Configure(GlobalConfig{}, map[string]any{"enabled": false})
+		if z.enabled {
+			t.Error("expected enabled=false")
+		}
+	})
+
+	t.Run("non-bool enabled is ignored", func(t *testing.T) {
+		z := &Zellij{}
+		z.Configure(GlobalConfig{}, map[string]any{"enabled": "yes"})
+		if z.enabled {
+			t.Error("expected enabled=false when value is not a bool")
+		}
+	})
 }
 
 func TestZellij_Bindings_NoSocketDir(t *testing.T) {
@@ -160,7 +214,7 @@ func TestZellij_Bindings_NoSocketDir(t *testing.T) {
 }
 
 func TestZellij_Environment(t *testing.T) {
-	z := &Zellij{}
+	z := &Zellij{enabled: true}
 	env := z.Environment("/home/user", "/sandbox/home")
 
 	expected := map[string]bool{
@@ -228,7 +282,7 @@ func TestZellij_Check_NoSession(t *testing.T) {
 }
 
 func TestZellij_Check_NoSocketDir(t *testing.T) {
-	z := &Zellij{}
+	z := &Zellij{enabled: true}
 
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "zellij")
@@ -255,8 +309,35 @@ func TestZellij_Check_NoSocketDir(t *testing.T) {
 	}
 }
 
-func TestZellij_Check_OK(t *testing.T) {
+func TestZellij_Check_DisabledByDefault(t *testing.T) {
 	z := &Zellij{}
+
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "zellij")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("ZELLIJ", "0")
+	t.Setenv("ZELLIJ_SOCKET_DIR", t.TempDir())
+
+	result := z.Check("/home/user")
+	if result.Available {
+		t.Error("expected Available=false when zellij is not opted in")
+	}
+	hasIssue := false
+	for _, issue := range result.Issues {
+		if strings.Contains(issue, "disabled by default") {
+			hasIssue = true
+		}
+	}
+	if !hasIssue {
+		t.Errorf("expected issue about being disabled by default, got %v", result.Issues)
+	}
+}
+
+func TestZellij_Check_OK(t *testing.T) {
+	z := &Zellij{enabled: true}
 
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "zellij")

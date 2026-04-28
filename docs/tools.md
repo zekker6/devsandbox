@@ -626,6 +626,40 @@ The host's real kitty socket is **not** bind-mounted into the sandbox.
 
 Run `devsandbox tools check kitty` to confirm the tool is detected and see the active mode.
 
+## Zellij Terminal Multiplexer
+
+When running inside a [zellij](https://zellij.dev/) session, devsandbox can forward the session socket and `ZELLIJ*` env vars into the sandbox so `zellij run`, `zellij action`, etc. attach to the host multiplexer.
+
+**Disabled by default.** Unlike kitty, the zellij socket has no capability filtering — exposing it gives sandboxed code unrestricted control over the host multiplexer (execute commands in any pane, read pane contents, swap layouts). Opt in only if you trust the workload.
+
+### Configuration
+
+```toml
+[tools.zellij]
+enabled = true
+```
+
+### Activation
+
+When `enabled = true`, the tool activates if all of:
+
+1. `ZELLIJ` env var is set on the host.
+2. The `zellij` binary is on PATH.
+3. A zellij socket directory exists (`$ZELLIJ_SOCKET_DIR`, `$XDG_RUNTIME_DIR/zellij/`, or `/tmp/zellij-<uid>/`).
+
+### What Gets Mounted
+
+| Resource | Mode | Purpose |
+|----------|------|---------|
+| Zellij socket directory | read-write bind mount | IPC socket for `zellij` CLI commands |
+| `zellij` binary | read-only | CLI for `zellij run`, `zellij action`, etc. |
+
+### Environment Variables
+
+`ZELLIJ`, `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID` are forwarded from the host.
+
+Run `devsandbox tools check zellij` to confirm the tool is detected and see the active state.
+
 ## XDG Desktop Portal (Linux only)
 
 Sandboxed applications can send desktop notifications to the host via [XDG Desktop Portal](https://flatpak.github.io/xdg-desktop-portal/). This uses `xdg-dbus-proxy` to expose only the notification portal interface — no other D-Bus access is granted.

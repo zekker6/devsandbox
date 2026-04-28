@@ -14,14 +14,34 @@ func init() {
 
 // Zellij forwards the Zellij session environment into the sandbox.
 // Mounts the Zellij socket directory and binary so the CLI works inside the sandbox.
-type Zellij struct{}
+//
+// Disabled by default: zellij has no socket-level filtering, so exposing the
+// session socket gives sandboxed code unrestricted control over the host
+// multiplexer (run arbitrary commands in any pane, read pane contents, etc.).
+// Set [tools.zellij] enabled = true to opt in.
+type Zellij struct {
+	enabled bool
+}
 
 func (z *Zellij) Name() string              { return "zellij" }
 func (z *Zellij) Description() string       { return "Zellij terminal multiplexer session forwarding" }
 func (z *Zellij) ShellInit(_ string) string { return "" }
 
+// Configure implements ToolWithConfig.
+func (z *Zellij) Configure(_ GlobalConfig, toolCfg map[string]any) {
+	z.enabled = false
+	if toolCfg == nil {
+		return
+	}
+	if v, ok := toolCfg["enabled"].(bool); ok {
+		z.enabled = v
+	}
+}
+
 // Available returns true when running inside a Zellij session.
-// Requires ZELLIJ env var to be set and the zellij binary in PATH.
+// Requires ZELLIJ env var to be set and the zellij binary in PATH. The tool's
+// enabled flag (false by default) is checked separately in Bindings/Environment
+// so that Configure() still runs for an actively-detected zellij session.
 func (z *Zellij) Available(_ string) bool {
 	if os.Getenv("ZELLIJ") == "" {
 		return false
@@ -48,6 +68,9 @@ func zellijSocketDirs() []string {
 }
 
 func (z *Zellij) Bindings(_ string, _ string) []Binding {
+	if !z.enabled {
+		return nil
+	}
 	if os.Getenv("ZELLIJ") == "" {
 		return nil
 	}
@@ -86,6 +109,9 @@ func (z *Zellij) Bindings(_ string, _ string) []Binding {
 }
 
 func (z *Zellij) Environment(_, _ string) []EnvVar {
+	if !z.enabled {
+		return nil
+	}
 	return []EnvVar{
 		{Name: "ZELLIJ", FromHost: true},
 		{Name: "ZELLIJ_SESSION_NAME", FromHost: true},
@@ -102,6 +128,15 @@ func (z *Zellij) Check(_ string) CheckResult {
 	if os.Getenv("ZELLIJ") == "" {
 		result.Available = false
 		result.AddIssue("ZELLIJ not set — not running inside a Zellij session")
+		return result
+	}
+
+	if z.enabled {
+		result.AddInfo("enabled: true")
+	} else {
+		result.AddInfo("enabled: false")
+		result.Available = false
+		result.AddIssue("zellij forwarding is disabled by default (no socket-level filtering); set [tools.zellij] enabled = true to opt in")
 		return result
 	}
 
@@ -134,6 +169,7 @@ func (z *Zellij) Check(_ string) CheckResult {
 
 // Ensure interfaces are implemented.
 var (
-	_ Tool          = (*Zellij)(nil)
-	_ ToolWithCheck = (*Zellij)(nil)
+	_ Tool           = (*Zellij)(nil)
+	_ ToolWithConfig = (*Zellij)(nil)
+	_ ToolWithCheck  = (*Zellij)(nil)
 )
