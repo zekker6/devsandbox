@@ -2,10 +2,12 @@ package logging
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"time"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/source"
 )
 
 // DispatcherConfig contains configuration for creating a dispatcher.
@@ -100,10 +102,15 @@ func newWriterFromConfig(r config.ReceiverConfig, globalAttrs map[string]string,
 			protocol = "http"
 		}
 
+		headers, err := resolveOTLPHeaders(r.Headers, r.HeaderSources)
+		if err != nil {
+			return nil, err
+		}
+
 		cfg := OTLPConfig{
 			Endpoint:           endpoint,
 			Protocol:           protocol,
-			Headers:            r.Headers,
+			Headers:            headers,
 			BatchSize:          r.BatchSize,
 			Insecure:           r.Insecure,
 			ResourceAttributes: globalAttrs,
@@ -123,4 +130,30 @@ func newWriterFromConfig(r config.ReceiverConfig, globalAttrs map[string]string,
 	default:
 		return nil, fmt.Errorf("unknown receiver type: %s", r.Type)
 	}
+}
+
+// resolveOTLPHeaders merges static headers with header sources resolved from
+// env/file/value. Sources take precedence on key collisions. An env-sourced
+// header that resolves to an empty string is rejected to avoid silently
+// sending unauthenticated logs to an auth-enforced endpoint.
+func resolveOTLPHeaders(static map[string]string, sources map[string]source.Source) (map[string]string, error) {
+	if len(static) == 0 && len(sources) == 0 {
+		return nil, nil
+	}
+
+	out := make(map[string]string, len(static)+len(sources))
+	maps.Copy(out, static)
+
+	for name, src := range sources {
+		val, err := src.Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("otlp header %q: %w", name, err)
+		}
+		if val == "" {
+			return nil, fmt.Errorf("otlp header %q: source resolved to empty value (env var unset or file empty)", name)
+		}
+		out[name] = val
+	}
+
+	return out, nil
 }

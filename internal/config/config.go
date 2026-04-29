@@ -432,8 +432,16 @@ type ReceiverConfig struct {
 	// Tag is the syslog program tag.
 	Tag string `toml:"tag"`
 
-	// Headers are custom HTTP headers for OTLP.
+	// Headers are custom HTTP headers for OTLP. Values are stored verbatim and
+	// are best for non-secret metadata. For tokens or other secrets, prefer
+	// HeaderSources, which resolves from env vars, files, or literal values.
 	Headers map[string]string `toml:"headers"`
+
+	// HeaderSources defines OTLP headers whose values are resolved from a
+	// host environment variable, a file, or a literal value. This keeps
+	// secrets out of the config file. Sources take precedence over Headers
+	// when the same header name is set in both.
+	HeaderSources map[string]source.Source `toml:"header_sources"`
 
 	// BatchSize is the OTLP batch size before flush.
 	BatchSize int `toml:"batch_size"`
@@ -743,6 +751,11 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// Validate logging receivers
+	if err := c.validateLogging(); err != nil {
+		return err
+	}
+
 	// Validate Docker resource limits
 	if mem := c.Sandbox.Docker.Resources.Memory; mem != "" {
 		matched, _ := regexp.MatchString(`^\d+[bkmgBKMG]?$`, mem)
@@ -867,6 +880,21 @@ func (c *Config) validateRedaction() error {
 		}
 	}
 
+	return nil
+}
+
+// validateLogging validates the logging receivers, including OTLP header sources.
+func (c *Config) validateLogging() error {
+	for i, r := range c.Logging.Receivers {
+		for name, src := range r.HeaderSources {
+			if name == "" {
+				return fmt.Errorf("logging.receivers[%d].header_sources: header name cannot be empty", i)
+			}
+			if src.IsZero() {
+				return fmt.Errorf("logging.receivers[%d].header_sources[%q]: must set value, env, or file", i, name)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1161,7 +1189,16 @@ persistent = false
 # type = "otlp"
 # endpoint = "http://localhost:4318/v1/logs"
 # protocol = "http"  # default
-# headers = { "Authorization" = "Bearer token" }
+# # Static headers — values stored verbatim in the config file.
+# # Use this for non-secret metadata only.
+# headers = { "X-Team" = "platform" }
+# # Header sources — resolved at runtime from env vars, files, or literals.
+# # Use this for auth tokens to keep secrets out of the config file.
+# # The host env var must be set; resolving to an empty string is an error.
+# # [logging.receivers.header_sources.Authorization]
+# # env = "OTLP_AUTH_TOKEN"  # reads $OTLP_AUTH_TOKEN, e.g. "Bearer …"
+# # [logging.receivers.header_sources."X-API-Key"]
+# # file = "~/.config/devsandbox/otlp-key"  # reads file, trims whitespace
 # batch_size = 100
 # flush_interval = "5s"
 

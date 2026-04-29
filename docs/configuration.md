@@ -596,9 +596,39 @@ protocol = "http"
 batch_size = 100
 flush_interval = "5s"
 
-# Optional: authentication
-headers = { "Authorization" = "Bearer your-token" }
+# Optional: non-secret metadata headers (stored verbatim in the config)
+headers = { "X-Team" = "platform" }
 ```
+
+#### Authenticating to an Auth-Enforced Endpoint
+
+To send logs to an endpoint that requires an auth header, use `header_sources`
+instead of `headers`. Sources resolve at runtime from a host environment
+variable, a file, or a literal value, so secrets stay out of the config file
+(and out of the sandbox — header sources are resolved on the host).
+
+```toml
+[[logging.receivers]]
+type = "otlp"
+endpoint = "https://otel.example.com/v1/logs"
+protocol = "http"
+
+# Resolve Authorization from a host env var (e.g. OTLP_AUTH_TOKEN="Bearer abc…")
+[logging.receivers.header_sources.Authorization]
+env = "OTLP_AUTH_TOKEN"
+
+# Or read from a file (whitespace is trimmed; ~ is expanded)
+[logging.receivers.header_sources."X-API-Key"]
+file = "~/.config/devsandbox/otlp-key"
+```
+
+Each source must set exactly one of `value`, `env`, or `file` (priority:
+`value` > `env` > `file`). If a source resolves to an empty string (e.g. the
+env var is unset or the file is empty), startup fails — devsandbox will not
+silently send unauthenticated logs.
+
+When the same header name appears in both `headers` and `header_sources`, the
+source value wins.
 
 #### gRPC Protocol
 

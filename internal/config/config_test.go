@@ -567,6 +567,59 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "invalid docker cpu limit",
 		},
+		{
+			name: "valid otlp header_sources",
+			cfg: &Config{
+				Logging: LoggingConfig{
+					Receivers: []ReceiverConfig{
+						{
+							Type:     "otlp",
+							Endpoint: "http://localhost:4318/v1/logs",
+							HeaderSources: map[string]source.Source{
+								"Authorization": {Env: "OTLP_AUTH_TOKEN"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "otlp header_sources with empty source",
+			cfg: &Config{
+				Logging: LoggingConfig{
+					Receivers: []ReceiverConfig{
+						{
+							Type:     "otlp",
+							Endpoint: "http://localhost:4318/v1/logs",
+							HeaderSources: map[string]source.Source{
+								"Authorization": {},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "must set value, env, or file",
+		},
+		{
+			name: "otlp header_sources with empty header name",
+			cfg: &Config{
+				Logging: LoggingConfig{
+					Receivers: []ReceiverConfig{
+						{
+							Type:     "otlp",
+							Endpoint: "http://localhost:4318/v1/logs",
+							HeaderSources: map[string]source.Source{
+								"": {Env: "OTLP_AUTH_TOKEN"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "header name cannot be empty",
+		},
 	}
 
 	for _, tt := range tests {
