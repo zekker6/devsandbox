@@ -87,6 +87,11 @@ type ProxyConfig struct {
 
 	// Redaction contains content redaction scanning configuration.
 	Redaction ProxyRedactionConfig `toml:"redaction"`
+
+	// LogSkip contains rules for suppressing request log entries.
+	// Matched entries are dropped from both the local jsonl file and remote
+	// log dispatchers (syslog/OTLP). Empty rules → nothing is skipped.
+	LogSkip ProxyLogSkipConfig `toml:"log_skip"`
 }
 
 // IsEnabled returns whether proxy is enabled (defaults to false).
@@ -145,6 +150,28 @@ type ProxyFilterRule struct {
 
 	// Reason is shown when blocking a request.
 	Reason string `toml:"reason"`
+}
+
+// ProxyLogSkipConfig contains rules for suppressing request log entries.
+// Skip is absolute: matched entries are dropped from both the local jsonl
+// file and remote log dispatchers, with no carve-out for errors or blocks.
+type ProxyLogSkipConfig struct {
+	// Rules is the list of skip rules; first match wins.
+	Rules []ProxyLogSkipRule `toml:"rules"`
+}
+
+// ProxyLogSkipRule defines a single log-skip rule.
+type ProxyLogSkipRule struct {
+	// Pattern is the pattern to match (exact, glob, or regex).
+	Pattern string `toml:"pattern"`
+
+	// Scope defines what to match: "host", "path", or "url".
+	// Default: "host"
+	Scope string `toml:"scope"`
+
+	// Type specifies pattern type: "exact", "glob", or "regex".
+	// Default: "glob" (regex auto-detected on metacharacters).
+	Type string `toml:"type"`
 }
 
 // ProxyRedactionConfig contains content redaction settings.
@@ -667,6 +694,21 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate log_skip rules
+	validScopes := map[string]bool{"host": true, "path": true, "url": true, "": true}
+	validPatternTypes := map[string]bool{"exact": true, "glob": true, "regex": true, "": true}
+	for i, rule := range c.Proxy.LogSkip.Rules {
+		if rule.Pattern == "" {
+			return fmt.Errorf("proxy.log_skip.rules[%d].pattern cannot be empty", i)
+		}
+		if !validScopes[rule.Scope] {
+			return fmt.Errorf("proxy.log_skip.rules[%d].scope must be 'host', 'path', or 'url', got %q", i, rule.Scope)
+		}
+		if !validPatternTypes[rule.Type] {
+			return fmt.Errorf("proxy.log_skip.rules[%d].type must be 'exact', 'glob', or 'regex', got %q", i, rule.Type)
+		}
+	}
+
 	// Validate mount rules
 	validMountModes := map[string]bool{
 		"hidden": true, "readonly": true, "readwrite": true,
@@ -927,6 +969,19 @@ port = 8080
 # pattern = "*.tracking.io"
 # action = "block"
 # reason = "Tracking domain blocked"
+
+# Log-skip rules drop matching requests from proxy logs entirely.
+# Use this for noisy traffic you don't want to see in logs/proxy/requests.jsonl
+# or in any configured remote log dispatcher. Skip is absolute: matched
+# entries are dropped even on errors or filter blocks.
+# Defaults: type = "glob", scope = "host"
+# [[proxy.log_skip.rules]]
+# pattern = "telemetry.example.com"
+
+# [[proxy.log_skip.rules]]
+# pattern = "*/v1/traces"
+# scope = "url"
+# type = "glob"
 
 # Credential injection (requires proxy mode)
 # Injects authentication tokens into outbound requests for specific domains.

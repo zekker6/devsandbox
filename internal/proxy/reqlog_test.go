@@ -3,13 +3,31 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"devsandbox/internal/logging"
 )
+
+// recordingWriter is a logging.Writer test double that counts Write calls.
+type recordingWriter struct {
+	count atomic.Int64
+}
+
+func (w *recordingWriter) Write(_ *logging.Entry) error {
+	w.count.Add(1)
+	return nil
+}
+
+func (w *recordingWriter) Close() error { return nil }
 
 func TestLogRequest_RedactsSensitiveHeaders(t *testing.T) {
 	dir := t.TempDir()
-	rl, err := NewRequestLogger(dir, nil, false)
+	rl, err := NewRequestLogger(dir, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +157,7 @@ func TestRequestLog_RedactionUpdatesEntry(t *testing.T) {
 
 func TestToLogEntry_RedactionBlock(t *testing.T) {
 	dir := t.TempDir()
-	rl, err := NewRequestLogger(dir, nil, false)
+	rl, err := NewRequestLogger(dir, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +186,7 @@ func TestToLogEntry_RedactionBlock(t *testing.T) {
 
 func TestToLogEntry_RedactionRedact(t *testing.T) {
 	dir := t.TempDir()
-	rl, err := NewRequestLogger(dir, nil, false)
+	rl, err := NewRequestLogger(dir, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +216,7 @@ func TestToLogEntry_RedactionRedact(t *testing.T) {
 
 func TestToLogEntry_NoRedaction(t *testing.T) {
 	dir := t.TempDir()
-	rl, err := NewRequestLogger(dir, nil, false)
+	rl, err := NewRequestLogger(dir, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,5 +242,130 @@ func TestRedactHeaders_Nil(t *testing.T) {
 	result := redactHeaders(nil)
 	if result != nil {
 		t.Error("redactHeaders(nil) should return nil")
+	}
+}
+
+// readActiveLogFile reads concatenated contents of all uncompressed request
+// log files in the directory. Files are named like
+// "requests_<YYYYMMDD>_<NNNN>.jsonl" so we glob rather than guess the path.
+// Returns "" if no files exist or all are empty.
+func readActiveLogFile(t *testing.T, dir string) string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, RequestLogPrefix+"_*"+RequestLogSuffix))
+	if err != nil {
+		t.Fatalf("glob log files: %v", err)
+	}
+	var sb strings.Builder
+	for _, p := range matches {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		sb.Write(data)
+	}
+	return sb.String()
+}
+
+func TestRequestLogger_Log_SkipsMatchingEntries(t *testing.T) {
+	dir := t.TempDir()
+	skipEngine, err := NewLogSkipEngine(&LogSkipConfig{Rules: []LogSkipRule{
+		{Pattern: "telemetry.example.com", Type: PatternTypeExact},
+	}})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	dispatcher := logging.NewDispatcher()
+	rec := &recordingWriter{}
+	dispatcher.AddWriter(rec)
+
+	rl, err := NewRequestLogger(dir, dispatcher, true, skipEngine)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	skipped := &RequestLog{
+		Timestamp: time.Now(),
+		Method:    "POST",
+		URL:       "https://telemetry.example.com/v1/traces",
+	}
+	if err := rl.Log(skipped); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	if got := readActiveLogFile(t, dir); got != "" {
+		t.Errorf("expected empty log file, got %q", got)
+	}
+	if n := rec.count.Load(); n != 0 {
+		t.Errorf("expected 0 dispatcher writes, got %d", n)
+	}
+}
+
+func TestRequestLogger_Log_KeepsNonMatchingEntries(t *testing.T) {
+	dir := t.TempDir()
+	skipEngine, err := NewLogSkipEngine(&LogSkipConfig{Rules: []LogSkipRule{
+		{Pattern: "telemetry.example.com", Type: PatternTypeExact},
+	}})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	dispatcher := logging.NewDispatcher()
+	rec := &recordingWriter{}
+	dispatcher.AddWriter(rec)
+
+	rl, err := NewRequestLogger(dir, dispatcher, true, skipEngine)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	kept := &RequestLog{
+		Timestamp:  time.Now(),
+		Method:     "GET",
+		URL:        "https://api.example.com/v1/chat",
+		StatusCode: 200,
+	}
+	if err := rl.Log(kept); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	contents := readActiveLogFile(t, dir)
+	if !strings.Contains(contents, "api.example.com") {
+		t.Errorf("expected log file to contain non-matched URL, got %q", contents)
+	}
+	if n := rec.count.Load(); n != 1 {
+		t.Errorf("expected exactly 1 dispatcher write, got %d", n)
+	}
+}
+
+func TestRequestLogger_Log_NilSkipEngineAlwaysLogs(t *testing.T) {
+	dir := t.TempDir()
+	dispatcher := logging.NewDispatcher()
+	rec := &recordingWriter{}
+	dispatcher.AddWriter(rec)
+
+	rl, err := NewRequestLogger(dir, dispatcher, true, nil)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	entry := &RequestLog{
+		Timestamp:  time.Now(),
+		Method:     "GET",
+		URL:        "https://anything.example.com/",
+		StatusCode: 200,
+	}
+	if err := rl.Log(entry); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	if got := readActiveLogFile(t, dir); !strings.Contains(got, "anything.example.com") {
+		t.Errorf("nil skip engine should always log, got %q", got)
+	}
+	if n := rec.count.Load(); n != 1 {
+		t.Errorf("nil skip engine: expected 1 dispatcher write, got %d", n)
 	}
 }

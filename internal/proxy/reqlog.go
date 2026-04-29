@@ -42,13 +42,15 @@ type RequestLogger struct {
 	writer         *RotatingFileWriter
 	dispatcher     *logging.Dispatcher
 	ownsDispatcher bool // true if this logger created/owns the dispatcher
+	skipEngine     *LogSkipEngine
 	mu             sync.Mutex
 }
 
 // NewRequestLogger creates a new request logger.
 // If dispatcher is provided, logs will also be forwarded to remote destinations.
 // If ownsDispatcher is true, the dispatcher will be closed when the logger is closed.
-func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher bool) (*RequestLogger, error) {
+// If skipEngine is non-nil, entries matching its rules are dropped before any I/O.
+func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher bool, skipEngine *LogSkipEngine) (*RequestLogger, error) {
 	writer, err := NewRotatingFileWriter(RotatingFileWriterConfig{
 		Dir:           dir,
 		Prefix:        RequestLogPrefix,
@@ -63,11 +65,17 @@ func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher
 		writer:         writer,
 		dispatcher:     dispatcher,
 		ownsDispatcher: ownsDispatcher,
+		skipEngine:     skipEngine,
 	}, nil
 }
 
 // Log writes a request/response pair to the log and forwards to remote destinations.
+// Entries matching the skip engine are dropped: no file write, no dispatcher forward.
 func (rl *RequestLogger) Log(entry *RequestLog) error {
+	if rl.skipEngine != nil && rl.skipEngine.ShouldSkip(entry) {
+		return nil
+	}
+
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err

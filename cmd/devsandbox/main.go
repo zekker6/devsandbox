@@ -464,6 +464,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		pCfg.Filter = buildFilterConfig(appCfg, cmd, filterDefault, allowDomains, blockDomains)
 		pCfg.Redaction = buildRedactionConfig(&appCfg.Proxy.Redaction)
+		pCfg.LogSkip = buildLogSkipConfig(appCfg)
 		pCfg.ProjectDir = projectDir
 
 		if netInfo != nil {
@@ -499,6 +500,10 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
 			notice.Info("Redaction: %d rules, default action: %s",
 				len(pCfg.Redaction.Rules), pCfg.Redaction.GetDefaultAction())
+		}
+
+		if pCfg.LogSkip.IsEnabled() {
+			notice.Info("Log-skip: %d rules (matched requests dropped from logs)", len(pCfg.LogSkip.Rules))
 		}
 
 		if !cfg.ProxyMITM {
@@ -869,6 +874,24 @@ func buildFilterConfig(appCfg *config.Config, cmd *cobra.Command, filterDefault 
 	}
 
 	return filterCfg
+}
+
+// buildLogSkipConfig converts config-layer log-skip rules to proxy types.
+// Returns nil when no rules are configured so that downstream nil-checks
+// short-circuit cleanly.
+func buildLogSkipConfig(appCfg *config.Config) *proxy.LogSkipConfig {
+	if len(appCfg.Proxy.LogSkip.Rules) == 0 {
+		return nil
+	}
+	cfg := &proxy.LogSkipConfig{Rules: make([]proxy.LogSkipRule, 0, len(appCfg.Proxy.LogSkip.Rules))}
+	for _, r := range appCfg.Proxy.LogSkip.Rules {
+		cfg.Rules = append(cfg.Rules, proxy.LogSkipRule{
+			Pattern: r.Pattern,
+			Scope:   proxy.FilterScope(r.Scope),
+			Type:    proxy.PatternType(r.Type),
+		})
+	}
+	return cfg
 }
 
 // buildRedactionConfig converts config types to proxy redaction types.

@@ -58,46 +58,45 @@ func NewFilterEngine(cfg *FilterConfig) (*FilterEngine, error) {
 
 // compileRule creates a compiled rule with a pre-built matcher function.
 func compileRule(rule FilterRule) (compiledRule, error) {
-	patternType := rule.DetectPatternType()
+	matcher, err := compilePattern(rule.Pattern, rule.DetectPatternType())
+	if err != nil {
+		return compiledRule{}, err
+	}
+	return compiledRule{rule: rule, matcher: matcher}, nil
+}
 
-	var matcher func(string) bool
-
-	switch patternType {
+// compilePattern returns a matcher function for the given pattern and type.
+// Shared by FilterEngine and LogSkipEngine to avoid duplicating the
+// exact/glob/regex compilation switch.
+func compilePattern(pattern string, t PatternType) (func(string) bool, error) {
+	switch t {
 	case PatternTypeExact:
-		pattern := rule.Pattern
-		matcher = func(s string) bool {
+		return func(s string) bool {
 			return s == pattern
-		}
+		}, nil
 
 	case PatternTypeGlob:
 		// Use doublestar for glob matching (supports *, **, ?)
-		pattern := rule.Pattern
-		// Validate pattern at compile time
 		if !doublestar.ValidatePattern(pattern) {
-			return compiledRule{}, fmt.Errorf("invalid glob pattern: %s", pattern)
+			return nil, fmt.Errorf("invalid glob pattern: %s", pattern)
 		}
-		matcher = func(s string) bool {
+		return func(s string) bool {
 			matched, _ := doublestar.Match(pattern, s)
 			return matched
-		}
+		}, nil
 
 	case PatternTypeRegex:
-		re, err := regexp.Compile(rule.Pattern)
+		re, err := regexp.Compile(pattern)
 		if err != nil {
-			return compiledRule{}, fmt.Errorf("invalid regex pattern: %w", err)
+			return nil, fmt.Errorf("invalid regex pattern: %w", err)
 		}
-		matcher = func(s string) bool {
+		return func(s string) bool {
 			return re.MatchString(s)
-		}
+		}, nil
 
 	default:
-		return compiledRule{}, fmt.Errorf("unknown pattern type: %s", patternType)
+		return nil, fmt.Errorf("unknown pattern type: %s", t)
 	}
-
-	return compiledRule{
-		rule:    rule,
-		matcher: matcher,
-	}, nil
 }
 
 // Match evaluates the request against filter rules and returns a decision.

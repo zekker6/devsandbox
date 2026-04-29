@@ -117,8 +117,19 @@ func NewServer(cfg *Config) (*Server, error) {
 		ownsDispatcher = true
 	}
 
+	// Create log-skip engine before the request logger so it can be threaded in.
+	// nil cfg.LogSkip → empty engine (no-op skip).
+	skipEngine, err := NewLogSkipEngine(cfg.LogSkip)
+	if err != nil {
+		_ = proxyLogger.Close()
+		if ownsDispatcher && dispatcher != nil {
+			_ = dispatcher.Close()
+		}
+		return nil, fmt.Errorf("failed to create log-skip engine: %w", err)
+	}
+
 	// Create request logger for persisting full request/response data
-	reqLogger, err := NewRequestLogger(cfg.LogDir, dispatcher, ownsDispatcher)
+	reqLogger, err := NewRequestLogger(cfg.LogDir, dispatcher, ownsDispatcher, skipEngine)
 	if err != nil {
 		_ = proxyLogger.Close()
 		if ownsDispatcher && dispatcher != nil {

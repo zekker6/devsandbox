@@ -84,6 +84,16 @@ func mergeConfigs(base, overlay *Config) *Config {
 		)
 	}
 
+	// Proxy log_skip: rules are additive (overlay prepends for higher priority).
+	// First-match-wins inside the engine, so prepending ensures overlay rules
+	// take precedence over base rules.
+	if len(overlay.Proxy.LogSkip.Rules) > 0 {
+		result.Proxy.LogSkip.Rules = append(
+			overlay.Proxy.LogSkip.Rules,
+			result.Proxy.LogSkip.Rules...,
+		)
+	}
+
 	// Sandbox settings
 	if overlay.Sandbox.BasePath != "" {
 		result.Sandbox.BasePath = overlay.Sandbox.BasePath

@@ -65,7 +65,7 @@ tasks:
 
   test:
     cmds:
-      - go test ./internal/... ./cmd/devsandbox-shim/...
+      - go test ./internal/... ./cmd/devsandbox/... ./cmd/devsandbox-shim/...
 
   test:e2e:
     deps:

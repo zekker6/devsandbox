@@ -187,6 +187,31 @@ pattern = "sk-[a-zA-Z0-9]{20,}"
 
 Redaction rules are always additive when merging configs. The `default_action` uses most-restrictive-wins (`block` > `redact` > `log`).
 
+### Log Skip
+
+Suppress matching requests from the proxy log entirely (both `logs/proxy/requests.jsonl` and any configured remote log dispatcher). The request still passes through — only the log entry is dropped. See [Proxy: Skipping Log Entries](proxy.md#skipping-log-entries) for the use case and behavior.
+
+```toml
+[[proxy.log_skip.rules]]
+pattern = "telemetry.example.com"
+# scope defaults to "host", type auto-detects glob
+
+[[proxy.log_skip.rules]]
+pattern = "*/v1/traces"
+scope = "url"
+type = "glob"
+```
+
+**Fields:**
+
+| Field | Description | Default |
+|---|---|---|
+| `pattern` | Pattern to match (exact / glob / regex). Required. | — |
+| `scope` | What to match against: `host`, `path`, or `url`. | `host` |
+| `type` | Pattern type: `exact`, `glob`, or `regex`. Auto-detected as `regex` when the pattern contains regex metacharacters. | `glob` |
+
+Skip is **absolute**: matched entries are dropped even when the request errored, was blocked by the security filter, or triggered a redaction rule. Rules are evaluated in order; first match wins.
+
 ### Avoiding GitHub Rate Limits
 
 On macOS, mise downloads tool releases from GitHub inside a Docker container. Unauthenticated requests are limited to 60/hour. Enable credential injection with a read-only GitHub token to raise this to 5,000/hour.

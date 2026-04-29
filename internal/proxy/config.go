@@ -48,6 +48,11 @@ type Config struct {
 	// Filter contains HTTP request filtering configuration.
 	Filter *FilterConfig
 
+	// LogSkip contains rules for suppressing request log entries.
+	// Matched entries are dropped from both the local jsonl file and remote
+	// dispatchers. nil/empty → no entries are skipped.
+	LogSkip *LogSkipConfig
+
 	// CredentialInjectors add authentication to requests for specific domains.
 	// Built by BuildCredentialInjectors() from [proxy.credentials] config.
 	// If nil/empty, no credential injection is performed.

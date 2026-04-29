@@ -91,6 +91,44 @@ func Test_mergeConfigs_ArrayConcat(t *testing.T) {
 	}
 }
 
+func Test_mergeConfigs_LogSkipRulesPrepend(t *testing.T) {
+	base := &Config{
+		Proxy: ProxyConfig{
+			LogSkip: ProxyLogSkipConfig{
+				Rules: []ProxyLogSkipRule{
+					{Pattern: "base.example.com"},
+				},
+			},
+		},
+	}
+	overlay := &Config{
+		Proxy: ProxyConfig{
+			LogSkip: ProxyLogSkipConfig{
+				Rules: []ProxyLogSkipRule{
+					{Pattern: "overlay.example.com"},
+					{Pattern: "/v1/traces", Scope: "path", Type: "exact"},
+				},
+			},
+		},
+	}
+
+	result := mergeConfigs(base, overlay)
+
+	if len(result.Proxy.LogSkip.Rules) != 3 {
+		t.Fatalf("expected 3 log_skip rules, got %d", len(result.Proxy.LogSkip.Rules))
+	}
+	// Overlay rules come first (higher priority, first-match-wins)
+	if result.Proxy.LogSkip.Rules[0].Pattern != "overlay.example.com" {
+		t.Errorf("expected overlay.example.com first, got %q", result.Proxy.LogSkip.Rules[0].Pattern)
+	}
+	if result.Proxy.LogSkip.Rules[1].Pattern != "/v1/traces" {
+		t.Errorf("expected /v1/traces second, got %q", result.Proxy.LogSkip.Rules[1].Pattern)
+	}
+	if result.Proxy.LogSkip.Rules[2].Pattern != "base.example.com" {
+		t.Errorf("expected base.example.com last, got %q", result.Proxy.LogSkip.Rules[2].Pattern)
+	}
+}
+
 func Test_mergeConfigs_NilOverlay(t *testing.T) {
 	base := &Config{
 		Proxy: ProxyConfig{Port: 8080},

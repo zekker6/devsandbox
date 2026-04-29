@@ -444,6 +444,57 @@ func TestValidate(t *testing.T) {
 			errMsg:  "action must be",
 		},
 		{
+			name: "valid log_skip rules",
+			cfg: &Config{
+				Proxy: ProxyConfig{
+					LogSkip: ProxyLogSkipConfig{
+						Rules: []ProxyLogSkipRule{
+							{Pattern: "telemetry.example.com"},
+							{Pattern: "/v1/traces", Scope: "path", Type: "exact"},
+							{Pattern: `^https://api\..*$`, Scope: "url", Type: "regex"},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "log_skip empty pattern",
+			cfg: &Config{
+				Proxy: ProxyConfig{
+					LogSkip: ProxyLogSkipConfig{
+						Rules: []ProxyLogSkipRule{{Pattern: ""}},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "proxy.log_skip.rules[0].pattern cannot be empty",
+		},
+		{
+			name: "log_skip invalid scope",
+			cfg: &Config{
+				Proxy: ProxyConfig{
+					LogSkip: ProxyLogSkipConfig{
+						Rules: []ProxyLogSkipRule{{Pattern: "x", Scope: "bogus"}},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "proxy.log_skip.rules[0].scope must be",
+		},
+		{
+			name: "log_skip invalid type",
+			cfg: &Config{
+				Proxy: ProxyConfig{
+					LogSkip: ProxyLogSkipConfig{
+						Rules: []ProxyLogSkipRule{{Pattern: "x", Type: "bogus"}},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "proxy.log_skip.rules[0].type must be",
+		},
+		{
 			name: "invalid isolation backend",
 			cfg: &Config{
 				Sandbox: SandboxConfig{Isolation: "podman"},
@@ -1485,5 +1536,47 @@ func TestSandboxEnvironment_ValidationErrors(t *testing.T) {
 				t.Errorf("Validate() err = %v, want substring %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestProxyLogSkip_ParseAndValidate(t *testing.T) {
+	tomlStr := `
+[proxy]
+enabled = true
+
+[[proxy.log_skip.rules]]
+pattern = "telemetry.example.com"
+
+[[proxy.log_skip.rules]]
+pattern = "*/v1/traces"
+scope = "url"
+type = "glob"
+
+[[proxy.log_skip.rules]]
+pattern = "/v1/metrics"
+scope = "path"
+type = "exact"
+`
+	cfg := &Config{}
+	if err := toml.Unmarshal([]byte(tomlStr), cfg); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	rules := cfg.Proxy.LogSkip.Rules
+	if len(rules) != 3 {
+		t.Fatalf("expected 3 log_skip rules, got %d", len(rules))
+	}
+	if rules[0].Pattern != "telemetry.example.com" || rules[0].Scope != "" || rules[0].Type != "" {
+		t.Errorf("rule[0] = %+v, defaults not preserved", rules[0])
+	}
+	if rules[1].Pattern != "*/v1/traces" || rules[1].Scope != "url" || rules[1].Type != "glob" {
+		t.Errorf("rule[1] = %+v, fields mismatched", rules[1])
+	}
+	if rules[2].Pattern != "/v1/metrics" || rules[2].Scope != "path" || rules[2].Type != "exact" {
+		t.Errorf("rule[2] = %+v, fields mismatched", rules[2])
 	}
 }

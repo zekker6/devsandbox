@@ -774,6 +774,44 @@ devsandbox logs proxy --json | jq 'select(.redaction_action != null)'
 
 See [Configuration: Content Redaction](configuration.md#content-redaction) for the full TOML reference, pattern rules, and merge behavior.
 
+## Skipping Log Entries
+
+Log-skip rules drop matching requests from the proxy log entirely. This is for noise reduction, not for security: matched requests still pass through (filtering, redaction, and credential injection still apply); they simply never appear in `logs/proxy/requests.jsonl` and are never forwarded to remote log dispatchers (syslog/OTLP).
+
+The intended use case is endpoints you'd otherwise see hundreds of times per session and don't care about — for example, telemetry traffic that an agent sends to your own observability infrastructure, where the data is already captured upstream.
+
+### How It Works
+
+Each rule has a pattern and an optional `scope` (default `host`) and `type` (default `glob`, regex auto-detected on metacharacters). Matching reuses the same engine as filter rules: `host` matches the request hostname (port stripped), `path` matches the URL path, `url` matches the full URL string. Rules are evaluated in order, first match wins. Skip is **absolute** — a matched entry is never logged, even if the request errored, was blocked by the security filter, or triggered a redaction rule.
+
+### Configuration
+
+```toml
+[[proxy.log_skip.rules]]
+pattern = "telemetry.example.com"
+# scope defaults to "host", type auto-detects glob
+
+[[proxy.log_skip.rules]]
+pattern = "*/v1/traces"
+scope = "url"
+type = "glob"
+
+[[proxy.log_skip.rules]]
+pattern = "/v1/metrics"
+scope = "path"
+type = "exact"
+```
+
+### Interaction With Other Features
+
+- **Filter (allow/block):** independent. A request blocked by the filter is still skipped from logs if it also matches a `log_skip` rule. If you want to keep a record of blocked attempts, do not log-skip the same hosts you block.
+- **Redaction:** independent. Redaction still scrubs request/response bodies in flight; log-skip just decides whether the (already-redacted) entry gets persisted.
+- **Credential injection:** independent. Tokens are still injected on outbound requests; log-skip only affects the local log artifact.
+
+### Configuration Reference
+
+See [Configuration: Log Skip](configuration.md#log-skip) for the full TOML reference.
+
 ## Troubleshooting
 
 ### "proxy mode requires pasta"

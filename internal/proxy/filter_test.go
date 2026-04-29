@@ -3,10 +3,94 @@ package proxy
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
+
+func TestCompilePattern(t *testing.T) {
+	t.Run("exact match", func(t *testing.T) {
+		m, err := compilePattern("api.example.com", PatternTypeExact)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !m("api.example.com") {
+			t.Errorf("exact pattern should match identical string")
+		}
+		if m("api.example.com.evil.test") {
+			t.Errorf("exact pattern should not match suffix")
+		}
+		if m("API.example.com") {
+			t.Errorf("exact pattern is case-sensitive")
+		}
+	})
+
+	t.Run("glob match", func(t *testing.T) {
+		m, err := compilePattern("*.example.com", PatternTypeGlob)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !m("api.example.com") {
+			t.Errorf("glob should match subdomain")
+		}
+		if !m("foo.example.com") {
+			t.Errorf("glob should match different subdomain")
+		}
+		if m("example.com") {
+			t.Errorf("glob *.example.com should not match bare apex")
+		}
+		if m("other.com") {
+			t.Errorf("glob should not match unrelated host")
+		}
+	})
+
+	t.Run("regex match", func(t *testing.T) {
+		m, err := compilePattern(`^api\.(staging|prod)\.example\.com$`, PatternTypeRegex)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !m("api.staging.example.com") {
+			t.Errorf("regex should match staging")
+		}
+		if !m("api.prod.example.com") {
+			t.Errorf("regex should match prod")
+		}
+		if m("api.dev.example.com") {
+			t.Errorf("regex should not match dev")
+		}
+	})
+
+	t.Run("invalid regex error", func(t *testing.T) {
+		_, err := compilePattern(`(unclosed`, PatternTypeRegex)
+		if err == nil {
+			t.Fatal("expected error for invalid regex")
+		}
+		if !strings.Contains(err.Error(), "invalid regex") {
+			t.Errorf("expected wrapped 'invalid regex' message, got: %v", err)
+		}
+	})
+
+	t.Run("invalid glob error", func(t *testing.T) {
+		_, err := compilePattern("[unclosed", PatternTypeGlob)
+		if err == nil {
+			t.Fatal("expected error for invalid glob")
+		}
+		if !strings.Contains(err.Error(), "invalid glob") {
+			t.Errorf("expected 'invalid glob' message, got: %v", err)
+		}
+	})
+
+	t.Run("unknown pattern type error", func(t *testing.T) {
+		_, err := compilePattern("anything", PatternType("bogus"))
+		if err == nil {
+			t.Fatal("expected error for unknown pattern type")
+		}
+		if !strings.Contains(err.Error(), "unknown pattern type") {
+			t.Errorf("expected 'unknown pattern type' message, got: %v", err)
+		}
+	})
+}
 
 func TestFilterEngine_GlobPattern(t *testing.T) {
 	cfg := &FilterConfig{
