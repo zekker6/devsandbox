@@ -1,685 +1,644 @@
 package proxy
 
 import (
+	"errors"
+	"io/fs"
 	"net/http"
-	"os"
-	"path/filepath"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
-func TestGitHubCredentialInjector_Match(t *testing.T) {
-	injector := &GitHubCredentialInjector{token: "test-token", enabled: true}
-
-	tests := []struct {
-		name     string
-		url      string
-		expected bool
-	}{
-		{"matches api.github.com", "https://api.github.com/repos/foo/bar", true},
-		{"matches api.github.com with path", "https://api.github.com/rate_limit", true},
-		{"no match github.com", "https://github.com/foo/bar", false},
-		{"no match raw.githubusercontent.com", "https://raw.githubusercontent.com/foo/bar/main/file", false},
-		{"no match other domain", "https://example.com/api", false},
+func TestPresetRegistry_RegisterAndLookup(t *testing.T) {
+	RegisterPreset("test-preset", Preset{
+		Host:        "example.com",
+		Header:      "X-Test",
+		ValueFormat: "tok {token}",
+	})
+	p, ok := lookupPreset("test-preset")
+	if !ok {
+		t.Fatalf("expected preset to be registered")
 	}
+	if p.Host != "example.com" || p.Header != "X-Test" || p.ValueFormat != "tok {token}" {
+		t.Errorf("preset fields not stored correctly: %+v", p)
+	}
+	if _, ok := lookupPreset("nonexistent-preset"); ok {
+		t.Errorf("expected lookup of unknown preset to return false")
+	}
+}
 
+// newGenericInjectorForTest builds a GenericInjector with a host matcher
+// compiled the same way BuildCredentialInjectors will (exact == when no
+// glob metachars; doublestar.Match otherwise). Test-internal helper.
+func newGenericInjectorForTest(t *testing.T, name, host, header, valueFormat, token string, overwrite, enabled bool) *GenericInjector {
+	t.Helper()
+	g := &GenericInjector{
+		name:        name,
+		host:        host,
+		header:      http.CanonicalHeaderKey(header),
+		valueFormat: valueFormat,
+		token:       token,
+		overwrite:   overwrite,
+		enabled:     enabled,
+	}
+	if strings.ContainsAny(host, "*?[") {
+		if !doublestar.ValidatePattern(host) {
+			t.Fatalf("invalid glob pattern in test setup: %q", host)
+		}
+		pattern := host
+		g.matcher = func(s string) bool {
+			matched, _ := doublestar.Match(pattern, s)
+			return matched
+		}
+		g.isExact = false
+	} else {
+		exact := host
+		g.matcher = func(s string) bool { return s == exact }
+		g.isExact = true
+	}
+	return g
+}
+
+func TestGenericInjector_Match(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		reqHost string
+		want    bool
+	}{
+		{"exact match", "api.github.com", "api.github.com", true},
+		{"exact mismatch", "api.github.com", "raw.github.com", false},
+		{"glob non-match: raw.githubusercontent.com is not a *.github.com subdomain",
+			"*.github.com", "raw.githubusercontent.com", false},
+		{"glob match subdomain", "*.github.com", "api.github.com", true},
+		{"port stripped from req host", "api.github.com", "api.github.com:443", true},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, _ := http.NewRequest("GET", tt.url, nil)
-			if got := injector.Match(req); got != tt.expected {
-				t.Errorf("Match() = %v, want %v", got, tt.expected)
+			g := newGenericInjectorForTest(t, "test", tt.host, "X-Test", "{token}", "tok", false, true)
+			req, err := http.NewRequest("GET", "https://"+tt.reqHost+"/", nil)
+			if err != nil {
+				t.Fatalf("NewRequest error: %v", err)
+			}
+			if got := g.Match(req); got != tt.want {
+				t.Errorf("Match(%q vs %q) = %v, want %v", tt.host, tt.reqHost, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestGitHubCredentialInjector_Match_WithPort(t *testing.T) {
-	injector := &GitHubCredentialInjector{token: "test-token", enabled: true}
+func TestGenericInjector_Inject(t *testing.T) {
+	t.Run("empty token is no-op", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "Authorization", "Bearer {token}", "", false, true)
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		g.Inject(req)
+		if got := req.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
+		}
+	})
 
-	tests := []struct {
-		name     string
-		host     string
-		expected bool
+	t.Run("overwrite=false preserves existing header", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "Authorization", "Bearer {token}", "real-token", false, true)
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		req.Header.Set("Authorization", "Bearer placeholder")
+		g.Inject(req)
+		if got := req.Header.Get("Authorization"); got != "Bearer placeholder" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer placeholder")
+		}
+	})
+
+	t.Run("overwrite=true replaces existing header", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "Authorization", "Bearer {token}", "real-token", true, true)
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		req.Header.Set("Authorization", "Bearer placeholder")
+		g.Inject(req)
+		if got := req.Header.Get("Authorization"); got != "Bearer real-token" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer real-token")
+		}
+	})
+
+	t.Run("value_format with {token} is rendered", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "Authorization", "Bearer {token}", "abc", false, true)
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		g.Inject(req)
+		if got := req.Header.Get("Authorization"); got != "Bearer abc" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer abc")
+		}
+	})
+
+	t.Run("value_format raw {token} (no prefix)", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "X-API-Key", "{token}", "abc", false, true)
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		g.Inject(req)
+		if got := req.Header.Get("X-Api-Key"); got != "abc" {
+			t.Errorf("X-Api-Key = %q, want %q", got, "abc")
+		}
+	})
+
+	t.Run("header is canonicalized at construction", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "authorization", "Bearer {token}", "abc", false, true)
+		if g.header != "Authorization" {
+			t.Errorf("header field = %q, want %q (canonicalized)", g.header, "Authorization")
+		}
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		g.Inject(req)
+		if got := req.Header.Get("Authorization"); got != "Bearer abc" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer abc")
+		}
+	})
+
+	t.Run("value_format without {token} is literal", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "X-Static", "literal-value", "ignored", false, true)
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		g.Inject(req)
+		if got := req.Header.Get("X-Static"); got != "literal-value" {
+			t.Errorf("X-Static = %q, want %q", got, "literal-value")
+		}
+	})
+}
+
+func TestGenericInjector_Specificity(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		want int
 	}{
-		{"api.github.com no port", "api.github.com", true},
-		{"api.github.com with 443", "api.github.com:443", true},
-		{"api.github.com with 8080", "api.github.com:8080", true},
-		{"github.com no port", "github.com", false},
-		{"github.com with 443", "github.com:443", false},
-		{"other host", "example.com", false},
-		{"other host with port", "example.com:443", false},
+		{"exact host", "api.github.com", 1000},
+		{"glob *.github.com", "*.github.com", len("*.github.com") - 1},
+		{"glob *", "*", 0},
+		{"glob *.com", "*.com", len("*.com") - 1},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req, _ := http.NewRequest("GET", "https://placeholder/path", nil)
-			req.URL.Host = tt.host
-			if got := injector.Match(req); got != tt.expected {
-				t.Errorf("Match() = %v, want %v for host %q", got, tt.expected, tt.host)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := newGenericInjectorForTest(t, "test", c.host, "X-Test", "{token}", "tok", false, true)
+			if got := g.Specificity(); got != c.want {
+				t.Errorf("Specificity(%q) = %d, want %d", c.host, got, c.want)
 			}
 		})
 	}
+	// Sanity: exact > any glob; longer-literal-glob > shorter-literal-glob.
+	exact := newGenericInjectorForTest(t, "exact", "api.github.com", "X", "{token}", "x", false, true)
+	wide := newGenericInjectorForTest(t, "wide", "*.github.com", "X", "{token}", "x", false, true)
+	star := newGenericInjectorForTest(t, "star", "*", "X", "{token}", "x", false, true)
+	if exact.Specificity() <= wide.Specificity() {
+		t.Errorf("expected exact > wide, got %d vs %d", exact.Specificity(), wide.Specificity())
+	}
+	if wide.Specificity() <= star.Specificity() {
+		t.Errorf("expected *.github.com > *, got %d vs %d", wide.Specificity(), star.Specificity())
+	}
 }
 
-func TestGitHubCredentialInjector_Inject(t *testing.T) {
-	t.Run("injects token when not present", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{token: "my-secret-token", enabled: true}
-		req, _ := http.NewRequest("GET", "https://api.github.com/repos/foo/bar", nil)
-
-		injector.Inject(req)
-
-		auth := req.Header.Get("Authorization")
-		if auth != "Bearer my-secret-token" {
-			t.Errorf("Authorization = %q, want %q", auth, "Bearer my-secret-token")
+func TestGenericInjector_ResolvedValue(t *testing.T) {
+	t.Run("enabled returns token", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "X", "{token}", "abc", false, true)
+		if got := g.ResolvedValue(); got != "abc" {
+			t.Errorf("ResolvedValue() = %q, want %q", got, "abc")
 		}
 	})
-
-	t.Run("does not override existing auth", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{token: "my-secret-token", enabled: true}
-		req, _ := http.NewRequest("GET", "https://api.github.com/repos/foo/bar", nil)
-		req.Header.Set("Authorization", "Bearer existing-token")
-
-		injector.Inject(req)
-
-		auth := req.Header.Get("Authorization")
-		if auth != "Bearer existing-token" {
-			t.Errorf("Authorization = %q, want %q (should not override)", auth, "Bearer existing-token")
-		}
-	})
-
-	t.Run("no-op when token is empty", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{token: "", enabled: true}
-		req, _ := http.NewRequest("GET", "https://api.github.com/repos/foo/bar", nil)
-
-		injector.Inject(req)
-
-		auth := req.Header.Get("Authorization")
-		if auth != "" {
-			t.Errorf("Authorization = %q, want empty", auth)
-		}
-	})
-
-	t.Run("overrides existing auth when overwrite enabled", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{token: "real-token", enabled: true, overwrite: true}
-		req, _ := http.NewRequest("GET", "https://api.github.com/repos/foo/bar", nil)
-		req.Header.Set("Authorization", "Bearer fake-token")
-
-		injector.Inject(req)
-
-		auth := req.Header.Get("Authorization")
-		if auth != "Bearer real-token" {
-			t.Errorf("Authorization = %q, want %q (overwrite should replace)", auth, "Bearer real-token")
-		}
-	})
-
-	t.Run("overwrite does not inject when token is empty", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{token: "", enabled: true, overwrite: true}
-		req, _ := http.NewRequest("GET", "https://api.github.com/repos/foo/bar", nil)
-		req.Header.Set("Authorization", "Bearer existing")
-
-		injector.Inject(req)
-
-		auth := req.Header.Get("Authorization")
-		if auth != "Bearer existing" {
-			t.Errorf("Authorization = %q, want %q (empty token must not clobber)", auth, "Bearer existing")
-		}
-	})
-}
-
-func TestGitHubCredentialInjector_Configure_Overwrite(t *testing.T) {
-	t.Run("overwrite defaults to false when not set", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "t")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": true})
-
-		if injector.overwrite {
-			t.Error("expected overwrite=false by default")
-		}
-	})
-
-	t.Run("overwrite=true is parsed", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "t")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled":   true,
-			"overwrite": true,
-		})
-
-		if !injector.overwrite {
-			t.Error("expected overwrite=true")
-		}
-	})
-
-	t.Run("overwrite=false is parsed", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "t")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled":   true,
-			"overwrite": false,
-		})
-
-		if injector.overwrite {
-			t.Error("expected overwrite=false")
-		}
-	})
-
-	t.Run("overwrite cleared on reconfigure", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "t")
-
-		injector := &GitHubCredentialInjector{overwrite: true}
-		injector.Configure(map[string]any{"enabled": true})
-
-		if injector.overwrite {
-			t.Error("expected overwrite to be reset to false on reconfigure")
-		}
-	})
-}
-
-func TestGitHubCredentialInjector_Configure(t *testing.T) {
-	t.Run("enabled with GITHUB_TOKEN", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "token-from-github-token")
-		t.Setenv("GH_TOKEN", "token-from-gh-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": true})
-
-		if !injector.Enabled() {
-			t.Error("expected enabled")
-		}
-		if injector.token != "token-from-github-token" {
-			t.Errorf("token = %q, want %q", injector.token, "token-from-github-token")
-		}
-	})
-
-	t.Run("falls back to GH_TOKEN", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "")
-		t.Setenv("GH_TOKEN", "token-from-gh-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": true})
-
-		if !injector.Enabled() {
-			t.Error("expected enabled")
-		}
-		if injector.token != "token-from-gh-token" {
-			t.Errorf("token = %q, want %q", injector.token, "token-from-gh-token")
-		}
-	})
-
-	t.Run("disabled when enabled=false", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "some-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": false})
-
-		if injector.Enabled() {
-			t.Error("expected disabled")
-		}
-	})
-
-	t.Run("disabled when no token available", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "")
-		t.Setenv("GH_TOKEN", "")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": true})
-
-		if injector.Enabled() {
-			t.Error("expected disabled when no token")
-		}
-	})
-
-	t.Run("disabled with nil config", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(nil)
-
-		if injector.Enabled() {
-			t.Error("expected disabled with nil config")
-		}
-	})
-
-	t.Run("disabled when enabled not set", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "some-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{})
-
-		if injector.Enabled() {
-			t.Error("expected disabled when enabled not set")
-		}
-	})
-}
-
-func TestGitHubCredentialInjector_Configure_WithSource(t *testing.T) {
-	t.Run("uses custom env var from source", func(t *testing.T) {
-		t.Setenv("CUSTOM_GH_TOKEN", "custom-token")
-		t.Setenv("GITHUB_TOKEN", "default-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled": true,
-			"source":  map[string]any{"env": "CUSTOM_GH_TOKEN"},
-		})
-
-		if !injector.Enabled() {
-			t.Error("expected enabled")
-		}
-		if injector.token != "custom-token" {
-			t.Errorf("token = %q, want %q", injector.token, "custom-token")
-		}
-	})
-
-	t.Run("source overrides defaults even when default vars set", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "default-token")
-		t.Setenv("GH_TOKEN", "gh-token")
-		t.Setenv("MY_TOKEN", "my-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled": true,
-			"source":  map[string]any{"env": "MY_TOKEN"},
-		})
-
-		if injector.token != "my-token" {
-			t.Errorf("token = %q, want %q (source should override defaults)", injector.token, "my-token")
-		}
-	})
-
-	t.Run("disabled when source env var is unset", func(t *testing.T) {
-		t.Setenv("MISSING_VAR", "")
-		t.Setenv("GITHUB_TOKEN", "default-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled": true,
-			"source":  map[string]any{"env": "MISSING_VAR"},
-		})
-
-		if injector.Enabled() {
-			t.Error("expected disabled when source env var is empty")
-		}
-	})
-
-	t.Run("falls back to defaults when source not configured", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "default-token")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": true})
-
-		if !injector.Enabled() {
-			t.Error("expected enabled")
-		}
-		if injector.token != "default-token" {
-			t.Errorf("token = %q, want %q", injector.token, "default-token")
-		}
-	})
-
-	t.Run("uses static value from source", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled": true,
-			"source":  map[string]any{"value": "static-github-token"},
-		})
-
-		if !injector.Enabled() {
-			t.Error("expected enabled")
-		}
-		if injector.token != "static-github-token" {
-			t.Errorf("token = %q, want %q", injector.token, "static-github-token")
-		}
-	})
-
-	t.Run("uses file from source", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "gh-token")
-		if err := os.WriteFile(path, []byte("file-github-token\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled": true,
-			"source":  map[string]any{"file": path},
-		})
-
-		if !injector.Enabled() {
-			t.Error("expected enabled")
-		}
-		if injector.token != "file-github-token" {
-			t.Errorf("token = %q, want %q", injector.token, "file-github-token")
-		}
-	})
-
-	t.Run("disabled when file source cannot be read", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "")
-		t.Setenv("GH_TOKEN", "")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{
-			"enabled": true,
-			"source":  map[string]any{"file": "/nonexistent/devsandbox-test-path/xyzzy"},
-		})
-
-		if injector.Enabled() {
-			t.Error("expected disabled when file source is unreadable")
-		}
-		if injector.token != "" {
-			t.Errorf("token = %q, want empty on file-read failure", injector.token)
-		}
-	})
-}
-
-func TestParseCredentialSource(t *testing.T) {
-	t.Run("nil config returns nil", func(t *testing.T) {
-		src := ParseCredentialSource(nil)
-		if src != nil {
-			t.Errorf("expected nil, got %+v", src)
-		}
-	})
-
-	t.Run("no source key returns nil", func(t *testing.T) {
-		src := ParseCredentialSource(map[string]any{"enabled": true})
-		if src != nil {
-			t.Errorf("expected nil, got %+v", src)
-		}
-	})
-
-	t.Run("source with env", func(t *testing.T) {
-		src := ParseCredentialSource(map[string]any{
-			"source": map[string]any{"env": "MY_TOKEN"},
-		})
-		if src == nil {
-			t.Fatal("expected non-nil source")
-		}
-		if src.Env != "MY_TOKEN" {
-			t.Errorf("Env = %q, want %q", src.Env, "MY_TOKEN")
-		}
-	})
-
-	t.Run("source with value", func(t *testing.T) {
-		src := ParseCredentialSource(map[string]any{
-			"source": map[string]any{"value": "static-secret"},
-		})
-		if src == nil {
-			t.Fatal("expected non-nil source")
-		}
-		if src.Value != "static-secret" {
-			t.Errorf("Value = %q, want %q", src.Value, "static-secret")
-		}
-	})
-
-	t.Run("source with file", func(t *testing.T) {
-		src := ParseCredentialSource(map[string]any{
-			"source": map[string]any{"file": "~/.config/devsandbox/github-token"},
-		})
-		if src == nil {
-			t.Fatal("expected non-nil source")
-		}
-		if src.File != "~/.config/devsandbox/github-token" {
-			t.Errorf("File = %q, want %q", src.File, "~/.config/devsandbox/github-token")
-		}
-	})
-
-	t.Run("empty source returns non-nil with empty fields", func(t *testing.T) {
-		src := ParseCredentialSource(map[string]any{
-			"source": map[string]any{},
-		})
-		if src == nil {
-			t.Fatal("expected non-nil source (explicit empty source)")
-		}
-		if src.Env != "" {
-			t.Errorf("Env = %q, want empty", src.Env)
-		}
-	})
-
-	t.Run("source with wrong type is ignored", func(t *testing.T) {
-		src := ParseCredentialSource(map[string]any{
-			"source": "not-a-map",
-		})
-		if src != nil {
-			t.Errorf("expected nil for wrong type, got %+v", src)
-		}
-	})
-}
-
-func TestCredentialSource_Resolve(t *testing.T) {
-	t.Run("resolves env var", func(t *testing.T) {
-		t.Setenv("TEST_CRED_TOKEN", "resolved-value")
-
-		src := &CredentialSource{Env: "TEST_CRED_TOKEN"}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "resolved-value" {
-			t.Errorf("Resolve() = %q, want %q", got, "resolved-value")
-		}
-	})
-
-	t.Run("returns empty when env var missing", func(t *testing.T) {
-		t.Setenv("TEST_CRED_MISSING", "")
-
-		src := &CredentialSource{Env: "TEST_CRED_MISSING"}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "" {
-			t.Errorf("Resolve() = %q, want empty", got)
-		}
-	})
-
-	t.Run("returns empty when all fields empty", func(t *testing.T) {
-		src := &CredentialSource{}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "" {
-			t.Errorf("Resolve() = %q, want empty", got)
-		}
-	})
-
-	t.Run("resolves static value", func(t *testing.T) {
-		src := &CredentialSource{Value: "static-secret"}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "static-secret" {
-			t.Errorf("Resolve() = %q, want %q", got, "static-secret")
-		}
-	})
-
-	t.Run("resolves file contents", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "token")
-		if err := os.WriteFile(path, []byte("file-secret\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		src := &CredentialSource{File: path}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "file-secret" {
-			t.Errorf("Resolve() = %q, want %q (should trim whitespace)", got, "file-secret")
-		}
-	})
-
-	t.Run("returns error when file does not exist", func(t *testing.T) {
-		src := &CredentialSource{File: "/nonexistent/path/to/token"}
-		got, err := src.Resolve()
-		if err == nil {
-			t.Errorf("Resolve() expected error for missing file, got %q", got)
-		}
-	})
-
-	t.Run("value takes priority over env", func(t *testing.T) {
-		t.Setenv("TEST_CRED_PRIORITY", "from-env")
-
-		src := &CredentialSource{Value: "from-value", Env: "TEST_CRED_PRIORITY"}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "from-value" {
-			t.Errorf("Resolve() = %q, want %q (value should take priority)", got, "from-value")
-		}
-	})
-
-	t.Run("env takes priority over file", func(t *testing.T) {
-		t.Setenv("TEST_CRED_ENV_PRIO", "from-env")
-		dir := t.TempDir()
-		path := filepath.Join(dir, "token")
-		if err := os.WriteFile(path, []byte("from-file"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		src := &CredentialSource{Env: "TEST_CRED_ENV_PRIO", File: path}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "from-env" {
-			t.Errorf("Resolve() = %q, want %q (env should take priority over file)", got, "from-env")
-		}
-	})
-
-	t.Run("file with tilde expansion", func(t *testing.T) {
-		// Write to a temp file under home to test ~ expansion
-		home, err := os.UserHomeDir()
-		if err != nil {
-			t.Skip("cannot determine home directory")
-		}
-		dir := t.TempDir()
-		// TempDir is not under ~, so test absolute path with expandHome logic
-		path := filepath.Join(dir, "token")
-		if err := os.WriteFile(path, []byte("  token-with-spaces  \n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		// Test absolute path works (no expansion needed)
-		src := &CredentialSource{File: path}
-		got, err := src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "token-with-spaces" {
-			t.Errorf("Resolve() = %q, want %q", got, "token-with-spaces")
-		}
-
-		// Test ~ expansion with a known path under home
-		testFile := filepath.Join(home, ".devsandbox-test-cred-resolve")
-		if err := os.WriteFile(testFile, []byte("home-token\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Remove(testFile) })
-
-		src = &CredentialSource{File: "~/.devsandbox-test-cred-resolve"}
-		got, err = src.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve() error = %v", err)
-		}
-		if got != "home-token" {
-			t.Errorf("Resolve() = %q, want %q (tilde should expand)", got, "home-token")
-		}
-	})
-}
-
-func TestBuildCredentialInjectors(t *testing.T) {
-	t.Run("returns github injector when enabled with token", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "test-token")
-
-		injectors := BuildCredentialInjectors(map[string]any{
-			"github": map[string]any{"enabled": true},
-		})
-
-		if len(injectors) != 1 {
-			t.Fatalf("len(injectors) = %d, want 1", len(injectors))
-		}
-	})
-
-	t.Run("empty when no credentials configured", func(t *testing.T) {
-		injectors := BuildCredentialInjectors(nil)
-
-		if len(injectors) != 0 {
-			t.Errorf("len(injectors) = %d, want 0", len(injectors))
-		}
-	})
-
-	t.Run("empty when github disabled", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "test-token")
-
-		injectors := BuildCredentialInjectors(map[string]any{
-			"github": map[string]any{"enabled": false},
-		})
-
-		if len(injectors) != 0 {
-			t.Errorf("len(injectors) = %d, want 0", len(injectors))
-		}
-	})
-
-	t.Run("skips unknown injectors", func(t *testing.T) {
-		injectors := BuildCredentialInjectors(map[string]any{
-			"nonexistent": map[string]any{"enabled": true},
-		})
-
-		if len(injectors) != 0 {
-			t.Errorf("len(injectors) = %d, want 0", len(injectors))
-		}
-	})
-
-	t.Run("empty when no tokens available", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "")
-		t.Setenv("GH_TOKEN", "")
-
-		injectors := BuildCredentialInjectors(map[string]any{
-			"github": map[string]any{"enabled": true},
-		})
-
-		if len(injectors) != 0 {
-			t.Errorf("len(injectors) = %d, want 0 (no token available)", len(injectors))
-		}
-	})
-}
-
-func TestGitHubCredentialInjector_ResolvedValue(t *testing.T) {
-	t.Run("returns token when configured", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "test-token-123")
-
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": true})
-
-		if got := injector.ResolvedValue(); got != "test-token-123" {
-			t.Errorf("ResolvedValue() = %q, want %q", got, "test-token-123")
-		}
-	})
-
-	t.Run("returns empty when disabled", func(t *testing.T) {
-		injector := &GitHubCredentialInjector{}
-		injector.Configure(map[string]any{"enabled": false})
-
-		if got := injector.ResolvedValue(); got != "" {
+	t.Run("disabled returns empty", func(t *testing.T) {
+		g := newGenericInjectorForTest(t, "test", "api.example.com", "X", "{token}", "abc", false, false)
+		if got := g.ResolvedValue(); got != "" {
 			t.Errorf("ResolvedValue() = %q, want empty", got)
 		}
 	})
 }
 
-func TestRegisteredCredentialInjectors(t *testing.T) {
-	names := RegisteredCredentialInjectors()
-
-	found := false
-	for _, name := range names {
-		if name == "github" {
-			found = true
-			break
-		}
+func TestGenericInjector_Name(t *testing.T) {
+	g := newGenericInjectorForTest(t, "my-injector", "api.example.com", "X", "{token}", "abc", false, true)
+	if got := g.Name(); got != "my-injector" {
+		t.Errorf("Name() = %q, want %q", got, "my-injector")
 	}
-	if !found {
-		t.Errorf("expected 'github' in registered injectors, got %v", names)
+}
+
+func TestBuildCredentialInjectors_NilAndEmpty(t *testing.T) {
+	t.Run("nil map returns nil slice and nil error", func(t *testing.T) {
+		injs, err := BuildCredentialInjectors(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if injs != nil {
+			t.Errorf("expected nil slice, got %v", injs)
+		}
+	})
+
+	t.Run("empty map returns nil slice and nil error", func(t *testing.T) {
+		injs, err := BuildCredentialInjectors(map[string]any{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if injs != nil {
+			t.Errorf("expected nil slice, got %v", injs)
+		}
+	})
+}
+
+func TestBuildCredentialInjectors_CustomAndCanonicalization(t *testing.T) {
+	t.Run("custom injector with static source builds and canonicalizes header", func(t *testing.T) {
+		injs, err := BuildCredentialInjectors(map[string]any{
+			"my-api": map[string]any{
+				"enabled":      true,
+				"host":         "api.example.com",
+				"header":       "x-api-key",
+				"value_format": "{token}",
+				"source":       map[string]any{"value": "abc"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(injs) != 1 {
+			t.Fatalf("len(injs) = %d, want 1", len(injs))
+		}
+		if injs[0].Name() != "my-api" {
+			t.Errorf("Name() = %q, want %q", injs[0].Name(), "my-api")
+		}
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		injs[0].Inject(req)
+		// Canonicalized: x-api-key -> X-Api-Key.
+		if got := req.Header.Get("X-Api-Key"); got != "abc" {
+			t.Errorf("X-Api-Key = %q, want %q", got, "abc")
+		}
+	})
+
+	t.Run("authorization header is canonicalized at load time", func(t *testing.T) {
+		injs, err := BuildCredentialInjectors(map[string]any{
+			"basic-bearer": map[string]any{
+				"enabled":      true,
+				"host":         "api.example.com",
+				"header":       "authorization",
+				"value_format": "Bearer {token}",
+				"source":       map[string]any{"value": "abc"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(injs) != 1 {
+			t.Fatalf("len(injs) = %d, want 1", len(injs))
+		}
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		injs[0].Inject(req)
+		if got := req.Header.Get("Authorization"); got != "Bearer abc" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer abc")
+		}
+	})
+
+	t.Run("missing value_format defaults to {token}", func(t *testing.T) {
+		injs, err := BuildCredentialInjectors(map[string]any{
+			"raw": map[string]any{
+				"enabled": true,
+				"host":    "api.example.com",
+				"header":  "X-Token",
+				"source":  map[string]any{"value": "raw-value"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(injs) != 1 {
+			t.Fatalf("len(injs) = %d, want 1", len(injs))
+		}
+		req, _ := http.NewRequest("GET", "https://api.example.com/", nil)
+		injs[0].Inject(req)
+		if got := req.Header.Get("X-Token"); got != "raw-value" {
+			t.Errorf("X-Token = %q, want %q", got, "raw-value")
+		}
+	})
+}
+
+func TestBuildCredentialInjectors_ValidationErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     map[string]any
+		wantSub []string // error message must contain all of these substrings
+	}{
+		{
+			name: "missing host when enabled",
+			cfg: map[string]any{
+				"x": map[string]any{
+					"enabled": true,
+					"header":  "X-Test",
+					"source":  map[string]any{"value": "tok"},
+				},
+			},
+			wantSub: []string{"host", "x"},
+		},
+		{
+			name: "missing header when enabled",
+			cfg: map[string]any{
+				"y": map[string]any{
+					"enabled": true,
+					"host":    "api.example.com",
+					"source":  map[string]any{"value": "tok"},
+				},
+			},
+			wantSub: []string{"header", "y"},
+		},
+		{
+			name: "unknown explicit preset",
+			cfg: map[string]any{
+				"weird": map[string]any{
+					"enabled": true,
+					"preset":  "doesnotexist",
+				},
+			},
+			wantSub: []string{"preset", "doesnotexist"},
+		},
+		{
+			name: "invalid glob pattern",
+			cfg: map[string]any{
+				"bad-glob": map[string]any{
+					"enabled":      true,
+					"host":         "*[bad",
+					"header":       "X-Test",
+					"value_format": "{token}",
+					"source":       map[string]any{"value": "tok"},
+				},
+			},
+			wantSub: []string{"glob", "bad-glob"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := BuildCredentialInjectors(tc.cfg)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			for _, s := range tc.wantSub {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q missing substring %q", err.Error(), s)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildCredentialInjectors_PresetSelfReference(t *testing.T) {
+	// preset = "<section>" with no preset registered under that name is a
+	// no-op when inferred; an explicit unknown preset is an error. Here
+	// the section name "self-ref-test" has no preset and the user did
+	// not set `preset`, so the inferred path is taken (no preset).
+	injs, err := BuildCredentialInjectors(map[string]any{
+		"self-ref-test": map[string]any{
+			"enabled":      true,
+			"host":         "api.example.com",
+			"header":       "X-Test",
+			"value_format": "{token}",
+			"source":       map[string]any{"value": "tok"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(injs) != 1 {
+		t.Fatalf("len(injs) = %d, want 1", len(injs))
+	}
+}
+
+func TestBuildCredentialInjectors_EmptySourceDisables(t *testing.T) {
+	t.Setenv("DEVSANDBOX_TEST_UNSET", "")
+
+	injs, err := BuildCredentialInjectors(map[string]any{
+		"unset-env": map[string]any{
+			"enabled":      true,
+			"host":         "api.example.com",
+			"header":       "X-Test",
+			"value_format": "{token}",
+			"source":       map[string]any{"env": "DEVSANDBOX_TEST_UNSET"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(injs) != 0 {
+		t.Errorf("expected 0 injectors (silently disabled), got %d", len(injs))
+	}
+}
+
+func TestBuildCredentialInjectors_SpecificityOrder(t *testing.T) {
+	t.Run("exact wins over glob", func(t *testing.T) {
+		injs, err := BuildCredentialInjectors(map[string]any{
+			"wide": map[string]any{
+				"enabled":      true,
+				"host":         "*.github.com",
+				"header":       "X-Wide",
+				"value_format": "{token}",
+				"source":       map[string]any{"value": "w"},
+			},
+			"specific": map[string]any{
+				"enabled":      true,
+				"host":         "api.github.com",
+				"header":       "X-Specific",
+				"value_format": "{token}",
+				"source":       map[string]any{"value": "s"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(injs) != 2 {
+			t.Fatalf("len(injs) = %d, want 2", len(injs))
+		}
+		if injs[0].Name() != "specific" {
+			t.Errorf("expected specific (exact) first, got %q", injs[0].Name())
+		}
+		if injs[1].Name() != "wide" {
+			t.Errorf("expected wide (glob) second, got %q", injs[1].Name())
+		}
+	})
+
+	t.Run("equal-specificity tiebreak by name ascending", func(t *testing.T) {
+		// Two distinct exact hosts of equal "specificity" (both 1000).
+		// Tie should be broken by name ascending: "alpha" before "beta".
+		injs, err := BuildCredentialInjectors(map[string]any{
+			"beta": map[string]any{
+				"enabled":      true,
+				"host":         "two.example.com",
+				"header":       "X-Beta",
+				"value_format": "{token}",
+				"source":       map[string]any{"value": "b"},
+			},
+			"alpha": map[string]any{
+				"enabled":      true,
+				"host":         "one.example.com",
+				"header":       "X-Alpha",
+				"value_format": "{token}",
+				"source":       map[string]any{"value": "a"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(injs) != 2 {
+			t.Fatalf("len(injs) = %d, want 2", len(injs))
+		}
+		if injs[0].Name() != "alpha" || injs[1].Name() != "beta" {
+			t.Errorf("expected alpha,beta got %q,%q", injs[0].Name(), injs[1].Name())
+		}
+	})
+}
+
+func TestBuildCredentialInjectors_DisabledExcluded(t *testing.T) {
+	injs, err := BuildCredentialInjectors(map[string]any{
+		"off": map[string]any{
+			"enabled": false,
+			"host":    "api.example.com",
+			"header":  "X-Off",
+			"source":  map[string]any{"value": "tok"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(injs) != 0 {
+		t.Errorf("expected 0 injectors (enabled=false), got %d", len(injs))
+	}
+}
+
+func TestGitHubPreset_Compat(t *testing.T) {
+	cases := []struct {
+		name        string
+		githubToken string
+		ghToken     string
+		wantEnabled bool
+		wantHeader  string
+	}{
+		{"GITHUB_TOKEN set", "primary", "", true, "Bearer primary"},
+		{"GH_TOKEN only", "", "fallback", true, "Bearer fallback"},
+		{"both set, GITHUB_TOKEN wins", "primary", "fallback", true, "Bearer primary"},
+		{"neither set, silently disabled", "", "", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("GITHUB_TOKEN", c.githubToken)
+			t.Setenv("GH_TOKEN", c.ghToken)
+			cfg := map[string]any{"github": map[string]any{"enabled": true}}
+			injs, err := BuildCredentialInjectors(cfg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !c.wantEnabled {
+				if len(injs) != 0 {
+					t.Fatalf("expected disabled, got %d injectors", len(injs))
+				}
+				return
+			}
+			if len(injs) != 1 {
+				t.Fatalf("expected 1 injector, got %d", len(injs))
+			}
+			req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+			if !injs[0].Match(req) {
+				t.Fatalf("github preset must match api.github.com")
+			}
+			injs[0].Inject(req)
+			if got := req.Header.Get("Authorization"); got != c.wantHeader {
+				t.Errorf("got %q, want %q", got, c.wantHeader)
+			}
+			// Verify it does NOT match raw.githubusercontent.com (preset is exact host).
+			req2 := httptest.NewRequest("GET", "https://raw.githubusercontent.com/x", nil)
+			if injs[0].Match(req2) {
+				t.Errorf("github preset must not match raw.githubusercontent.com")
+			}
+		})
+	}
+}
+
+func TestGitHubPreset_OverwriteWithCustomSource(t *testing.T) {
+	t.Setenv("GH_RO_TOKEN", "real-token")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	cfg := map[string]any{
+		"github": map[string]any{
+			"enabled":   true,
+			"overwrite": true,
+			"source":    map[string]any{"env": "GH_RO_TOKEN"},
+		},
+	}
+	injs, err := BuildCredentialInjectors(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(injs) != 1 {
+		t.Fatalf("expected 1 injector, got %d", len(injs))
+	}
+	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	req.Header.Set("Authorization", "Bearer placeholder")
+	injs[0].Inject(req)
+	if got := req.Header.Get("Authorization"); got != "Bearer real-token" {
+		t.Errorf("expected Bearer real-token (overwrite), got %q", got)
+	}
+}
+
+func TestGitHubPreset_UserHostOverride(t *testing.T) {
+	// User overlay wins over preset defaults — if user sets host="example.com",
+	// the injector matches example.com, not api.github.com.
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("GH_TOKEN", "")
+	cfg := map[string]any{
+		"github": map[string]any{
+			"enabled": true,
+			"host":    "example.com",
+		},
+	}
+	injs, err := BuildCredentialInjectors(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(injs) != 1 {
+		t.Fatalf("expected 1 injector, got %d", len(injs))
+	}
+	req := httptest.NewRequest("GET", "https://example.com/", nil)
+	if !injs[0].Match(req) {
+		t.Errorf("user-overridden host must match")
+	}
+	req2 := httptest.NewRequest("GET", "https://api.github.com/", nil)
+	if injs[0].Match(req2) {
+		t.Errorf("preset default host must not match when user overrode")
+	}
+}
+
+func TestBuildCredentialInjectors_SourceFileReadError(t *testing.T) {
+	cfg := map[string]any{
+		"x": map[string]any{
+			"enabled": true,
+			"host":    "api.example.com",
+			"header":  "X-Test",
+			"source":  map[string]any{"file": "/no/such/devsandbox-test-file"},
+		},
+	}
+	injs, err := BuildCredentialInjectors(cfg)
+	if err == nil {
+		t.Fatalf("expected error from unreadable source file, got injectors=%v", injs)
+	}
+	if !strings.Contains(err.Error(), "x") {
+		t.Errorf("error should mention injector name; got: %v", err)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error should wrap fs.ErrNotExist; got: %v", err)
+	}
+}
+
+func TestGitHubPreset_ExplicitSelfReference(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("GH_TOKEN", "")
+	cfg := map[string]any{
+		"github": map[string]any{
+			"enabled": true,
+			"preset":  "github", // explicit, matches section name — should be a no-op
+		},
+	}
+	injs, err := BuildCredentialInjectors(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(injs) != 1 {
+		t.Fatalf("expected 1 injector, got %d", len(injs))
+	}
+	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	injs[0].Inject(req)
+	if got := req.Header.Get("Authorization"); got != "Bearer tok" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer tok")
 	}
 }

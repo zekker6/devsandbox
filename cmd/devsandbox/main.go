@@ -458,7 +458,10 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		pCfg.Dispatcher = logDispatcher
 		pCfg.LogReceivers = appCfg.Logging.Receivers
 		pCfg.LogAttributes = appCfg.Logging.Attributes
-		pCfg.CredentialInjectors = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
+		pCfg.CredentialInjectors, err = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
+		if err != nil {
+			return fmt.Errorf("build credential injectors: %w", err)
+		}
 		pCfg.Filter = buildFilterConfig(appCfg, cmd, filterDefault, allowDomains, blockDomains)
 		pCfg.Redaction = buildRedactionConfig(&appCfg.Proxy.Redaction)
 		pCfg.ProjectDir = projectDir

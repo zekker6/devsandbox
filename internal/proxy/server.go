@@ -57,11 +57,7 @@ func validateCredentialRedactionConflicts(injectors []CredentialInjector, engine
 
 	var errs []string
 	for _, injector := range injectors {
-		ci, ok := injector.(ConfigurableInjector)
-		if !ok {
-			continue
-		}
-		value := ci.ResolvedValue()
+		value := injector.ResolvedValue()
 		if value == "" {
 			continue
 		}
@@ -72,7 +68,7 @@ func validateCredentialRedactionConflicts(injectors []CredentialInjector, engine
 				"credential injector %q conflicts with redaction rules %v: "+
 					"injected credential value matches redaction rules that would block or modify it; "+
 					"either remove the conflicting redaction rules or disable credential injection for this domain",
-				ci.Name(), matches,
+				injector.Name(), matches,
 			))
 		}
 	}

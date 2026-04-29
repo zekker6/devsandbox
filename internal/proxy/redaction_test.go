@@ -9,6 +9,23 @@ import (
 	"testing"
 )
 
+// newTestInjector constructs a *GenericInjector for redaction conflict tests.
+// It uses an exact-host matcher and the canonicalized header form to mirror
+// what BuildCredentialInjectors would produce.
+func newTestInjector(name, host, header, token string, enabled bool) *GenericInjector {
+	exact := host
+	return &GenericInjector{
+		name:        name,
+		host:        host,
+		matcher:     func(s string) bool { return s == exact },
+		isExact:     true,
+		header:      http.CanonicalHeaderKey(header),
+		valueFormat: "Bearer {token}",
+		token:       token,
+		enabled:     enabled,
+	}
+}
+
 func TestRedactionEngine_SourceResolution_Value(t *testing.T) {
 	cfg := &RedactionConfig{
 		Enabled:       boolPtr(true),
@@ -603,8 +620,7 @@ func TestRedactionEngine_MatchesValue_SourceContains(t *testing.T) {
 func TestValidateCredentialRedactionConflicts_SourceConflict(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "secret-abc-123")
 
-	injector := &GitHubCredentialInjector{}
-	injector.Configure(map[string]any{"enabled": true})
+	injector := newTestInjector("github", "api.github.com", "Authorization", "secret-abc-123", true)
 
 	cfg := &RedactionConfig{
 		Enabled:       boolPtr(true),
@@ -631,7 +647,7 @@ func TestValidateCredentialRedactionConflicts_SourceConflict(t *testing.T) {
 }
 
 func TestValidateCredentialRedactionConflicts_PatternConflict(t *testing.T) {
-	injector := &GitHubCredentialInjector{token: "sk-abcdefghijklmnopqrstuvwxyz", enabled: true}
+	injector := newTestInjector("github", "api.github.com", "Authorization", "sk-abcdefghijklmnopqrstuvwxyz", true)
 
 	cfg := &RedactionConfig{
 		Enabled:       boolPtr(true),
@@ -655,7 +671,7 @@ func TestValidateCredentialRedactionConflicts_PatternConflict(t *testing.T) {
 }
 
 func TestValidateCredentialRedactionConflicts_NoConflict(t *testing.T) {
-	injector := &GitHubCredentialInjector{token: "github-token-xyz", enabled: true}
+	injector := newTestInjector("github", "api.github.com", "Authorization", "github-token-xyz", true)
 
 	cfg := &RedactionConfig{
 		Enabled:       boolPtr(true),
@@ -677,7 +693,7 @@ func TestValidateCredentialRedactionConflicts_NoConflict(t *testing.T) {
 }
 
 func TestValidateCredentialRedactionConflicts_NilEngine(t *testing.T) {
-	injector := &GitHubCredentialInjector{token: "some-token", enabled: true}
+	injector := newTestInjector("github", "api.github.com", "Authorization", "some-token", true)
 
 	err := validateCredentialRedactionConflicts([]CredentialInjector{injector}, nil)
 	if err != nil {
@@ -706,7 +722,7 @@ func TestValidateCredentialRedactionConflicts_NoInjectors(t *testing.T) {
 
 func TestValidateCredentialRedactionConflicts_DisabledInjectorSkipped(t *testing.T) {
 	// Disabled injector should not trigger conflict even if value would match
-	injector := &GitHubCredentialInjector{token: "", enabled: false}
+	injector := newTestInjector("github", "api.github.com", "Authorization", "", false)
 
 	cfg := &RedactionConfig{
 		Enabled:       boolPtr(true),

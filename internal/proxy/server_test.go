@@ -519,3 +519,41 @@ func TestServerHEAD_PreservesContentLength_MITM(t *testing.T) {
 		t.Errorf("Docker-Content-Digest: got %q, want %q", got, "sha256:cafebabe")
 	}
 }
+
+func TestServer_CredentialInjector_SpecificityOrder(t *testing.T) {
+	cfg := map[string]any{
+		"specific": map[string]any{
+			"enabled":      true,
+			"host":         "api.github.com",
+			"header":       "X-Specific",
+			"value_format": "specific-{token}",
+			"source":       map[string]any{"value": "S"},
+		},
+		"wide": map[string]any{
+			"enabled":      true,
+			"host":         "*.github.com",
+			"header":       "X-Wide",
+			"value_format": "wide-{token}",
+			"source":       map[string]any{"value": "W"},
+		},
+	}
+	injs, err := BuildCredentialInjectors(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mirror server.go's first-match-wins loop on the pre-sorted slice.
+	req := httptest.NewRequest("GET", "https://api.github.com/user", nil)
+	for _, inj := range injs {
+		if inj.Match(req) {
+			inj.Inject(req)
+			break
+		}
+	}
+	if req.Header.Get("X-Specific") != "specific-S" {
+		t.Errorf("specific injector should win for api.github.com; got X-Specific=%q X-Wide=%q",
+			req.Header.Get("X-Specific"), req.Header.Get("X-Wide"))
+	}
+	if req.Header.Get("X-Wide") != "" {
+		t.Errorf("wide injector must not run when specific matched")
+	}
+}

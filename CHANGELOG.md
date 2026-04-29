@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `devsandbox sandboxes prune --orphaned` flag to restrict pruning to orphaned sandboxes (those whose original project directory no longer exists). The flag intersects with other selectors: `--orphaned --older-than 30d` removes orphans last used over 30 days ago; `--orphaned --keep N` prunes orphans outside the N most-recently-used set; `--orphaned --all` (or `--orphaned` alone) removes every orphan. Without the flag, the existing default (orphans-only when no other selector is set) is unchanged.
+- **Generic credential injector for proxy.** Define credential injection by `host` + `header` + `value_format` + `[...source]` + `overwrite` in TOML — no Go code change required to add a new service. Built-in `github` preset preserves existing config compatibility (`[proxy.credentials.github] enabled = true` works unchanged, including `GITHUB_TOKEN` → `GH_TOKEN` fallback). Specificity-based ordering when multiple injectors could match the same request (exact host > longer literal > shorter glob, tie-break by name). `BuildCredentialInjectors` now returns an error for invalid configs (unknown preset, missing `host`/`header`, invalid glob).
 
 ## [v0.14.1] - 2026-04-28
 

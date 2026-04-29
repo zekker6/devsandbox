@@ -83,9 +83,11 @@ when proxy mode is active.
 
 ### Proxy Credentials
 
-Inject authentication credentials into requests for specific domains. Credentials are read from host environment variables and added to matching requests. The token never enters the sandbox.
+Inject authentication credentials into requests for specific domains. Credentials are read from a configurable source (host env var, file, or static value) and added to matching requests. The token never enters the sandbox.
 
 See [Proxy: Credential Injection](proxy.md#credential-injection) for how this works and when to use it.
+
+Minimal configuration using the built-in `github` preset:
 
 ```toml
 [proxy.credentials.github]
@@ -97,22 +99,51 @@ enabled = true
 # file = "~/.config/devsandbox/github-token"
 # value = "github_pat_..."
 
-# Optional: replace any Authorization header already on the request.
+# Optional: replace any header value already on the request.
 # Useful when a CLI inside the sandbox (e.g. `gh`) refuses to run without a
 # token set - pass a placeholder via env_passthrough while the real token
 # stays on the host and is swapped in by the proxy.
 # overwrite = true
 ```
 
-**Available injectors:**
+Custom injector for any other service - no built-in preset required:
 
-| Name     | Matches              | Default Env Var               | Header                          |
-|----------|----------------------|-------------------------------|---------------------------------|
-| `github` | `api.github.com`     | `GITHUB_TOKEN` or `GH_TOKEN`  | `Authorization: Bearer <token>` |
+```toml
+[proxy.credentials.gitlab]
+enabled = true
+host = "gitlab.com"
+header = "PRIVATE-TOKEN"
+value_format = "{token}"
+
+  [proxy.credentials.gitlab.source]
+  env = "GITLAB_TOKEN"
+```
+
+**Fields under `[proxy.credentials.<name>]`:**
+
+| Field | Type | Default | Required when `enabled = true` |
+|-------|------|---------|--------------------------------|
+| `enabled` | bool | `false` | - |
+| `host` | string (exact or glob) | preset value or `""` | yes |
+| `header` | string (canonicalized) | preset value or `""` | yes |
+| `value_format` | string with `{token}` placeholder | preset value or `"{token}"` | no |
+| `overwrite` | bool | `false` | no |
+| `preset` | string | `""` (or section name if it matches a built-in) | no |
+| `[...source]` sub-table | `env` / `file` / `value` | preset's default source | no |
+
+**Built-in presets:**
+
+| Preset | `host` | `header` | `value_format` | Default source |
+|--------|--------|----------|----------------|----------------|
+| `github` | `api.github.com` | `Authorization` | `Bearer {token}` | `env = "GITHUB_TOKEN"` (with `GH_TOKEN` fallback when no explicit source is set) |
+
+A section named after a built-in preset (e.g. `[proxy.credentials.github]`) auto-applies the preset; user fields override preset defaults.
 
 **Source priority:** `value` > `env` > `file`. Set exactly one for clarity.
 
-**Overwrite:** `overwrite = false` (default) preserves any existing `Authorization` header on outgoing requests - safer, but does nothing when the sandboxed tool sets its own Authorization. `overwrite = true` unconditionally replaces the header with the injected token. Combine with a placeholder `GH_TOKEN` in `sandbox.env_passthrough` to satisfy tools that refuse to start without a token.
+**Specificity ordering:** when multiple injectors could match the same host, the most-specific one wins (exact > longer literal > shorter glob), tie-broken by name alphabetically.
+
+**Overwrite:** `overwrite = false` (default) preserves any existing value of the configured header - safer, but does nothing when the sandboxed tool sets its own. `overwrite = true` unconditionally replaces the header. Combine with a placeholder env var via `[sandbox.environment.<NAME>]` to satisfy tools that refuse to start without a token.
 
 ### Content Redaction
 

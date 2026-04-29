@@ -4,7 +4,7 @@ Network isolation, traffic inspection, and HTTP filtering.
 
 Proxy mode routes all HTTP/HTTPS traffic through a local MITM (Man-in-the-Middle) proxy for inspection and logging.
 The sections below describe bwrap backend behavior by default. The Docker backend achieves the same goal with different
-mechanisms — see [Backend-Specific Behavior](#backend-specific-behavior) for details.
+mechanisms - see [Backend-Specific Behavior](#backend-specific-behavior) for details.
 
 ## Why Use Proxy Mode?
 
@@ -25,9 +25,9 @@ mechanisms — see [Backend-Specific Behavior](#backend-specific-behavior) for d
 
 ## Requirements (bwrap backend)
 
-Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt—basic sandboxing works without it.
+Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt-basic sandboxing works without it.
 
-devsandbox includes an embedded pasta binary — no system packages required. To use a system-installed pasta instead, set `use_embedded = false` in [configuration](configuration.md).
+devsandbox includes an embedded pasta binary - no system packages required. To use a system-installed pasta instead, set `use_embedded = false` in [configuration](configuration.md).
 
 > **Docker backend:** The Docker backend does NOT require pasta. It uses per-session Docker networks for isolation instead. See [Backend-Specific Behavior](#backend-specific-behavior).
 
@@ -81,7 +81,7 @@ port = 8080
 
 By default, the proxy performs MITM (Man-in-the-Middle) interception on HTTPS connections, using a generated CA certificate. This enables full traffic inspection, credential injection, and content redaction for HTTPS.
 
-If you don't need HTTPS inspection — for example, when tools have certificate pinning or you only need network isolation with HTTP logging — you can disable MITM:
+If you don't need HTTPS inspection - for example, when tools have certificate pinning or you only need network isolation with HTTP logging — you can disable MITM:
 
 ### Command Line
 
@@ -109,18 +109,19 @@ mitm = false
 | CA certificate injection | Yes | Skipped |
 | Network isolation | Yes | Yes |
 
-When MITM is disabled, the proxy logs warnings at startup if credential injectors, redaction rules, or filter rules are configured — since these features cannot inspect encrypted HTTPS traffic.
+When MITM is disabled, the proxy logs warnings at startup if credential injectors, redaction rules, or filter rules are configured - since these features cannot inspect encrypted HTTPS traffic.
 
 **When to disable MITM:**
+
 - Tools with certificate pinning that reject the proxy CA
 - You only need network isolation and HTTP (not HTTPS) logging
 - You don't need credential injection, content redaction, or HTTPS filtering
 
-If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM enabled — it's required for credential injection and secret scanning.
+If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM enabled - it's required for credential injection and secret scanning.
 
 ## Backend-Specific Behavior
 
-The proxy achieves the same goal on both backends — intercept and log HTTP/HTTPS traffic — but the underlying mechanisms differ.
+The proxy achieves the same goal on both backends - intercept and log HTTP/HTTPS traffic — but the underlying mechanisms differ.
 
 ### bwrap backend
 
@@ -529,6 +530,7 @@ Decision:
 ```
 
 **Keys** (instant response, no Enter needed):
+
 - `a` - Allow this request
 - `b` - Block this request
 - `s` - Allow and remember for session
@@ -580,22 +582,56 @@ Filter decisions are logged with requests:
 
 ## Credential Injection
 
-The proxy can inject authentication credentials into requests for specific domains, keeping tokens completely out of the sandbox environment. The sandboxed process never sees the token — it stays on the host side.
+The proxy can inject authentication credentials into requests for specific domains, keeping tokens completely out of the sandbox environment. The sandboxed process never sees the token - it stays on the host side.
 
 ### How It Works
 
-1. **Intercept** — The proxy intercepts outgoing requests from the sandbox.
-2. **Match** — For each registered credential injector, it checks if the request matches a known domain (e.g., host is `api.github.com`).
-3. **Inject** — If matched and no `Authorization` header is already present, the injector adds the credential header.
-4. **Isolate** — The sandbox process never sees the token. It is read from the host environment and added transparently.
+1. **Intercept** - The proxy intercepts outgoing requests from the sandbox.
+2. **Match** - For each configured credential injector, it checks whether the request host matches the injector's `host` (exact match or glob).
+3. **Inject** - If matched, the injector sets the configured `header` to the rendered `value_format` with `{token}` substituted from the resolved `source`. The existing header is preserved unless `overwrite = true`.
+4. **Isolate** - The sandbox process never sees the token. It is read from the host environment and added transparently.
 
-### Available Injectors
+### Universal Schema
 
-| Name | Matches | Default Environment Variable | Header |
-|------|---------|------------------------------|--------|
-| `github` | `api.github.com` | `GITHUB_TOKEN` or `GH_TOKEN` | `Authorization: Bearer <token>` |
+Every injector is defined by the same set of fields under `[proxy.credentials.<name>]`:
 
-Default environment variables are used when no explicit source is configured. When a source is configured, it takes precedence and defaults are ignored.
+| Field | Purpose |
+|-------|---------|
+| `enabled` | Master switch. Injector is inert unless `enabled = true`. |
+| `host` | Hostname to match. Exact (`api.github.com`) or glob (`*.example.com`). |
+| `header` | HTTP header to set on matching requests. Canonicalized at load (`authorization` → `Authorization`). |
+| `value_format` | Template for the header value. `{token}` is replaced with the resolved source value. Defaults to `"{token}"`. |
+| `overwrite` | When `true`, replaces any existing value for the configured header. Default `false`. |
+| `preset` | Optional name of a built-in preset whose defaults are used as the base for this injector. |
+| `[...source]` sub-table | Where the token comes from: `env`, `file`, or `value`. |
+
+A custom non-GitHub injector - no Go code required:
+
+```toml
+[proxy.credentials.gitlab]
+enabled = true
+host = "gitlab.com"
+header = "PRIVATE-TOKEN"
+value_format = "{token}"
+
+  [proxy.credentials.gitlab.source]
+  env = "GITLAB_TOKEN"
+```
+
+### Built-in Presets
+
+Built-in preset names are reserved - using one as the section name (e.g. `[proxy.credentials.github]`) automatically applies the preset's defaults. User fields override preset defaults; `[...source]` overrides the preset's default source.
+
+| Preset | `host` | `header` | `value_format` | Default source |
+|--------|--------|----------|----------------|----------------|
+| `github` | `api.github.com` | `Authorization` | `Bearer {token}` | `env = "GITHUB_TOKEN"` (with `GH_TOKEN` fallback when no explicit source is set) |
+
+Minimal GitHub configuration - the preset supplies everything else:
+
+```toml
+[proxy.credentials.github]
+enabled = true
+```
 
 ### Source Types
 
@@ -607,9 +643,21 @@ Default environment variables are used when no explicit source is configured. Wh
 
 When multiple fields are set, priority is: `value` > `env` > `file`. Set exactly one for clarity.
 
+### Specificity Ordering
+
+When more than one configured injector could match the same request host, the most-specific one wins:
+
+1. Exact host beats any glob.
+2. Among globs, the longer literal portion (`len(host) - count('*')`) wins.
+3. Ties are broken by injector name in alphabetical order.
+
+So an exact `api.github.com` injector wins over a `*.github.com` injector for `api.github.com`, and the proxy injects exactly one credential per request.
+
+A glob that doesn't match any actual request is not an error - host coverage is enforced lazily at request time, not at config load.
+
 ### Overwriting Existing Authorization Headers
 
-By default the injector never replaces an existing `Authorization` header — the sandboxed tool wins. That's safe, but breaks the pattern where a CLI inside the sandbox needs a token set in its environment to start (e.g. `gh` CLI refuses to run without `GH_TOKEN`).
+By default the injector never replaces an existing value for its configured header - the sandboxed tool wins. That's safe, but breaks the pattern where a CLI inside the sandbox needs a token set in its environment to start (e.g. `gh` CLI refuses to run without `GH_TOKEN`).
 
 To handle this, set `overwrite = true` and inject a placeholder env var into the sandbox so the CLI starts:
 
@@ -627,16 +675,16 @@ env = "GH_RO_TOKEN"   # real read-only token on the host
 
 Export `GH_RO_TOKEN` on the host only. The sandbox sees `GH_TOKEN=placeholder`; `gh` adds `Authorization: Bearer placeholder` to its requests; the proxy replaces the header with the real token from `GH_RO_TOKEN` before forwarding to `api.github.com`.
 
-> **Security trade-off:** the sandbox sees a non-functional placeholder, not the real token — leaking the placeholder is harmless. This preserves the core guarantee: the real credential never enters the sandbox.
+> **Security trade-off:** the sandbox sees a non-functional placeholder, not the real token - leaking the placeholder is harmless. This preserves the core guarantee: the real credential never enters the sandbox.
 
-> **AI agent workflow:** Credential injection is particularly useful for AI coding assistants like Claude Code that need GitHub API access. The token stays on the host — the AI agent never sees it, but its API requests to github.com are automatically authenticated.
+> **AI agent workflow:** Credential injection is particularly useful for AI coding assistants like Claude Code that need GitHub API access. The token stays on the host - the AI agent never sees it, but its API requests to github.com are automatically authenticated.
 
 **Notes:**
 
 - Credential injection requires proxy mode (`--proxy`) with MITM enabled (the default).
-- Injectors are only active when explicitly `enabled = true` and the credential resolves to a non-empty value.
-- By default the injector never overwrites an existing `Authorization` header on the request. Set `overwrite = true` on the injector to change this.
-- Unknown injector names in the config produce a warning and are skipped.
+- Injectors are only active when explicitly `enabled = true` and the credential source resolves to a non-empty value. An empty source silently disables the injector - it is not a config error.
+- By default the injector never overwrites an existing value for its configured header. Set `overwrite = true` to change this.
+- Invalid configuration fails fast at load time: unknown `preset`, missing `host`/`header` when `enabled = true`, invalid glob, or unreadable source `file`.
 
 See [Configuration: Proxy Credentials](configuration.md#proxy-credentials) for the complete TOML reference.
 
@@ -685,6 +733,7 @@ Rules detect secrets using either a **source** (exact value lookup) or a **patte
 | `value` | Static value in config | `value = "literal-secret"` |
 
 **Choosing an action:**
+
 - **Block** when the secret must never leave your machine (most secure, may break the tool's request)
 - **Redact** when the request should proceed but without the secret (destination sees `[REDACTED:rule-name]`)
 - **Log** when you want visibility without enforcement (monitoring only)
@@ -704,7 +753,7 @@ Redaction events appear in proxy logs with additional fields:
 }
 ```
 
-For the `redact` action, the logged URL and body contain the replacement placeholders — the original secret never appears in logs.
+For the `redact` action, the logged URL and body contain the replacement placeholders - the original secret never appears in logs.
 
 View redaction events:
 
@@ -716,7 +765,7 @@ devsandbox logs proxy --json | jq 'select(.redaction_action != null)'
 
 - Content redaction requires proxy mode (`--proxy`) with MITM enabled.
 - All source values must resolve at startup. If an environment variable is missing or a file is unreadable, devsandbox exits with an error (**fail-closed**).
-- Log entries for blocked and redacted requests have secrets replaced — secrets never appear in proxy logs.
+- Log entries for blocked and redacted requests have secrets replaced - secrets never appear in proxy logs.
 - Redaction rules are always **additive** when merging configs. The default action uses most-restrictive-wins.
 - Redaction rules must not match values used by credential injectors. If a redaction rule (source or pattern) would match an injected credential, devsandbox exits with an error at startup. This prevents the confusing situation where credential injection adds a token and redaction immediately blocks it.
 - When multiple rules match, the most severe action wins: **block > redact > log**.
