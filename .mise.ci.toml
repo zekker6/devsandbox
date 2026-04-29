@@ -3,6 +3,6 @@
 
 [tools]
 go = "1.26.2"
-task = "3.40"
+task = "3.50.0"
 golangci-lint = "2.11.4"
 neovim = "0.10"
