@@ -1064,6 +1064,10 @@ func (b *Builder) AddProxyEnvironment() *Builder {
 	b.SetEnv("YARN_HTTP_PROXY", proxyURL)
 	b.SetEnv("YARN_HTTPS_PROXY", proxyURL)
 
+	// Node.js >=24: opt-in for built-in fetch (undici) to honor HTTP(S)_PROXY env vars.
+	// Without this, npx-based tools like mcp-remote bypass the proxy and fail with ENETUNREACH.
+	b.SetEnv("NODE_USE_ENV_PROXY", "1")
+
 	// User-defined extra proxy env vars from config
 	for _, name := range b.cfg.ProxyExtraEnv {
 		b.SetEnv(name, proxyURL)

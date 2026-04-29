@@ -687,15 +687,16 @@ func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
 
 	// Check for YARN proxy vars
 	expectedVars := map[string]string{
-		"HTTP_PROXY":       "http://10.0.2.2:8080",
-		"HTTPS_PROXY":      "http://10.0.2.2:8080",
-		"http_proxy":       "http://10.0.2.2:8080",
-		"https_proxy":      "http://10.0.2.2:8080",
-		"YARN_HTTP_PROXY":  "http://10.0.2.2:8080",
-		"YARN_HTTPS_PROXY": "http://10.0.2.2:8080",
-		"NO_PROXY":         "localhost,127.0.0.1",
-		"no_proxy":         "localhost,127.0.0.1",
-		"DEVSANDBOX_PROXY": "1",
+		"HTTP_PROXY":         "http://10.0.2.2:8080",
+		"HTTPS_PROXY":        "http://10.0.2.2:8080",
+		"http_proxy":         "http://10.0.2.2:8080",
+		"https_proxy":        "http://10.0.2.2:8080",
+		"YARN_HTTP_PROXY":    "http://10.0.2.2:8080",
+		"YARN_HTTPS_PROXY":   "http://10.0.2.2:8080",
+		"NO_PROXY":           "localhost,127.0.0.1",
+		"no_proxy":           "localhost,127.0.0.1",
+		"NODE_USE_ENV_PROXY": "1",
+		"DEVSANDBOX_PROXY":   "1",
 	}
 
 	for wantName, wantValue := range expectedVars {

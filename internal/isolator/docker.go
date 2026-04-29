@@ -784,6 +784,10 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-e", fmt.Sprintf("YARN_HTTP_PROXY=%s", proxyURL))
 		args = append(args, "-e", fmt.Sprintf("YARN_HTTPS_PROXY=%s", proxyURL))
 
+		// Node.js >=24: opt-in for built-in fetch (undici) to honor HTTP(S)_PROXY env vars.
+		// Without this, npx-based tools like mcp-remote bypass the proxy and fail with ENETUNREACH.
+		args = append(args, "-e", "NODE_USE_ENV_PROXY=1")
+
 		// User-defined extra proxy env vars from config
 		for _, name := range cfg.ProxyExtraEnv {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", name, proxyURL))
