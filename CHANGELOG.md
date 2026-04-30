@@ -4,17 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.17.0] - 2026-04-30
+
 ### Added
 
 - **Audit-grade structured logging.** Per-session fields (`session_id`, `sandbox_name`, `sandbox_path`, `project_dir`, `isolator`, `pid`, `devsandbox_version`) on every dispatched entry, plus synthesized `session.start` / `session.end` lifecycle events and security events (`proxy.filter.decision`, `proxy.redaction.applied`, `proxy.credential.injected`, `proxy.mitm.bypass`, `mount.decision`, `notice.overflow`). See [Audit Logging](docs/configuration.md#audit-logging).
 - **OTLP `header_sources`.** Resolve receiver headers from `value` / `env` / `file` at runtime so secrets stay on the host. See [Authenticating to an Auth-Enforced Endpoint](docs/configuration.md#authenticating-to-an-auth-enforced-endpoint).
-- **Proxy `log_skip` rules.** Drop matching requests from the proxy log (local + remote dispatchers); the request itself still passes through. See [Skipping Log Entries](docs/proxy.md#skipping-log-entries).
 - `NODE_USE_ENV_PROXY=1` is now set automatically in proxy mode so Node.js ≥24's built-in `fetch` (undici) honors `HTTP(S)_PROXY` — fixes `ENETUNREACH` from npx-based tools like `mcp-remote`.
 
-### Dependencies
+## [v0.16.0] - 2026-04-29
 
-- `neovim` 0.10.4 → 0.12.2 (#52).
-- `task` 3.40.1 → 3.50.0 (#53).
+### Added
+
+- **Proxy `log_skip` rules.** Drop matching requests from the proxy log (local + remote dispatchers); the request itself still passes through. See [Skipping Log Entries](docs/proxy.md#skipping-log-entries).
 
 ## [v0.15.0] - 2026-04-29
 
@@ -42,7 +44,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- `kitty` proxy revdiff launch pattern now accepts the unquoted `/usr/bin/env ` prefix the launcher actually emits (only `ENV_PREFIX` assignments and the inner argv are single-quoted). The literal absolute path is required — bare `env` (PATH-relative) still rejects, so `$PATH` shadowing can't be used to bypass the inner-program check.
+- `kitty` proxy revdiff launch pattern now accepts the unquoted `/usr/bin/env` prefix the launcher actually emits (only `ENV_PREFIX` assignments and the inner argv are single-quoted). The literal absolute path is required — bare `env` (PATH-relative) still rejects, so `$PATH` shadowing can't be used to bypass the inner-program check.
 
 ## [v0.13.2] - 2026-04-20
 
