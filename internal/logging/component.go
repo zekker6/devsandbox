@@ -93,3 +93,19 @@ func (l *ComponentLogger) dispatch(level Level, msg string) {
 		},
 	})
 }
+
+// Event emits a structured audit event scoped to this component. The event
+// name and the supplied fields are merged with the component label.
+// No-op when both errorLogger and dispatcher are nil (l.dispatcher is checked
+// inside Dispatcher.Event, but we still want the component to ride along).
+func (l *ComponentLogger) Event(name string, fields map[string]any) {
+	if l == nil || l.dispatcher == nil {
+		return
+	}
+	merged := make(map[string]any, len(fields)+1)
+	for k, v := range fields {
+		merged[k] = v
+	}
+	merged["component"] = l.component
+	_ = l.dispatcher.Event(LevelInfo, name, merged)
+}

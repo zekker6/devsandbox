@@ -299,7 +299,11 @@ func (w *OTLPWriter) buildResourceAttributes() []*commonpb.KeyValue {
 }
 
 func (w *OTLPWriter) buildProtoRequest(entries []*Entry) *collectorlogs.ExportLogsServiceRequest {
-	logRecords := make([]*logspb.LogRecord, 0, len(entries))
+	// Group records by their `component` field so each component gets its own
+	// InstrumentationScope. Records with no `component` field fall under the
+	// "devsandbox" scope as a catch-all.
+	byScope := make(map[string][]*logspb.LogRecord)
+	scopeOrder := make([]string, 0)
 
 	for _, e := range entries {
 		record := &logspb.LogRecord{
@@ -310,7 +314,22 @@ func (w *OTLPWriter) buildProtoRequest(entries []*Entry) *collectorlogs.ExportLo
 			Body:                 &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: e.Message}},
 			Attributes:           fieldsToProtoAttributes(e.Fields),
 		}
-		logRecords = append(logRecords, record)
+		scope := scopeNameFor(e)
+		if _, seen := byScope[scope]; !seen {
+			scopeOrder = append(scopeOrder, scope)
+		}
+		byScope[scope] = append(byScope[scope], record)
+	}
+
+	scopeLogs := make([]*logspb.ScopeLogs, 0, len(scopeOrder))
+	for _, scope := range scopeOrder {
+		scopeLogs = append(scopeLogs, &logspb.ScopeLogs{
+			Scope: &commonpb.InstrumentationScope{
+				Name:    scope,
+				Version: version.Version,
+			},
+			LogRecords: byScope[scope],
+		})
 	}
 
 	return &collectorlogs.ExportLogsServiceRequest{
@@ -319,22 +338,30 @@ func (w *OTLPWriter) buildProtoRequest(entries []*Entry) *collectorlogs.ExportLo
 				Resource: &resourcepb.Resource{
 					Attributes: w.buildResourceAttributes(),
 				},
-				ScopeLogs: []*logspb.ScopeLogs{
-					{
-						Scope: &commonpb.InstrumentationScope{
-							Name:    "devsandbox.proxy",
-							Version: version.Version,
-						},
-						LogRecords: logRecords,
-					},
-				},
+				ScopeLogs: scopeLogs,
 			},
 		},
 	}
 }
 
+// scopeNameFor derives the OTLP InstrumentationScope name from the entry's
+// `component` field. Components map to "devsandbox.<component>" (e.g.,
+// "devsandbox.proxy", "devsandbox.mounts", "devsandbox.wrapper"). Entries
+// without a `component` field — synthesized lifecycle/security events emitted
+// directly via Dispatcher.Event — fall back to "devsandbox" so they land
+// somewhere queryable.
+func scopeNameFor(e *Entry) string {
+	if comp, ok := e.Fields["component"].(string); ok && comp != "" {
+		return "devsandbox." + comp
+	}
+	return "devsandbox"
+}
+
 func (w *OTLPWriter) buildJSONPayload(entries []*Entry) []byte {
-	logRecords := make([]otlpLogRecord, 0, len(entries))
+	// Group records by component-derived scope so each component lands in its
+	// own InstrumentationScope, matching the proto path.
+	byScope := make(map[string][]otlpLogRecord)
+	scopeOrder := make([]string, 0)
 
 	for _, e := range entries {
 		record := otlpLogRecord{
@@ -345,7 +372,22 @@ func (w *OTLPWriter) buildJSONPayload(entries []*Entry) []byte {
 			Attributes:           fieldsToJSONAttributes(e.Fields),
 			ObservedTimeUnixNano: uint64(time.Now().UnixNano()),
 		}
-		logRecords = append(logRecords, record)
+		scope := scopeNameFor(e)
+		if _, seen := byScope[scope]; !seen {
+			scopeOrder = append(scopeOrder, scope)
+		}
+		byScope[scope] = append(byScope[scope], record)
+	}
+
+	scopeLogs := make([]otlpScopeLogs, 0, len(scopeOrder))
+	for _, scope := range scopeOrder {
+		scopeLogs = append(scopeLogs, otlpScopeLogs{
+			Scope: otlpScope{
+				Name:    scope,
+				Version: version.Version,
+			},
+			LogRecords: byScope[scope],
+		})
 	}
 
 	// Build resource attributes for JSON
@@ -368,15 +410,7 @@ func (w *OTLPWriter) buildJSONPayload(entries []*Entry) []byte {
 				Resource: otlpResource{
 					Attributes: resourceAttrs,
 				},
-				ScopeLogs: []otlpScopeLogs{
-					{
-						Scope: otlpScope{
-							Name:    "devsandbox.proxy",
-							Version: version.Version,
-						},
-						LogRecords: logRecords,
-					},
-				},
+				ScopeLogs: scopeLogs,
 			},
 		},
 	}

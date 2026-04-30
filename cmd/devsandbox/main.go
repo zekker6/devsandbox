@@ -458,6 +458,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		pCfg.Dispatcher = logDispatcher
 		pCfg.LogReceivers = appCfg.Logging.Receivers
 		pCfg.LogAttributes = appCfg.Logging.Attributes
+		pCfg.LogFilterDecisions = appCfg.Logging.LogFilterDecisions
 		pCfg.CredentialInjectors, err = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
 		if err != nil {
 			return fmt.Errorf("build credential injectors: %w", err)
@@ -544,6 +545,44 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 				sandboxName = sessionStore.AutoName(projectDir)
 			}
 		}
+	}
+
+	// Audit logging: build session context AFTER AutoName resolves so
+	// sandbox_name is populated, then attach to dispatcher and notice.
+	// When proxy is disabled, sandbox_name may be empty; that's intentional.
+	sessionCtx, err := buildSessionContext(sandboxName, cfg.SandboxRoot, projectDir, string(isolation))
+	if err != nil {
+		return fmt.Errorf("build session context: %w", err)
+	}
+	if logDispatcher != nil {
+		logDispatcher.SetSessionFields(sessionCtx.Fields())
+		dropped := notice.AttachSink(noticeSinkFor(logDispatcher))
+		if dropped > 0 {
+			_ = logDispatcher.Event(logging.LevelWarn, "notice.overflow", map[string]any{
+				"component": "wrapper",
+				"dropped":   dropped,
+			})
+		}
+
+		// Capture proxy config snapshot for session.start; nil if proxy disabled.
+		var sessionPCfg *proxy.Config
+		if proxyServer != nil {
+			sessionPCfg = proxyServer.Config()
+		}
+		emitSessionStart(logDispatcher, appCfg, sessionPCfg, args, term.IsTerminal(int(os.Stdin.Fd())))
+
+		// session.end fires before logDispatcher.Close (registered earlier at
+		// line 450 — LIFO means our defer runs first while dispatcher is open).
+		// The signal-suppression defer above (line 156) runs AFTER us, so we
+		// observe the un-suppressed retErr — important for audit accuracy.
+		// On signal-driven shutdown, startProxyServer's signal goroutine
+		// (cmd/devsandbox/main.go:961) sets proxyRes.signaled and triggers
+		// natural runSandbox return, so this defer runs.
+		sessionStart := time.Now()
+		defer func() {
+			signaled := proxyRes != nil && proxyRes.signaled.Load()
+			emitSessionEnd(logDispatcher, sessionStart, retErr, signaled, proxyServer)
+		}()
 	}
 
 	// Build RunConfig and delegate to the isolator

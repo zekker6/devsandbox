@@ -714,6 +714,122 @@ View logging errors:
 devsandbox logs internal --type logging
 ```
 
+### Audit Logging
+
+Every dispatched log entry — proxy request logs, isolator (`builder`/`mounts`/`docker`) logs, the new wrapper banners, and synthesized lifecycle/security events — carries a fixed set of per-session fields suitable for ad-hoc audit query.
+
+#### Per-entry session fields
+
+| Field | Type | Source |
+|---|---|---|
+| `session_id` | UUIDv7 string | Generated once per `devsandbox claude` invocation. Sortable by time. |
+| `sandbox_name` | string | Auto-resolved when proxy is enabled (e.g., `bold-falcon-12`); may be empty when proxy is disabled and `--name` was not passed. |
+| `sandbox_path` | string | Sandbox root directory under `~/.local/share/devsandbox/`. |
+| `project_dir` | string | The user's working directory mounted into the sandbox. |
+| `isolator` | string | `bwrap` or `docker`. |
+| `pid` | int | Wrapper process PID. |
+| `devsandbox_version` | string | Build-injected `internal/version.Version`. |
+
+These fields are injected by the dispatcher at write time. They appear on both OTLP (as record attributes) and syslog (inside the existing `Fields` JSON object — see "Syslog payload shape" below).
+
+#### Lifecycle events
+
+Two synthesized entries bookend each session.
+
+**`session.start`** (level: `info`, `event=session.start`) is emitted once after the dispatcher and notice sink are wired up. Payload:
+
+| Field | Description |
+|---|---|
+| `host` | `os.Hostname()` |
+| `host_user` | `user.Current().Username` |
+| `proxy_enabled` | bool |
+| `proxy_port` | int (omitted when proxy is disabled) |
+| `proxy_mitm` | bool |
+| `filter_mode` | `off` / `allow` / `block` / `ask` |
+| `filter_rule_count` | int |
+| `redaction_rule_count` | int |
+| `log_skip_rule_count` | int |
+| `credential_injectors` | `[]string` — names only, no resolved values |
+| `command` | wrapped command argv joined with spaces |
+| `tty` | bool — was stdin a terminal at startup |
+| `start_time` | RFC3339 timestamp |
+
+**`session.end`** (level: `info`, `event=session.end`) is emitted from a deferred function before the dispatcher is closed. Payload:
+
+| Field | Description |
+|---|---|
+| `exit_code` | int — 0 on normal exit, the wrapped command's exit code on failure (extracted from `*exec.ExitError`), `-1` on signal-driven shutdown, `1` on generic error |
+| `duration_ms` | int — `time.Since(start).Milliseconds()` |
+| `end_time` | RFC3339 timestamp |
+| `proxy_request_count` | int — non-skipped requests handled by the proxy (0 if proxy disabled) |
+
+#### Security events
+
+Each event is dispatched through the same path with `event=<name>` set as a Field. Secret values are deliberately excluded from every event — only metadata (rule names, header names, hosts) appears.
+
+| Event | Level | Trigger | Payload |
+|---|---|---|---|
+| `proxy.filter.decision` | `info` (allow) / `warn` (block, ask) | Filter engine evaluates a request | `host`, `method`, `path` (path-only — query string stripped), `rule_action`, `rule_id`, `default_action_used` |
+| `proxy.redaction.applied` | `info` | One event per match when the redaction engine rewrites or blocks | `host`, `secret_kind` (rule name), `location` (`url` / `body` / `header:<name>`), `rule_id` |
+| `proxy.credential.injected` | `info` | Credential injector successfully writes an auth header | `host`, `injector` (name), `header_name` |
+| `proxy.mitm.bypass` | `info` | First CONNECT to a host in no-MITM mode (deduped per host per session) | `host`, `reason` (currently always `global`) |
+| `mount.decision` | `info` | One event per successfully resolved mount, emitted from the mounts engine | `source`, `dest`, `mode` (`readonly` / `readwrite` / `tmpoverlay` / `overlay` / `hidden`), `policy` (`persistent` / `scratchpad` / `runtime`), `pattern` |
+| `notice.overflow` | `warn` | The notice ring buffer (256 entries) overflowed before the dispatcher was attached | `dropped` (count), `component=wrapper` |
+
+**Note on filter decision volume:** by default, only `block` / `ask` decisions emit events. `allow` decisions are gated behind `[logging] log_filter_decisions = true` so the audit log isn't flooded by routine traffic. Enable for short audit windows only.
+
+#### Wrapper notice events
+
+User-facing wrapper output (`notice.Info` / `notice.Warn` / `notice.Error`) — startup banners, MITM warnings, container lifecycle messages, proxy runtime errors — is forwarded through the dispatcher with `component=wrapper` and the configured level. Lines emitted before the dispatcher is wired up are buffered (max 256 entries) and drained when the dispatcher attaches.
+
+#### Syslog payload shape
+
+The existing syslog writer JSON-encodes each entry via `json.Marshal(entry)`, producing one record per syslog line in the shape:
+
+```json
+{
+  "Timestamp": "2026-04-29T10:00:00Z",
+  "Level": "info",
+  "Message": "session.start",
+  "Fields": {
+    "event": "session.start",
+    "session_id": "01HF...",
+    "sandbox_name": "bold-falcon-12",
+    "host": "...",
+    "proxy_enabled": true,
+    ...
+  }
+}
+```
+
+Per-session fields and event-specific fields appear inside `Fields`. `json.Marshal` sorts map keys deterministically, so syslog text is grep-friendly.
+
+#### Example LogsQL queries (VictoriaLogs)
+
+```
+# All deny decisions in the last hour
+{event="proxy.filter.decision"} | unpack_json | rule_action="block"
+
+# Every secret redaction by rule
+{event="proxy.redaction.applied"} | unpack_json | stats count() by (secret_kind)
+
+# Sessions that ran with MITM disabled
+{event="session.start"} | unpack_json | proxy_mitm="false"
+
+# A single session's full audit trail
+{session_id="01HF..."} | sort by (Timestamp)
+```
+
+#### Configuration flag
+
+```toml
+[logging]
+# When true, every filter decision (allow/block/ask) emits a
+# proxy.filter.decision event. When false (default), only block and ask
+# decisions emit events.
+log_filter_decisions = false
+```
+
 ## Complete Example
 
 ```toml

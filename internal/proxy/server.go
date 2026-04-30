@@ -41,10 +41,21 @@ type Server struct {
 	askServer           *AskServer
 	askQueue            *AskQueue
 	credentialInjectors []CredentialInjector
+	dispatcher          *logging.Dispatcher
+	bypassedHosts       sync.Map // dedupe for proxy.mitm.bypass events (host → struct{}{})
 	wg                  sync.WaitGroup
 	mu                  sync.Mutex
 	running             bool
 	requestID           uint64
+}
+
+// RequestCount returns the count of non-skipped requests handled by this
+// server's request logger. Used by session.end audit events.
+func (s *Server) RequestCount() int64 {
+	if s == nil || s.reqLogger == nil {
+		return 0
+	}
+	return s.reqLogger.RequestCount()
 }
 
 // validateCredentialRedactionConflicts checks that no credential injector's resolved
@@ -193,6 +204,7 @@ func NewServer(cfg *Config) (*Server, error) {
 		askServer:           askServer,
 		askQueue:            askQueue,
 		credentialInjectors: cfg.CredentialInjectors,
+		dispatcher:          dispatcher,
 	}
 
 	s.setupMITM()
@@ -205,6 +217,15 @@ func (s *Server) setupMITM() {
 	if !s.config.MITM {
 		// Transparent mode: tunnel CONNECT requests without interception
 		s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			// Dedupe: emit one proxy.mitm.bypass per host per session.
+			// host arrives as "example.com:443"; strip the port for the event.
+			cleanHost := host
+			if idx := strings.LastIndex(host, ":"); idx > 0 {
+				cleanHost = host[:idx]
+			}
+			if _, loaded := s.bypassedHosts.LoadOrStore(cleanHost, struct{}{}); !loaded {
+				s.emitMITMBypass(cleanHost)
+			}
 			return goproxy.OkConnect, host
 		})
 		return
@@ -237,7 +258,13 @@ func (s *Server) setupLogging() {
 		// Inject credentials for matching domains
 		for _, injector := range s.credentialInjectors {
 			if injector.Match(req) {
-				injector.Inject(req)
+				if injector.Inject(req) {
+					host := req.URL.Host
+					if host == "" {
+						host = req.Host
+					}
+					s.emitCredentialInjected(host, injector.Name(), injector.Header())
+				}
 				break // first match wins
 			}
 		}
@@ -245,6 +272,7 @@ func (s *Server) setupLogging() {
 		// Apply filter rules if configured
 		if s.filterEngine != nil && s.filterEngine.IsEnabled() {
 			decision := s.filterEngine.Match(req)
+			s.emitFilterDecision(req, decision)
 
 			// Log the filter decision
 			if entry != nil {
@@ -320,6 +348,7 @@ func (s *Server) setupLogging() {
 
 			result := s.redactionEngine.Scan(req, scanBody)
 			if result.Matched {
+				s.emitRedactionApplied(req, result)
 				// Build rule names list for logging and response
 				ruleNames := make([]string, len(result.Matches))
 				for i, m := range result.Matches {

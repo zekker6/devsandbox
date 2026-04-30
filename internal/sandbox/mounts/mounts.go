@@ -12,9 +12,14 @@ import (
 	"devsandbox/internal/config"
 )
 
-// Logger is used by the mounts engine to report warnings.
+// Logger is used by the mounts engine to report warnings and emit
+// structured audit events.
 type Logger interface {
 	Warnf(format string, args ...any)
+	// Event emits a structured event with the given name and fields. nil-safe
+	// at the implementation level — implementations that don't dispatch (e.g.,
+	// stdlib *log.Logger wrappers) may make this a no-op.
+	Event(name string, fields map[string]any)
 }
 
 // Mode defines how a path should be mounted.
@@ -56,6 +61,42 @@ func (e *Engine) SetLogger(l Logger) {
 func (e *Engine) logWarnf(format string, args ...any) {
 	if e.logger != nil {
 		e.logger.Warnf(format, args...)
+	}
+}
+
+// EmitMountDecision emits a structured mount.decision audit event for a path
+// that was successfully mounted. Callers (e.g., the sandbox builder) invoke
+// this after the actual mount has been applied so the audit log reflects
+// real mount operations, not candidate paths that may be skipped or rejected
+// further down the pipeline. policyFor maps the rule's mode to the audit
+// "policy" classification.
+func (e *Engine) EmitMountDecision(source, dest string, rule Rule) {
+	if e.logger == nil {
+		return
+	}
+	e.logger.Event("mount.decision", map[string]any{
+		"source":  source,
+		"dest":    dest,
+		"mode":    string(rule.Mode),
+		"policy":  policyFor(rule.Mode),
+		"pattern": rule.Pattern,
+	})
+}
+
+// policyFor classifies a mount mode into an audit-friendly policy bucket.
+//   - persistent: state survives across sessions
+//   - scratchpad: state is discarded on session exit
+//   - runtime:    no state at all (read-only or hidden)
+func policyFor(mode Mode) string {
+	switch mode {
+	case ModeOverlay, ModeReadWrite:
+		return "persistent"
+	case ModeTmpOverlay:
+		return "scratchpad"
+	case ModeReadOnly, ModeHidden:
+		return "runtime"
+	default:
+		return "runtime"
 	}
 }
 

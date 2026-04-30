@@ -691,7 +691,9 @@ func (b *Builder) AddCustomMounts() *Builder {
 	// Apply mounts in sorted order
 	for _, path := range sortedPaths {
 		rule := expandedPaths[path]
-		b.applyMountRule(path, rule)
+		if b.applyMountRule(path, rule) {
+			engine.EmitMountDecision(path, path, rule)
+		}
 	}
 
 	return b
@@ -728,7 +730,9 @@ func (b *Builder) AddHomeCustomMounts() *Builder {
 
 	for _, path := range sortedPaths {
 		rule := expandedPaths[path]
-		b.applyMountRule(path, rule)
+		if b.applyMountRule(path, rule) {
+			engine.EmitMountDecision(path, path, rule)
+		}
 	}
 
 	return b
@@ -760,11 +764,14 @@ func (b *Builder) isInsideHome(path string) bool {
 	return strings.HasPrefix(cleanPath, home+string(filepath.Separator))
 }
 
-// applyMountRule applies a single custom mount rule to a path.
-func (b *Builder) applyMountRule(path string, rule mounts.Rule) {
+// applyMountRule applies a single custom mount rule to a path. Returns true
+// when the mount was actually applied; callers use this to gate audit-event
+// emission so we don't log mount.decision for paths that get rejected
+// (hidden directories, overlay on non-directories, etc.).
+func (b *Builder) applyMountRule(path string, rule mounts.Rule) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		return // Path doesn't exist
+		return false // Path doesn't exist
 	}
 
 	switch rule.Mode {
@@ -772,23 +779,28 @@ func (b *Builder) applyMountRule(path string, rule mounts.Rule) {
 		if info.IsDir() {
 			// Hiding directories is not supported - log and skip
 			b.logWarnf("mounts: cannot hide directory %q - use 'readonly', 'overlay', or 'tmpoverlay' mode instead (pattern: %s)", path, rule.Pattern)
-			return
+			return false
 		}
 		// For files within mounted paths, overlay with /dev/null
 		b.ROBind("/dev/null", path)
+		return true
 
 	case mounts.ModeReadOnly:
 		b.ROBind(path, path)
+		return true
 
 	case mounts.ModeReadWrite:
 		b.Bind(path, path)
+		return true
 
 	case mounts.ModeOverlay:
-		b.applyCustomOverlay(path, rule, false)
+		return b.applyCustomOverlay(path, rule, false)
 
 	case mounts.ModeTmpOverlay:
-		b.applyCustomOverlay(path, rule, true)
+		return b.applyCustomOverlay(path, rule, true)
 	}
+
+	return false
 }
 
 // sortPaths sorts paths so that parent directories come before children.
@@ -808,24 +820,26 @@ func sortPaths(paths []string) []string {
 }
 
 // applyCustomOverlay applies an overlay mount for a custom mount rule.
-func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) {
+// Returns true when the overlay was applied; false on rejection (non-directory)
+// or setup failure.
+func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) bool {
 	info, err := os.Stat(path)
 	if err != nil || !info.IsDir() {
 		b.logWarnf("mounts: overlay only supported for directories: %s (pattern: %s)", path, rule.Pattern)
-		return
+		return false
 	}
 
 	b.OverlaySrc(path)
 
 	if tmpfs {
 		b.TmpOverlay(path)
-		return
+		return true
 	}
 
 	upperDir, workDir, err := createOverlayDirs(b.cfg.SandboxHome, path, "custom", b.cfg.SessionID)
 	if err != nil {
 		b.logWarnf("mounts: %v", err)
-		return
+		return false
 	}
 
 	// For concurrent sessions, add primary session's persistent upper as lower layer
@@ -839,6 +853,7 @@ func (b *Builder) applyCustomOverlay(path string, rule mounts.Rule, tmpfs bool) 
 	}
 
 	b.Overlay(upperDir, workDir, path)
+	return true
 }
 
 func (b *Builder) AddProjectBindings() *Builder {
@@ -923,7 +938,9 @@ func (b *Builder) applyProjectCustomMounts() {
 	// Apply mounts
 	for _, path := range sortedPaths {
 		rule := expandedPaths[path]
-		b.applyMountRule(path, rule)
+		if b.applyMountRule(path, rule) {
+			engine.EmitMountDecision(path, path, rule)
+		}
 	}
 }
 

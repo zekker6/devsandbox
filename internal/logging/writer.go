@@ -2,6 +2,7 @@
 package logging
 
 import (
+	"maps"
 	"sync"
 	"time"
 )
@@ -35,9 +36,10 @@ type Writer interface {
 
 // Dispatcher fans out log entries to multiple writers.
 type Dispatcher struct {
-	writers     []Writer
-	errorLogger *ErrorLogger
-	mu          sync.RWMutex
+	writers       []Writer
+	errorLogger   *ErrorLogger
+	sessionFields map[string]any
+	mu            sync.RWMutex
 }
 
 // NewDispatcher creates a new log dispatcher.
@@ -54,11 +56,37 @@ func (d *Dispatcher) AddWriter(w Writer) {
 	d.writers = append(d.writers, w)
 }
 
-// Write sends an entry to all registered writers.
-// Errors from individual writers are ignored to ensure delivery to other writers.
+// SetSessionFields stores per-session fields that are merged into every
+// dispatched Entry's Fields map at Write time. Per-event keys win on
+// collision, so this is a "fill the gaps" merge. Pass nil to clear.
+func (d *Dispatcher) SetSessionFields(fields map[string]any) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if fields == nil {
+		d.sessionFields = nil
+		return
+	}
+	cp := make(map[string]any, len(fields))
+	maps.Copy(cp, fields)
+	d.sessionFields = cp
+}
+
+// Write sends an entry to all registered writers, merging session fields
+// into a copy of entry.Fields beforehand. The caller-supplied entry is not
+// mutated. Errors from individual writers are ignored to ensure delivery to
+// other writers.
 func (d *Dispatcher) Write(entry *Entry) error {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+
+	if len(d.sessionFields) > 0 {
+		merged := make(map[string]any, len(entry.Fields)+len(d.sessionFields))
+		maps.Copy(merged, d.sessionFields)
+		maps.Copy(merged, entry.Fields)
+		copyEntry := *entry
+		copyEntry.Fields = merged
+		entry = &copyEntry
+	}
 
 	for _, w := range d.writers {
 		_ = w.Write(entry)
@@ -82,6 +110,23 @@ func (d *Dispatcher) Close() error {
 
 	d.writers = nil
 	return nil
+}
+
+// Event dispatches a structured event entry: Message and Fields["event"] are
+// both set to name, the supplied fields are merged in (caller-supplied map is
+// not mutated), and the entry is written through the dispatcher. The "event"
+// key is always the helper-controlled name even if the caller passed one.
+func (d *Dispatcher) Event(level Level, name string, fields map[string]any) error {
+	merged := make(map[string]any, len(fields)+1)
+	maps.Copy(merged, fields)
+	merged["event"] = name
+
+	return d.Write(&Entry{
+		Timestamp: time.Now(),
+		Level:     level,
+		Message:   name,
+		Fields:    merged,
+	})
 }
 
 // HasWriters returns true if the dispatcher has any writers registered.

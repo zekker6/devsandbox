@@ -45,6 +45,11 @@ type Config struct {
 	// LogAttributes are custom attributes added to all log entries.
 	LogAttributes map[string]string
 
+	// LogFilterDecisions, when true, emits proxy.filter.decision audit events
+	// for every filter match (allow/deny/ask). When false (default), only
+	// deny and ask decisions emit events.
+	LogFilterDecisions bool
+
 	// Filter contains HTTP request filtering configuration.
 	Filter *FilterConfig
 

@@ -408,6 +408,12 @@ type LoggingConfig struct {
 
 	// Attributes are custom key-value pairs added to all log entries.
 	Attributes map[string]string `toml:"attributes"`
+
+	// LogFilterDecisions controls whether allow filter decisions are emitted
+	// as audit events. When false (default), only deny/ask decisions log.
+	// When true, every filter decision logs — high volume, only enable for
+	// audit traces over short windows.
+	LogFilterDecisions bool `toml:"log_filter_decisions"`
 }
 
 // ReceiverConfig defines a single log receiver.
@@ -1164,6 +1170,12 @@ persistent = false
 # Remote logging configuration
 # Proxy logs can be forwarded to remote destinations
 [logging]
+
+# Audit-grade filter decision logging.
+# When false (default), only block/ask decisions emit proxy.filter.decision events.
+# When true, every filter decision (including allow) emits an event — high volume,
+# only enable for short audit windows.
+# log_filter_decisions = false
 
 # Custom attributes added to all log entries
 # [logging.attributes]

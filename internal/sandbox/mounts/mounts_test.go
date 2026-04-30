@@ -201,10 +201,110 @@ func TestExpandedPaths_NoMatches(t *testing.T) {
 
 type testLogger struct {
 	warnings []string
+	events   []testEvent
+}
+
+type testEvent struct {
+	name   string
+	fields map[string]any
 }
 
 func (l *testLogger) Warnf(format string, args ...any) {
 	l.warnings = append(l.warnings, fmt.Sprintf(format, args...))
+}
+
+func (l *testLogger) Event(name string, fields map[string]any) {
+	cp := make(map[string]any, len(fields))
+	for k, v := range fields {
+		cp[k] = v
+	}
+	l.events = append(l.events, testEvent{name: name, fields: cp})
+}
+
+func TestEmitMountDecision_PayloadAndPolicyMapping(t *testing.T) {
+	logger := &testLogger{}
+	engine := &Engine{logger: logger}
+
+	engine.EmitMountDecision("/host/secret.txt", "/sandbox/secret.txt", Rule{
+		Pattern:  "~/secret.txt",
+		Expanded: "/host/secret.txt",
+		Mode:     ModeReadOnly,
+	})
+	engine.EmitMountDecision("/host/state", "/sandbox/state", Rule{
+		Pattern: "~/state",
+		Mode:    ModeTmpOverlay,
+	})
+
+	if len(logger.events) != 2 {
+		t.Fatalf("got %d events, want 2: %+v", len(logger.events), logger.events)
+	}
+
+	byMode := map[string]testEvent{}
+	for _, e := range logger.events {
+		if e.name != "mount.decision" {
+			t.Errorf("event name = %q, want mount.decision", e.name)
+		}
+		byMode[e.fields["mode"].(string)] = e
+	}
+
+	ro := byMode["readonly"]
+	if ro.fields["policy"] != "runtime" {
+		t.Errorf("readonly policy = %v, want runtime", ro.fields["policy"])
+	}
+	if ro.fields["pattern"] != "~/secret.txt" {
+		t.Errorf("readonly pattern = %v, want ~/secret.txt", ro.fields["pattern"])
+	}
+	if ro.fields["source"] != "/host/secret.txt" {
+		t.Errorf("readonly source = %v, want /host/secret.txt", ro.fields["source"])
+	}
+	if ro.fields["dest"] != "/sandbox/secret.txt" {
+		t.Errorf("readonly dest = %v, want /sandbox/secret.txt", ro.fields["dest"])
+	}
+
+	tmp := byMode["tmpoverlay"]
+	if tmp.fields["policy"] != "scratchpad" {
+		t.Errorf("tmpoverlay policy = %v, want scratchpad", tmp.fields["policy"])
+	}
+}
+
+func TestExpandedPaths_DoesNotEmitEvents(t *testing.T) {
+	// Regression test: ExpandedPaths must not emit events. Audit events
+	// belong at the actual mount-application call sites in builder.go, not
+	// the candidate-discovery layer (which can run multiple times for
+	// different scopes).
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.MountsConfig{
+		Rules: []config.MountRule{{Pattern: tmpDir + "/f.txt", Mode: "readonly"}},
+	}
+	engine := NewEngine(cfg, tmpDir)
+	logger := &testLogger{}
+	engine.SetLogger(logger)
+
+	_ = engine.ExpandedPaths()
+	_ = engine.ExpandedPathsInDir(tmpDir)
+
+	if len(logger.events) != 0 {
+		t.Errorf("ExpandedPaths(InDir) emitted %d events, want 0: %+v",
+			len(logger.events), logger.events)
+	}
+}
+
+func TestPolicyFor_AllModes(t *testing.T) {
+	tests := map[Mode]string{
+		ModeOverlay:    "persistent",
+		ModeReadWrite:  "persistent",
+		ModeTmpOverlay: "scratchpad",
+		ModeReadOnly:   "runtime",
+		ModeHidden:     "runtime",
+	}
+	for mode, want := range tests {
+		if got := policyFor(mode); got != want {
+			t.Errorf("policyFor(%q) = %q, want %q", mode, got, want)
+		}
+	}
 }
 
 func TestExpandedPaths_LogsNoMatchWarning(t *testing.T) {

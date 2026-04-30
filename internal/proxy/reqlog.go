@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"devsandbox/internal/logging"
@@ -43,6 +44,7 @@ type RequestLogger struct {
 	dispatcher     *logging.Dispatcher
 	ownsDispatcher bool // true if this logger created/owns the dispatcher
 	skipEngine     *LogSkipEngine
+	requestCount   atomic.Int64
 	mu             sync.Mutex
 }
 
@@ -69,12 +71,19 @@ func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher
 	}, nil
 }
 
+// RequestCount returns the count of non-skipped Log calls handled by this
+// logger. Used by session.end audit events.
+func (rl *RequestLogger) RequestCount() int64 {
+	return rl.requestCount.Load()
+}
+
 // Log writes a request/response pair to the log and forwards to remote destinations.
 // Entries matching the skip engine are dropped: no file write, no dispatcher forward.
 func (rl *RequestLogger) Log(entry *RequestLog) error {
 	if rl.skipEngine != nil && rl.skipEngine.ShouldSkip(entry) {
 		return nil
 	}
+	rl.requestCount.Add(1)
 
 	data, err := json.Marshal(entry)
 	if err != nil {

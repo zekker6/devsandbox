@@ -76,18 +76,23 @@ func (g *GenericInjector) Match(req *http.Request) bool {
 	return g.matcher(NormalizeHost(req.URL.Host))
 }
 
-// Inject writes the configured header on req. It is a no-op when the resolved
-// token is empty. When overwrite is false, an existing header value on req is
-// preserved.
-func (g *GenericInjector) Inject(req *http.Request) {
+// Inject writes the configured header on req and returns true. It returns
+// false (no-op) when the resolved token is empty or when overwrite=false and
+// the header is already set.
+func (g *GenericInjector) Inject(req *http.Request) bool {
 	if g.token == "" {
-		return
+		return false
 	}
 	if !g.overwrite && req.Header.Get(g.header) != "" {
-		return
+		return false
 	}
 	req.Header.Set(g.header, strings.ReplaceAll(g.valueFormat, "{token}", g.token))
+	return true
 }
+
+// Header returns the configured header name (e.g., "Authorization"). Used by
+// audit events.
+func (g *GenericInjector) Header() string { return g.header }
 
 // exactHostSpecificity ranks exact-host injectors above any glob.
 // Safe upper bound: DNS hostnames are limited to 253 chars, so any glob's
@@ -123,11 +128,16 @@ func (g *GenericInjector) Name() string { return g.name }
 type CredentialInjector interface {
 	// Match returns true if this injector handles the request.
 	Match(req *http.Request) bool
-	// Inject adds credentials to the request (modifies in place).
-	Inject(req *http.Request)
+	// Inject adds credentials to the request (modifies in place). Returns
+	// true when a header was actually written, false when it was a no-op
+	// (token empty or header already set with overwrite=false).
+	Inject(req *http.Request) bool
 	// Name returns the injector's configured name (typically the TOML
 	// section key, e.g., "github").
 	Name() string
+	// Header returns the HTTP header name the injector writes (e.g.,
+	// "Authorization"). Used by audit events.
+	Header() string
 	// ResolvedValue returns the resolved credential value when the injector
 	// is enabled, or "" when disabled. Used by redaction conflict detection.
 	ResolvedValue() string
