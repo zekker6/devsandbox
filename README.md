@@ -1,12 +1,19 @@
 # devsandbox
 
-Sandbox your AI coding assistants. Run Claude Code, Copilot, aider, and other tools without exposing SSH keys, cloud credentials, or secrets.
+Your real dev environment, sandboxed per project. Run Claude Code, Copilot, aider, and other AI coding agents safely -- without giving up your shell, your `mise`-managed tools, or your editor configs.
 
-## The Problem
+## The DX gap
 
-AI coding assistants execute shell commands, install packages, and make network requests on your machine -- with full access to your `~/.ssh` keys, `~/.aws` credentials, `.env` secrets, and everything else. An AI agent with unrestricted access could read your `~/.ssh/id_ed25519`, exfiltrate `~/.aws/credentials` via an API call, or `rm -rf` your home directory.
+Docker and VMs isolate by *replacing* your dev environment. Fresh shell with no aliases. No `mise`, no editor, no prompt. Reinstall every tool inside the container, fight file watchers across the VM boundary, and wait 10-30 seconds for cold starts. So most people skip isolation entirely and let agents run on the host -- with full access to `~/.ssh`, cloud credentials, `.env` secrets, and every other project on disk.
 
-devsandbox removes that risk. It wraps any command in a sandbox scoped to your current working directory -- the directory you run `devsandbox` from becomes the project root with full read/write access, while everything outside it (credentials, keys, secrets, other projects) is blocked. An optional proxy mode logs every HTTP/HTTPS request for inspection.
+devsandbox closes that gap. It wraps any command in a sandbox scoped to your current working directory and brings the rest of your real environment with it:
+
+- **Your shell, aliases, history.** Detected from `$SHELL` and bound read-only.
+- **`mise`-managed tools.** Go, Node, Python, kubectl, whatever -- already there, no `mise install` twice.
+- **Editor + LSP, prompt, multiplexer.** nvim, helix, starship, tmux, fish, zsh -- all preserved.
+- **Sub-second startup.** bubblewrap on Linux shares the host kernel; native file watching works.
+
+The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools -- and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files, sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
 
 ## Prerequisites
 
@@ -124,13 +131,15 @@ devsandbox scratchpad rm experiments --keep-state
 devsandbox scratchpad rm --all --force
 ```
 
-## What Your AI Agent CAN and CANNOT Do
+## Security baseline
 
-**CAN:** Read/write your project files, run build commands, install dependencies, make API calls (logged in proxy mode).
+DX is the headline; isolation is the floor. The defaults are tuned so an agent inside a fresh sandbox can do its job and nothing more -- no flags required.
+
+**CAN:** Read/write your project files, use your `mise`-managed tools, inherit your shell and editor configs, run build commands, install dependencies, make API calls (logged in proxy mode).
 
 **CANNOT:** Read SSH keys, access cloud credentials (AWS/Azure/GCloud), read `.env` secrets, see other projects, push to git (by default), or modify your system.
 
-### Security Details
+### Resource access defaults
 
 | Resource | Default Access |
 |---|---|
@@ -149,13 +158,13 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 ## Features
 
-- **Zero-config security** -- SSH keys, cloud credentials, `.env` files, and git credentials are blocked by default
-- **Your tools, your shell** -- mise-managed tools, shell configs, editor setups (nvim, starship, tmux) all work inside the sandbox
+- **Your real dev env, inside the sandbox** -- mise-managed tools, shell configs, editor setups (nvim, starship, tmux) auto-detected and bound, no Dockerfile required
+- **Sub-second startup** -- [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux share the host kernel; native file watching works. Docker layer caching keeps macOS restarts at 1-2s
+- **Per-project isolation** -- each project gets its own sandbox home, caches, and logs
+- **Zero-config security baseline** -- SSH keys, cloud credentials, `.env` files, and git credentials blocked by default
 - **MITM proxy** -- optional traffic inspection with log viewing, filtering, and export
 - **HTTP filtering** -- whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** -- scan outgoing requests for secrets, block or replace them before they leave your machine
-- **Cross-platform** -- [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux (sub-second startup), Docker containers on macOS
-- **Per-project isolation** -- each project gets its own sandbox home, caches, and logs
 - **Git modes** -- readonly (default), readwrite (with SSH/GPG), or disabled
 - **Desktop notifications** -- sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
 
