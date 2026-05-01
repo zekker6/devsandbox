@@ -154,30 +154,19 @@ The proxy achieves the same goal on both backends - intercept and log HTTP/HTTPS
 
 ### Network Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Host System                          │
-│  ┌─────────────────┐                                        │
-│  │  Proxy Server   │◄─────┐                                 │
-│  │  127.0.0.1:8080 │      │                                 │
-│  └────────┬────────┘      │                                 │
-│           │               │                                 │
-│           ▼               │                                 │
-│      Internet             │ pasta NAT                       │
-│                           │ (10.0.2.2 → 127.0.0.1)          │
-├───────────────────────────┼─────────────────────────────────┤
-│                           │        Sandbox (netns)          │
-│                    ┌──────┴──────┐                          │
-│                    │   Gateway   │                          │
-│                    │  10.0.2.2   │                          │
-│                    └──────▲──────┘                          │
-│                           │                                 │
-│                    ┌──────┴──────┐                          │
-│                    │ Application │                          │
-│                    │ HTTP_PROXY= │                          │
-│                    │ 10.0.2.2:   │                          │
-│                    └─────────────┘                          │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph host["Host System"]
+        proxy["Proxy Server<br/>127.0.0.1:8080"]
+        internet(["Internet"])
+        proxy --> internet
+    end
+    subgraph sandbox["Sandbox (netns)"]
+        app["Application<br/>HTTP_PROXY=10.0.2.2:8080"]
+        gateway["Gateway<br/>10.0.2.2"]
+        app --> gateway
+    end
+    gateway -. "pasta NAT<br/>10.0.2.2 → 127.0.0.1" .-> proxy
 ```
 
 ## CA Certificate
@@ -590,6 +579,30 @@ The proxy can inject authentication credentials into requests for specific domai
 2. **Match** - For each configured credential injector, it checks whether the request host matches the injector's `host` (exact match or glob).
 3. **Inject** - If matched, the injector sets the configured `header` to the rendered `value_format` with `{token}` substituted from the resolved `source`. The existing header is preserved unless `overwrite = true`.
 4. **Isolate** - The sandbox process never sees the token. It is read from the host environment and added transparently.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Sandboxed app
+    participant Proxy as devsandbox proxy
+    participant Source as Host token source
+    participant Upstream as Upstream API
+
+    App->>Proxy: HTTPS request, no Authorization
+    Note over Proxy: MITM decrypt, match host<br/>against injector globs
+    alt host matches an injector
+        Proxy->>Source: Resolve credential<br/>from env, file, or value
+        Source-->>Proxy: token
+        Note over Proxy: Render value_format,<br/>set header unless already set<br/>or overwrite = true
+        Proxy->>Upstream: HTTPS request + Authorization
+        Upstream-->>Proxy: response
+        Proxy-->>App: response, token never returns
+    else no injector matches
+        Proxy->>Upstream: HTTPS request, unchanged
+        Upstream-->>Proxy: response
+        Proxy-->>App: response
+    end
+```
 
 ### Universal Schema
 
