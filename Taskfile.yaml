@@ -281,3 +281,53 @@ tasks:
             echo "OK: $f — $(file "$f" | cut -d: -f2)"
           done
         done
+
+  # --- Documentation site (Zensical + landing page on GitHub Pages) ---
+
+  site:install:
+    desc: Ensure documentation site deps are installed (zensical via mise)
+    cmds:
+      - mise install
+
+  site:dev:
+    desc: Run docs + landing dev servers locally (loopback only)
+    deps: [site:install]
+    cmds:
+      # bash -c so we can use named-signal trap (sh/dash rejects INT/TERM)
+      - |
+        bash -c '
+          trap "kill 0" INT TERM EXIT
+          echo ""
+          echo "  Landing:  http://127.0.0.1:8001/"
+          echo "  Docs:     http://127.0.0.1:8000/"
+          echo ""
+          python -m http.server 8001 --bind 127.0.0.1 --directory site/landing &
+          mise exec -- zensical serve -a 127.0.0.1:8000 &
+          wait
+        '
+
+  site:build:
+    desc: Build the documentation site to ./public/
+    deps: [site:install]
+    cmds:
+      # Wipe both output and Zensical's snippet cache.
+      # `zensical build --clean` does not invalidate snippet-included content
+      # (e.g., updates to README.md don't propagate without removing .cache).
+      - rm -rf public/ .cache/
+      - mise exec -- zensical build --clean
+      # Strip internal-only dirs that Zensical may have rendered if they exist locally.
+      # CI checkouts don't have these, so this is a local-dev safety net.
+      - rm -rf public/docs/plans public/docs/summaries public/docs/superpowers
+      - mkdir -p public/
+      - cp -r site/landing/. public/
+      - 'echo "Built: public/index.html (landing) + public/docs/ (zensical)"'
+
+  site:check:
+    desc: 'Verify internal links (deferred for v1 — see plan Post-Completion)'
+    cmds:
+      - 'echo "site:check is a no-op for v1. See docs/plans/ entry for the 4 cross-link follow-ups before --strict can be enabled."'
+
+  site:clean:
+    desc: Remove built site and Zensical caches
+    cmds:
+      - rm -rf public/ .cache/

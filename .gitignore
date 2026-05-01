@@ -9,4 +9,8 @@ claudedocs/
 docs/plans/
 docs/summaries/
 bin/devsandbox-shim
+/public/
+/.cache/
+__pycache__/
+*.pyc
 

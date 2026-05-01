@@ -314,6 +314,25 @@ sudo dnf install bubblewrap passt
 task build
 ```
 
+### Documentation site (development)
+
+The project ships a small documentation site (Zensical + a hand-written landing page) that deploys to GitHub Pages from `main`. To work on it locally:
+
+```bash
+# Live-reload dev servers — landing on :8001, docs on :8000 (loopback only)
+task site:dev
+
+# Production-style assembly into ./public/
+task site:build
+
+# Clean build artifacts
+task site:clean
+```
+
+`zensical.toml` at the repo root configures the docs site; landing source lives under `site/landing/`. The CI workflow `.github/workflows/pages.yml` runs the same `task site:build` and uploads `./public/` to GitHub Pages.
+
+One-time setup (must be done in the GitHub UI, cannot be done from the workflow): **Repository → Settings → Pages → Source = "GitHub Actions"**. After the first successful workflow run, the site is reachable at `https://zekker6.github.io/devsandbox/`.
+
 ## Quick Reference
 
 ```bash

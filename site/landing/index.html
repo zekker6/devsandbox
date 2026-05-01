@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>devsandbox — sandbox AI coding assistants safely</title>
+<meta name="description" content="Run Claude Code, Copilot, aider, and any other AI coding tool safely. devsandbox sandboxes the agent to your project directory — your SSH keys, cloud credentials, and other projects stay invisible. Skip permission prompts without giving up your home directory.">
+<meta name="color-scheme" content="light dark">
+<link rel="canonical" href="https://zekker6.github.io/devsandbox/">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://zekker6.github.io/devsandbox/">
+<meta property="og:title" content="devsandbox — sandbox AI coding assistants safely">
+<meta property="og:description" content="Run Claude Code, Copilot, aider, and friends without exposing SSH keys or cloud credentials. Skip permission prompts safely.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="devsandbox — sandbox AI coding assistants safely">
+<meta name="twitter:description" content="Run Claude Code, Copilot, aider, and friends without exposing SSH keys or cloud credentials.">
+
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <nav class="topnav">
+      <span class="brand">devsandbox</span>
+      <span class="topnav-links">
+        <a href="/devsandbox/docs/">Docs</a>
+        <a href="https://github.com/zekker6/devsandbox" rel="noopener">GitHub</a>
+      </span>
+    </nav>
+    <h1>Run AI coding tools without giving them your SSH keys.</h1>
+    <p class="lede">
+      <strong>devsandbox</strong> sandboxes Claude Code, Copilot, aider, and any other CLI tool to the directory you're working in.
+      Skip permission prompts safely — your <code>~/.ssh</code>, cloud credentials, and other projects stay invisible.
+    </p>
+
+    <div class="install">
+      <pre><code id="install-cmd">mise use -g github:zekker6/devsandbox</code></pre>
+      <button class="copy-btn" type="button" data-target="install-cmd" aria-label="Copy install command">Copy</button>
+    </div>
+
+    <div class="cta-row">
+      <a class="cta cta-primary" href="/devsandbox/docs/getting-started/install/">Get started &rarr;</a>
+      <a class="cta cta-secondary" href="https://github.com/zekker6/devsandbox" rel="noopener">GitHub &rarr;</a>
+    </div>
+
+    <p class="hero-foot">
+      Open source · MIT licensed · Linux &amp; macOS
+    </p>
+  </div>
+</header>
+
+<section class="why">
+  <div class="container">
+    <h2>Why devsandbox</h2>
+    <div class="cards">
+      <article class="card">
+        <h3>Secrets stay yours</h3>
+        <p>
+          <code>~/.ssh</code>, <code>~/.aws</code>, <code>.env</code>, parent directories, and other projects are <em>invisible</em> inside the sandbox. An AI agent can't exfiltrate what isn't mounted.
+        </p>
+      </article>
+      <article class="card">
+        <h3>No more permission fatigue</h3>
+        <p>
+          Run with <code>--dangerously-skip-permissions</code> and actually mean it. Auto-approve commands without trusting your whole home directory.
+        </p>
+      </article>
+      <article class="card">
+        <h3>Tool-agnostic</h3>
+        <p>
+          Claude Code, GitHub Copilot, aider, Cursor CLI, OpenCode — anything with a shell. Wraps the binary, no plugin needed.
+        </p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="how">
+  <div class="container">
+    <h2>How it works</h2>
+
+    <ol class="steps">
+      <li>
+        <h3>Wrap the command.</h3>
+        <p>Use <code>devsandbox</code> as a prefix. The directory you run it from becomes the sandbox root — everything else is blocked.</p>
+        <pre><code>cd ~/projects/my-app
+devsandbox claude --dangerously-skip-permissions</code></pre>
+      </li>
+      <li>
+        <h3>Filesystem locked down.</h3>
+        <p>Project files are read/write. Credentials, parent directories, sibling projects, and <code>.env</code> files are gone. <code>.git</code> is read-only by default.</p>
+        <pre><code># inside the sandbox
+ls ~/.ssh
+# No such file or directory
+
+cat .env
+# (empty — masked with /dev/null)</code></pre>
+      </li>
+      <li>
+        <h3>Network optional.</h3>
+        <p>Add <code>--proxy</code> to log every HTTP request. Block outbound entirely with a filter rule, or interactively approve each domain.</p>
+        <pre><code>devsandbox --proxy claude --dangerously-skip-permissions
+devsandbox logs proxy --last 50</code></pre>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="container">
+    <p class="footer-links">
+      <a href="https://github.com/zekker6/devsandbox" rel="noopener">GitHub</a>
+      ·
+      <a href="/devsandbox/docs/">Docs</a>
+      ·
+      <a href="/devsandbox/docs/about/changelog/">Changelog</a>
+      ·
+      <a href="/devsandbox/docs/about/license/">License (MIT)</a>
+    </p>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const btn = document.querySelector('.copy-btn');
+  if (!btn || !navigator.clipboard) return;
+  btn.addEventListener('click', async () => {
+    const target = document.getElementById(btn.dataset.target);
+    if (!target) return;
+    try {
+      await navigator.clipboard.writeText(target.textContent.trim());
+      const original = btn.textContent;
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1600);
+    } catch (e) { /* clipboard denied — fall through silently */ }
+  });
+})();
+</script>
+
+</body>
+</html>
