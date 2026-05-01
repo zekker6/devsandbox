@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>devsandbox — your dev environment, sandboxed</title>
+<title>devsandbox - your dev environment, sandboxed</title>
 <meta name="description" content="Sandbox AI coding agents without rebuilding your dev env. Your shell, mise-managed tools, and editor configs come with you. SSH keys, cloud credentials, and other projects stay invisible.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#c84a1a" media="(prefers-color-scheme: light)">
@@ -13,10 +13,10 @@
 
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://zekker6.github.io/devsandbox/">
-<meta property="og:title" content="devsandbox — your dev environment, sandboxed">
+<meta property="og:title" content="devsandbox - your dev environment, sandboxed">
 <meta property="og:description" content="Sandbox AI coding agents without rebuilding your dev env. Your shell, mise tools, and editor configs come with you. Credentials and other projects stay invisible.">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="devsandbox — your dev environment, sandboxed">
+<meta name="twitter:title" content="devsandbox - your dev environment, sandboxed">
 <meta name="twitter:description" content="Sandbox AI coding agents without rebuilding your dev env. Your shell and mise tools come with you.">
 
 <link rel="stylesheet" href="style.css">
@@ -38,7 +38,7 @@
       Sandbox the agent. <em>Keep your dev env.</em>
     </h1>
     <p class="lede">
-      Docker and VMs isolate by replacing your environment — fresh shell, no <code>mise</code>, no editor config, slow rebuilds. So most people skip isolation entirely.
+      Docker and VMs isolate by replacing your environment - fresh shell, no <code>mise</code>, no editor config, slow rebuilds. So most people skip isolation entirely.
       <strong>devsandbox</strong> brings your real shell, mise-managed tools, and editor setup into a per-project sandbox. Your <code>~/.ssh</code>, cloud credentials, and other projects stay invisible.
     </p>
 
@@ -60,21 +60,21 @@
 
 <section class="dxgap">
   <div class="container">
-    <p class="section-tag">/ 01 — the DX gap</p>
+    <p class="section-tag">/ 01 - the DX gap</p>
     <h2>Most isolation tools make you rebuild your dev env from zero.</h2>
     <p class="section-lede">
-      Spin up a Docker container or VM and you land in a stranger's machine: bash with no aliases, no <code>mise</code>, no editor, no prompt. Reinstall everything, fight file watchers, eat 10–30s cold starts. Eventually you give up and let the agent run on the host. devsandbox closes that gap.
+      Spin up a Docker container or VM and you land in a stranger's machine: bash with no aliases, no <code>mise</code>, no editor, no prompt. Reinstall everything, fight file watchers, eat 10-30s cold starts. Eventually you give up and let the agent run on the host. devsandbox closes that gap.
     </p>
 
     <div class="comparison">
       <div class="col col-pain">
         <p class="col-tag">Docker · VM</p>
         <ul class="checklist negative">
-          <li>Fresh shell — no aliases, no history, no prompt</li>
+          <li>Fresh shell - no aliases, no history, no prompt</li>
           <li>Reinstall every tool inside the container</li>
           <li>Editor + LSP configs (nvim, helix, vscode) gone</li>
-          <li><code>mise</code>, <code>starship</code>, <code>tmux</code> — gone</li>
-          <li>10–30s cold start, slow rebuilds</li>
+          <li><code>mise</code>, <code>starship</code>, <code>tmux</code> - gone</li>
+          <li>10-30s cold start, slow rebuilds</li>
           <li>File-watching breaks across the VM boundary</li>
         </ul>
       </div>
@@ -82,11 +82,11 @@
         <p class="col-tag">devsandbox</p>
         <ul class="checklist positive">
           <li>Your shell, your aliases, your history</li>
-          <li><code>mise</code> tools mounted read-only — Go, Node, Python, all of it</li>
+          <li><code>mise</code> tools mounted read-only - Go, Node, Python, all of it</li>
           <li>Editor + LSP configs come along, untouched</li>
-          <li>Starship, tmux, nvim, fish, zsh — all preserved</li>
-          <li>Sub-second restart on Linux, 1–2s on macOS</li>
-          <li>Native file watching — bubblewrap shares the host kernel</li>
+          <li>Starship, tmux, nvim, fish, zsh - all preserved</li>
+          <li>Sub-second restart on Linux, 1-2s on macOS</li>
+          <li>Native file watching - bubblewrap shares the host kernel</li>
         </ul>
       </div>
     </div>
@@ -95,7 +95,7 @@
 
 <section class="how">
   <div class="container">
-    <p class="section-tag">/ 02 — how it works</p>
+    <p class="section-tag">/ 02 - how it works</p>
     <h2>Wrap any command. Inherit your env. Block the rest.</h2>
 
     <ol class="steps">
@@ -109,7 +109,7 @@ devsandbox claude --dangerously-skip-permissions</code></pre>
       <li>
         <p class="step-num">02 · inherit</p>
         <h3>Your env follows you in.</h3>
-        <p>mise tools, shell configs, editor and prompt — auto-detected, bound read-only. No reinstall, no Dockerfile, no <code>mise install</code> twice.</p>
+        <p>mise tools, shell configs, editor and prompt - auto-detected, bound read-only. No reinstall, no Dockerfile, no <code>mise install</code> twice.</p>
         <pre><code># inside the sandbox
 mise ls            # your real toolchain
 which nvim         # your real editor
@@ -118,12 +118,12 @@ echo $STARSHIP_*   # your real prompt</code></pre>
       <li>
         <p class="step-num">03 · isolate</p>
         <h3>Credentials stay out.</h3>
-        <p>SSH keys, cloud creds, <code>.env</code>, sibling projects — invisible. <code>.git</code> is read-only by default. Now <code>--dangerously-skip-permissions</code> actually means something.</p>
+        <p>SSH keys, cloud creds, <code>.env</code>, sibling projects - invisible. <code>.git</code> is read-only by default. Now <code>--dangerously-skip-permissions</code> actually means something.</p>
         <pre><code>ls ~/.ssh
 # No such file or directory
 
 cat .env
-# (empty — masked with /dev/null)</code></pre>
+# (empty - masked with /dev/null)</code></pre>
       </li>
       <li>
         <p class="step-num">04 · observe</p>
@@ -138,10 +138,10 @@ devsandbox logs proxy --last 50</code></pre>
 
 <section class="security">
   <div class="container">
-    <p class="section-tag">/ 03 — security baseline</p>
+    <p class="section-tag">/ 03 - security baseline</p>
     <h2>Zero-config defaults. <em>Reach what isn't mounted.</em></h2>
     <p class="section-lede">
-      DX is the headline; isolation is the floor. The defaults are tuned so that an agent inside a fresh sandbox can do its job and nothing more — no flags required.
+      DX is the headline; isolation is the floor. The defaults are tuned so that an agent inside a fresh sandbox can do its job and nothing more - no flags required.
     </p>
 
     <div class="security-grid">
@@ -156,7 +156,7 @@ devsandbox logs proxy --last 50</code></pre>
       <div class="cell cell-bad">
         <p class="cell-label">blocked by default</p>
         <ul>
-          <li><code>~/.ssh</code> — keys, known_hosts</li>
+          <li><code>~/.ssh</code> - keys, known_hosts</li>
           <li><code>~/.aws</code>, <code>~/.azure</code>, <code>~/.gcloud</code></li>
           <li><code>.env</code> and <code>.env.*</code> (masked)</li>
           <li>Parent dirs and sibling projects</li>
@@ -198,7 +198,7 @@ devsandbox logs proxy --last 50</code></pre>
       btn.textContent = 'copied';
       btn.classList.add('copied');
       setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1600);
-    } catch (e) { /* clipboard denied — fall through silently */ }
+    } catch (e) { /* clipboard denied - fall through silently */ }
   });
 })();
 </script>

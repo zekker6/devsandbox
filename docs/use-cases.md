@@ -19,7 +19,7 @@ devsandbox claude --dangerously-skip-permissions
 devsandbox --proxy claude --dangerously-skip-permissions
 ```
 
-`--dangerously-skip-permissions` is a Claude Code flag — safe inside the sandbox because devsandbox provides the security boundary. See [Tools: Claude Code](tools.md#claude-code) for details.
+`--dangerously-skip-permissions` is a Claude Code flag - safe inside the sandbox because devsandbox provides the security boundary. See [Tools: Claude Code](tools.md#claude-code) for details.
 
 See [Security Model](sandboxing.md#security-model) for full details on what's accessible inside the sandbox.
 
@@ -360,7 +360,7 @@ fi
 
 This is particularly relevant on macOS where mise runs inside a Docker container and cannot reuse the host's GitHub authentication.
 
-Without a token, tool installation via mise inside the sandbox may hit GitHub's 60 requests/hour limit, causing transient failures during initial setup. Enabling credential injection with a **read-only** GitHub token raises this limit to **5,000 requests per hour**. A token with no permissions granted is sufficient — it only needs to authenticate requests, not access private resources.
+Without a token, tool installation via mise inside the sandbox may hit GitHub's 60 requests/hour limit, causing transient failures during initial setup. Enabling credential injection with a **read-only** GitHub token raises this limit to **5,000 requests per hour**. A token with no permissions granted is sufficient - it only needs to authenticate requests, not access private resources.
 
 **Step 1: Create a fine-grained personal access token**
 
@@ -368,7 +368,7 @@ Without a token, tool installation via mise inside the sandbox may hit GitHub's 
 2. Set a descriptive name (e.g., `devsandbox-mise`)
 3. Set expiration as desired
 4. Under **Repository access**, select "Public Repositories (read-only)"
-5. Under **Permissions**, grant nothing — leave all permissions at "No access"
+5. Under **Permissions**, grant nothing - leave all permissions at "No access"
 6. Click **Generate token**
 
 **Step 2: Set the environment variable**
@@ -391,7 +391,7 @@ enabled = true
 enabled = true
 ```
 
-The proxy injects the token into GitHub API requests automatically. The token never enters the sandbox environment — it stays on the host side and is added to matching requests by the proxy.
+The proxy injects the token into GitHub API requests automatically. The token never enters the sandbox environment - it stays on the host side and is added to matching requests by the proxy.
 
 > **Tip:** To avoid conflicts with `gh` CLI or other tools that read `GITHUB_TOKEN`, use a dedicated environment variable:
 >
@@ -407,20 +407,20 @@ The proxy injects the token into GitHub API requests automatically. The token ne
 > env = "DEVSANDBOX_GITHUB_TOKEN"
 > ```
 
-> **Security note:** Use minimum-permission tokens. A fine-grained token with "Public Repositories (read-only)" and no additional permissions is all that's needed. The token never enters the sandbox — it stays on the host and is injected by the proxy into matching requests only.
+> **Security note:** Use minimum-permission tokens. A fine-grained token with "Public Repositories (read-only)" and no additional permissions is all that's needed. The token never enters the sandbox - it stays on the host and is injected by the proxy into matching requests only.
 
 ## Troubleshooting
 
 See the dedicated troubleshooting sections:
 
-- [Sandbox troubleshooting](sandboxing.md#troubleshooting) -- installation checks, user namespaces, permissions, SELinux/AppArmor
-- [Proxy troubleshooting](proxy.md#troubleshooting) -- pasta, timeouts, certificates, missing logs
+- [Sandbox troubleshooting](sandboxing.md#troubleshooting) - installation checks, user namespaces, permissions, SELinux/AppArmor
+- [Proxy troubleshooting](proxy.md#troubleshooting) - pasta, timeouts, certificates, missing logs
 
 ## See Also
 
-- [Sandboxing](sandboxing.md) -- security model and isolation details
-- [Proxy Mode](proxy.md) -- traffic inspection, HTTP filtering, log formats
-- [Tools](tools.md) -- tool-specific configuration (git, mise, editors, AI assistants)
-- [Configuration](configuration.md) -- full config reference, per-project settings
+- [Sandboxing](sandboxing.md) - security model and isolation details
+- [Proxy Mode](proxy.md) - traffic inspection, HTTP filtering, log formats
+- [Tools](tools.md) - tool-specific configuration (git, mise, editors, AI assistants)
+- [Configuration](configuration.md) - full config reference, per-project settings
 
 [Back to docs index](README.md) | [Back to README](../README.md)

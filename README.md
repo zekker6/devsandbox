@@ -1,19 +1,19 @@
 # devsandbox
 
-Your real dev environment, sandboxed per project. Run Claude Code, Copilot, aider, and other AI coding agents safely -- without giving up your shell, your `mise`-managed tools, or your editor configs.
+Your real dev environment, sandboxed per project. Run Claude Code, Copilot, aider, and other AI coding agents safely - without giving up your shell, your `mise`-managed tools, or your editor configs.
 
 ## The DX gap
 
-Docker and VMs isolate by *replacing* your dev environment. Fresh shell with no aliases. No `mise`, no editor, no prompt. Reinstall every tool inside the container, fight file watchers across the VM boundary, and wait 10-30 seconds for cold starts. So most people skip isolation entirely and let agents run on the host -- with full access to `~/.ssh`, cloud credentials, `.env` secrets, and every other project on disk.
+Docker and VMs isolate by *replacing* your dev environment. Fresh shell with no aliases. No `mise`, no editor, no prompt. Reinstall every tool inside the container, fight file watchers across the VM boundary, and wait 10-30 seconds for cold starts. So most people skip isolation entirely and let agents run on the host - with full access to `~/.ssh`, cloud credentials, `.env` secrets, and every other project on disk.
 
 devsandbox closes that gap. It wraps any command in a sandbox scoped to your current working directory and brings the rest of your real environment with it:
 
 - **Your shell, aliases, history.** Detected from `$SHELL` and bound read-only.
-- **`mise`-managed tools.** Go, Node, Python, kubectl, whatever -- already there, no `mise install` twice.
-- **Editor + LSP, prompt, multiplexer.** nvim, helix, starship, tmux, fish, zsh -- all preserved.
+- **`mise`-managed tools.** Go, Node, Python, kubectl, whatever - already there, no `mise install` twice.
+- **Editor + LSP, prompt, multiplexer.** nvim, helix, starship, tmux, fish, zsh - all preserved.
 - **Sub-second startup.** bubblewrap on Linux shares the host kernel; native file watching works.
 
-The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools -- and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files, sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
+The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools - and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files, sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
 
 ## Prerequisites
 
@@ -52,9 +52,9 @@ brew install mise
 ```
 
 A Docker runtime is also required (ensure it is running before using devsandbox):
-- [OrbStack](https://orbstack.dev/) -- recommended for Apple Silicon (fastest startup, lowest resource usage)
-- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) -- most widely tested
-- [Colima](https://github.com/abiosoft/colima) -- free and open-source
+- [OrbStack](https://orbstack.dev/) - recommended for Apple Silicon (fastest startup, lowest resource usage)
+- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) - most widely tested
+- [Colima](https://github.com/abiosoft/colima) - free and open-source
 
 ## Quickstart
 
@@ -79,11 +79,11 @@ devsandbox claude --dangerously-skip-permissions
 devsandbox --info
 ```
 
-devsandbox sandboxes the current working directory -- `cd` into your project first, then run `devsandbox`. Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts -- safe inside the sandbox because devsandbox provides the security boundary.
+devsandbox sandboxes the current working directory - `cd` into your project first, then run `devsandbox`. Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts - safe inside the sandbox because devsandbox provides the security boundary.
 
 **Works with:** Claude Code, GitHub Copilot, aider, Cursor, Continue, Cline, OpenCode, and any CLI-based development tool.
 
-That's it. No config files needed. On Linux, devsandbox includes embedded binaries -- zero dependencies. On macOS, a Docker runtime is required (see [Installation Details](#installation-details)).
+That's it. No config files needed. On Linux, devsandbox includes embedded binaries - zero dependencies. On macOS, a Docker runtime is required (see [Installation Details](#installation-details)).
 
 Run `devsandbox doctor` to verify your setup.
 
@@ -91,7 +91,7 @@ Run `devsandbox doctor` to verify your setup.
 
 ## Scratchpads
 
-Sometimes you want to run a sandboxed tool in an empty working directory — try a library, give an AI agent a clean slate, or quickly build something unrelated to your current project. `devsandbox scratchpad` gives you a managed, persistent scratch workspace without having to mkdir under `/tmp` by hand.
+Sometimes you want to run a sandboxed tool in an empty working directory - try a library, give an AI agent a clean slate, or quickly build something unrelated to your current project. `devsandbox scratchpad` gives you a managed, persistent scratch workspace without having to mkdir under `/tmp` by hand.
 
 ```bash
 # Interactive shell in the default scratchpad
@@ -106,13 +106,13 @@ devsandbox scratchpad experiments claude --dangerously-skip-permissions
 # Command in the default scratchpad (name it explicitly)
 devsandbox scratchpad default bun init
 
-# Ephemeral run — wipe state on exit
+# Ephemeral run - wipe state on exit
 devsandbox scratchpad --rm experiments bun init
 ```
 
 Scratchpad working directories live at `~/.local/share/devsandbox-scratchpads/scratchpad-<name>/` and persist between runs. The sandbox state (home overlay, tool caches) lives in the usual `~/.local/share/devsandbox/` tree alongside your project sandboxes.
 
-Local `.devsandbox.toml` files are never loaded inside a scratchpad — the baseline is always global config only, so scratchpads stay uncontaminated by project-specific overrides.
+Local `.devsandbox.toml` files are never loaded inside a scratchpad - the baseline is always global config only, so scratchpads stay uncontaminated by project-specific overrides.
 
 ### Managing scratchpads
 
@@ -133,7 +133,7 @@ devsandbox scratchpad rm --all --force
 
 ## Security baseline
 
-DX is the headline; isolation is the floor. The defaults are tuned so an agent inside a fresh sandbox can do its job and nothing more -- no flags required.
+DX is the headline; isolation is the floor. The defaults are tuned so an agent inside a fresh sandbox can do its job and nothing more - no flags required.
 
 **CAN:** Read/write your project files, use your `mise`-managed tools, inherit your shell and editor configs, run build commands, install dependencies, make API calls (logged in proxy mode).
 
@@ -158,19 +158,19 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 ## Features
 
-- **Your real dev env, inside the sandbox** -- mise-managed tools, shell configs, editor setups (nvim, starship, tmux) auto-detected and bound, no Dockerfile required
-- **Sub-second startup** -- [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux share the host kernel; native file watching works. Docker layer caching keeps macOS restarts at 1-2s
-- **Per-project isolation** -- each project gets its own sandbox home, caches, and logs
-- **Zero-config security baseline** -- SSH keys, cloud credentials, `.env` files, and git credentials blocked by default
-- **MITM proxy** -- optional traffic inspection with log viewing, filtering, and export
-- **HTTP filtering** -- whitelist/blacklist domains, or interactively approve requests one at a time
-- **Content redaction** -- scan outgoing requests for secrets, block or replace them before they leave your machine
-- **Git modes** -- readonly (default), readwrite (with SSH/GPG), or disabled
-- **Desktop notifications** -- sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
+- **Your real dev env, inside the sandbox** - mise-managed tools, shell configs, editor setups (nvim, starship, tmux) auto-detected and bound, no Dockerfile required
+- **Sub-second startup** - [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux share the host kernel; native file watching works. Docker layer caching keeps macOS restarts at 1-2s
+- **Per-project isolation** - each project gets its own sandbox home, caches, and logs
+- **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files, and git credentials blocked by default
+- **MITM proxy** - optional traffic inspection with log viewing, filtering, and export
+- **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
+- **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine
+- **Git modes** - readonly (default), readwrite (with SSH/GPG), or disabled
+- **Desktop notifications** - sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
 
 ## How It Works
 
-**Linux:** Uses [bubblewrap](https://github.com/containers/bubblewrap) to create namespace-based isolation. No root privileges, no Docker, no system packages required -- bwrap and pasta binaries are embedded. Startup is sub-second.
+**Linux:** Uses [bubblewrap](https://github.com/containers/bubblewrap) to create namespace-based isolation. No root privileges, no Docker, no system packages required - bwrap and pasta binaries are embedded. Startup is sub-second.
 
 **macOS:** Uses Docker containers with volume mounts that mirror the bwrap behavior. Named volumes provide near-native filesystem performance. Containers are cached for 1-2 second restarts.
 
@@ -210,7 +210,7 @@ devsandbox --rm
 
 ## Git Integration
 
-By default, `.git` is mounted read-only -- you can view history, diff, and status, but commits are blocked and no credentials are exposed.
+By default, `.git` is mounted read-only - you can view history, diff, and status, but commits are blocked and no credentials are exposed.
 
 | Mode | `.git` | Commits | Credentials |
 |---|---|---|---|
@@ -254,11 +254,11 @@ The slug is derived from the main repo root so worktrees of the same repo share 
 
 Known limitations:
 
-- Submodule init inside a readonly sandbox fails — not worked around.
+- Submodule init inside a readonly sandbox fails - not worked around.
 - If git already has the canonical path registered to a different branch, invocation fails with git's own error plus a hint; run `git worktree list` to investigate.
-- A stale directory at the canonical path (git has no record) causes `devsandbox` to refuse to clobber — remove it manually.
+- A stale directory at the canonical path (git has no record) causes `devsandbox` to refuse to clobber - remove it manually.
 
-## Proxy Mode -- Monitor Your AI Agent's Network Activity
+## Proxy Mode - Monitor Your AI Agent's Network Activity
 
 Route all HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request.
 
@@ -279,7 +279,7 @@ devsandbox proxy monitor
 
 On Linux, proxy mode uses [pasta](https://passt.top/) for network namespace isolation (embedded, no install needed). On macOS, it uses per-session Docker networks.
 
-See [Proxy Mode docs](docs/proxy.md) for filtering rules, log formats, and remote logging setup. Audit-grade structured logging — per-session metadata, lifecycle events, and security events forwarded to syslog/OTLP — is documented under [Audit Logging](docs/configuration.md#audit-logging).
+See [Proxy Mode docs](docs/proxy.md) for filtering rules, log formats, and remote logging setup. Audit-grade structured logging - per-session metadata, lifecycle events, and security events forwarded to syslog/OTLP - is documented under [Audit Logging](docs/configuration.md#audit-logging).
 
 ## Installation Details
 
@@ -313,7 +313,7 @@ sudo apt install bubblewrap passt
 sudo dnf install bubblewrap passt
 ```
 
-**macOS:** Requires a Docker runtime -- see [Prerequisites](#prerequisites) for options.
+**macOS:** Requires a Docker runtime - see [Prerequisites](#prerequisites) for options.
 
 **Build from source:**
 
@@ -328,7 +328,7 @@ task build
 The project ships a small documentation site (Zensical + a hand-written landing page) that deploys to GitHub Pages from `main`. To work on it locally:
 
 ```bash
-# Live-reload dev servers — landing on :8001, docs on :8000 (loopback only)
+# Live-reload dev servers - landing on :8001, docs on :8000 (loopback only)
 task site:dev
 
 # Production-style assembly into ./public/
@@ -386,7 +386,7 @@ devsandbox image build              # Build Docker image (macOS)
 - Network isolation uses HTTP_PROXY instead of pasta
 
 **Both:**
-- Docker socket access is read-only (no container creation/deletion) -- see [Tools docs](docs/tools.md#docker)
+- Docker socket access is read-only (no container creation/deletion) - see [Tools docs](docs/tools.md#docker)
 - No nested Docker (cannot run Docker inside the sandbox)
 
 ## License

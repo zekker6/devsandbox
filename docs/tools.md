@@ -275,7 +275,7 @@ For other editors, mount their config directories manually or use the sandbox ho
 
 ## AI Coding Assistants
 
-AI coding assistants execute arbitrary code -- installing packages, running builds, making network requests. Running them inside devsandbox ensures they can do their job without accessing your credentials, keys, or secrets.
+AI coding assistants execute arbitrary code - installing packages, running builds, making network requests. Running them inside devsandbox ensures they can do their job without accessing your credentials, keys, or secrets.
 
 ### Claude Code
 
@@ -289,7 +289,7 @@ devsandbox claude
 devsandbox claude --dangerously-skip-permissions
 ```
 
-Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts -- safe inside the sandbox because devsandbox provides the security boundary.
+Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts - safe inside the sandbox because devsandbox provides the security boundary.
 
 Configuration directories are mounted read-write to allow Claude to save settings:
 
@@ -299,7 +299,7 @@ Configuration directories are mounted read-write to allow Claude to save setting
 ~/.claude.json      → Sandbox (read-write)
 ```
 
-These directories are isolated to the sandbox home -- not your real host directories. Claude's conversation state and settings persist across sandbox sessions for the same project but are not shared with your host.
+These directories are isolated to the sandbox home - not your real host directories. Claude's conversation state and settings persist across sandbox sessions for the same project but are not shared with your host.
 
 ### aider
 
@@ -571,7 +571,7 @@ The proxy starts when all of the following hold:
 2. The `kitty` binary is on PATH.
 3. At least one enabled tool declares a kitty capability (or `mode = "enforce"` is set).
 
-If no tool declares a capability and `mode = "auto"` (the default), the proxy stays inactive — zero attack surface when nothing needs it. `revdiff` is the built-in consumer: if the `revdiff` binary is on PATH, the proxy activates automatically.
+If no tool declares a capability and `mode = "auto"` (the default), the proxy stays inactive - zero attack surface when nothing needs it. `revdiff` is the built-in consumer: if the `revdiff` binary is on PATH, the proxy activates automatically.
 
 ### Configuration
 
@@ -601,7 +601,7 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 | `send_text_owned` | `send-text` scoped to windows the sandbox opened |
 | `get_text_owned` | `get-text` scoped to windows the sandbox opened |
 | `set_title_owned` | `set-window-title` scoped to windows the sandbox opened |
-| `list_owned` | `ls` — response is filtered to owned windows only |
+| `list_owned` | `ls` - response is filtered to owned windows only |
 
 `launch_*` capabilities equal arbitrary host code execution and must be paired with command patterns declared by the tool that requests them. Shell metacharacters (`;`, `&`, `|`, `` ` ``, `$()`, `<`, `>`, etc.) in `sh -c` payloads are rejected outright.
 
@@ -616,13 +616,13 @@ The host's real kitty socket is **not** bind-mounted into the sandbox.
 
 ### Environment Variables
 
-- `KITTY_LISTEN_ON` — rewritten to `unix:$HOME/.kitty.sock` inside the sandbox. Host value is never exposed.
-- `KITTY_WINDOW_ID`, `KITTY_PID` — passed through from host (read-only signals about the host pane).
+- `KITTY_LISTEN_ON` - rewritten to `unix:$HOME/.kitty.sock` inside the sandbox. Host value is never exposed.
+- `KITTY_WINDOW_ID`, `KITTY_PID` - passed through from host (read-only signals about the host pane).
 
 ### Limitations
 
 - Async / streaming kitty commands (`get-text --watcher`, async kittens) are denied in this MVP.
-- `remote_control_password` in `kitty.conf` is unsupported — use `allow_remote_control = socket-only` instead.
+- `remote_control_password` in `kitty.conf` is unsupported - use `allow_remote_control = socket-only` instead.
 
 Run `devsandbox tools check kitty` to confirm the tool is detected and see the active mode.
 
@@ -630,7 +630,7 @@ Run `devsandbox tools check kitty` to confirm the tool is detected and see the a
 
 When running inside a [zellij](https://zellij.dev/) session, devsandbox can forward the session socket and `ZELLIJ*` env vars into the sandbox so `zellij run`, `zellij action`, etc. attach to the host multiplexer.
 
-**Disabled by default.** Unlike kitty, the zellij socket has no capability filtering — exposing it gives sandboxed code unrestricted control over the host multiplexer (execute commands in any pane, read pane contents, swap layouts). Opt in only if you trust the workload.
+**Disabled by default.** Unlike kitty, the zellij socket has no capability filtering - exposing it gives sandboxed code unrestricted control over the host multiplexer (execute commands in any pane, read pane contents, swap layouts). Opt in only if you trust the workload.
 
 ### Configuration
 
@@ -662,7 +662,7 @@ Run `devsandbox tools check zellij` to confirm the tool is detected and see the 
 
 ## XDG Desktop Portal (Linux only)
 
-Sandboxed applications can send desktop notifications to the host via [XDG Desktop Portal](https://flatpak.github.io/xdg-desktop-portal/). This uses `xdg-dbus-proxy` to expose only the notification portal interface — no other D-Bus access is granted.
+Sandboxed applications can send desktop notifications to the host via [XDG Desktop Portal](https://flatpak.github.io/xdg-desktop-portal/). This uses `xdg-dbus-proxy` to expose only the notification portal interface - no other D-Bus access is granted.
 
 ### Requirements
 
@@ -716,7 +716,7 @@ Example output:
 
 ### Limitations
 
-- Linux only (bwrap backend) — not available on macOS Docker backend
+- Linux only (bwrap backend) - not available on macOS Docker backend
 - Only the notification portal is currently supported
 - The host must have a running D-Bus session bus with a unix socket
 
@@ -736,10 +736,10 @@ To make additional tools available:
 
 ## See Also
 
-- [Sandboxing](sandboxing.md) -- how isolation works, overlay filesystem for writable tools
-- [Sandboxing: Overlay Filesystem](sandboxing.md#overlay-filesystem) -- allow mise to install tools inside the sandbox
-- [Configuration: Tool Settings](configuration.md#tool-specific-configuration) -- git, mise, and Docker config options
-- [Use Cases: AI Coding Assistants](use-cases.md#ai-coding-assistants) -- workflows for Claude Code and Copilot
-- [Use Cases: Development Workflows](use-cases.md#development-workflows) -- language-specific examples
+- [Sandboxing](sandboxing.md) - how isolation works, overlay filesystem for writable tools
+- [Sandboxing: Overlay Filesystem](sandboxing.md#overlay-filesystem) - allow mise to install tools inside the sandbox
+- [Configuration: Tool Settings](configuration.md#tool-specific-configuration) - git, mise, and Docker config options
+- [Use Cases: AI Coding Assistants](use-cases.md#ai-coding-assistants) - workflows for Claude Code and Copilot
+- [Use Cases: Development Workflows](use-cases.md#development-workflows) - language-specific examples
 
 [Back to docs index](README.md) | [Back to README](../README.md)

@@ -13,14 +13,14 @@ mise use -g github:zekker6/devsandbox
 ## 2. Sandbox an AI agent
 
 ```bash
-# cd into your project — this directory becomes the sandbox root
+# cd into your project - this directory becomes the sandbox root
 cd ~/projects/my-app
 
 # Run Claude Code inside the sandbox
 devsandbox claude --dangerously-skip-permissions
 ```
 
-`devsandbox` wraps any command. Everything after the binary name is passed through to the sandboxed program. The flag `--dangerously-skip-permissions` is a Claude Code flag that disables its permission prompts — safe to enable here because devsandbox provides the actual security boundary.
+`devsandbox` wraps any command. Everything after the binary name is passed through to the sandboxed program. The flag `--dangerously-skip-permissions` is a Claude Code flag that disables its permission prompts - safe to enable here because devsandbox provides the actual security boundary.
 
 ## 3. Verify what's protected
 

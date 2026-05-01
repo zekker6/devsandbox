@@ -32,7 +32,7 @@ unshare --user true
 # Should succeed silently. If it fails, see Limitations.
 ```
 
-No system packages are required — `bwrap` and `pasta` binaries ship embedded in the devsandbox binary.
+No system packages are required - `bwrap` and `pasta` binaries ship embedded in the devsandbox binary.
 
 ### macOS
 
@@ -42,9 +42,9 @@ brew install mise
 
 A Docker runtime is also required:
 
-- [OrbStack](https://orbstack.dev/) — recommended for Apple Silicon (fastest startup, lowest resource usage)
-- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) — most widely tested
-- [Colima](https://github.com/abiosoft/colima) — free and open-source
+- [OrbStack](https://orbstack.dev/) - recommended for Apple Silicon (fastest startup, lowest resource usage)
+- [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) - most widely tested
+- [Colima](https://github.com/abiosoft/colima) - free and open-source
 
 ## Install devsandbox
 

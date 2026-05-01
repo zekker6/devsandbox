@@ -81,7 +81,7 @@ port = 8080
 
 By default, the proxy performs MITM (Man-in-the-Middle) interception on HTTPS connections, using a generated CA certificate. This enables full traffic inspection, credential injection, and content redaction for HTTPS.
 
-If you don't need HTTPS inspection - for example, when tools have certificate pinning or you only need network isolation with HTTP logging — you can disable MITM:
+If you don't need HTTPS inspection - for example, when tools have certificate pinning or you only need network isolation with HTTP logging - you can disable MITM:
 
 ### Command Line
 
@@ -121,7 +121,7 @@ If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM ena
 
 ## Backend-Specific Behavior
 
-The proxy achieves the same goal on both backends - intercept and log HTTP/HTTPS traffic — but the underlying mechanisms differ.
+The proxy achieves the same goal on both backends - intercept and log HTTP/HTTPS traffic - but the underlying mechanisms differ.
 
 ### bwrap backend
 
@@ -483,7 +483,7 @@ Default is `host`.
 
 ### Ask Mode
 
-In ask mode, unmatched requests require user approval via a separate monitor terminal. This is particularly useful when running AI agents autonomously -- you can approve or block each network request the agent makes, giving you real-time control over what data leaves your machine.
+In ask mode, unmatched requests require user approval via a separate monitor terminal. This is particularly useful when running AI agents autonomously - you can approve or block each network request the agent makes, giving you real-time control over what data leaves your machine.
 
 **Step 1**: Start the sandbox with ask mode:
 
@@ -778,11 +778,11 @@ See [Configuration: Content Redaction](configuration.md#content-redaction) for t
 
 Log-skip rules drop matching requests from the proxy log entirely. This is for noise reduction, not for security: matched requests still pass through (filtering, redaction, and credential injection still apply); they simply never appear in `logs/proxy/requests.jsonl` and are never forwarded to remote log dispatchers (syslog/OTLP).
 
-The intended use case is endpoints you'd otherwise see hundreds of times per session and don't care about — for example, telemetry traffic that an agent sends to your own observability infrastructure, where the data is already captured upstream.
+The intended use case is endpoints you'd otherwise see hundreds of times per session and don't care about - for example, telemetry traffic that an agent sends to your own observability infrastructure, where the data is already captured upstream.
 
 ### How It Works
 
-Each rule has a pattern and an optional `scope` (default `host`) and `type` (default `glob`, regex auto-detected on metacharacters). Matching reuses the same engine as filter rules: `host` matches the request hostname (port stripped), `path` matches the URL path, `url` matches the full URL string. Rules are evaluated in order, first match wins. Skip is **absolute** — a matched entry is never logged, even if the request errored, was blocked by the security filter, or triggered a redaction rule.
+Each rule has a pattern and an optional `scope` (default `host`) and `type` (default `glob`, regex auto-detected on metacharacters). Matching reuses the same engine as filter rules: `host` matches the request hostname (port stripped), `path` matches the URL path, `url` matches the full URL string. Rules are evaluated in order, first match wins. Skip is **absolute** - a matched entry is never logged, even if the request errored, was blocked by the security filter, or triggered a redaction rule.
 
 ### Configuration
 
@@ -845,10 +845,10 @@ devsandbox doctor
 
 ## See Also
 
-- [Sandboxing](sandboxing.md) -- filesystem and process isolation, security model
-- [Configuration: Remote Logging](configuration.md#remote-logging) -- send proxy logs to syslog or OTLP
-- [Configuration: Credential Injection](configuration.md#proxy-credentials) -- inject tokens into requests without exposing them to the sandbox
-- [Configuration: Port Forwarding](configuration.md#port-forwarding) -- forward ports between host and sandbox (requires proxy mode)
-- [Use Cases: Security Monitoring](use-cases.md#security-monitoring) -- real-time monitoring and post-session audit scripts
+- [Sandboxing](sandboxing.md) - filesystem and process isolation, security model
+- [Configuration: Remote Logging](configuration.md#remote-logging) - send proxy logs to syslog or OTLP
+- [Configuration: Credential Injection](configuration.md#proxy-credentials) - inject tokens into requests without exposing them to the sandbox
+- [Configuration: Port Forwarding](configuration.md#port-forwarding) - forward ports between host and sandbox (requires proxy mode)
+- [Use Cases: Security Monitoring](use-cases.md#security-monitoring) - real-time monitoring and post-session audit scripts
 
 [Back to docs index](README.md) | [Back to README](../README.md)

@@ -4,7 +4,7 @@ Known constraints of the current implementation.
 
 ## Linux (bwrap backend)
 
-- Requires unprivileged user namespaces. Verify with `unshare --user true` (should succeed silently). See [How sandboxing works — Troubleshooting](../sandboxing.md#troubleshooting) for distro-specific guidance.
+- Requires unprivileged user namespaces. Verify with `unshare --user true` (should succeed silently). See [How sandboxing works - Troubleshooting](../sandboxing.md#troubleshooting) for distro-specific guidance.
 - SELinux or AppArmor may restrict namespace operations. See [Security Modules](../sandboxing.md#security-modules) for known interactions.
 - MITM proxy may break tools with certificate pinning.
 - GUI applications are not supported (no display server forwarding). Desktop notifications work via XDG Desktop Portal.
@@ -18,5 +18,5 @@ Known constraints of the current implementation.
 
 ## Both platforms
 
-- Docker socket access is read-only — no container creation, deletion, or modification from inside the sandbox. See [Supported tools — Docker](../tools.md#docker) for what does work.
+- Docker socket access is read-only - no container creation, deletion, or modification from inside the sandbox. See [Supported tools - Docker](../tools.md#docker) for what does work.
 - Nested Docker (running Docker inside the sandbox) is not supported.

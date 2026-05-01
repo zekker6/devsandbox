@@ -3,7 +3,7 @@
 How filesystem, process, and network isolation works in devsandbox.
 
 devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux or Docker containers on macOS to create
-isolated environments for running untrusted code. On Linux, bwrap and pasta binaries are embedded — no system packages
+isolated environments for running untrusted code. On Linux, bwrap and pasta binaries are embedded - no system packages
 required. To use system-installed binaries instead, see [configuration](configuration.md).
 
 > **macOS users:** devsandbox uses the Docker backend on macOS. Skip to [How It Works (Docker)](#how-it-works-docker) for platform-relevant details, or see [Platform Differences](#platform-differences) for a comparison table.
@@ -284,8 +284,8 @@ devsandbox doctor
 
 This verifies:
 
-- Required binaries (bwrap — embedded or system-installed)
-- Optional binaries (pasta for proxy mode — embedded or system-installed)
+- Required binaries (bwrap - embedded or system-installed)
+- Optional binaries (pasta for proxy mode - embedded or system-installed)
 - User namespace support
 - Directory permissions
 - Overlayfs support (for tool writable layers)
@@ -335,7 +335,7 @@ If namespace restrictions cannot be resolved, use the Docker backend instead (`-
 
 **"bwrap not found"**
 
-- devsandbox includes embedded bwrap — this error means extraction failed and no system package is installed
+- devsandbox includes embedded bwrap - this error means extraction failed and no system package is installed
 - Check `devsandbox doctor` output for details (embedded vs system source)
 - Install bubblewrap as a fallback: see [Installation](getting-started/install.md)
 - To disable embedded binaries and use only system packages, set `use_embedded = false` in [configuration](configuration.md)
@@ -403,7 +403,7 @@ Overlayfs creates a layered filesystem:
 
 | Mode | Writes persist? | Host modified? | Use when |
 |---|---|---|---|
-| `split` (default) | Caches/data: yes. Configs: no | Never | Default — protects host configs from supply chain attacks |
+| `split` (default) | Caches/data: yes. Configs: no | Never | Default - protects host configs from supply chain attacks |
 | `overlay` | Yes (all) | Never | You want all tool state to persist across sessions |
 | `tmpoverlay` | No | Never | Disposable experiments, CI, untrusted code |
 | `readonly` | No (writes fail) | Never | Maximum lockdown, no tool installation |
@@ -421,7 +421,7 @@ Overlayfs creates a layered filesystem:
 
 Under the default `split` policy, category-`data` and category-`cache` bindings mount as persistent overlays. Writes made inside the sandbox (e.g. Claude Code session JSONLs under `~/.claude/projects`, installed mise tools under `~/.local/share/mise`) accumulate in the sandbox's overlay upper directory under `~/.local/share/devsandbox/<sandbox>/home/overlay/.../upper/` and are **never** promoted to the real host path.
 
-If you want to flip a binding from `overlay`/`split` to `readwrite` — or just surface accumulated sandbox state onto the host — use `devsandbox overlay migrate`:
+If you want to flip a binding from `overlay`/`split` to `readwrite` - or just surface accumulated sandbox state onto the host - use `devsandbox overlay migrate`:
 
 ```bash
 # Preview (dry-run, default): shows what would be written, overwritten, deleted.
@@ -451,7 +451,7 @@ devsandbox overlay migrate --sandbox my-project --tool claude --apply --set-mode
 | `--primary-only` | Ignore per-session uppers; only promote the primary persistent upper. |
 | `--apply` | Actually perform the migration (default is dry-run). |
 | `--set-mode MODE` | After a successful apply, set the tool's `mount_mode` in `.devsandbox.toml`. Requires `--tool`. |
-| `--force` | Proceed even if a targeted sandbox appears to have an active session (racy — only use when you're sure). |
+| `--force` | Proceed even if a targeted sandbox appears to have an active session (racy - only use when you're sure). |
 | `--yes` | Skip the multi-sandbox confirmation prompt when `--set-mode` would touch more than one config file. |
 
 **Safety model:**
@@ -586,7 +586,7 @@ keep_container = false  # Remove container on exit
 
 **One-off Fresh Containers:**
 
-Use `--rm` flag for ephemeral mode — sandbox state is removed after exit:
+Use `--rm` flag for ephemeral mode - sandbox state is removed after exit:
 
 ```bash
 devsandbox --rm
@@ -711,7 +711,7 @@ These are Docker Desktop minimum allocations. devsandbox containers use these re
 
 On macOS, the sandbox home directory uses a **named Docker volume** instead of a bind mount. This is necessary because bind mounts on macOS go through a virtualization layer (VirtioFS or gRPC-FUSE) that can be 2-5x slower than native filesystem access.
 
-Named volumes store data inside the Docker VM's filesystem, providing near-native performance for operations like `npm install`, Go builds, and other I/O-heavy tasks. The tradeoff is that volume contents are not directly accessible from the macOS Finder — use `devsandbox sandboxes list` to view sizes and `devsandbox sandboxes prune` to reclaim space. To see Docker volumes directly: `docker volume ls | grep devsandbox`.
+Named volumes store data inside the Docker VM's filesystem, providing near-native performance for operations like `npm install`, Go builds, and other I/O-heavy tasks. The tradeoff is that volume contents are not directly accessible from the macOS Finder - use `devsandbox sandboxes list` to view sizes and `devsandbox sandboxes prune` to reclaim space. To see Docker volumes directly: `docker volume ls | grep devsandbox`.
 
 #### File Watching Limitations
 
@@ -728,7 +728,7 @@ devsandbox -- npx vite --force
 CHOKIDAR_USEPOLLING=true devsandbox npm run dev
 ```
 
-### Docker Socket Forwarding — Security Warning
+### Docker Socket Forwarding - Security Warning
 
 When `[tools.docker] enabled = true`, the sandbox gains filtered access to the host
 Docker daemon. The proxy allows:
@@ -736,7 +736,7 @@ Docker daemon. The proxy allows:
 - **Read operations**: List all containers, images, volumes, and networks on the host
 - **Exec/attach**: Execute commands inside ANY running container on the host
 
-This is **intentional** — it enables Docker-in-Docker workflows. However, it
+This is **intentional** - it enables Docker-in-Docker workflows. However, it
 effectively grants the sandbox **host-level access via Docker**, which is often
 equivalent to root. **Only enable this for trusted code.**
 
@@ -746,7 +746,7 @@ Container creation, deletion, and image manipulation are blocked by the proxy fi
 
 - **No pasta network**: Network isolation uses HTTP_PROXY instead of pasta
 - **Proxy filtering**: Proxy mode with request filtering is supported via per-session Docker networks
-- **.env hiding**: Uses Docker volume mounts (`-v /dev/null`) to hide `.env` files — no special privileges required
+- **.env hiding**: Uses Docker volume mounts (`-v /dev/null`) to hide `.env` files - no special privileges required
 - **macOS file performance**: Named volumes are slower than native filesystem
 - **inotify limitations**: File watching may be less reliable on macOS
 - **No nested Docker**: Cannot run Docker commands inside the sandbox
@@ -768,9 +768,9 @@ Container creation, deletion, and image manipulation are blocked by the proxy fi
 
 ## See Also
 
-- [Proxy Mode](proxy.md) -- network isolation and traffic inspection
-- [Tools](tools.md) -- how development tools are made available inside the sandbox
-- [Configuration](configuration.md) -- config file reference, custom mounts, overlay settings
-- [Use Cases](use-cases.md) -- workflows and shell setup
+- [Proxy Mode](proxy.md) - network isolation and traffic inspection
+- [Tools](tools.md) - how development tools are made available inside the sandbox
+- [Configuration](configuration.md) - config file reference, custom mounts, overlay settings
+- [Use Cases](use-cases.md) - workflows and shell setup
 
 [Back to docs index](README.md) | [Back to README](../README.md)

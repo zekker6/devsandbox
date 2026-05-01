@@ -189,7 +189,7 @@ Redaction rules are always additive when merging configs. The `default_action` u
 
 ### Log Skip
 
-Suppress matching requests from the proxy log entirely (both `logs/proxy/requests.jsonl` and any configured remote log dispatcher). The request still passes through — only the log entry is dropped. See [Proxy: Skipping Log Entries](proxy.md#skipping-log-entries) for the use case and behavior.
+Suppress matching requests from the proxy log entirely (both `logs/proxy/requests.jsonl` and any configured remote log dispatcher). The request still passes through - only the log entry is dropped. See [Proxy: Skipping Log Entries](proxy.md#skipping-log-entries) for the use case and behavior.
 
 ```toml
 [[proxy.log_skip.rules]]
@@ -206,7 +206,7 @@ type = "glob"
 
 | Field | Description | Default |
 |---|---|---|
-| `pattern` | Pattern to match (exact / glob / regex). Required. | — |
+| `pattern` | Pattern to match (exact / glob / regex). Required. | - |
 | `scope` | What to match against: `host`, `path`, or `url`. | `host` |
 | `type` | Pattern type: `exact`, `glob`, or `regex`. Auto-detected as `regex` when the pattern contains regex metacharacters. | `glob` |
 
@@ -605,7 +605,7 @@ headers = { "X-Team" = "platform" }
 To send logs to an endpoint that requires an auth header, use `header_sources`
 instead of `headers`. Sources resolve at runtime from a host environment
 variable, a file, or a literal value, so secrets stay out of the config file
-(and out of the sandbox — header sources are resolved on the host).
+(and out of the sandbox - header sources are resolved on the host).
 
 ```toml
 [[logging.receivers]]
@@ -624,7 +624,7 @@ file = "~/.config/devsandbox/otlp-key"
 
 Each source must set exactly one of `value`, `env`, or `file` (priority:
 `value` > `env` > `file`). If a source resolves to an empty string (e.g. the
-env var is unset or the file is empty), startup fails — devsandbox will not
+env var is unset or the file is empty), startup fails - devsandbox will not
 silently send unauthenticated logs.
 
 When the same header name appears in both `headers` and `header_sources`, the
@@ -716,7 +716,7 @@ devsandbox logs internal --type logging
 
 ### Audit Logging
 
-Every dispatched log entry — proxy request logs, isolator (`builder`/`mounts`/`docker`) logs, the new wrapper banners, and synthesized lifecycle/security events — carries a fixed set of per-session fields suitable for ad-hoc audit query.
+Every dispatched log entry - proxy request logs, isolator (`builder`/`mounts`/`docker`) logs, the new wrapper banners, and synthesized lifecycle/security events - carries a fixed set of per-session fields suitable for ad-hoc audit query.
 
 #### Per-entry session fields
 
@@ -730,7 +730,7 @@ Every dispatched log entry — proxy request logs, isolator (`builder`/`mounts`/
 | `pid` | int | Wrapper process PID. |
 | `devsandbox_version` | string | Build-injected `internal/version.Version`. |
 
-These fields are injected by the dispatcher at write time. They appear on both OTLP (as record attributes) and syslog (inside the existing `Fields` JSON object — see "Syslog payload shape" below).
+These fields are injected by the dispatcher at write time. They appear on both OTLP (as record attributes) and syslog (inside the existing `Fields` JSON object - see "Syslog payload shape" below).
 
 #### Lifecycle events
 
@@ -749,27 +749,27 @@ Two synthesized entries bookend each session.
 | `filter_rule_count` | int |
 | `redaction_rule_count` | int |
 | `log_skip_rule_count` | int |
-| `credential_injectors` | `[]string` — names only, no resolved values |
+| `credential_injectors` | `[]string` - names only, no resolved values |
 | `command` | wrapped command argv joined with spaces |
-| `tty` | bool — was stdin a terminal at startup |
+| `tty` | bool - was stdin a terminal at startup |
 | `start_time` | RFC3339 timestamp |
 
 **`session.end`** (level: `info`, `event=session.end`) is emitted from a deferred function before the dispatcher is closed. Payload:
 
 | Field | Description |
 |---|---|
-| `exit_code` | int — 0 on normal exit, the wrapped command's exit code on failure (extracted from `*exec.ExitError`), `-1` on signal-driven shutdown, `1` on generic error |
-| `duration_ms` | int — `time.Since(start).Milliseconds()` |
+| `exit_code` | int - 0 on normal exit, the wrapped command's exit code on failure (extracted from `*exec.ExitError`), `-1` on signal-driven shutdown, `1` on generic error |
+| `duration_ms` | int - `time.Since(start).Milliseconds()` |
 | `end_time` | RFC3339 timestamp |
-| `proxy_request_count` | int — non-skipped requests handled by the proxy (0 if proxy disabled) |
+| `proxy_request_count` | int - non-skipped requests handled by the proxy (0 if proxy disabled) |
 
 #### Security events
 
-Each event is dispatched through the same path with `event=<name>` set as a Field. Secret values are deliberately excluded from every event — only metadata (rule names, header names, hosts) appears.
+Each event is dispatched through the same path with `event=<name>` set as a Field. Secret values are deliberately excluded from every event - only metadata (rule names, header names, hosts) appears.
 
 | Event | Level | Trigger | Payload |
 |---|---|---|---|
-| `proxy.filter.decision` | `info` (allow) / `warn` (block, ask) | Filter engine evaluates a request | `host`, `method`, `path` (path-only — query string stripped), `rule_action`, `rule_id`, `default_action_used` |
+| `proxy.filter.decision` | `info` (allow) / `warn` (block, ask) | Filter engine evaluates a request | `host`, `method`, `path` (path-only - query string stripped), `rule_action`, `rule_id`, `default_action_used` |
 | `proxy.redaction.applied` | `info` | One event per match when the redaction engine rewrites or blocks | `host`, `secret_kind` (rule name), `location` (`url` / `body` / `header:<name>`), `rule_id` |
 | `proxy.credential.injected` | `info` | Credential injector successfully writes an auth header | `host`, `injector` (name), `header_name` |
 | `proxy.mitm.bypass` | `info` | First CONNECT to a host in no-MITM mode (deduped per host per session) | `host`, `reason` (currently always `global`) |
@@ -780,7 +780,7 @@ Each event is dispatched through the same path with `event=<name>` set as a Fiel
 
 #### Wrapper notice events
 
-User-facing wrapper output (`notice.Info` / `notice.Warn` / `notice.Error`) — startup banners, MITM warnings, container lifecycle messages, proxy runtime errors — is forwarded through the dispatcher with `component=wrapper` and the configured level. Lines emitted before the dispatcher is wired up are buffered (max 256 entries) and drained when the dispatcher attaches.
+User-facing wrapper output (`notice.Info` / `notice.Warn` / `notice.Error`) - startup banners, MITM warnings, container lifecycle messages, proxy runtime errors - is forwarded through the dispatcher with `component=wrapper` and the configured level. Lines emitted before the dispatcher is wired up are buffered (max 256 entries) and drained when the dispatcher attaches.
 
 #### Syslog payload shape
 
@@ -1055,9 +1055,9 @@ devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbo
 
 ## See Also
 
-- [Sandboxing](sandboxing.md) -- security model, custom mounts, overlay filesystem details
-- [Proxy Mode](proxy.md) -- proxy usage, log viewing, HTTP filtering
-- [Tools](tools.md) -- tool-specific behavior (git modes, mise, Docker socket proxy)
-- [Use Cases](use-cases.md) -- practical workflows using these configuration options
+- [Sandboxing](sandboxing.md) - security model, custom mounts, overlay filesystem details
+- [Proxy Mode](proxy.md) - proxy usage, log viewing, HTTP filtering
+- [Tools](tools.md) - tool-specific behavior (git modes, mise, Docker socket proxy)
+- [Use Cases](use-cases.md) - practical workflows using these configuration options
 
 [Back to docs index](README.md) | [Back to README](../README.md)
