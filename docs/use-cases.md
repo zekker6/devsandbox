@@ -98,7 +98,7 @@ Any CLI-based AI coding tool works in the sandbox. Electron-based desktop apps (
 
 ## Scratchpads
 
-Managed throwaway workspaces for one-off experiments. See [Scratchpads](../README.md#scratchpads) in the README for full usage and management commands.
+Managed throwaway workspaces for one-off experiments. See [Scratchpads](index.md#scratchpads) on the docs home for full usage and management commands.
 
 ## Shell Autocompletion
 

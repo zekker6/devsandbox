@@ -514,7 +514,7 @@ supported; TCP connections to remote Docker daemons are not proxied.
 
 > **Security Warning**: Enabling Docker socket forwarding grants the sandbox read access
 > to all Docker state and the ability to exec into any container on the host.
-> See [Docker Socket Forwarding](sandboxing.md#docker-socket-forwarding--security-warning) for details.
+> See [Docker Socket Forwarding](sandboxing.md#docker-socket-forwarding-security-warning) for details.
 
 See [docs/tools.md](tools.md#docker) for full details on allowed operations.
 

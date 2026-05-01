@@ -5,44 +5,45 @@ site_description = "Sandbox your AI coding assistants. Run Claude Code, Copilot,
 site_author = "Zakhar Bessarab"
 site_dir = "public/docs"
 repo_url = "https://github.com/zekker6/devsandbox"
+edit_uri = "edit/main/docs/"
 
-copyright = "Built by Zakhar Bessarab. MIT licensed."
+copyright = "Built by zekker6. MIT licensed."
 
 nav = [
-    { "Home" = "index.md" },
-    { "Getting Started" = [
-        { "Installation" = "getting-started/install.md" },
-        { "Quick start" = "getting-started/quickstart.md" },
-        { "First run" = "getting-started/first-run.md" },
-        { "Where to start (legacy)" = "where-to-start.md" },
-    ] },
-    { "Guides" = [
-        { "Use cases" = "use-cases.md" },
-        { "Supported tools" = "tools.md" },
-    ] },
-    { "Reference" = [
-        { "How sandboxing works" = "sandboxing.md" },
-        { "Configuration" = "configuration.md" },
-        { "Proxy mode" = "proxy.md" },
-    ] },
-    { "About" = [
-        { "Limitations" = "about/limitations.md" },
-        { "Changelog" = "about/changelog.md" },
-        { "License" = "about/license.md" },
-    ] },
+  { "Home" = "index.md" },
+  { "Getting Started" = [
+    { "Installation" = "getting-started/install.md" },
+    { "Quick start" = "getting-started/quickstart.md" },
+    { "First run" = "getting-started/first-run.md" },
+  ] },
+  { "Guides" = [
+    { "Use cases" = "use-cases.md" },
+    { "Supported tools" = "tools.md" },
+  ] },
+  { "Reference" = [
+    { "How sandboxing works" = "sandboxing.md" },
+    { "Configuration" = "configuration.md" },
+    { "Proxy mode" = "proxy.md" },
+  ] },
+  { "About" = [
+    { "Limitations" = "about/limitations.md" },
+    { "Changelog" = "about/changelog.md" },
+    { "License" = "about/license.md" },
+  ] },
 ]
 
 [project.theme]
 language = "en"
 features = [
-    "navigation.sections",
-    "navigation.indexes",
-    "navigation.top",
-    "navigation.tracking",
-    "content.code.copy",
-    "content.code.select",
-    "search.highlight",
-    "toc.follow",
+  "navigation.sections",
+  "navigation.indexes",
+  "navigation.top",
+  "navigation.tracking",
+  "content.code.copy",
+  "content.code.select",
+  "content.action.edit",
+  "search.highlight",
+  "toc.follow",
 ]
 
 [[project.theme.palette]]

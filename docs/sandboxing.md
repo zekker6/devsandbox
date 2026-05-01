@@ -99,7 +99,7 @@ Use `git.mode = "readwrite"` for full git access.
 
 ## How It Works (bwrap)
 
-The following sections describe how the bwrap (bubblewrap) backend implements isolation on Linux. For Docker-specific behavior, see [Docker Backend](#docker-backend) below.
+The following sections describe how the bwrap (bubblewrap) backend implements isolation on Linux. For Docker-specific behavior, see [Docker Backend](#docker-backend-all-platforms) below.
 
 ### Filesystem Isolation
 
@@ -337,7 +337,7 @@ If namespace restrictions cannot be resolved, use the Docker backend instead (`-
 
 - devsandbox includes embedded bwrap — this error means extraction failed and no system package is installed
 - Check `devsandbox doctor` output for details (embedded vs system source)
-- Install bubblewrap as a fallback: see [README](../README.md#installation-details)
+- Install bubblewrap as a fallback: see [Installation](getting-started/install.md)
 - To disable embedded binaries and use only system packages, set `use_embedded = false` in [configuration](configuration.md)
 
 **"Permission denied" on project files**
