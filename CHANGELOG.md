@@ -2,7 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.17.0...HEAD)
+## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.17.1...HEAD)
+
+## [v0.17.1](https://github.com/zekker6/devsandbox/releases/tag/v0.17.1) - 2026-05-13
+
+### Fixed
+
+- **Proxy no longer panics on requests with a nil `URL`.** goproxy can dispatch HTTPS requests whose `http.Request.URL` is nil when its internal `url.Parse` fallback fails (the parse error is swallowed and the request is still handed off). Every downstream step - credential injection, filtering, redaction, ask-mode, request logging - dereferences `req.URL`, so any such request crashed the proxy worker. `RequestLogger.LogRequest` now falls back to `RequestURI` when `URL` is nil, and the request handler short-circuits with a 403 (`malformed request: missing URL`) instead of dispatching downstream.
 
 ## [v0.17.0](https://github.com/zekker6/devsandbox/releases/tag/v0.17.0) - 2026-04-30
 
