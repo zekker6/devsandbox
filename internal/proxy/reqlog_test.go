@@ -59,6 +59,32 @@ func TestLogRequest_RedactsSensitiveHeaders(t *testing.T) {
 	}
 }
 
+// Regression: goproxy can dispatch HTTPS requests with a nil URL when its
+// internal url.Parse fallback fails. LogRequest must not panic in that case.
+// https://github.com/elazarl/goproxy/blob/v1.8.3/https.go#L272-L274
+func TestLogRequest_NilURL(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	req := &http.Request{
+		Method:     "GET",
+		RequestURI: "/some/path",
+		Header:     http.Header{},
+	}
+
+	entry, _ := rl.LogRequest(req)
+	if entry == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if entry.URL != "/some/path" {
+		t.Errorf("URL = %q, want %q (falling back to RequestURI)", entry.URL, "/some/path")
+	}
+}
+
 func TestRequestLog_RedactionFields(t *testing.T) {
 	entry := &RequestLog{
 		Method:           "POST",

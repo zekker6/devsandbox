@@ -255,6 +255,22 @@ func (s *Server) setupLogging() {
 		entry, reqBody := s.reqLogger.LogRequest(req)
 		ctx.UserData = entry
 
+		// goproxy can dispatch HTTPS requests with a nil URL when its own
+		// url.Parse fallback fails. Every downstream step here (credential
+		// injection, filtering, redaction, ask mode) dereferences req.URL,
+		// so we reject with 403 rather than panic.
+		// https://github.com/elazarl/goproxy/blob/v1.8.3/https.go#L272-L274
+		if req.URL == nil {
+			resp := BlockResponse(req, "malformed request: missing URL")
+			if entry != nil {
+				entry.FilterAction = string(FilterActionBlock)
+				entry.FilterReason = "malformed request: missing URL"
+				s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
+				_ = s.reqLogger.Log(entry)
+			}
+			return nil, resp
+		}
+
 		// Inject credentials for matching domains
 		for _, injector := range s.credentialInjectors {
 			if injector.Match(req) {

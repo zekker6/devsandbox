@@ -153,10 +153,20 @@ func (rl *RequestLogger) toLogEntry(req *RequestLog) *logging.Entry {
 
 // LogRequest captures request details and returns a log entry
 func (rl *RequestLogger) LogRequest(req *http.Request) (*RequestLog, []byte) {
+	// req.URL can be nil when goproxy's HTTPS handler fails to re-parse a
+	// malformed request line - the parse error is swallowed and the request
+	// is still dispatched. Fall back to RequestURI so logging never panics.
+	// https://github.com/elazarl/goproxy/blob/v1.8.3/https.go#L272-L274
+	urlStr := ""
+	if req.URL != nil {
+		urlStr = req.URL.String()
+	} else {
+		urlStr = req.RequestURI
+	}
 	entry := &RequestLog{
 		Timestamp:      time.Now(),
 		Method:         req.Method,
-		URL:            req.URL.String(),
+		URL:            urlStr,
 		RequestHeaders: redactHeaders(cloneHeaders(req.Header)),
 	}
 
