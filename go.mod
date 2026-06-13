@@ -11,7 +11,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/proto/otlp v1.10.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/term v0.43.0
+	golang.org/x/term v0.44.0
 	google.golang.org/grpc v1.81.1
 )
 
@@ -31,7 +31,7 @@ require (
 	github.com/olekukonko/ll v0.1.8 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	golang.org/x/net v0.54.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260511170946-3700d4141b60 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60 // indirect
