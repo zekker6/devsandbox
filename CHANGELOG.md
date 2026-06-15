@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.17.1...HEAD)
 
+### Changed
+
+- Embedded `pasta` upgraded to passt `2026_06_11.a9c61ff` (from `2026_05_07.1afd4ed`). The statically linked pasta binary that backs sandbox networking is rebuilt from the newer upstream passt release. Embedded `bwrap` is unchanged at `v0.11.2`.
+
 ## [v0.17.1](https://github.com/zekker6/devsandbox/releases/tag/v0.17.1) - 2026-05-13
 
 ### Fixed
