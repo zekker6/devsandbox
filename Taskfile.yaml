@@ -134,7 +134,7 @@ tasks:
 
   docker:test:
     desc: Test the devsandbox Docker image
-    deps: [ docker:build ]
+    deps: [docker:build]
     cmds:
       - docker run --rm -v "{{.PWD}}:/workspace" -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) devsandbox:local bash -c "whoami && mise --version"
 
@@ -142,6 +142,8 @@ tasks:
 
   embed:builder:amd64:
     internal: true
+    deps:
+      - embed:setup-qemu
     cmds:
       - >-
         docker build --platform linux/amd64
@@ -150,6 +152,8 @@ tasks:
 
   embed:builder:arm64:
     internal: true
+    deps:
+      - embed:setup-qemu
     cmds:
       - >-
         docker build --platform linux/arm64
@@ -239,7 +243,6 @@ tasks:
         strip /out/pasta
         '
   # --- Public entry points ---
-
   embed:build:
     desc: Build static bwrap and pasta binaries for all platforms (arm64 requires QEMU binfmt)
     deps:
@@ -323,7 +326,7 @@ tasks:
       - 'echo "Built: public/index.html (landing) + public/docs/ (zensical)"'
 
   site:check:
-    desc: 'Verify internal links (deferred for v1 — see plan Post-Completion)'
+    desc: "Verify internal links (deferred for v1 — see plan Post-Completion)"
     cmds:
       - 'echo "site:check is a no-op for v1. See docs/plans/ entry for the 4 cross-link follow-ups before --strict can be enabled."'
 
