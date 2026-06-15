@@ -133,6 +133,19 @@ func TestServerHTTPProxy(t *testing.T) {
 	}
 }
 
+// trustUpstreamCert makes the proxy's upstream transport trust the given
+// self-signed test server. goproxy v1.8.4 verifies upstream certificates by
+// default (v1.8.3 skipped verification via its tlsClientSkipVerify config), so
+// MITM tests that proxy to an httptest TLS server must register that server's
+// cert with the proxy's upstream root pool. A fresh *tls.Config is assigned
+// rather than mutating the shared default, so other proxies are unaffected.
+func trustUpstreamCert(t *testing.T, proxyServer *Server, ts *httptest.Server) {
+	t.Helper()
+	pool := x509.NewCertPool()
+	pool.AddCert(ts.Certificate())
+	proxyServer.proxy.Tr.TLSClientConfig = &tls.Config{RootCAs: pool}
+}
+
 func TestServerHTTPSProxy(t *testing.T) {
 	// Start a test HTTPS server
 	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +167,7 @@ func TestServerHTTPSProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
+	trustUpstreamCert(t, proxyServer, testServer)
 
 	if err := proxyServer.Start(); err != nil {
 		t.Fatalf("Start failed: %v", err)
@@ -463,6 +477,7 @@ func TestServerHEAD_PreservesContentLength_MITM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
+	trustUpstreamCert(t, proxyServer, testServer)
 	if err := proxyServer.Start(); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
