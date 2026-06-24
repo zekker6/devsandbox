@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -206,6 +207,18 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 		return nil
 	}
 
+	// Streaming responses (Server-Sent Events, newline-delimited JSON) must not
+	// be buffered. goproxy relays a response to the client only after the
+	// OnResponse handler returns, so io.ReadAll on a long-lived stream blocks
+	// until the upstream closes it. The client never receives the response
+	// headers and aborts (e.g. codex/OpenAI: "Codex SSE response headers timed
+	// out after 20000ms"). Pass the body through untouched and log metadata
+	// (status + headers) only; the streamed body is unbounded and not useful to
+	// capture in full anyway.
+	if isStreamingResponse(resp) {
+		return nil
+	}
+
 	// Read and restore response body
 	var respBody []byte
 	if resp.Body != nil {
@@ -218,6 +231,98 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 	return respBody
 }
 
+// maxResponseLogBytes caps how much of a response body is captured for logging.
+// The full body always streams to the client; only this leading prefix is
+// recorded in the log entry, bounding memory for large or long-lived streams.
+const maxResponseLogBytes = 256 * 1024
+
+// LogResponseStreaming records response status and headers immediately, then
+// arranges for the body to be captured for logging WITHOUT buffering it first.
+//
+// goproxy relays a response to the client only after the OnResponse handler
+// returns, and it does not flush the body until the handler-supplied resp.Body
+// is read. Reading the whole body here (io.ReadAll) therefore withholds the
+// response *headers* from the client until the body completes. For streaming
+// responses that stay open for seconds to minutes (SSE, chunked, HTTP
+// upgrades) this is fatal: codex aborts with "SSE response headers timed out
+// after 20000ms" while the proxy spends 10-80s reading the stream. Crucially,
+// such responses are not always identifiable by Content-Type - codex's
+// streamed responses carry an empty Content-Type - so buffering cannot be
+// avoided by media-type sniffing alone.
+//
+// The body is therefore wrapped so it streams to the client unchanged while a
+// bounded prefix is captured; the log entry is written when the body is closed
+// (stream end or client disconnect). Responses with no streamable body are
+// logged immediately and left untouched: HEAD (whose upstream Content-Length
+// must be preserved verbatim per RFC 9110 §9.3.2 - replacing the body makes
+// goproxy strip Content-Length and switch to chunked, breaking OCI/registry
+// clients), 1xx informational/upgrade responses, and empty bodies.
+func (rl *RequestLogger) LogResponseStreaming(entry *RequestLog, resp *http.Response, startTime time.Time) {
+	entry.Duration = time.Since(startTime)
+
+	if resp == nil {
+		entry.Error = "no response"
+		_ = rl.Log(entry)
+		return
+	}
+
+	entry.StatusCode = resp.StatusCode
+	entry.ResponseHeaders = redactHeaders(cloneHeaders(resp.Header))
+
+	isHead := resp.Request != nil && resp.Request.Method == http.MethodHead
+	if isHead || resp.StatusCode < http.StatusOK || resp.Body == nil || resp.Body == http.NoBody {
+		_ = rl.Log(entry)
+		return
+	}
+
+	resp.Body = &captureBody{
+		src:       resp.Body,
+		remaining: maxResponseLogBytes,
+		entry:     entry,
+		logger:    rl,
+	}
+}
+
+// captureBody wraps an upstream response body so it streams to the consumer
+// (goproxy, and thus the client) unchanged while a bounded prefix is captured
+// for logging. The log entry is finalized exactly once, when the body reaches
+// EOF or is closed, so the proxy never buffers the full body before relaying
+// response headers.
+type captureBody struct {
+	src       io.ReadCloser
+	buf       bytes.Buffer
+	remaining int
+	entry     *RequestLog
+	logger    *RequestLogger
+	logOnce   sync.Once
+}
+
+func (c *captureBody) Read(p []byte) (int, error) {
+	n, err := c.src.Read(p)
+	if n > 0 && c.remaining > 0 {
+		take := min(n, c.remaining)
+		c.buf.Write(p[:take])
+		c.remaining -= take
+	}
+	if err == io.EOF {
+		c.finalize()
+	}
+	return n, err
+}
+
+func (c *captureBody) Close() error {
+	err := c.src.Close()
+	c.finalize()
+	return err
+}
+
+func (c *captureBody) finalize() {
+	c.logOnce.Do(func() {
+		c.entry.ResponseBody = c.buf.Bytes()
+		_ = c.logger.Log(c.entry)
+	})
+}
+
 // Close closes the logger and flushes remote destinations.
 // The dispatcher is only closed if this logger owns it.
 func (rl *RequestLogger) Close() error {
@@ -225,6 +330,27 @@ func (rl *RequestLogger) Close() error {
 		_ = rl.dispatcher.Close()
 	}
 	return rl.writer.Close()
+}
+
+// streamingContentTypes are response media types that represent long-lived
+// streams whose bodies must never be buffered by the proxy. See LogResponse.
+var streamingContentTypes = map[string]bool{
+	"text/event-stream":    true, // Server-Sent Events (OpenAI, Anthropic, codex, claude)
+	"application/x-ndjson": true, // newline-delimited JSON streaming (Ollama, etc.)
+}
+
+// isStreamingResponse reports whether the response is a streaming protocol that
+// must be relayed incrementally rather than read to completion. Detection is by
+// Content-Type media type, ignoring any parameters (e.g. "; charset=utf-8").
+func isStreamingResponse(resp *http.Response) bool {
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		return false
+	}
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return streamingContentTypes[strings.ToLower(strings.TrimSpace(ct))]
 }
 
 var sensitiveHeaders = map[string]bool{

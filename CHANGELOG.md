@@ -2,7 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.17.1...HEAD)
+## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.17.2...HEAD)
+
+### Added
+
+- **`DEVSANDBOX_DEBUG=1` proxy lifecycle tracing.** The MITM proxy now logs a per-request `CONNECT` / `request` / `response` trace to the internal proxy log (`devsandbox logs internal --type proxy`), including response status, content-type, streaming detection, and time-to-headers. Query strings are stripped so tokens are never logged. Use it to pinpoint where a hung or timed-out request stalls. See [Debugging the Request/Response Lifecycle](docs/proxy.md#debugging-the-requestresponse-lifecycle).
+
+### Fixed
+
+- **MITM proxy no longer buffers response bodies before relaying headers.** goproxy relays a response to the client only after the `OnResponse` handler returns and does not flush the body until the handler-supplied `resp.Body` is read, but request logging read the entire body with `io.ReadAll` to capture it. For any streaming response the body stays open until generation finishes, so the proxy withheld the response *headers* for the full duration - codex aborted with `Codex SSE response headers timed out after 20000ms` while the proxy spent 10-80s reading the stream (one HTTP upgrade buffered for 82s). Crucially these responses are not always identifiable by `Content-Type` (codex's streamed responses carry an empty `Content-Type`), so media-type sniffing alone could not avoid the buffering. The response body is now wrapped so it streams to the client unchanged while a bounded prefix (256 KiB) is captured for logging; the log entry is written when the body closes. The proxy never buffers a body before relaying headers, so SSE, chunked, empty-`Content-Type`, and large responses all stream incrementally. This also unbreaks **WebSocket (WSS) and other HTTP upgrades through MITM**: 1xx/`101 Switching Protocols` responses are now left untouched, so goproxy can type-assert `resp.Body` to `io.ReadWriter` and relay the upgraded connection (the old code read the 101 body and replaced it with a `bytes.Reader`, stalling the stream for up to 82s and failing the relay).
+
+## [v0.17.2](https://github.com/zekker6/devsandbox/releases/tag/v0.17.2) - 2026-06-15
 
 ### Changed
 

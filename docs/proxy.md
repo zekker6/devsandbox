@@ -360,6 +360,48 @@ devsandbox logs internal -f
 devsandbox logs internal --last 100
 ```
 
+### Debugging the Request/Response Lifecycle
+
+Set `DEVSANDBOX_DEBUG=1` to log a per-request lifecycle trace to the internal
+proxy log. This is the fastest way to diagnose hung or timed-out requests
+(for example a streaming client failing with `SSE response headers timed out`):
+
+```bash
+DEVSANDBOX_DEBUG=1 devsandbox --proxy claude
+# reproduce the issue, then in another shell:
+devsandbox logs internal --type proxy -f
+```
+
+Each intercepted request emits up to three lines:
+
+```
+DEBUG CONNECT chatgpt.com:443 -> MITM
+DEBUG request: POST chatgpt.com:443/backend-api/codex/responses
+DEBUG response: POST https://chatgpt.com:443/backend-api/codex/responses status=200 content-type="" streaming=false time_to_headers=412ms (body streamed, not buffered)
+```
+
+`time_to_headers` is how long the upstream took to return response headers.
+Response bodies are streamed to the client and captured asynchronously, so the
+proxy never buffers them - the `response` line is emitted as soon as headers
+arrive.
+
+How to read it:
+
+- **No `CONNECT` line for the host** - traffic is not reaching the proxy, or is
+  tunneled instead of intercepted (transparent mode). The proxy cannot be the
+  cause; check network/DNS and that proxy mode is enabled.
+- **`request` line but no matching `response` line** within the client timeout -
+  the upstream (or the proxy-to-upstream connection) never returned headers. The
+  stall is upstream, not in the proxy.
+- **`response` line with a large `time_to_headers`** - the upstream itself was
+  slow to respond. A small `time_to_headers` but a client that still times out
+  points to the client or the connection after headers, not the proxy.
+- **`streaming`** reports only whether the response advertised a streaming
+  `Content-Type` (e.g. `text/event-stream`); it is informational. Bodies stream
+  through regardless of `Content-Type` (codex's responses carry an empty one).
+
+Query strings are stripped from these lines so tokens are never logged.
+
 ## Remote Logging
 
 Proxy logs can be forwarded to remote destinations.

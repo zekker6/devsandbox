@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -261,6 +262,194 @@ func TestToLogEntry_NoRedaction(t *testing.T) {
 	}
 	if _, exists := logEntry.Fields["redaction_matches"]; exists {
 		t.Error("redaction_matches should not be present when no redaction occurred")
+	}
+}
+
+func TestIsStreamingResponse(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		want        bool
+	}{
+		{"sse plain", "text/event-stream", true},
+		{"sse with charset", "text/event-stream; charset=utf-8", true},
+		{"sse mixed case + spaces", "  Text/Event-Stream ; charset=utf-8", true},
+		{"ndjson", "application/x-ndjson", true},
+		{"json", "application/json", false},
+		{"json with charset", "application/json; charset=utf-8", false},
+		{"empty", "", false},
+		{"octet-stream", "application/octet-stream", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{Header: http.Header{}}
+			if tt.contentType != "" {
+				resp.Header.Set("Content-Type", tt.contentType)
+			}
+			if got := isStreamingResponse(resp); got != tt.want {
+				t.Errorf("isStreamingResponse(%q) = %v, want %v", tt.contentType, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLogResponse_StreamingBodyNotConsumed verifies that LogResponse leaves a
+// streaming response body untouched. Buffering it would block goproxy from
+// relaying response headers until the stream closes, causing SSE clients to
+// time out waiting for headers.
+func TestLogResponse_StreamingBodyNotConsumed(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	body := &blockingReadCloser{ch: make(chan struct{})}
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       body,
+	}
+
+	entry := &RequestLog{Method: "POST", URL: "https://api.openai.com/v1/responses"}
+	rl.LogResponse(entry, resp, time.Now())
+
+	if body.readCalled.Load() {
+		t.Error("LogResponse read from a streaming response body; it must be passed through untouched")
+	}
+	// Original body must remain in place so goproxy can stream it to the client.
+	if resp.Body != body {
+		t.Error("LogResponse replaced the streaming response body; original must be preserved")
+	}
+	// Metadata is still captured.
+	if entry.StatusCode != 200 || entry.ResponseHeaders["Content-Type"][0] != "text/event-stream" {
+		t.Error("LogResponse should still capture status and headers for streaming responses")
+	}
+}
+
+// blockingReadCloser is a Body that blocks forever on Read (like a live SSE
+// stream) and records whether Read was ever called.
+type blockingReadCloser struct {
+	ch         chan struct{}
+	readCalled atomic.Bool
+}
+
+func (b *blockingReadCloser) Read(_ []byte) (int, error) {
+	b.readCalled.Store(true)
+	<-b.ch // block until Close
+	return 0, io.EOF
+}
+
+func (b *blockingReadCloser) Close() error {
+	close(b.ch)
+	return nil
+}
+
+// TestLogResponseStreaming_StreamsAndLogsOnClose verifies the body streams
+// through unchanged and the log entry (with captured body) is written when the
+// body is closed - not buffered up front. The response has an empty
+// Content-Type, reproducing codex's /backend-api/codex/responses.
+func TestLogResponseStreaming_StreamsAndLogsOnClose(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	const body = "streamed-token-1 streamed-token-2"
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{}, // empty Content-Type, like codex
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    &http.Request{Method: "POST"},
+	}
+	entry := &RequestLog{Method: "POST", URL: "https://chatgpt.com/backend-api/codex/responses"}
+
+	rl.LogResponseStreaming(entry, resp, time.Now())
+
+	// Nothing should be logged yet: the body has not been read/closed.
+	if got := readActiveLogFile(t, dir); got != "" {
+		t.Errorf("entry logged before body close; streaming response was buffered: %q", got)
+	}
+
+	// Body streams through unchanged.
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != body {
+		t.Errorf("streamed body = %q, want %q", got, body)
+	}
+	_ = resp.Body.Close()
+
+	// On close, the entry is logged with the captured body.
+	if string(entry.ResponseBody) != body {
+		t.Errorf("captured body = %q, want %q", entry.ResponseBody, body)
+	}
+	if contents := readActiveLogFile(t, dir); !strings.Contains(contents, "codex/responses") {
+		t.Errorf("expected response logged on close, got %q", contents)
+	}
+}
+
+// TestLogResponseStreaming_CapsCapturedBody verifies large bodies stream in full
+// but only a bounded prefix is captured for logging.
+func TestLogResponseStreaming_CapsCapturedBody(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	big := strings.Repeat("x", maxResponseLogBytes+4096)
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(big)),
+		Request:    &http.Request{Method: "GET"},
+	}
+	entry := &RequestLog{Method: "GET", URL: "https://example.com/big"}
+
+	rl.LogResponseStreaming(entry, resp, time.Now())
+
+	got, _ := io.ReadAll(resp.Body)
+	if len(got) != len(big) {
+		t.Errorf("streamed %d bytes, want full %d", len(got), len(big))
+	}
+	_ = resp.Body.Close()
+
+	if len(entry.ResponseBody) != maxResponseLogBytes {
+		t.Errorf("captured %d bytes, want cap %d", len(entry.ResponseBody), maxResponseLogBytes)
+	}
+}
+
+// TestLogResponseStreaming_HeadNotWrapped verifies HEAD responses are logged
+// immediately and their body is left untouched (Content-Length preservation).
+func TestLogResponseStreaming_HeadNotWrapped(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	origBody := io.NopCloser(strings.NewReader(""))
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Length": {"1048576"}},
+		Body:       origBody,
+		Request:    &http.Request{Method: http.MethodHead},
+	}
+	entry := &RequestLog{Method: http.MethodHead, URL: "https://reg.example.com/v2/manifests/v1"}
+
+	rl.LogResponseStreaming(entry, resp, time.Now())
+
+	if resp.Body != origBody {
+		t.Error("HEAD response body was wrapped; must be left untouched to preserve Content-Length")
+	}
+	// HEAD is logged immediately (no body to wait for).
+	if contents := readActiveLogFile(t, dir); !strings.Contains(contents, "manifests/v1") {
+		t.Errorf("expected HEAD entry logged immediately, got %q", contents)
 	}
 }
 

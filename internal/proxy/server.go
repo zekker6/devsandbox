@@ -47,6 +47,7 @@ type Server struct {
 	mu                  sync.Mutex
 	running             bool
 	requestID           uint64
+	debug               bool // DEVSANDBOX_DEBUG: log per-request lifecycle to the internal proxy log
 }
 
 // RequestCount returns the count of non-skipped requests handled by this
@@ -205,6 +206,7 @@ func NewServer(cfg *Config) (*Server, error) {
 		askQueue:            askQueue,
 		credentialInjectors: cfg.CredentialInjectors,
 		dispatcher:          dispatcher,
+		debug:               os.Getenv("DEVSANDBOX_DEBUG") != "",
 	}
 
 	s.setupMITM()
@@ -231,8 +233,17 @@ func (s *Server) setupMITM() {
 		return
 	}
 
-	// MITM mode: intercept all HTTPS connections
-	s.proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	// MITM mode: intercept all HTTPS connections. In debug mode, log each
+	// CONNECT so we can confirm a host is actually being intercepted (vs.
+	// tunneled or never reaching the proxy at all).
+	if s.debug {
+		s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			s.debugf("CONNECT %s -> MITM", host)
+			return goproxy.MitmConnect, host
+		})
+	} else {
+		s.proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	}
 
 	// Set up certificate generation
 	goproxy.GoproxyCa = tls.Certificate{
@@ -269,6 +280,10 @@ func (s *Server) setupLogging() {
 				_ = s.reqLogger.Log(entry)
 			}
 			return nil, resp
+		}
+
+		if s.debug {
+			s.debugf("request: %s %s%s", req.Method, req.URL.Host, req.URL.Path)
 		}
 
 		// Inject credentials for matching domains
@@ -455,14 +470,53 @@ func (s *Server) setupLogging() {
 	})
 
 	s.proxy.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		// Complete and persist log entry
-		if entry, ok := ctx.UserData.(*RequestLog); ok {
-			s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
-			_ = s.reqLogger.Log(entry)
+		entry, ok := ctx.UserData.(*RequestLog)
+		if !ok {
+			return resp
+		}
+
+		// Read debug fields before wrapping. The body is captured asynchronously
+		// (see LogResponseStreaming) so the response headers reach the client
+		// immediately; time_to_headers is how long upstream took to return them.
+		var ct string
+		var streaming bool
+		if s.debug && resp != nil {
+			ct = resp.Header.Get("Content-Type")
+			streaming = isStreamingResponse(resp)
+		}
+
+		// Records status/headers now and streams the body through to the client
+		// while capturing a bounded prefix; the log entry is written when the
+		// body closes. Never buffers the body before relaying headers.
+		s.reqLogger.LogResponseStreaming(entry, resp, entry.Timestamp)
+
+		if s.debug {
+			s.debugf("response: %s %s status=%d content-type=%q streaming=%t time_to_headers=%s (body streamed, not buffered)",
+				entry.Method, stripQuery(entry.URL), entry.StatusCode, ct, streaming,
+				entry.Duration.Round(time.Millisecond))
 		}
 
 		return resp
 	})
+}
+
+// debugf writes a per-request lifecycle line to the internal proxy log when
+// DEVSANDBOX_DEBUG is set. Lines carry timestamps (log.LstdFlags) so request
+// and response events can be correlated and timed. View with
+// `devsandbox logs internal --type proxy`.
+func (s *Server) debugf(format string, args ...any) {
+	if s.proxy != nil && s.proxy.Logger != nil {
+		s.proxy.Logger.Printf("DEBUG "+format, args...)
+	}
+}
+
+// stripQuery returns the URL with any query string removed. Debug logs must not
+// carry query parameters, which can contain tokens.
+func stripQuery(rawURL string) string {
+	if i := strings.IndexByte(rawURL, '?'); i >= 0 {
+		return rawURL[:i]
+	}
+	return rawURL
 }
 
 func (s *Server) Start() error {
