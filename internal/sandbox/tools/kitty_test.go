@@ -136,7 +136,7 @@ func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
 	k := &Kitty{}
 	k.Configure(GlobalConfig{}, nil)
 
-	// sandboxHome must also be short: kitty's proxy listens at <sandboxHome>/.kitty.sock.
+	// sandboxHome must also be short: kitty's proxy listens under <sandboxHome>.
 	sandboxHome := shortSocketDir(t)
 	if err := k.Start(context.Background(), sandboxHome, sandboxHome); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -146,7 +146,7 @@ func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
 	if k.proxy == nil {
 		t.Fatal("expected proxy to be started when consumer present")
 	}
-	expected := filepath.Join(sandboxHome, ".kitty.sock")
+	expected := filepath.Join(runDir(sandboxHome), kittyProxySocketName)
 	if _, err := os.Stat(expected); err != nil {
 		t.Errorf("proxy socket not created: %v", err)
 	}
@@ -158,9 +158,53 @@ func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
 			listen = e.Value
 		}
 	}
-	wantPrefix := "unix:" + filepath.Join(sandboxHome, ".kitty.sock")
+	wantPrefix := "unix:" + expected
 	if listen != wantPrefix {
 		t.Errorf("KITTY_LISTEN_ON = %q, want %q", listen, wantPrefix)
+	}
+}
+
+// The proxy socket must be private to this process: sandbox home is shared by
+// every session for the project, and closing the listener unlinks the path, so
+// a shared path lets one session's exit break a live session's KITTY_LISTEN_ON.
+func TestKitty_SocketPath_IsProcessScoped(t *testing.T) {
+	dir := shortSocketDir(t)
+	upstream := filepath.Join(dir, "upstream.sock")
+	l, err := net.Listen("unix", upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+
+	t.Setenv("KITTY_LISTEN_ON", "unix:"+upstream)
+	Register(fakeKittyConsumer{})
+	defer Unregister("fake-kitty-consumer")
+
+	k := &Kitty{}
+	k.Configure(GlobalConfig{}, nil)
+
+	sandboxHome := shortSocketDir(t)
+	if err := k.Start(context.Background(), sandboxHome, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = k.Stop() }()
+
+	// A concurrent session's socket, in its own run dir under the same home.
+	peerDir := filepath.Join(sandboxHome, runDirName, "1")
+	if err := os.MkdirAll(peerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	peerSocket := filepath.Join(peerDir, kittyProxySocketName)
+	if err := os.WriteFile(peerSocket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := k.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if _, err := os.Stat(peerSocket); err != nil {
+		t.Errorf("Stop removed a concurrent session's socket: %v", err)
 	}
 }
 

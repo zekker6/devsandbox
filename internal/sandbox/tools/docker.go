@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -93,9 +94,11 @@ func (d *Docker) Available(homeDir string) bool {
 }
 
 // socketPath returns the path where the proxy socket will be created.
-// It's placed in sandboxHome so it's visible inside the sandbox.
+// It's placed in sandboxHome so it's visible inside the sandbox, under this
+// process's run directory so that a concurrent session for the same project
+// cannot unlink a live socket.
 func (d *Docker) socketPath(sandboxHome string) string {
-	return filepath.Join(sandboxHome, dockerSocketName)
+	return filepath.Join(runDir(sandboxHome), dockerSocketName)
 }
 
 // Configure implements ToolWithConfig.
@@ -131,10 +134,10 @@ func (d *Docker) Environment(homeDir, sandboxHome string) []EnvVar {
 		return nil
 	}
 
-	// The socket is created at sandboxHome/docker.sock on the host,
-	// but sandboxHome is mounted at $HOME inside the sandbox.
-	// So we return $HOME/docker.sock as the path visible inside the sandbox.
-	sandboxVisiblePath := filepath.Join(homeDir, dockerSocketName)
+	// The socket is created under sandboxHome on the host, but sandboxHome is
+	// mounted at $HOME inside the sandbox, so the same relative path under
+	// homeDir is what the sandbox sees.
+	sandboxVisiblePath := filepath.Join(runDir(homeDir), dockerSocketName)
 	return []EnvVar{
 		{Name: "DOCKER_HOST", Value: "unix://" + sandboxVisiblePath},
 	}
@@ -153,7 +156,15 @@ func (d *Docker) Start(ctx context.Context, homeDir, sandboxHome string) error {
 	notice.Warn("Docker socket proxy enabled. The sandbox can access ALL existing Docker containers on this host.")
 	notice.Warn("This might allow accessing host resources. Ensure you trust the sandbox content.")
 
+	if _, err := ensureRunDir(sandboxHome); err != nil {
+		return fmt.Errorf("docker: %w", err)
+	}
+
 	listenPath := d.socketPath(sandboxHome)
+	if err := checkSocketPath(listenPath); err != nil {
+		return fmt.Errorf("docker: %w", err)
+	}
+
 	d.proxy = dockerproxy.New(d.hostSocket, listenPath)
 	if d.logger != nil {
 		d.proxy.SetLogger(d.logger)

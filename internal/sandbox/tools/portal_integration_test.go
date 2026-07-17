@@ -44,9 +44,19 @@ func TestPortal_Integration_ProxyStartStop(t *testing.T) {
 	}
 
 	// Verify socket exists
-	proxySocket := filepath.Join(sandboxHome, ".dbus-proxy", "bus")
+	proxySocket := filepath.Join(p.proxySocketDir(sandboxHome), "bus")
 	if _, err := os.Stat(proxySocket); err != nil {
 		t.Fatalf("proxy socket not found: %v", err)
+	}
+
+	// A concurrent session's socket must survive this instance's teardown.
+	peerDir := filepath.Join(sandboxHome, runDirName, "1", "dbus")
+	if err := os.MkdirAll(peerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	peerSocket := filepath.Join(peerDir, "bus")
+	if err := os.WriteFile(peerSocket, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	// Stop proxy
@@ -58,5 +68,8 @@ func TestPortal_Integration_ProxyStartStop(t *testing.T) {
 	// Verify socket cleaned up
 	if _, err := os.Stat(proxySocket); !os.IsNotExist(err) {
 		t.Error("expected proxy socket to be cleaned up after Stop")
+	}
+	if _, err := os.Stat(peerSocket); err != nil {
+		t.Errorf("Stop removed a concurrent session's socket: %v", err)
 	}
 }

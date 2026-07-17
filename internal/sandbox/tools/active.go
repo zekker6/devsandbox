@@ -43,6 +43,12 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 	home := r.cfg.HomeDir
 	sandboxHome := r.cfg.SandboxHome
 
+	// Reclaim socket dirs from runs that are gone. Must happen before any tool
+	// creates its sockets, so that a PID reused from a crashed run starts clean.
+	if _, err := cleanupStaleRunDirs(sandboxHome); err != nil && r.logger != nil {
+		r.logger.LogErrorf("tools", "clean stale run dirs: %v", err)
+	}
+
 	// Find and start active tools
 	for _, tool := range Available(home) {
 		at, ok := tool.(ActiveTool)

@@ -1177,12 +1177,12 @@ func TestGetToolBindings_DockerHostRemapped(t *testing.T) {
 		t.Fatal("DOCKER_HOST environment variable not found in tool bindings")
 	}
 
-	// DOCKER_HOST should point to /home/sandboxuser, not host homeDir
+	// DOCKER_HOST should point under /home/sandboxuser, not host homeDir
 	if strings.Contains(dockerHost, "/home/testuser") {
 		t.Errorf("DOCKER_HOST should not contain host homeDir, got: %s", dockerHost)
 	}
-	if !strings.Contains(dockerHost, "/home/sandboxuser/docker.sock") {
-		t.Errorf("DOCKER_HOST should point to /home/sandboxuser/docker.sock, got: %s", dockerHost)
+	if !strings.HasPrefix(dockerHost, "unix:///home/sandboxuser/") || !strings.HasSuffix(dockerHost, "/docker.sock") {
+		t.Errorf("DOCKER_HOST should point to a docker.sock under /home/sandboxuser, got: %s", dockerHost)
 	}
 }
 

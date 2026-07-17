@@ -22,6 +22,7 @@ type Portal struct {
 	xdgRuntime    string // XDG_RUNTIME_DIR value (from host env or /run/user/<uid>)
 	logger        ErrorLogger
 	proxyCmd      *exec.Cmd
+	proxyDir      string // host directory holding the proxy socket
 	proxySocket   string // path to the proxy socket file
 }
 
@@ -70,8 +71,11 @@ func (p *Portal) SetLogger(logger ErrorLogger) {
 }
 
 // proxySocketDir returns the directory for the proxy socket inside sandbox home.
+// It is private to this process so that a concurrent session for the same
+// project cannot unlink a live socket. Its own subdirectory keeps the other
+// tools' sockets out of the read-only bind published at XDG_RUNTIME_DIR.
 func (p *Portal) proxySocketDir(sandboxHome string) string {
-	return filepath.Join(sandboxHome, ".dbus-proxy")
+	return filepath.Join(runDir(sandboxHome), "dbus")
 }
 
 // buildProxyArgs constructs xdg-dbus-proxy arguments.
@@ -107,9 +111,16 @@ func (p *Portal) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		return fmt.Errorf("portal: create proxy socket dir: %w", err)
 	}
 
+	p.proxyDir = proxyDir
 	p.proxySocket = filepath.Join(proxyDir, "bus")
 
-	// Remove stale socket from previous run
+	// xdg-dbus-proxy reports an unbindable socket only by never creating it,
+	// which would surface here as an opaque timeout.
+	if err := checkSocketPath(p.proxySocket); err != nil {
+		return fmt.Errorf("portal: %w", err)
+	}
+
+	// Remove stale socket left by an earlier run that held this PID.
 	_ = os.Remove(p.proxySocket)
 
 	proxyArgs := p.buildProxyArgs(busAddr, p.proxySocket)
@@ -140,9 +151,12 @@ func (p *Portal) Stop() error {
 	_ = p.proxyCmd.Process.Kill()
 	_ = p.proxyCmd.Wait()
 
-	// Clean up socket
-	if p.proxySocket != "" {
-		_ = os.Remove(p.proxySocket)
+	// Clean up socket. The directory is private to this process, so removing it
+	// whole cannot affect a concurrent session.
+	if p.proxyDir != "" {
+		if err := os.RemoveAll(p.proxyDir); err != nil {
+			return fmt.Errorf("portal: remove proxy socket dir: %w", err)
+		}
 	}
 	return nil
 }

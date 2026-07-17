@@ -520,7 +520,7 @@ socket = "/path/to/docker.sock"
 
 ### How It Works
 
-1. A Unix socket proxy is created at `$HOME/docker.sock` inside the sandbox
+1. A Unix socket proxy is created at `$HOME/.run/<pid>/docker.sock` inside the sandbox, where `<pid>` is the devsandbox process that owns the session. Sandbox home is shared by every session for the project, so the socket is kept per-session to stop a second session from unlinking a live one's socket.
 2. The `DOCKER_HOST` environment variable is set to point to this socket
 3. All requests are filtered before being forwarded to the host Docker socket
 4. Write operations are blocked with an HTTP 403 error
@@ -609,14 +609,14 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 
 | Resource | Mode | Purpose |
 |----------|------|---------|
-| Proxy socket (`$HOME/.kitty.sock`) | read-write (proxy is local to the sandbox home) | kitty remote-control via the filtering proxy |
+| Proxy socket (`$HOME/.run/<pid>/kitty.sock`) | read-write (proxy is local to the sandbox home) | kitty remote-control via the filtering proxy |
 | `kitty` binary | read-only | CLI for `kitty @ launch`, `kitty @ ls`, etc. |
 
 The host's real kitty socket is **not** bind-mounted into the sandbox.
 
 ### Environment Variables
 
-- `KITTY_LISTEN_ON` - rewritten to `unix:$HOME/.kitty.sock` inside the sandbox. Host value is never exposed.
+- `KITTY_LISTEN_ON` - rewritten to `unix:$HOME/.run/<pid>/kitty.sock` inside the sandbox, where `<pid>` is the devsandbox process owning the session. Host value is never exposed.
 - `KITTY_WINDOW_ID`, `KITTY_PID` - passed through from host (read-only signals about the host pane).
 
 ### Limitations
@@ -698,7 +698,7 @@ notifications = false
 4. `DBUS_SESSION_BUS_ADDRESS` inside the sandbox points to the proxy socket
 5. A `.flatpak-info` file is created so `xdg-desktop-portal` recognizes the sandbox as a valid Flatpak-like application
 
-The proxy is started before the sandbox launches and stopped when the sandbox exits.
+The proxy is started before the sandbox launches and stopped when the sandbox exits. Each session runs its own proxy with its own socket on the host, so starting or exiting a second session for the same project leaves a running session's notifications working.
 
 ### Checking Portal Status
 

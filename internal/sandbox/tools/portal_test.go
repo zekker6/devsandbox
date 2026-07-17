@@ -2,7 +2,9 @@ package tools
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -53,9 +55,68 @@ func TestPortal_Configure_Disabled(t *testing.T) {
 func TestPortal_ProxySocketPath(t *testing.T) {
 	p := &Portal{}
 	path := p.proxySocketDir("/sandbox/home")
-	expected := filepath.Join("/sandbox/home", ".dbus-proxy")
+	expected := filepath.Join(runDir("/sandbox/home"), "dbus")
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
+	}
+}
+
+// The socket dir must be private to this process: sandbox home is shared by
+// every session for the project, and a shared socket path lets one session's
+// start or exit unlink a live session's bus.
+func TestPortal_ProxySocketPath_IsProcessScoped(t *testing.T) {
+	p := &Portal{}
+	path := p.proxySocketDir("/sandbox/home")
+
+	if !strings.Contains(path, strconv.Itoa(os.Getpid())) {
+		t.Errorf("expected proxy socket dir to be scoped to the PID, got %q", path)
+	}
+	if filepath.Dir(path) == "/sandbox/home" {
+		t.Errorf("expected proxy socket dir below sandbox home, got %q", path)
+	}
+}
+
+// Regression test for the reported failure: a second session for the same
+// project exiting must not delete a live session's bus socket.
+func TestPortal_Stop_KeepsConcurrentSessionSocket(t *testing.T) {
+	sandboxHome := t.TempDir()
+
+	// Stand in for a session that is still running: same sandbox home, its own
+	// run dir, socket in place.
+	peerDir := filepath.Join(sandboxHome, runDirName, "1", "dbus")
+	if err := os.MkdirAll(peerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	peerSocket := filepath.Join(peerDir, "bus")
+	if err := os.WriteFile(peerSocket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for this session's proxy without needing xdg-dbus-proxy.
+	p := &Portal{notifications: true}
+	p.proxyDir = p.proxySocketDir(sandboxHome)
+	if err := os.MkdirAll(p.proxyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.proxySocket = filepath.Join(p.proxyDir, "bus")
+	if err := os.WriteFile(p.proxySocket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start stand-in proxy: %v", err)
+	}
+	p.proxyCmd = cmd
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	if _, err := os.Stat(p.proxySocket); !os.IsNotExist(err) {
+		t.Error("expected this session's socket to be removed")
+	}
+	if _, err := os.Stat(peerSocket); err != nil {
+		t.Errorf("Stop removed a concurrent session's socket: %v", err)
 	}
 }
 
@@ -118,7 +179,6 @@ func TestDbusSocketPath(t *testing.T) {
 func TestPortal_Bindings(t *testing.T) {
 	p := &Portal{
 		notifications: true,
-		proxySocket:   "/sandbox/home/.dbus-proxy/bus",
 		xdgRuntime:    "/run/user/1000",
 	}
 
@@ -130,8 +190,8 @@ func TestPortal_Bindings(t *testing.T) {
 	}
 
 	b := bindings[0]
-	if b.Source != "/sandbox/home/.dbus-proxy" {
-		t.Errorf("expected source /sandbox/home/.dbus-proxy, got %q", b.Source)
+	if want := p.proxySocketDir("/sandbox/home"); b.Source != want {
+		t.Errorf("expected source %q, got %q", want, b.Source)
 	}
 	if !strings.HasSuffix(b.Dest, ".dbus-proxy") {
 		t.Errorf("expected dest ending in .dbus-proxy, got %q", b.Dest)

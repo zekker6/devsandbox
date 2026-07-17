@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.17.3...HEAD)
 
+### Fixed
+
+- **A second session for the same project no longer breaks a running session's notifications, Docker access, and kitty remote control.** The portal, Docker, and kitty proxies each created their unix socket at a path keyed only on the project (`<sandbox home>/.dbus-proxy/bus`, `<sandbox home>/docker.sock`, `<sandbox home>/.kitty.sock`), but sandbox home is shared by every session for that project. Starting a second session unlinked the live session's socket and re-created it, and that session's exit deleted the path outright - leaving the first session with `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, and `KITTY_LISTEN_ON` pointing at a path that no longer existed. `notify-send` failed with `Could not connect: No such file or directory` for the rest of the session, with no way to recover short of restarting it. Each session's sockets now live in a directory private to the owning process (`<sandbox home>/.run/<pid>/`), so concurrent sessions cannot disturb each other; directories left by sessions that are gone are reclaimed on the next start. `DBUS_SESSION_BUS_ADDRESS` is unchanged; `DOCKER_HOST` and `KITTY_LISTEN_ON` now point at `$HOME/.run/<pid>/docker.sock` and `$HOME/.run/<pid>/kitty.sock` inside the sandbox.
+- **A socket path too long for the kernel is now reported as such.** The proxy socket paths above sit under an already-long sandbox home, and `bind(2)` rejects anything past 107 bytes (103 on macOS) with a bare `invalid argument` - which the portal surfaced only as an opaque "proxy socket not created" timeout. The portal, Docker, and kitty proxies now fail with the path, its length, the limit, and the remedy (a shorter project directory name).
+
 ## [v0.17.3](https://github.com/zekker6/devsandbox/releases/tag/v0.17.3) - 2026-06-24
 
 ### Added

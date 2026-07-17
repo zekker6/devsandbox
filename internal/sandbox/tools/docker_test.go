@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -96,10 +98,32 @@ func TestDocker_Environment_Enabled(t *testing.T) {
 		t.Errorf("expected DOCKER_HOST, got %q", env[0].Name)
 	}
 
-	// Socket path is homeDir/docker.sock (where sandboxHome is mounted inside sandbox)
-	expected := "unix://" + homeDir + "/docker.sock"
+	// Socket path is under homeDir, where sandboxHome is mounted inside the
+	// sandbox, and mirrors the host-side path under sandboxHome.
+	expected := "unix://" + filepath.Join(runDir(homeDir), "docker.sock")
 	if env[0].Value != expected {
 		t.Errorf("expected %q, got %q", expected, env[0].Value)
+	}
+
+	hostPath := d.socketPath(sandboxHome)
+	sandboxPath := strings.TrimPrefix(env[0].Value, "unix://")
+	if rel := strings.TrimPrefix(hostPath, sandboxHome); rel != strings.TrimPrefix(sandboxPath, homeDir) {
+		t.Errorf("socket path %q under sandbox home does not mirror %q under home dir", hostPath, sandboxPath)
+	}
+}
+
+// The socket must be private to this process: sandbox home is shared by every
+// session for the project, and Go unlinks the socket path on listener close,
+// so a shared path lets one session's exit break a live session's DOCKER_HOST.
+func TestDocker_SocketPath_IsProcessScoped(t *testing.T) {
+	d := &Docker{enabled: true}
+	path := d.socketPath("/sandbox/home")
+
+	if !strings.Contains(path, strconv.Itoa(os.Getpid())) {
+		t.Errorf("expected docker socket path to be scoped to the PID, got %q", path)
+	}
+	if filepath.Dir(path) == "/sandbox/home" {
+		t.Errorf("expected docker socket below sandbox home, got %q", path)
 	}
 }
 

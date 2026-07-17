@@ -17,7 +17,7 @@ func init() {
 }
 
 const (
-	kittyProxySocketName = ".kitty.sock"
+	kittyProxySocketName = "kitty.sock"
 	kittyModeAuto        = "auto"
 	kittyModeDisabled    = "disabled"
 	kittyModeEnforce     = "enforce"
@@ -112,7 +112,7 @@ func (k *Kitty) Environment(homeDir, _ string) []EnvVar {
 		return nil
 	}
 	return []EnvVar{
-		{Name: "KITTY_LISTEN_ON", Value: "unix:" + filepath.Join(homeDir, kittyProxySocketName)},
+		{Name: "KITTY_LISTEN_ON", Value: "unix:" + filepath.Join(runDir(homeDir), kittyProxySocketName)},
 		{Name: "KITTY_WINDOW_ID", FromHost: true},
 		{Name: "KITTY_PID", FromHost: true},
 	}
@@ -199,7 +199,15 @@ func (k *Kitty) Start(ctx context.Context, _, sandboxHome string) error {
 		Owned:          owned,
 	})
 
-	listenPath := filepath.Join(sandboxHome, kittyProxySocketName)
+	if _, err := ensureRunDir(sandboxHome); err != nil {
+		return fmt.Errorf("kitty: %w", err)
+	}
+
+	listenPath := filepath.Join(runDir(sandboxHome), kittyProxySocketName)
+	if err := checkSocketPath(listenPath); err != nil {
+		return fmt.Errorf("kitty: %w", err)
+	}
+
 	k.proxy = kittyproxy.New(hostSock, listenPath, filter, owned)
 	if k.logger != nil {
 		k.proxy.SetLogger(k.logger)
