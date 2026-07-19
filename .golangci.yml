@@ -4,7 +4,17 @@ run:
   timeout: 5m
   modules-download-mode: readonly
 
-issues:
-  exclude-dirs:
-    - vendor
-    - tmp
+linters:
+  exclusions:
+    paths:
+      - vendor
+      - tmp
+    rules:
+      # staticcheck SA5011 false-positives on t.Fatal-guarded nil checks in tests.
+      # golangci-lint's staticcheck driver does not treat testing.T.Fatal as a
+      # terminating call, so `if x == nil { t.Fatal(...) }` followed by a deref is
+      # wrongly flagged as a possible nil dereference. Suppress SA5011 in tests only.
+      - path: _test\.go
+        linters:
+          - staticcheck
+        text: "SA5011"

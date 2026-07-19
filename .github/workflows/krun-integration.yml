@@ -1,0 +1,55 @@
+name: krun Integration (KVM)
+
+# The krun integration test boots a real libkrun microVM, which needs a host
+# exposing /dev/kvm. Standard GitHub/Gitea hosted runners do not provide nested
+# KVM, so this job is opt-in: it runs only on manual dispatch and targets a
+# self-hosted runner labelled `kvm`. The job still guards on /dev/kvm and skips
+# cleanly (without failing) if the runner turns out to lack hardware
+# virtualization, and `task test:integration:krun` self-skips on every other
+# host, so the suite never blocks the main CI on machines that cannot run it.
+
+concurrency:
+  group: krun-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch: { }
+
+jobs:
+  krun-integration:
+    name: krun Integration Test
+    # Self-hosted runner with hardware virtualization. Hosted runners lack
+    # nested KVM; this job never runs there because it is dispatch-only.
+    runs-on: [self-hosted, kvm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Check for /dev/kvm
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::/dev/kvm absent on this runner - krun integration test will be skipped"
+          fi
+
+      - name: Set up Go
+        if: steps.kvm.outputs.available == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install mise
+        if: steps.kvm.outputs.available == 'true'
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          install: true
+
+      - name: Run krun integration test
+        if: steps.kvm.outputs.available == 'true'
+        run: task test:integration:krun

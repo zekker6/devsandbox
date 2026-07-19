@@ -15,6 +15,7 @@ import (
 
 	"devsandbox/internal/config"
 	"devsandbox/internal/embed"
+	"devsandbox/internal/isolator"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -37,6 +38,7 @@ Checks (all platforms):
   - Configuration file
   - Recent error logs
   - Docker and Docker image availability
+  - krun microVM prerequisites (podman, krun runtime, KVM; nft/iptables for proxy mode on Linux) - informational, opt-in
 
 Checks (Linux only):
   - Required binaries (bwrap)
@@ -85,6 +87,12 @@ func runDoctor() error {
 	// Docker checks (both platforms)
 	results = append(results, checkDocker())
 	results = append(results, checkDockerImage(""))
+
+	// krun microVM prerequisites - always shown but purely informational. krun
+	// is opt-in, so unmet prerequisites are warnings (never errors): doctor must
+	// not exit non-zero for bwrap/docker users who never touch krun. This is the
+	// first place podman is probed (doctor otherwise only checks docker).
+	results = append(results, checkKrun()...)
 
 	printDoctorResults(results)
 
@@ -736,4 +744,37 @@ func checkDockerImage(image string) checkResult {
 		status:  "ok",
 		message: fmt.Sprintf("%s available", image),
 	}
+}
+
+// checkKrun reports the krun microVM backend prerequisites as informational
+// doctor rows (podman, the krun OCI runtime, and /dev/kvm on Linux). On Linux it
+// also reports whether a firewall backend (nft/iptables) is present: krun + proxy
+// needs one to port-scope guest egress, and the launch fails closed without it, so
+// doctor surfaces the gap ahead of launch. The row is Linux-only because the
+// egress lockdown is Linux-only.
+func checkKrun() []checkResult {
+	results := microVMResults(isolator.CheckMicroVM())
+	if runtime.GOOS == "linux" {
+		results = append(results, microVMResults([]isolator.MicroVMCheck{isolator.CheckFirewallBackend()})...)
+	}
+	return results
+}
+
+// microVMResults maps structured krun prerequisite checks to doctor rows.
+// Unmet prerequisites map to "warn", never "error", because krun is opt-in and
+// doctor must not exit non-zero for bwrap/docker users who never use it.
+func microVMResults(checks []isolator.MicroVMCheck) []checkResult {
+	results := make([]checkResult, 0, len(checks))
+	for _, c := range checks {
+		status := "warn"
+		if c.OK {
+			status = "ok"
+		}
+		results = append(results, checkResult{
+			name:    "krun: " + c.Name,
+			status:  status,
+			message: c.Summary,
+		})
+	}
+	return results
 }

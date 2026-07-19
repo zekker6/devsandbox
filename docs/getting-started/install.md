@@ -34,6 +34,8 @@ unshare --user true
 
 No system packages are required - `bwrap` and `pasta` binaries ship embedded in the devsandbox binary.
 
+> Want hardware-level isolation for untrusted code? The experimental `krun` microVM backend needs extra packages (`podman`, the `krun` runtime, KVM). See [krun microVM setup](krun.md).
+
 ### macOS
 
 ```bash

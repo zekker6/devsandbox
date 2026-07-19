@@ -75,7 +75,7 @@ func TestRepoRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(t, dir, "git", "add", "README")
-	run(t, dir, "git", "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "init")
+	run(t, dir, "git", "-c", "user.email=a@b", "-c", "user.name=a", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
 
 	got, err := RepoRoot(dir)
 	if err != nil {
@@ -104,7 +104,7 @@ func TestRepoRootFromWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(t, repo, "git", "add", "README")
-	run(t, repo, "git", "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "init")
+	run(t, repo, "git", "-c", "user.email=a@b", "-c", "user.name=a", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
 
 	// Create a worktree.
 	wtDir := filepath.Join(t.TempDir(), "wt")

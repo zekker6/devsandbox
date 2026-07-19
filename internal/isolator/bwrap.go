@@ -50,6 +50,13 @@ func (b *BwrapIsolator) IsolationType() sandbox.IsolationType {
 	return sandbox.IsolationBwrap
 }
 
+// Preflight is a no-op for bwrap: concurrent same-project sessions are supported
+// via per-session overlay dirs, not refused, so there is no launch-time conflict
+// to detect.
+func (b *BwrapIsolator) Preflight(_ context.Context, _ string) error {
+	return nil
+}
+
 // PrepareNetwork is a no-op for bwrap. Network setup (pasta) is handled inside Run().
 func (b *BwrapIsolator) PrepareNetwork(_ context.Context, _ string) (*NetworkInfo, error) {
 	return nil, nil

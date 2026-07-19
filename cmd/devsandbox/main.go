@@ -49,7 +49,7 @@ func addSandboxFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("block-domain", nil, "Block domain pattern (can be repeated)")
 
 	// Isolation backend flag
-	cmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker")
+	cmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker, krun")
 
 	// Sandbox lifecycle flag
 	cmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
@@ -354,6 +354,13 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if err := cfg.EnsureSandboxDirs(); err != nil {
+		return err
+	}
+
+	// Fail fast on a backend-specific launch conflict (e.g. a krun microVM
+	// already running for this project) before paying for proxy startup, the
+	// docker socket proxy, and the image build below.
+	if err := iso.Preflight(cmd.Context(), cfg.ProjectDir); err != nil {
 		return err
 	}
 

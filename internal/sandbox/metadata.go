@@ -19,6 +19,7 @@ type IsolationType string
 const (
 	IsolationBwrap  IsolationType = "bwrap"
 	IsolationDocker IsolationType = "docker"
+	IsolationKrun   IsolationType = "krun"
 )
 
 // Metadata stores information about a sandbox instance
@@ -28,7 +29,7 @@ type Metadata struct {
 	CreatedAt  time.Time     `json:"created_at"`
 	LastUsed   time.Time     `json:"last_used"`
 	Shell      Shell         `json:"shell"`
-	Isolation  IsolationType `json:"isolation,omitempty"` // "bwrap" or "docker"
+	Isolation  IsolationType `json:"isolation,omitempty"`
 	// Computed fields (not persisted)
 	SandboxRoot string `json:"-"`
 	SizeBytes   int64  `json:"-"`

@@ -2,34 +2,63 @@ package isolator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// skipIfNoDocker skips the test if Docker is not installed, the daemon is not running,
-// or write operations are blocked (e.g., inside a devsandbox with Docker proxy).
+// dockerBuildSkip caches the skip reason so the (relatively expensive) build
+// probe runs at most once per package test run.
+var (
+	dockerBuildProbeOnce sync.Once
+	dockerBuildSkip      string
+)
+
+// skipIfNoDocker skips the test when `docker build` is unavailable: Docker not
+// installed, the daemon not running, or write operations blocked (e.g. inside a
+// devsandbox where the Docker proxy blocks container/build writes). Every caller
+// goes on to run a real `docker build`, so the capability is probed with a
+// trivial build - the exact operation under test. A lighter `docker create`
+// probe took a different proxy code path whose error surfaced inconsistently,
+// occasionally letting a build run and fail with a sandbox-block error instead
+// of the assertion the test expected.
 func skipIfNoDocker(t *testing.T) {
 	t.Helper()
+	dockerBuildProbeOnce.Do(func() { dockerBuildSkip = probeDockerBuild() })
+	if dockerBuildSkip != "" {
+		t.Skip(dockerBuildSkip)
+	}
+}
+
+// probeDockerBuild returns a non-empty skip reason when a trivial `docker build`
+// cannot complete, or "" when image builds work.
+func probeDockerBuild() string {
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("Docker not installed")
+		return "Docker not installed"
 	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("Docker daemon not running")
+		return "Docker daemon not running"
 	}
-	// Verify write operations work (sandbox Docker proxy may block them)
-	out, err := exec.Command("docker", "create", "--name", "devsandbox-docker-test-probe", "hello-world").CombinedOutput()
+	probeDir, err := os.MkdirTemp("", "devsandbox-docker-probe-")
 	if err != nil {
-		outStr := string(out)
-		if strings.Contains(outStr, "blocked") || strings.Contains(outStr, "connection reset") {
-			t.Skip("Docker write operations blocked (running inside sandbox)")
-		}
-	} else {
-		_ = exec.Command("docker", "rm", "devsandbox-docker-test-probe").Run()
+		return fmt.Sprintf("cannot create Docker probe dir: %v", err)
 	}
+	defer func() { _ = os.RemoveAll(probeDir) }()
+	if err := os.WriteFile(filepath.Join(probeDir, "Dockerfile"), []byte("FROM alpine:latest\n"), 0o644); err != nil {
+		return fmt.Sprintf("cannot write Docker probe Dockerfile: %v", err)
+	}
+	const probeTag = "devsandbox-docker-test-probe:latest"
+	if out, err := exec.Command("docker", "build", "-t", probeTag, probeDir).CombinedOutput(); err != nil {
+		return fmt.Sprintf("Docker write operations blocked or build unavailable (running inside sandbox?): %v: %s",
+			err, strings.TrimSpace(string(out)))
+	}
+	_ = exec.Command("docker", "rmi", "-f", probeTag).Run()
+	return ""
 }
 
 func TestDockerIsolator_Name(t *testing.T) {
@@ -925,6 +954,13 @@ func TestBuildCommonArgs_CapDrop(t *testing.T) {
 	}
 	if !strings.Contains(argsStr, "--cap-add SETGID") {
 		t.Error("Expected --cap-add SETGID in args")
+	}
+	// DAC_OVERRIDE is required for the shim's root-phase setup: under rootful
+	// Docker the bind-mounted /home/sandboxuser and the :ro overlay manifest are
+	// owned by the non-root host UID, so without it container-root cannot populate
+	// the home or read the manifest and startup hangs on the readiness timeout.
+	if !strings.Contains(argsStr, "--cap-add DAC_OVERRIDE") {
+		t.Error("Expected --cap-add DAC_OVERRIDE in args")
 	}
 	if !strings.Contains(argsStr, "--security-opt no-new-privileges:true") {
 		t.Error("Expected --security-opt no-new-privileges:true in args")

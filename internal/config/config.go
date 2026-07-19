@@ -238,6 +238,9 @@ const (
 	IsolationBwrap IsolationBackend = "bwrap"
 	// IsolationDocker uses Docker containers for isolation (cross-platform).
 	IsolationDocker IsolationBackend = "docker"
+	// IsolationKrun runs the sandbox image inside a libkrun microVM
+	// (podman + --runtime krun) for hardware-level isolation.
+	IsolationKrun IsolationBackend = "krun"
 )
 
 // DockerConfig contains Docker-specific sandbox settings.
@@ -745,10 +748,10 @@ func (c *Config) Validate() error {
 	// Validate isolation backend
 	if c.Sandbox.Isolation != "" {
 		switch c.Sandbox.Isolation {
-		case IsolationAuto, IsolationBwrap, IsolationDocker:
+		case IsolationAuto, IsolationBwrap, IsolationDocker, IsolationKrun:
 			// valid
 		default:
-			return fmt.Errorf("invalid isolation backend %q: must be one of: auto, bwrap, docker", c.Sandbox.Isolation)
+			return fmt.Errorf("invalid isolation backend %q: must be one of: auto, bwrap, docker, krun", c.Sandbox.Isolation)
 		}
 	}
 

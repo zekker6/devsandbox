@@ -40,7 +40,7 @@ type Config struct {
 	Shell       Shell  // Detected shell (fish, bash, zsh)
 	ShellPath   string // Full path to shell binary
 
-	// Isolation backend ("bwrap" or "docker")
+	// Isolation backend ("bwrap", "docker", or "krun")
 	Isolation IsolationType
 
 	// Proxy settings

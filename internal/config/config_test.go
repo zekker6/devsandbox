@@ -510,6 +510,13 @@ func TestValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid krun isolation backend",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Isolation: IsolationKrun},
+			},
+			wantErr: false,
+		},
+		{
 			name: "invalid docker memory",
 			cfg: &Config{
 				Sandbox: SandboxConfig{
@@ -925,6 +932,7 @@ func TestSandboxConfig_GetIsolation(t *testing.T) {
 		{IsolationAuto, IsolationAuto},
 		{IsolationBwrap, IsolationBwrap},
 		{IsolationDocker, IsolationDocker},
+		{IsolationKrun, IsolationKrun},
 	}
 
 	for _, tt := range tests {

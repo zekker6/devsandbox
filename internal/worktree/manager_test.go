@@ -24,6 +24,9 @@ func makeRepo(t *testing.T) string {
 		{"init", "-q", "-b", "main"},
 		{"config", "user.email", "a@b"},
 		{"config", "user.name", "a"},
+		// Keep test commits independent of the developer's global git config:
+		// commit.gpgsign=true breaks `git commit` in a no-TTY test run.
+		{"config", "commit.gpgsign", "false"},
 	} {
 		run(t, dir, "git", argv...)
 	}

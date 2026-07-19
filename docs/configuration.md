@@ -222,10 +222,11 @@ See [Use Cases: Avoiding GitHub Rate Limits](use-cases.md#avoiding-github-rate-l
 
 ```toml
 [sandbox]
-# Isolation backend: "auto", "bwrap", or "docker"
+# Isolation backend: "auto", "bwrap", "docker", or "krun"
 # - "auto" (default): bwrap on Linux, docker on macOS
 # - "bwrap": bubblewrap (Linux only)
 # - "docker": Docker containers (Linux, macOS)
+# - "krun": libkrun microVM (experimental, opt-in; never auto-selected)
 isolation = "auto"
 
 # Docker-specific settings (only used when isolation = "docker")
@@ -245,6 +246,110 @@ keep_container = true
 memory = "4g"
 cpus = "2"
 ```
+
+#### krun microVM backend (experimental)
+
+bwrap and Docker share the host kernel, so a kernel-level Linux exploit escapes
+both. The `krun` backend runs the **same sandbox image inside a libkrun
+microVM** (`podman --runtime krun`), placing the workload behind a hardware
+virtualization boundary (KVM on Linux, Hypervisor.framework on macOS) with its
+own guest kernel. Use it when running genuinely untrusted code, where a
+host-kernel exploit must not be able to reach the host.
+
+```toml
+[sandbox]
+isolation = "krun"
+```
+
+It reuses the Docker image build, the `[sandbox.docker]` settings (Dockerfile,
+resource limits), and the same tool bindings and proxy wiring. Notes:
+
+- **Opt-in only.** `auto` never selects `krun`; you must request it explicitly
+  with `--isolation krun` or `isolation = "krun"`. The microVM needs `podman`, the
+  `krun` runtime, and `/dev/kvm` (or Apple Silicon HVF) that most hosts lack, and
+  it trades startup speed for a hardware boundary that only matters for untrusted
+  code, so it is never picked automatically.
+- **Ephemeral.** Each launch boots a fresh microVM (no `keep_container` reuse) -
+  a clean guest kernel every run.
+- **VM resource defaults.** When `[sandbox.docker.resources]` is unset, krun
+  applies sane microVM defaults (`memory = "4g"`, `cpus = "2"`) so the guest is
+  neither starved nor oversized. Set `memory`/`cpus` under
+  `[sandbox.docker.resources]` to override; explicit values are always respected.
+  (The docker backend keeps the engine default when unset - the krun defaults do
+  not apply to it.)
+- **Runs rootless.** The backend uses rootless `podman` with `--userns=keep-id`,
+  so files the workload writes to the project directory come back owned by you
+  (not a subuid). Overlay/`tmpoverlay` tool dirs use copy-on-start rather than
+  kernel overlayfs (the guest rejects an overlayfs mount over virtio-fs). A
+  `tmpoverlay` dir is reset to the host source on every run - the copy target is
+  cleared first (preserving any nested read-only bindings), so writes from a
+  previous run never persist, matching tmpoverlay's discard-on-exit semantics.
+- **Prerequisites:** `podman`, a `crun` built with libkrun (provides the `krun`
+  OCI runtime), and access to `/dev/kvm` on Linux (bare-metal or a host with
+  nested virtualization) or Apple Silicon on macOS. For **proxy mode on Linux** you
+  also need `nft` or `iptables` (usually already present) - the egress lockdown
+  uses it to port-scope guest access to the proxy, and a krun + proxy launch fails
+  closed without one. `devsandbox` fails fast with installation guidance if any are
+  missing; `devsandbox doctor` reports the firewall backend as a `krun: firewall`
+  row on Linux. On Arch: `pacman -S krun`. Sanity check:
+  `podman run --rm --runtime krun docker.io/library/alpine true`.
+- **Disable the Docker tool.** Set `[tools.docker] enabled = false` - mounting
+  your Docker socket into a microVM meant for untrusted code hands the guest your
+  host Docker, defeating the isolation.
+- **Management commands.** `devsandbox doctor` reports the krun prerequisites
+  (podman, the `krun` runtime, `/dev/kvm`) as informational rows - unmet ones
+  `warn` rather than `error`, since krun is opt-in and must not fail `doctor` for
+  bwrap/docker users. `devsandbox list` and `prune` cover krun sandboxes: they are
+  ephemeral (`--rm`), so they are tracked from on-disk metadata like bwrap rather
+  than enumerated from a container engine. `devsandbox forward` is **best-effort**
+  for krun in this release - the session is registered for forwarding, but
+  reaching a listener inside the guest through the microVM network namespace is
+  not yet validated (see the status note below).
+
+**Proxy networking (Linux).** On Linux, proxy mode works: the MITM proxy binds to
+host **loopback** (never LAN-reachable) and the guest reaches it through the pasta
+gateway `10.0.2.2`, mapped to the host's loopback per-VM - the same model the bwrap
+backend uses. Allowlist filtering and HTTPS MITM behave as on the other backends.
+On **macOS** proxy mode is **refused** fail-closed (see Status): the egress lockdown
+that forces guest traffic through the proxy is Linux-only, so krun + proxy there
+would run with open egress. Run krun without proxy on macOS, or run on Linux.
+
+**Security boundary (read this).** The microVM gives the workload its own guest
+kernel behind a hardware (KVM/HVF) boundary, so a host-kernel exploit cannot
+reach the host - that is the reason to use `krun`. Two things to be aware of in
+this experimental release:
+
+- **Egress lockdown (host-side, validated on a `/dev/kvm` host).** In proxy mode
+  the guest's egress is locked to the proxy gateway: a `/32` route to the gateway
+  (`10.0.2.2`) is kept and the default route is deleted, so direct-IP egress and
+  external DNS exfiltration have no path out. Because `--map-host-loopback` maps
+  *every* port of the gateway to the host's `127.0.0.1` (pasta has no
+  port-scoped host-loopback option), the lockdown also installs a fail-closed
+  firewall in the VMM netns (via `nft`, falling back to `iptables`) that allows
+  only new TCP to the gateway on the proxy port - so the guest cannot reach other
+  host-loopback services through the gateway - and drops everything else to it.
+  If neither `nft` nor `iptables` is available the launch aborts rather than run
+  with the port-wide exposure. Under libkrun the guest uses TSI
+  (transparent socket interception) - it has no routable interface, so its
+  `connect()` calls are executed by the VMM process in the VMM's pasta network
+  namespace and obey *that* namespace's routing table. The lockdown therefore runs
+  **host-side**: after the microVM boots, `devsandbox` enters the VMM netns (via
+  `nsenter --user --net`, as rootless userns-root) and applies the route surgery
+  there. The in-guest shim does **not** touch routes (an in-guest `ip route del`
+  has nothing to act on under TSI); it only **waits** for the host to finish (a
+  sentinel in the sandbox home) before running the workload, so untrusted code
+  never runs while direct egress is still open. The surgery is **fail-closed**
+  (the microVM is torn down and the launch aborts if any step errors), scoped to
+  krun + proxy on Linux. No in-guest `NET_ADMIN` is granted. (The route surgery
+  operates on the IPv4 table only, matching the bwrap backend; IPv6 egress, if the
+  guest is ever given an IPv6 route, is not yet covered. This bounds *data
+  exfiltration*, not host compromise - the kernel boundary is unaffected either
+  way.)
+- **Status:** experimental. The egress lockdown is validated on a `/dev/kvm` host;
+  the `forward` path and macOS (HVF) remain unvalidated. On macOS (HVF) **proxy
+  mode is refused** fail-closed because the egress lockdown is Linux-only - krun +
+  proxy there would run with open egress. Run krun without proxy on macOS, or run on
+  Linux for the full proxy egress lockdown.
 
 ### Sandbox Settings
 

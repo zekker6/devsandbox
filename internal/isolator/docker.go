@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"devsandbox/internal/logging"
@@ -80,12 +82,15 @@ type DockerConfig struct {
 	KeepContainer bool
 }
 
-// DockerIsolator implements Isolator using Docker containers.
+// DockerIsolator implements Isolator using an OCI container engine. The same
+// implementation drives both the Docker backend and the krun microVM backend
+// (podman + libkrun); the engine field selects which CLI and runtime to use.
 type DockerIsolator struct {
 	config       DockerConfig
-	imageTag     string // set after buildImage
-	networkName  string // per-session Docker network
-	gatewayIP    string // per-session network gateway IP (proxy bind address)
+	engine       containerEngine // container CLI/runtime descriptor (docker or krun)
+	imageTag     string          // set after buildImage
+	networkName  string          // per-session network
+	gatewayIP    string          // per-session network gateway IP (proxy bind address)
 	logger       *logging.ComponentLogger
 	manifestPath string // host path to overlay manifest temp file
 }
@@ -115,7 +120,7 @@ func (d *DockerIsolator) logWarn(format string, args ...any) {
 
 // NewDockerIsolator creates a new Docker isolator.
 func NewDockerIsolator(cfg DockerConfig) *DockerIsolator {
-	return &DockerIsolator{config: cfg}
+	return &DockerIsolator{config: cfg, engine: dockerEngine}
 }
 
 // resolveDockerfile determines the Dockerfile path to use.
@@ -160,10 +165,26 @@ func (d *DockerIsolator) determineImageTag(dockerfilePath, configDir, projectDir
 	return fmt.Sprintf("devsandbox:%s-%x", projectName, hash[:4])
 }
 
+// shouldWarnHostBuild reports whether a krun (microVM) launch is about to build a
+// project-provided Dockerfile. Such a build runs via host `podman build` before
+// the microVM boots, so its RUN steps execute on the host - outside the krun
+// guest isolation and outside the proxy egress lockdown. The auto-generated
+// config-dir Dockerfile (projectDockerfile == "") is trusted devsandbox content
+// and stays silent; only a user-supplied Dockerfile (relative or absolute)
+// warrants the trust-boundary disclosure. Pure so tests exercise the decision
+// without engine/runtime state.
+func shouldWarnHostBuild(microVM bool, projectDockerfile string) bool {
+	return microVM && projectDockerfile != ""
+}
+
 // buildImage builds a Docker image from the resolved Dockerfile.
 func (d *DockerIsolator) buildImage(ctx context.Context, dockerfilePath, imageTag string) error {
+	if shouldWarnHostBuild(d.engine.microVM, d.config.Dockerfile) {
+		d.logWarn("krun: building project Dockerfile %s on the host via %s build; its RUN steps run outside the microVM guest and the proxy egress lockdown. Only build Dockerfiles you trust.",
+			dockerfilePath, d.engine.binary)
+	}
 	buildContext := filepath.Dir(dockerfilePath)
-	cmd := exec.CommandContext(ctx, "docker", "build",
+	cmd := exec.CommandContext(ctx, d.engine.binary, "build",
 		"-t", imageTag,
 		"-f", dockerfilePath,
 		buildContext,
@@ -192,19 +213,23 @@ func (d *DockerIsolator) ResolveAndBuild(ctx context.Context, projectDir string)
 
 // Name returns the backend name.
 func (d *DockerIsolator) Name() Backend {
-	return BackendDocker
+	return d.engine.backend
 }
 
-// Available checks if Docker CLI and daemon are available.
+// Available checks if the configured container engine is usable.
 func (d *DockerIsolator) Available() error {
-	_, err := exec.LookPath("docker")
+	if d.engine.microVM {
+		return d.availableMicroVM()
+	}
+
+	_, err := exec.LookPath(d.engine.binary)
 	if err != nil {
 		return errors.New("docker CLI is not installed\n" +
 			"Install Docker Desktop: https://docs.docker.com/get-docker/")
 	}
 
 	// Check if daemon is running
-	cmd := exec.Command("docker", "info")
+	cmd := exec.Command(d.engine.binary, "info")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Run(); err != nil {
@@ -217,15 +242,26 @@ func (d *DockerIsolator) Available() error {
 
 // IsolationType returns the sandbox isolation type for metadata.
 func (d *DockerIsolator) IsolationType() sandbox.IsolationType {
-	return sandbox.IsolationDocker
+	return d.engine.isolationType
 }
 
 // PrepareNetwork creates a per-session Docker network for proxy isolation
 // and returns the network gateway IP for the proxy to bind to.
 func (d *DockerIsolator) PrepareNetwork(ctx context.Context, projectDir string) (*NetworkInfo, error) {
+	if d.engine.microVM {
+		// Rootless podman + krun: the per-session bridge-gateway model does not
+		// apply - rootless, the bridge gateway lives inside the container's network
+		// namespace and the proxy (a host process) cannot bind to it. Instead we
+		// bind the proxy to host loopback and the guest reaches it through the pasta
+		// gateway (--map-host-loopback; see krunEngine.hostAlias). podman's own
+		// host.containers.internal is deliberately not used - it resolves to a
+		// link-local, LAN-exposed host IP. No network to create, hence none to clean up.
+		return &NetworkInfo{BindAddress: "127.0.0.1"}, nil
+	}
+
 	hash := sha256.Sum256([]byte(projectDir))
 	networkName := fmt.Sprintf("devsandbox-net-%x", hash[:4])
-	createNet := exec.CommandContext(ctx, "docker", "network", "create", networkName)
+	createNet := exec.CommandContext(ctx, d.engine.binary, "network", "create", networkName)
 	if output, err := createNet.CombinedOutput(); err != nil {
 		// Ignore "already exists" errors — network may persist from a previous session
 		if !strings.Contains(string(output), "already exists") {
@@ -236,7 +272,7 @@ func (d *DockerIsolator) PrepareNetwork(ctx context.Context, projectDir string) 
 
 	// Get the gateway IP from the network for proxy binding.
 	// Never fall back to the Docker bridge IP — that's accessible to all containers.
-	gatewayCmd := exec.CommandContext(ctx, "docker", "network", "inspect", networkName, "--format", "{{(index .IPAM.Config 0).Gateway}}")
+	gatewayCmd := exec.CommandContext(ctx, d.engine.binary, "network", "inspect", networkName, "--format", "{{(index .IPAM.Config 0).Gateway}}")
 	gatewayOut, err := gatewayCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine proxy bind address for network %s: %w\nEnsure Docker networking is functioning correctly", networkName, err)
@@ -254,10 +290,18 @@ func (d *DockerIsolator) PrepareNetwork(ctx context.Context, projectDir string) 
 func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	sandboxCfg := cfg.SandboxCfg
 
+	// Fail closed before any launch: krun proxy mode has no egress lockdown off
+	// Linux, so it would run untrusted code with open egress. Reject that here
+	// rather than silently degrade to weaker isolation.
+	if err := microVMProxyUnsupported(runtime.GOOS, d.engine.microVM, sandboxCfg.ProxyEnabled); err != nil {
+		return err
+	}
+
 	// Set up logger for Docker isolator
 	logDir := filepath.Join(sandboxCfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
-	dockerLogger, _ := logging.NewErrorLogger(filepath.Join(logDir, "docker.log"))
-	d.SetLogger(logging.NewComponentLogger("docker", dockerLogger, cfg.LogDispatcher))
+	engineName := string(d.engine.backend)
+	dockerLogger, _ := logging.NewErrorLogger(filepath.Join(logDir, engineName+".log"))
+	d.SetLogger(logging.NewComponentLogger(engineName, dockerLogger, cfg.LogDispatcher))
 
 	// Build isolator config from RunConfig
 	isoCfg := &Config{
@@ -284,6 +328,21 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	// Add CA path if proxy is enabled and MITM generated a CA
 	if sandboxCfg.ProxyEnabled && cfg.ProxyServer != nil && cfg.ProxyServer.CA() != nil {
 		isoCfg.ProxyCAPath = cfg.ProxyServer.Config().CACertPath
+	}
+
+	// krun runs one ephemeral microVM per project at a time. The deterministic
+	// --name + --replace (buildRunArgs) means two simultaneous same-project
+	// launches could otherwise both pass BuildDocker's running-container guard
+	// (a TOCTOU check) and have the second --replace clobber the first live
+	// microVM. Hold an exclusive, cross-process per-project lock across both the
+	// guard and the run so only one wins; the loser fails fast below. Docker is
+	// unaffected (anonymous --rm, no name collision).
+	if d.engine.microVM {
+		lock, lockErr := acquireMicroVMSessionLock(d.containerName(sandboxCfg.ProjectDir))
+		if lockErr != nil {
+			return lockErr
+		}
+		defer func() { _ = lock.Release() }()
 	}
 
 	// Build command
@@ -317,7 +376,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 
 		if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
 			notice.Warn("Container setup timeout")
-			return fmt.Errorf("container setup timed out after %s", readinessTimeout)
+			return d.withStartupDiagnostics(fmt.Errorf("container setup timed out after %s", readinessTimeout), result.ContainerName)
 		}
 		notice.Info("Container setup ready")
 
@@ -331,7 +390,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		if result.ContainerJustStarted {
 			if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
 				notice.Warn("Container setup timeout")
-				return fmt.Errorf("container startup failed: %w", err)
+				return d.withStartupDiagnostics(fmt.Errorf("container startup failed: %w", err), result.ContainerName)
 			}
 			notice.Info("Container setup ready")
 		}
@@ -387,6 +446,45 @@ func (d *DockerIsolator) waitForContainerReady(dockerBinary, containerName strin
 			}
 		}
 	}
+}
+
+// startupLogTailLines is how many trailing lines of container output to surface
+// when a startup readiness/PID wait times out.
+const startupLogTailLines = 50
+
+// startupDiagnostics fetches the tail of a container's combined stdout/stderr so
+// a startup timeout can explain itself. On the detached create/exec path the
+// in-guest shim's fatal output (e.g. a permission-denied overlay-manifest read)
+// goes to the container log, never to the user's terminal, so a bare "did not
+// become ready" timeout hides the actual cause. This is best-effort: it returns
+// "" when there is no output to show or the lookup itself fails, so it can only
+// add context to the original timeout error, never mask it. It uses its own
+// short-lived context rather than the (possibly already-cancelled) run context
+// so log retrieval still works after a startup timeout.
+func (d *DockerIsolator) startupDiagnostics(containerName string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, d.engine.binary, "logs", "--tail", strconv.Itoa(startupLogTailLines), containerName)
+	out, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil && trimmed == "" {
+		return ""
+	}
+	return trimmed
+}
+
+// withStartupDiagnostics appends the container's recent log output to a startup
+// timeout error so the user sees why readiness was never reached (typically an
+// in-guest shim failure) instead of a bare timeout. Returns baseErr unchanged
+// when no logs are available.
+func (d *DockerIsolator) withStartupDiagnostics(baseErr error, containerName string) error {
+	logs := d.startupDiagnostics(containerName)
+	if logs == "" {
+		return baseErr
+	}
+	return fmt.Errorf("%w\n\nlast %d lines of %s output from %q:\n%s",
+		baseErr, startupLogTailLines, d.engine.binary, containerName, logs)
 }
 
 // installMiseTools installs mise tools if the project has a mise config file.
@@ -445,9 +543,9 @@ func (d *DockerIsolator) installMiseTools(dockerBinary, containerName string, cf
 // BuildDocker constructs the docker command based on container state.
 // Returns a DockerBuildResult that indicates what action to take.
 func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerBuildResult, error) {
-	dockerPath, err := exec.LookPath("docker")
+	dockerPath, err := exec.LookPath(d.engine.binary)
 	if err != nil {
-		return nil, fmt.Errorf("docker CLI not found: %w", err)
+		return nil, fmt.Errorf("%s CLI not found: %w", d.engine.binary, err)
 	}
 
 	// Resolve Dockerfile and determine image tag
@@ -527,22 +625,95 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 	}
 
 	// Ephemeral mode — docker run --rm.
+	//
+	// krun reuses a deterministic per-project --name so Run can resolve the
+	// guest PID for session registration, paired with --replace to clear a
+	// stopped leftover from a hard-killed prior run. But --replace would also
+	// silently destroy a sibling microVM still running for this project, so
+	// refuse loudly here instead of killing a live session. Docker stays
+	// anonymous and is unaffected.
+	if d.engine.microVM {
+		if _, running := d.getContainerState(ctx, containerName); running {
+			return nil, d.microVMSessionActiveError(containerName)
+		}
+	}
+
 	args, err := d.buildRunArgs(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &DockerBuildResult{
+	res := &DockerBuildResult{
 		Action:     DockerActionRun,
 		BinaryPath: dockerPath,
 		Args:       args,
-	}, nil
+	}
+	// Surface the krun container name so Run can resolve the guest PID for
+	// session registration (buildRunArgs injected the matching --name).
+	if d.engine.microVM {
+		res.ContainerName = containerName
+	}
+	return res, nil
+}
+
+// Preflight refuses to start a krun launch when another microVM session is
+// already running for this project. It runs before proxy startup and the image
+// build so the conflict surfaces in milliseconds instead of after that work is
+// wasted; BuildDocker keeps the identical guard (under the per-project session
+// lock) as the authoritative TOCTOU check for two launches racing past here.
+// Docker and bwrap have no launch-time conflict (anonymous --rm containers /
+// overlay-based concurrency), so Preflight is a no-op for them.
+func (d *DockerIsolator) Preflight(ctx context.Context, projectDir string) error {
+	if !d.engine.microVM {
+		return nil
+	}
+	containerName := d.containerName(projectDir)
+	if _, running := d.getContainerState(ctx, containerName); running {
+		return d.microVMSessionActiveError(containerName)
+	}
+	return nil
+}
+
+// microVMSessionActiveError reports that a krun microVM is already running for
+// this project and tells the user exactly how to clear it. krun runs one
+// ephemeral microVM per project, so a second launch would have to clobber the
+// live guest; the engine binary (podman) name is interpolated so the remediation
+// command is copy-pasteable.
+func (d *DockerIsolator) microVMSessionActiveError(containerName string) error {
+	return fmt.Errorf(
+		"a krun session is already active for this project (container %q); stop it before starting another:\n  %s rm -f %s",
+		containerName, d.engine.binary, containerName,
+	)
+}
+
+// acquireMicroVMSessionLock takes an exclusive, cross-process lock so only one
+// krun microVM session runs per project at a time. It is keyed on the container
+// name (unique per project) and held by Run across the guard check and the
+// `podman run --replace`, closing the TOCTOU window between them. A non-blocking
+// try-lock means a concurrent same-project launch fails fast with a clear error
+// rather than silently replacing the first live microVM. A lock file left by a
+// hard-killed prior run never blocks acquisition: the kernel auto-releases the
+// flock when the holder's fd closes on exit, so the leftover file (which is
+// never unlinked) is simply re-locked. The lock lives in the host temp dir, not
+// the guest-visible sandbox home, so untrusted guest code cannot remove it to
+// defeat the exclusion.
+func acquireMicroVMSessionLock(containerName string) (*proxy.FileLock, error) {
+	lockPath := filepath.Join(os.TempDir(), containerName+".krun.lock")
+	lock, err := proxy.TryFileLock(lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("acquire krun session lock for container %q (a session may already be active; stop it before starting another): %w", containerName, err)
+	}
+	return lock, nil
 }
 
 // buildExecArgs builds arguments for docker exec into a running container.
 func buildExecArgs(cfg *Config, containerName string) []string {
 	args := []string{"exec"}
+	// Attach stdin (-i) so piped input reaches the exec'd command; add a TTY only
+	// for interactive sessions.
 	if cfg.Interactive {
 		args = append(args, "-it")
+	} else {
+		args = append(args, "-i")
 	}
 	args = append(args, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 	args = append(args, containerName)
@@ -556,14 +727,27 @@ func buildExecArgs(cfg *Config, containerName string) []string {
 
 // buildRunArgs builds arguments for docker run with --rm.
 func (d *DockerIsolator) buildRunArgs(cfg *Config) ([]string, error) {
-	args := []string{
-		"run",
-		"--rm",
+	args := []string{"run"}
+	args = append(args, d.engine.runtimeArgs...)
+	args = append(args, "--rm")
+
+	// microVM (krun) ephemeral runs get a deterministic name so the run path can
+	// `podman inspect` the booted guest's PID and register a session for port
+	// forwarding. Docker keeps its anonymous --rm run (its forward path differs).
+	// --replace atomically removes a same-named container left behind by a prior
+	// run that was hard-killed (SIGKILL/OOM/host crash) before --rm cleanup, so a
+	// relaunch never fails with "container name already in use".
+	if d.engine.microVM {
+		args = append(args, "--replace", "--name", d.containerName(cfg.ProjectDir))
 	}
 
-	// Interactive mode only if stdin is a TTY
+	// Attach stdin so piped input reaches the workload; add a TTY only for an
+	// interactive session. Without -i, `podman/docker run` leaves the container's
+	// stdin closed, so `data | devsandbox -- cmd` silently loses its input.
 	if cfg.Interactive {
 		args = append(args, "-it")
+	} else {
+		args = append(args, "-i")
 	}
 
 	args = append(args, "--hostname", "sandbox")
@@ -592,7 +776,9 @@ func (d *DockerIsolator) buildRunArgs(cfg *Config) ([]string, error) {
 
 // buildCreateArgs builds arguments for docker create.
 func (d *DockerIsolator) buildCreateArgs(cfg *Config, containerName string) ([]string, error) {
-	args := []string{"create", "--name", containerName}
+	args := []string{"create"}
+	args = append(args, d.engine.runtimeArgs...)
+	args = append(args, "--name", containerName)
 
 	// Add labels (include config hash for stale-container detection on reuse)
 	args = append(args, d.buildLabels(cfg.ProjectDir,
@@ -634,7 +820,26 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	args = append(args, "--cap-add", "CHOWN")  // chown dirs during setup
 	args = append(args, "--cap-add", "SETUID") // privilege drop
 	args = append(args, "--cap-add", "SETGID") // privilege drop
+	// DAC_OVERRIDE is needed during the shim's root-phase setup, which must
+	// populate and chown a /home/sandboxuser that is NOT owned by container-root:
+	// rootful Docker bind-mounts it from the host (owned by the host UID) and the
+	// :ro overlay manifest is a host temp file (mode 0600, host-owned); krun shares
+	// it over virtio-fs under keep-id (owned by the mapped host user). With
+	// DAC_OVERRIDE dropped, container-root still obeys those DAC bits and cannot
+	// create files in the home or read the manifest (the read is fatal), so startup
+	// hangs on the readiness timeout. The shim setuids to the unprivileged user -
+	// which clears its capability set - before exec'ing the workload, and
+	// no-new-privileges blocks regaining anything, so the workload never holds it.
+	args = append(args, "--cap-add", "DAC_OVERRIDE")
 	args = append(args, "--security-opt", "no-new-privileges:true")
+
+	// microVM (krun) runs under rootless podman: keep-id maps the host user 1:1
+	// into the guest so files the workload writes to the virtio-fs-shared project
+	// dir/home come back owned by the host user instead of an unprivileged subuid.
+	// Rootful Docker needs no such remap.
+	if d.engine.microVM {
+		args = append(args, "--userns", "keep-id")
+	}
 
 	// User mapping - pass host UID/GID for entrypoint to use
 	args = append(args,
@@ -751,12 +956,15 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	// Use the per-session network gateway IP (where the proxy binds) instead of
 	// host-gateway, which resolves to the default bridge (docker0) gateway —
 	// a different IP that doesn't have the proxy listening on it.
-	if cfg.ProxyEnabled && runtime.GOOS == "linux" {
+	// krun is excluded: rootless podman already injects a working
+	// host.containers.internal that reaches the host loopback (where the proxy
+	// binds), so an explicit --add-host would override it with a wrong target.
+	if cfg.ProxyEnabled && runtime.GOOS == "linux" && !d.engine.microVM {
 		hostIP := "host-gateway"
 		if d.gatewayIP != "" {
 			hostIP = d.gatewayIP
 		}
-		args = append(args, "--add-host", "host.docker.internal:"+hostIP)
+		args = append(args, "--add-host", d.engine.hostAlias+":"+hostIP)
 	}
 
 	// Proxy mode
@@ -850,7 +1058,7 @@ func (d *DockerIsolator) Cleanup() error {
 		_ = os.Remove(d.manifestPath)
 	}
 	if d.networkName != "" {
-		rmNet := exec.Command("docker", "network", "rm", d.networkName)
+		rmNet := exec.Command(d.engine.binary, "network", "rm", d.networkName)
 		if output, err := rmNet.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to remove network %s: %s", d.networkName, string(output))
 		}
@@ -882,8 +1090,9 @@ func (d *DockerIsolator) NetworkName() string {
 
 // proxyHost returns the host address for proxy connections from within the container.
 func (d *DockerIsolator) proxyHost() string {
-	// host.docker.internal works on macOS natively and on Linux with --add-host
-	return "host.docker.internal"
+	// host.docker.internal (Docker) / host.containers.internal (podman) resolve to
+	// the host natively on macOS and on Linux via the --add-host mapping above.
+	return d.engine.hostAlias
 }
 
 // sandboxVolumeName generates a Docker volume name for the sandbox home.
@@ -1000,8 +1209,11 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 					isDir = info.IsDir()
 				}
 
-				if isTmpOverlay && isDir && runtime.GOOS == "darwin" {
+				if isTmpOverlay && isDir && (runtime.GOOS == "darwin" || d.engine.microVM) {
 					// macOS: overlayfs unavailable in Docker Desktop.
+					// krun: kernel overlayfs mount fails in the libkrun guest (EPERM
+					// for an overlay whose lowerdir is on virtio-fs inside a nested
+					// userns), so fall back to the same copy strategy.
 					// Mount source read-only at a shadow path; shim copies to target.
 					shadowDest := copyOverlayShadowPath(dest)
 					mounts = append(mounts, b.Source+":"+shadowDest+":ro")
@@ -1080,7 +1292,7 @@ func (d *DockerIsolator) containerName(projectDir string) string {
 
 // getContainerState checks if a container exists and its state.
 func (d *DockerIsolator) getContainerState(ctx context.Context, name string) (exists bool, running bool) {
-	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", name)
+	cmd := exec.CommandContext(ctx, d.engine.binary, "inspect", "--format", "{{.State.Running}}", name)
 	output, err := cmd.Output()
 	if err != nil {
 		return false, false // Container doesn't exist
@@ -1149,7 +1361,7 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 
 // getContainerConfigHash reads the config hash label from an existing container.
 func (d *DockerIsolator) getContainerConfigHash(ctx context.Context, name string) string {
-	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format",
+	cmd := exec.CommandContext(ctx, d.engine.binary, "inspect", "--format",
 		fmt.Sprintf("{{index .Config.Labels %q}}", LabelConfigHash), name)
 	output, err := cmd.Output()
 	if err != nil {
@@ -1160,7 +1372,7 @@ func (d *DockerIsolator) getContainerConfigHash(ctx context.Context, name string
 
 // removeContainer stops and removes a container by name.
 func (d *DockerIsolator) removeContainer(ctx context.Context, name string) {
-	rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", name)
+	rmCmd := exec.CommandContext(ctx, d.engine.binary, "rm", "-f", name)
 	_ = rmCmd.Run()
 }
 

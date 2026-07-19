@@ -10,18 +10,23 @@ required. To use system-installed binaries instead, see [configuration](configur
 
 ## Isolation Backends
 
-devsandbox supports two isolation backends:
+devsandbox supports three isolation backends:
 
 | Backend | Platform | Description |
 |---------|----------|-------------|
 | `bwrap` | Linux only | Uses bubblewrap for namespace-based isolation. Preferred on Linux. |
 | `docker` | Linux, macOS | Uses Docker containers. Required for macOS, optional on Linux. |
+| `krun` | Linux, macOS | **Experimental.** Runs the sandbox image inside a libkrun microVM (`podman --runtime krun`) for hardware-level isolation. Opt-in only. See [krun microVM backend](configuration.md#krun-microvm-backend-experimental). |
+
+`bwrap` and `docker` share the host kernel; a kernel-level exploit escapes both. `krun` puts the workload behind a hardware virtualization boundary with its own guest kernel - the right choice for genuinely untrusted code.
 
 ### Automatic Selection
 
 By default (`--isolation=auto`), devsandbox selects the best backend for your platform:
 - **Linux**: Uses `bwrap` (bubblewrap)
 - **macOS**: Uses `docker`
+
+`krun` is never auto-selected; it must be requested explicitly.
 
 ### Manual Override
 
@@ -33,13 +38,16 @@ devsandbox --isolation=docker
 
 # Explicitly use bwrap (Linux only)
 devsandbox --isolation=bwrap
+
+# Use the krun microVM backend (requires podman + libkrun + /dev/kvm)
+devsandbox --isolation=krun
 ```
 
 Or configure in `~/.config/devsandbox/config.toml`:
 
 ```toml
 [sandbox]
-isolation = "docker"  # "auto", "bwrap", or "docker"
+isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 ```
 
 ### Choosing a Backend (Linux)
@@ -256,6 +264,8 @@ devsandbox forward 3000 5173 9090
 ```
 
 Port spec format: `<sandbox_port>[:<host_port>]`. The sandbox port (the dev server you want to reach) comes first. If `host_port` is omitted, it defaults to the same as `sandbox_port`.
+
+> **krun backend:** `devsandbox forward` is best-effort for the experimental `krun` microVM backend. The session is registered for forwarding, but reaching a listener inside the guest through the microVM network namespace has not yet been validated on a `/dev/kvm` host. See [krun microVM backend](configuration.md#krun-microvm-backend-experimental).
 
 **Named sessions:**
 
@@ -621,7 +631,8 @@ The Docker backend:
    - **Linux**: Bind mount for consistency with bwrap
    - **macOS**: Named volume for better performance
 4. **Tool Configs**: Mounts nvim, tmux, starship configs read-only from host
-5. **Proxy Support**: Uses `host.docker.internal` for proxy connections
+5. **Host mise Tools** (Linux hosts): Mounts `~/.local/share/mise/installs` read-only and seeds the versions into the sandbox on startup, so host-installed tools resolve without a reinstall (see [Tools: mise](tools.md#tool-management-with-mise))
+6. **Proxy Support**: Uses `host.docker.internal` for proxy connections
 
 ### Docker Image
 
@@ -722,7 +733,7 @@ File watching (inotify) across the macOS ↔ Docker boundary can be unreliable. 
 WATCHPACK_POLLING=true devsandbox npm run dev
 
 # Vite
-devsandbox -- npx vite --force
+devsandbox - npx vite --force
 
 # Generic: set CHOKIDAR_USEPOLLING for chokidar-based watchers
 CHOKIDAR_USEPOLLING=true devsandbox npm run dev
