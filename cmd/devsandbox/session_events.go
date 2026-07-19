@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/isolator"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/proxy"
 )
@@ -88,10 +89,15 @@ func emitSessionEnd(
 }
 
 // exitCodeFromError extracts a process-style exit code from an error. nil → 0.
+// *isolator.CommandExitError (the sandboxed command's own status) → Code.
 // *exec.ExitError → ExitCode(). Any other non-nil error → 1.
 func exitCodeFromError(err error) int {
 	if err == nil {
 		return 0
+	}
+	var cmdExit *isolator.CommandExitError
+	if errors.As(err, &cmdExit) {
+		return cmdExit.Code
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

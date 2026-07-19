@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -127,6 +128,12 @@ Proxy Mode (--proxy):
 	rootCmd.SetVersionTemplate(versionTpl)
 
 	if err := rootCmd.Execute(); err != nil {
+		// A non-zero exit from the sandboxed command is its result, not a
+		// devsandbox failure: propagate the code and stay silent, like a shell.
+		var cmdExit *isolator.CommandExitError
+		if errors.As(err, &cmdExit) {
+			os.Exit(cmdExit.Code)
+		}
 		notice.Error("%v", err)
 		os.Exit(1)
 	}
