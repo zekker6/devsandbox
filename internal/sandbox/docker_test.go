@@ -87,6 +87,36 @@ func TestRemoveSandboxByType_Bwrap(t *testing.T) {
 	_ = err
 }
 
+// TestRemoveSandboxByType_Krun verifies krun sandboxes are torn down purely via
+// the engine-agnostic RemoveSandbox (on-disk dir removal), never the docker
+// container path. krun is ephemeral (--rm), so there is no persistent container
+// to stop/remove - only the metadata directory on disk.
+func TestRemoveSandboxByType_Krun(t *testing.T) {
+	tmpDir := t.TempDir()
+	sandboxRoot := filepath.Join(tmpDir, "krun-sandbox")
+	if err := os.MkdirAll(sandboxRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxRoot, "marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Metadata{
+		Name:        "krun-sandbox",
+		ProjectDir:  "/tmp/krun-project",
+		Isolation:   IsolationKrun,
+		SandboxRoot: sandboxRoot,
+	}
+
+	// No skipIfNoDocker: krun removal must not touch docker at all.
+	if err := RemoveSandboxByType(m, false); err != nil {
+		t.Fatalf("RemoveSandboxByType(krun) failed: %v", err)
+	}
+	if _, err := os.Stat(sandboxRoot); !os.IsNotExist(err) {
+		t.Errorf("krun sandbox dir still present after removal: err=%v", err)
+	}
+}
+
 func TestRemoveSandboxByType_Docker(t *testing.T) {
 	skipIfNoDocker(t)
 

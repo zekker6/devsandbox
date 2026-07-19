@@ -9,3 +9,9 @@ func execWithOverlays(uid, gid int, overlays []overlayEntry, args []string) {
 func overlayChild() {
 	fatal("overlay child requires Linux — this code path should not be reached on this platform")
 }
+
+// mountPointSet is Linux-only (reads /proc/self/mountinfo); the shim always runs
+// inside a Linux container, so the non-Linux build only needs this to compile.
+func mountPointSet() map[string]bool {
+	return map[string]bool{}
+}

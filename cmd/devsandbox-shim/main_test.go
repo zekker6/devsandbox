@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -104,6 +105,101 @@ func TestEnvInt(t *testing.T) {
 // NOTE: Tests for isEnvFile and findEnvFiles were removed because .env hiding
 // is now handled at container creation time via Docker volume mounts.
 // See internal/isolator/docker_test.go for the equivalent coverage.
+
+func TestGroupCreateArgs(t *testing.T) {
+	tests := []struct {
+		name   string
+		gid    int
+		exists bool
+		want   []string
+	}{
+		{
+			name:   "missing creates",
+			gid:    1000,
+			exists: false,
+			want:   []string{"groupadd", "-g", "1000", sandboxUser},
+		},
+		{
+			name:   "exists skips",
+			gid:    1000,
+			exists: true,
+			want:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotDB, gotKey string
+			lookup := func(database, key string) bool {
+				gotDB, gotKey = database, key
+				return tt.exists
+			}
+			got := groupCreateArgs(tt.gid, lookup)
+			if gotDB != "group" {
+				t.Errorf("looked up database %q, want \"group\"", gotDB)
+			}
+			if gotKey != "1000" {
+				t.Errorf("looked up key %q, want \"1000\"", gotKey)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("groupCreateArgs(%d, exists=%v) = %v, want %v", tt.gid, tt.exists, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUserCreateArgs(t *testing.T) {
+	tests := []struct {
+		name   string
+		uid    int
+		gid    int
+		exists bool
+		want   []string
+	}{
+		{
+			name:   "missing creates",
+			uid:    1000,
+			gid:    1000,
+			exists: false,
+			want: []string{
+				"useradd",
+				"-u", "1000",
+				"-g", "1000",
+				"-m",
+				"-d", sandboxHome,
+				"-s", "/bin/bash",
+				sandboxUser,
+			},
+		},
+		{
+			name:   "exists skips",
+			uid:    1000,
+			gid:    1000,
+			exists: true,
+			want:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotDB, gotKey string
+			lookup := func(database, key string) bool {
+				gotDB, gotKey = database, key
+				return tt.exists
+			}
+			got := userCreateArgs(tt.uid, tt.gid, lookup)
+			if gotDB != "passwd" {
+				t.Errorf("looked up database %q, want \"passwd\"", gotDB)
+			}
+			if gotKey != "1000" {
+				t.Errorf("looked up key %q, want \"1000\"", gotKey)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("userCreateArgs(%d, %d, exists=%v) = %v, want %v", tt.uid, tt.gid, tt.exists, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestEnvOr(t *testing.T) {
 	t.Setenv("TEST_ENVOR_SET", "value")

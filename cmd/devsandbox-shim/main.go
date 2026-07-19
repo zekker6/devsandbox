@@ -69,8 +69,15 @@ func main() {
 	}
 
 	// Apply copy overlays — no namespaces needed, just copy from shadow source.
+	// Clean the target first so a previous run's writes do not persist (krun on any
+	// OS, and the Docker backend on macOS, degrade tmpoverlay to a copy into the
+	// persistent home); the clean is mount-aware so nested read-only bindings under
+	// the target are preserved.
 	for _, entry := range copyOverlays {
-		if err := copyDir(entry.Source, entry.Path); err != nil {
+		if err := cleanCopyOverlayTarget(sandboxHome, entry.Path); err != nil {
+			fatal("clean copy overlay target %s: %v", entry.Path, err)
+		}
+		if err := copyDir(sandboxHome, entry.Source, entry.Path); err != nil {
 			fatal("copy overlay %s → %s: %v", entry.Source, entry.Path, err)
 		}
 		if err := chownRecursive(entry.Path, uid, gid); err != nil {
@@ -130,24 +137,62 @@ func envInt(key string, fallback int) int {
 }
 
 // ensureUser creates the sandboxuser group and user matching the host UID/GID.
-// Errors are logged but not fatal — the user/group may already exist.
+//
+// In the krun keep-id case the host UID/GID are already provisioned in the
+// image's /etc/passwd, so groupadd/useradd would fail and print noise. We check
+// with getent first and skip creation when the ID already exists; the docker /
+// non-keep-id case (ID absent) still creates them. Create errors stay non-fatal —
+// the ID may be claimed under a different name we did not detect.
 func ensureUser(uid, gid int) {
-	// Create group if it doesn't exist (ignore error — may already exist)
-	_ = run("groupadd", "-g", strconv.Itoa(gid), sandboxUser)
+	if argv := groupCreateArgs(gid, getentExists); argv != nil {
+		_ = run(argv[0], argv[1:]...)
+	}
+	if argv := userCreateArgs(uid, gid, getentExists); argv != nil {
+		_ = run(argv[0], argv[1:]...)
+	}
 
-	// Create user if it doesn't exist (ignore error — may already exist)
-	_ = run("useradd",
+	// Fix ownership of sandbox home
+	if err := chownRecursive(sandboxHome, uid, gid); err != nil {
+		warn("chown sandbox home: %v", err)
+	}
+}
+
+// idExistsFunc reports whether getent finds an entry for key in the given
+// database ("group" or "passwd"). It is a parameter so the create-arg helpers
+// stay unit-testable without a real getent.
+type idExistsFunc func(database, key string) bool
+
+// getentExists is the production idExistsFunc: it shells out to getent, which
+// exits 0 when the entry exists and non-zero otherwise, so a nil error means
+// "found". A missing getent (or any other error) is treated as "not found",
+// falling through to the create path and preserving the original behavior.
+func getentExists(database, key string) bool {
+	return exec.Command("getent", database, key).Run() == nil
+}
+
+// groupCreateArgs returns the groupadd argv for the sandbox group, or nil when a
+// group with gid already exists (keep-id case) so creation is skipped quietly.
+func groupCreateArgs(gid int, exists idExistsFunc) []string {
+	if exists("group", strconv.Itoa(gid)) {
+		return nil
+	}
+	return []string{"groupadd", "-g", strconv.Itoa(gid), sandboxUser}
+}
+
+// userCreateArgs returns the useradd argv for the sandbox user, or nil when a
+// user with uid already exists (keep-id case) so creation is skipped quietly.
+func userCreateArgs(uid, gid int, exists idExistsFunc) []string {
+	if exists("passwd", strconv.Itoa(uid)) {
+		return nil
+	}
+	return []string{
+		"useradd",
 		"-u", strconv.Itoa(uid),
 		"-g", strconv.Itoa(gid),
 		"-m",
 		"-d", sandboxHome,
 		"-s", "/bin/bash",
 		sandboxUser,
-	)
-
-	// Fix ownership of sandbox home
-	if err := chownRecursive(sandboxHome, uid, gid); err != nil {
-		warn("chown sandbox home: %v", err)
 	}
 }
 
