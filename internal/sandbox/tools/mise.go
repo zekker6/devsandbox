@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -14,7 +15,11 @@ func init() {
 
 // Mise provides mise tool manager integration.
 // Mise manages development tools like Node.js, Python, Go, etc.
-type Mise struct{}
+type Mise struct {
+	// ignoreGlobalConfig, when set, points MISE_GLOBAL_CONFIG_FILE at /dev/null in
+	// the sandbox so mise does not read the host user's global ~/.config/mise/config.toml.
+	ignoreGlobalConfig bool
+}
 
 func (m *Mise) Name() string {
 	return "mise"
@@ -65,9 +70,32 @@ func (m *Mise) Bindings(homeDir, sandboxHome string) []Binding {
 	}
 }
 
+// Configure implements ToolWithConfig. It reads the mise-specific settings from
+// the `[tools.mise]` config section.
+func (m *Mise) Configure(_ GlobalConfig, toolCfg map[string]any) {
+	m.ignoreGlobalConfig = false // default: respect the host's global mise config
+	if toolCfg == nil {
+		return
+	}
+	// Validation (config.Validate) guarantees this is a bool when present, so a
+	// bad type never silently degrades to the default here.
+	if v, ok := toolCfg["ignore_global_config"].(bool); ok {
+		m.ignoreGlobalConfig = v
+	}
+}
+
 func (m *Mise) Environment(homeDir, sandboxHome string) []EnvVar {
 	// MISE_SHELL is set by the builder based on detected shell
 	// PATH includes mise shims, also set by builder
+	if m.ignoreGlobalConfig {
+		// Point the global config at /dev/null so the sandbox does not eagerly
+		// resolve/install the host user's global `@latest` tools. On a proxy/egress
+		// -locked sandbox those resolutions hang on `npm view`/registry lookups and a
+		// swarm of them can OOM the guest. The project's `.mise.toml`, the image's
+		// system config (baked node), and `~/.config/mise/settings.toml` still apply;
+		// only the global `config.toml` tool list is dropped.
+		return []EnvVar{{Name: "MISE_GLOBAL_CONFIG_FILE", Value: "/dev/null"}}
+	}
 	return nil
 }
 
@@ -100,21 +128,32 @@ func (m *Mise) Check(homeDir string) CheckResult {
 }
 
 // CacheMounts implements ToolWithCache.
-// Returns cache directories for mise's installed tools and download cache.
+// Only the download cache is a dedicated cache mount. MISE_DATA_DIR is not: the
+// container backends point it at the persistent sandbox home (set in the Docker
+// isolator), so installed tools persist across runs there, and the image's baked
+// node is mirrored in by the in-guest shim so it resolves without a reinstall.
 func (m *Mise) CacheMounts() []CacheMount {
 	return []CacheMount{
-		{Name: "mise", EnvVar: "MISE_DATA_DIR"},
 		{Name: "mise/cache", EnvVar: "MISE_CACHE_DIR"},
 	}
 }
 
+// hostMiseInstallsDest is the in-guest shadow path where the host's mise
+// installs directory is mounted read-only. LOAD-BEARING: the in-guest shim
+// (hostMiseInstalls in cmd/devsandbox-shim/main.go) hardcodes the same path to
+// seed version-level symlinks from it into the sandbox MISE_DATA_DIR.
+const hostMiseInstallsDest = "/opt/host-mise/installs"
+
 // DockerBindings returns Docker-specific mounts for mise.
 // In Docker mode, we only mount config and shims read-only.
-// The data/cache/state directories are NOT mounted - the container uses its own
-// copies created by the entrypoint. This avoids read-only mount conflicts with
-// mise's tracking config feature.
+// The data/cache/state directories are NOT mounted at their home paths - the
+// container uses its own copies created by the entrypoint. This avoids
+// read-only mount conflicts with mise's tracking config feature. On Linux
+// hosts the host's installs directory is additionally shared read-only at a
+// shadow path, from which the shim seeds symlinks into the sandbox data dir so
+// host-installed tools resolve without a per-guest reinstall.
 func (m *Mise) DockerBindings(homeDir, sandboxHome string) []DockerMount {
-	return []DockerMount{
+	mounts := []DockerMount{
 		// User's local bin directory (may contain mise shims)
 		{
 			Source:   filepath.Join(homeDir, ".local", "bin"),
@@ -127,9 +166,30 @@ func (m *Mise) DockerBindings(homeDir, sandboxHome string) []DockerMount {
 			Dest:     "/home/sandboxuser/.config/mise",
 			ReadOnly: true,
 		},
-		// Note: data/cache/state directories are NOT mounted in Docker mode.
-		// The container uses its own copies at /home/sandboxuser/.local/share/mise etc.
-		// This allows mise to write tracking configs without read-only mount errors.
+	}
+	if hm := hostMiseInstallsMount(homeDir, runtime.GOOS); hm != nil {
+		mounts = append(mounts, *hm)
+	}
+	return mounts
+}
+
+// hostMiseInstallsMount returns the read-only mount sharing the host's mise
+// installs directory with the docker/krun guest, or nil on non-Linux hosts:
+// the guest is always Linux, so host binaries from another OS cannot run in it.
+//
+// Most mise-managed tools are upstream prebuilt releases targeting a broad
+// glibc range and run fine on the guest's userland; a host-compiled tool
+// linked against a newer host glibc can fail in the guest, in which case
+// `mise uninstall <tool>@<version>` (removing the seeded symlink) followed by
+// `mise install` inside the sandbox yields a guest-local install.
+func hostMiseInstallsMount(homeDir, goos string) *DockerMount {
+	if goos != "linux" {
+		return nil
+	}
+	return &DockerMount{
+		Source:   filepath.Join(homeDir, ".local", "share", "mise", "installs"),
+		Dest:     hostMiseInstallsDest,
+		ReadOnly: true,
 	}
 }
 

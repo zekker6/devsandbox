@@ -1085,6 +1085,14 @@ func (b *Builder) AddProxyEnvironment() *Builder {
 	// Without this, npx-based tools like mcp-remote bypass the proxy and fail with ENETUNREACH.
 	b.SetEnv("NODE_USE_ENV_PROXY", "1")
 
+	// mise's remote version-list lookups (one per `@latest`-style tool spec in a
+	// mise config) default to a 20s timeout each. In an egress-locked sandbox a
+	// lookup that escapes the proxy path hangs to the full timeout, and a config
+	// with several such specs stalls every `mise ls`/install for minutes. Bound
+	// the lookups tightly: through the local proxy a working fetch answers well
+	// under this, and a blocked one falls back to installed versions 3s in.
+	b.SetEnv("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
+
 	// User-defined extra proxy env vars from config
 	for _, name := range b.cfg.ProxyExtraEnv {
 		b.SetEnv(name, proxyURL)

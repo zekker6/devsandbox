@@ -694,6 +694,14 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("tools.%s.mount_mode must be 'split', 'overlay', 'tmpoverlay', 'readonly', 'readwrite', or 'disabled', got %q", name, mode)
 			}
 		}
+		// mise: ignore_global_config gates whether the host's global mise config is
+		// read in the sandbox. Reject a non-bool so a typo fails loudly rather than
+		// silently degrading to the default.
+		if v, ok := toolCfg["ignore_global_config"]; ok {
+			if _, isBool := v.(bool); !isBool {
+				return fmt.Errorf("tools.%s.ignore_global_config must be a boolean, got %T", name, v)
+			}
+		}
 	}
 
 	// Validate filter rules

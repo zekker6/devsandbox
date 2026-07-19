@@ -11,29 +11,89 @@ func TestMise_CacheMounts(t *testing.T) {
 
 	mounts := m.CacheMounts()
 
-	if len(mounts) != 2 {
-		t.Fatalf("CacheMounts() returned %d mounts, want 2", len(mounts))
+	// Only the download cache is a dedicated cache mount. MISE_DATA_DIR is
+	// deliberately not one: the container isolator points it at the persistent
+	// sandbox home so installed tools persist across runs there.
+	if len(mounts) != 1 {
+		t.Fatalf("CacheMounts() returned %d mounts, want 1", len(mounts))
 	}
-
-	// Check mise data dir
-	if mounts[0].Name != "mise" {
-		t.Errorf("mounts[0].Name = %q, want %q", mounts[0].Name, "mise")
+	if mounts[0].Name != "mise/cache" {
+		t.Errorf("mounts[0].Name = %q, want %q", mounts[0].Name, "mise/cache")
 	}
-	if mounts[0].EnvVar != "MISE_DATA_DIR" {
-		t.Errorf("mounts[0].EnvVar = %q, want %q", mounts[0].EnvVar, "MISE_DATA_DIR")
+	if mounts[0].EnvVar != "MISE_CACHE_DIR" {
+		t.Errorf("mounts[0].EnvVar = %q, want %q", mounts[0].EnvVar, "MISE_CACHE_DIR")
 	}
-
-	// Check mise cache dir
-	if mounts[1].Name != "mise/cache" {
-		t.Errorf("mounts[1].Name = %q, want %q", mounts[1].Name, "mise/cache")
-	}
-	if mounts[1].EnvVar != "MISE_CACHE_DIR" {
-		t.Errorf("mounts[1].EnvVar = %q, want %q", mounts[1].EnvVar, "MISE_CACHE_DIR")
+	for _, mnt := range mounts {
+		if mnt.EnvVar == "MISE_DATA_DIR" {
+			t.Error("MISE_DATA_DIR must not be a cache mount (the isolator points it at the persistent sandbox home)")
+		}
 	}
 }
 
 func TestMise_ImplementsToolWithCache(t *testing.T) {
 	var _ ToolWithCache = (*Mise)(nil)
+}
+
+func TestMise_ImplementsToolWithConfig(t *testing.T) {
+	var _ ToolWithConfig = (*Mise)(nil)
+}
+
+func TestMise_IgnoreGlobalConfig(t *testing.T) {
+	const key = "MISE_GLOBAL_CONFIG_FILE"
+
+	findEnv := func(envs []EnvVar, name string) (EnvVar, bool) {
+		for _, e := range envs {
+			if e.Name == name {
+				return e, true
+			}
+		}
+		return EnvVar{}, false
+	}
+
+	tests := []struct {
+		name       string
+		toolCfg    map[string]any
+		wantIgnore bool
+	}{
+		{"default (no config) respects global config", nil, false},
+		{"explicit false respects global config", map[string]any{"ignore_global_config": false}, false},
+		{"true ignores global config", map[string]any{"ignore_global_config": true}, true},
+		{"unrelated keys leave default", map[string]any{"mount_mode": "overlay"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Mise{}
+			m.Configure(GlobalConfig{}, tt.toolCfg)
+			env := m.Environment("/home/testuser", "/tmp/sandbox")
+
+			got, present := findEnv(env, key)
+			if tt.wantIgnore {
+				if !present {
+					t.Fatalf("expected %s to be set when ignore_global_config=true", key)
+				}
+				if got.Value != "/dev/null" {
+					t.Errorf("%s = %q, want /dev/null", key, got.Value)
+				}
+			} else if present {
+				t.Errorf("%s should not be set when respecting the global config, got %q", key, got.Value)
+			}
+		})
+	}
+}
+
+// TestMise_ConfigureResetsBetweenRuns guards against the shared tool singleton
+// leaking a prior run's ignore_global_config into a run that does not set it.
+func TestMise_ConfigureResetsBetweenRuns(t *testing.T) {
+	m := &Mise{}
+	m.Configure(GlobalConfig{}, map[string]any{"ignore_global_config": true})
+	if len(m.Environment("/h", "/s")) == 0 {
+		t.Fatal("precondition: ignore_global_config=true should set env")
+	}
+	m.Configure(GlobalConfig{}, nil) // next run has no mise config
+	if env := m.Environment("/h", "/s"); len(env) != 0 {
+		t.Errorf("ignore_global_config leaked across Configure calls: %+v", env)
+	}
 }
 
 func TestMise_DockerBindings_NoCacheDirs(t *testing.T) {
@@ -68,6 +128,28 @@ func TestMise_DockerBindings_NoCacheDirs(t *testing.T) {
 	}
 	if !foundBin {
 		t.Error("DockerBindings() missing .local/bin mount")
+	}
+}
+
+func TestHostMiseInstallsMount(t *testing.T) {
+	m := hostMiseInstallsMount("/home/testuser", "linux")
+	if m == nil {
+		t.Fatal("hostMiseInstallsMount() = nil on linux, want a mount")
+	}
+	if m.Source != "/home/testuser/.local/share/mise/installs" {
+		t.Errorf("Source = %q, want host mise installs dir", m.Source)
+	}
+	if m.Dest != hostMiseInstallsDest {
+		t.Errorf("Dest = %q, want %q", m.Dest, hostMiseInstallsDest)
+	}
+	if !m.ReadOnly {
+		t.Error("host installs mount must be read-only")
+	}
+
+	// The guest is always Linux; a darwin host's binaries cannot run in it, so
+	// no mount must be produced there.
+	if m := hostMiseInstallsMount("/home/testuser", "darwin"); m != nil {
+		t.Errorf("hostMiseInstallsMount() on darwin = %+v, want nil", m)
 	}
 }
 

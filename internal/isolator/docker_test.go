@@ -803,12 +803,19 @@ func TestDockerIsolator_Build_CacheVolume(t *testing.T) {
 		t.Errorf("Build args missing per-project cache volume mount, want %q in args", expectedVolume)
 	}
 
-	// Should have mise cache env vars
-	if !strings.Contains(argsStr, "MISE_DATA_DIR=/cache/mise") {
-		t.Error("Build args missing MISE_DATA_DIR")
+	// mise: the isolator redirects only the cache to the per-project volume; the
+	// data dir (the persistent sandbox home, where the shim seeds baked node) is a
+	// static path owned by the image ENV, so the isolator must NOT restate it as a
+	// duplicate -e override.
+	if strings.Contains(argsStr, "MISE_DATA_DIR=") {
+		t.Error("Build args should not restate MISE_DATA_DIR (it is owned by the image ENV, single source of truth)")
 	}
 	if !strings.Contains(argsStr, "MISE_CACHE_DIR=/cache/mise/cache") {
 		t.Error("Build args missing MISE_CACHE_DIR")
+	}
+	// XDG_* are likewise image-ENV-owned and must not be duplicated as -e overrides.
+	if strings.Contains(argsStr, "XDG_CONFIG_HOME=") {
+		t.Error("Build args should not restate XDG_* (owned by the image ENV, single source of truth)")
 	}
 
 	// Should have go cache env vars

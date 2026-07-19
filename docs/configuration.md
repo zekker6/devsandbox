@@ -28,7 +28,7 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 | `[overlay]` | `default` | [Overlay Settings](#overlay-settings) |
 | `[port_forwarding]` | `enabled`, `auto_detect`, `rules` | [Port Forwarding](#port-forwarding) |
 | `[tools.git]` | `mode`, `mount_mode` | [Tool Settings](#tool-specific-configuration) |
-| `[tools.mise]` | `mount_mode` | [Tool Settings](#tool-specific-configuration) |
+| `[tools.mise]` | `mount_mode`, `ignore_global_config` | [Tool Settings](#tool-specific-configuration) |
 | `[tools.docker]` | `enabled`, `socket` | [Tool Settings](#tool-specific-configuration) |
 | `[tools.portal]` | `notifications` | [Tool Settings](#tool-specific-configuration) |
 | `[logging]` | `attributes`, `receivers` | [Remote Logging](#remote-logging) |
@@ -561,6 +561,20 @@ mode = "readonly"
 
 In `readwrite` mode, SSH and GPG directories are mounted read-only to protect private keys
 while still allowing git operations that need them.
+
+#### Mise
+
+```toml
+[tools.mise]
+# Ignore the host's global mise config (~/.config/mise/config.toml) inside the
+# sandbox. Default false (the global config is respected). Set true when a large
+# global config with `@latest` npm:/go:/pipx: tools makes the sandbox hang or OOM:
+# on a proxy/egress-locked sandbox mise resolves each `@latest` spec over the
+# network at every shell start, which times out and can exhaust guest memory.
+# With this on, only the project `.mise.toml`, the image's system config (baked
+# node), and `~/.config/mise/settings.toml` apply. Covers bwrap, docker, and krun.
+ignore_global_config = true
+```
 
 #### Per-Tool Mount Mode Override
 

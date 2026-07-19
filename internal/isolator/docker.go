@@ -712,10 +712,14 @@ func (d *DockerIsolator) installMiseTools(dockerBinary, containerName string, cf
 	}
 
 	userSpec := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	// MISE_OFFLINE=0 overrides the offline default the krun proxy guest runs
+	// under: installing the project's pinned tools is the one boot phase that
+	// legitimately needs the network (through the proxy). No-op elsewhere.
 	checkArgs := []string{
 		"exec",
 		"-u", userSpec,
 		"-e", "MISE_GLOBAL_CONFIG_FILE=/dev/null",
+		"-e", "MISE_OFFLINE=0",
 		"--workdir", cfg.ProjectDir,
 		containerName,
 		"mise", "ls", "--missing",
@@ -731,6 +735,7 @@ func (d *DockerIsolator) installMiseTools(dockerBinary, containerName string, cf
 		"exec",
 		"-u", userSpec,
 		"-e", "MISE_GLOBAL_CONFIG_FILE=/dev/null",
+		"-e", "MISE_OFFLINE=0",
 		"--workdir", cfg.ProjectDir,
 		containerName,
 		"mise", "install", "-y",
@@ -1097,7 +1102,15 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		}
 	}
 
-	// Standard devsandbox environment variables
+	// Static container paths (HOME, PATH, XDG_*, MISE_DATA_DIR, MISE_STATE_DIR,
+	// MISE_SYSTEM_CONFIG_FILE, __fish_user_data_dir) are defined once in the image
+	// ENV and inherited here and by `exec`, so they are deliberately NOT restated
+	// as -e overrides. This block sets only values the isolator authoritatively
+	// owns at runtime: session/project metadata, and (below) cache-volume
+	// redirections, proxy, and user-supplied env. MISE_DATA_DIR points at the
+	// persistent sandbox home via the image ENV, so tools the project installs
+	// survive across runs; the in-guest shim seeds the image's pre-baked node into
+	// it (seedBakedMiseTools) so node resolves without a startup reinstall.
 	args = append(args, "-e", "DEVSANDBOX=1")
 	if cfg.ProjectDir != "" {
 		// Extract project name from path
@@ -1108,15 +1121,8 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	}
 	args = append(args, "-e", "GOTOOLCHAIN=local")
 
-	// XDG directories inside container
-	args = append(args, "-e", "XDG_CONFIG_HOME=/home/sandboxuser/.config")
-	args = append(args, "-e", "XDG_DATA_HOME=/home/sandboxuser/.local/share")
-	args = append(args, "-e", "XDG_CACHE_HOME=/home/sandboxuser/.cache")
-	args = append(args, "-e", "XDG_STATE_HOME=/home/sandboxuser/.local/state")
-
-	// Fish shell data directory - must be set before fish starts
-	// to ensure universal variables are stored in the right location
-	args = append(args, "-e", "__fish_user_data_dir=/home/sandboxuser/.local/share/fish")
+	// XDG_*, __fish_user_data_dir, MISE_DATA_DIR/STATE_DIR, HOME and PATH come from
+	// the image ENV (single source of truth) - see the note above.
 
 	// User-provided environment variables (sorted for deterministic ordering)
 	envKeys := make([]string, 0, len(cfg.Environment))
@@ -1202,6 +1208,14 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		// Node.js >=24: opt-in for built-in fetch (undici) to honor HTTP(S)_PROXY env vars.
 		// Without this, npx-based tools like mcp-remote bypass the proxy and fail with ENETUNREACH.
 		args = append(args, "-e", "NODE_USE_ENV_PROXY=1")
+
+		// mise's remote version-list lookups (one per `@latest`-style tool spec in
+		// a mise config) default to a 20s timeout each. In an egress-locked guest a
+		// lookup that escapes the proxy path hangs to the full timeout, and a config
+		// with several such specs stalls every `mise ls`/install for minutes. Bound
+		// the lookups tightly: through the local proxy a working fetch answers well
+		// under this, and a blocked one falls back to installed versions 3s in.
+		args = append(args, "-e", "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT=3s")
 
 		// User-defined extra proxy env vars from config
 		for _, name := range cfg.ProxyExtraEnv {

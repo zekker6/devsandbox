@@ -136,6 +136,31 @@ This means:
 - Tool configurations (`.mise.toml`) are respected
 - New tools cannot be installed from inside the sandbox (by default)
 
+On the container backends (`docker` and `krun`) the guest boots from a fresh image, but `MISE_DATA_DIR` points at the persistent sandbox home, so tools you install inside the sandbox (python, go, etc.) are installed once and reused on later runs rather than re-downloaded every launch. The image's pre-baked node is mirrored into that data dir on startup so it resolves immediately without a reinstall.
+
+On Linux hosts the container backends also share the host's installed tools: `~/.local/share/mise/installs` is mounted read-only into the guest, and on startup each host-installed version is mirrored into the sandbox data dir as a real version directory of symlinks (and the mise shims regenerated), so your host toolchain resolves inside `docker`/`krun` sandboxes without reinstalling or network access. The guest also runs the **host's own `mise` binary** when `~/.local/bin/mise` is mounted and executes in the guest (falling back to the image's otherwise): mise versions can disagree about a tool's backend and on-disk layout, so binary parity is what keeps host-installed tools resolving exactly as they do on the host. A version you install inside the sandbox always takes precedence over the host copy. Two caveats:
+
+- Host tools that were **compiled locally** against a newer glibc than the guest image ships may fail to run in the guest (upstream prebuilt tools - node, go, and most others - are unaffected). Fix: `mise uninstall <tool>@<version>` inside the sandbox (this only removes the seeded symlink, not the host install) and `mise install` to get a guest-local build.
+- On macOS hosts nothing is shared: the guest is Linux, so host (darwin) binaries cannot run in it.
+
+A host global config (`~/.config/mise/config.toml`) with `@latest` `npm:`/`go:`/`pipx:` tool specs is a hazard on an egress-locked sandbox: even when the tool itself is seeded from the host, mise refreshes the remote version list behind each `@latest` spec over the network, some backends' lookups (npm registry, python-build) never traverse the proxy and hang to their timeout, and mise re-resolves the toolset per listed row with no negative cache - a single `mise ls` can turn into hundreds of doomed lookups. devsandbox defends in three layers:
+
+- The **krun + proxy guest runs mise offline** (`MISE_OFFLINE=1`): everything resolves instantly from installed/cached data - with host installs seeded, that is your full host toolchain. The boot-time project-tool install still runs online through the proxy, and a manual install inside the sandbox works with an explicit `MISE_OFFLINE=0 mise install ...`.
+- All **proxy-mode sandboxes bound remote lookups to 3s** (`MISE_FETCH_REMOTE_VERSIONS_TIMEOUT=3s`, was mise's 20s default; override via the sandbox env config).
+- The **startup shim resolves nothing over the network** (`MISE_OFFLINE=1` for its own mise invocations).
+
+To avoid the residual per-lookup warnings on non-krun proxy sandboxes entirely:
+
+- Pin the versions in your global config, or prefer a per-project `.mise.toml` for the tools a sandboxed project actually needs.
+- Set `ignore_global_config` for mise so the sandbox does not read your host global `config.toml` at all (your project `.mise.toml`, the baked node, and `~/.config/mise/settings.toml` still apply):
+
+  ```toml
+  [tools.mise]
+  ignore_global_config = true
+  ```
+
+  This defaults to `false` (the host global config is respected). It applies to every backend (`bwrap`, `docker`, `krun`).
+
 ### Writable Mise (Overlay Mode)
 
 Configure the overlay mount mode for mise to allow installing tools inside the sandbox. In `~/.config/devsandbox/config.toml`:
