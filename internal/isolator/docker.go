@@ -359,7 +359,14 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		// krun + proxy: start non-blocking so the booted guest's PID can be
+		// resolved and the session registered for port forwarding (modeled on the
+		// bwrap StartWithPasta -> OnSandboxStart -> Wait flow). Docker and
+		// krun-without-proxy keep the simple blocking run.
+		if d.usesMicroVMSession(sandboxCfg.ProxyEnabled) {
+			return d.runMicroVMSession(ctx, cmd, result.ContainerName, cfg.OnSandboxStart, isoCfg.SandboxHome, isoCfg.ProxyPort)
+		}
+		return asCommandExit(cmd.Run())
 
 	case DockerActionCreate:
 		createCmd := exec.Command(result.BinaryPath, result.Args...)
@@ -404,6 +411,206 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	default:
 		return fmt.Errorf("unexpected docker action: %d", result.Action)
 	}
+}
+
+// usesMicroVMSession reports whether the krun non-blocking session path should
+// run for this launch: a microVM engine in proxy mode. The non-blocking path
+// resolves the booted guest's PID, which is needed for BOTH the host-side egress
+// lockdown (always, on Linux) and session registration for port forwarding (only
+// when a callback is wired). Gating it on proxy alone - not on a callback - keeps
+// it aligned with the DEVSANDBOX_EGRESS_LOCKDOWN env set in buildCommonArgs: if
+// this path were skipped while that env was set, the guest would wait forever for
+// a sentinel the host never writes. The proxy gate mirrors bwrap (it only calls
+// OnSandboxStart under ProxyEnabled) and the proxy-gated session naming/cleanup
+// in cmd/devsandbox/main.go; runMicroVMSession skips the callback when it is nil,
+// so no nameless session file is written. Docker and krun-without-proxy keep the
+// simple blocking run.
+func (d *DockerIsolator) usesMicroVMSession(proxyEnabled bool) bool {
+	return d.engine.microVM && proxyEnabled
+}
+
+// runMicroVMSession starts an already-built ephemeral krun run non-blocking,
+// resolves the booted guest's PID in the background, and invokes onStart so the
+// session registers for port forwarding - then waits for the session to exit.
+//
+// PID resolution runs concurrently rather than before Wait (unlike the bwrap
+// path, whose child PID is known synchronously): a short-lived `devsandbox run
+// <cmd>` would otherwise stall waiting for a PID on a container that has already
+// `--rm`'d itself. When the container exits, Wait returns and the poll is
+// cancelled, so a fast run is never delayed.
+//
+// Reachability caveat (validated on a KVM host in Post-Completion, not here):
+// the resolved PID is the host-side VMM process, whose network namespace is the
+// pasta/container netns - one layer outside the guest. Forwarding therefore
+// reaches that netns; whether a guest listener is visible there depends on pasta,
+// so krun forward is best-effort in v2. Session registration itself is correct
+// regardless (it powers `devsandbox forward`/liveness).
+func (d *DockerIsolator) runMicroVMSession(ctx context.Context, cmd *exec.Cmd, containerName string, onStart func(nsPID int, nsPath string), sandboxHome string, proxyPort int) error {
+	// Egress lockdown is applied here, host-side, in the VMM's pasta netns (see
+	// egress.go for why it cannot run in-guest under libkrun TSI). It is gated to
+	// the same condition that sets DEVSANDBOX_EGRESS_LOCKDOWN in buildCommonArgs:
+	// a krun microVM session always runs in proxy mode, so on Linux the guest is
+	// waiting on the sentinel and we MUST produce it (or fail closed).
+	// Clear any stale sentinel BEFORE the guest boots so it waits for THIS run's
+	// lockdown rather than honoring a file left by a previous run of the same
+	// project. Fail-closed: if the path cannot be verified clean, abort the launch
+	// here - before cmd.Start() below - rather than boot the guest against a
+	// sentinel path that could spoof the gate.
+	lockdown, prepErr := prepareEgressLockdown(d.engine.microVM, runtime.GOOS, sandboxHome)
+	if prepErr != nil {
+		return prepErr
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start %s microVM: %w", d.engine.binary, err)
+	}
+
+	resolveCtx, cancelResolve := context.WithCancel(ctx)
+	defer cancelResolve()
+
+	var (
+		lockdownMu  sync.Mutex
+		lockdownErr error
+	)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		pid, err := d.waitForContainerPID(resolveCtx, containerName, 30*time.Second)
+		if err != nil {
+			// Suppress the warning when the container simply exited first
+			// (resolveCtx cancelled) - that is the normal short-run case.
+			if resolveCtx.Err() == nil {
+				if diag := d.startupDiagnostics(containerName); diag != "" {
+					d.logWarn("port forwarding unavailable for this krun session: %v\nlast %d lines of %s output from %q:\n%s",
+						err, startupLogTailLines, d.engine.binary, containerName, diag)
+				} else {
+					d.logWarn("port forwarding unavailable for this krun session: %v", err)
+				}
+			}
+			return
+		}
+		// Skip the rest if the container exited while we were resolving.
+		if resolveCtx.Err() != nil {
+			return
+		}
+
+		// Lock egress before releasing the guest workload. The guest shim blocks
+		// on the sentinel until writeEgressSentinel below, so the workload never
+		// runs while direct egress is still open. Fail-closed: on any error, tear
+		// down the microVM and record the error so Run aborts.
+		if lockdown {
+			if err := lockdownGuestEgress(pid, d.engine.hostAlias, proxyPort); err != nil {
+				d.recordLockdownFailure(&lockdownMu, &lockdownErr, err, containerName, cancelResolve)
+				return
+			}
+			if err := writeEgressSentinel(sandboxHome); err != nil {
+				d.recordLockdownFailure(&lockdownMu, &lockdownErr, fmt.Errorf("write egress sentinel: %w", err), containerName, cancelResolve)
+				return
+			}
+		}
+
+		// Register the port-forward session when a callback is wired. krun+proxy
+		// runs may reach this path without one (the lockdown above still applies);
+		// skip rather than write a nameless session file.
+		if onStart != nil {
+			onStart(pid, containerNetnsPath(pid))
+		}
+	})
+
+	err := cmd.Wait()
+	// Cancel and join the resolver before returning. The caller registers the
+	// session inside onStart and tears it down in a deferred cleanup once Run
+	// returns; without the join the resolver could call onStart after that
+	// teardown, leaving a stale session/forward target. The cancel also unblocks
+	// a resolver still polling for a PID on the now-exited container.
+	cancelResolve()
+	wg.Wait()
+
+	lockdownMu.Lock()
+	le := lockdownErr
+	lockdownMu.Unlock()
+	if le != nil {
+		return fmt.Errorf("krun egress lockdown failed (fail-closed): %w", le)
+	}
+	return asCommandExit(err)
+}
+
+// recordLockdownFailure stores the first egress-lockdown error and fails closed
+// by killing the microVM (so the sentinel-gated guest never runs the workload)
+// and cancelling the resolver.
+func (d *DockerIsolator) recordLockdownFailure(mu *sync.Mutex, dst *error, err error, containerName string, cancelResolve context.CancelFunc) {
+	mu.Lock()
+	if *dst == nil {
+		*dst = err
+	}
+	mu.Unlock()
+	d.logWarn("egress lockdown failed, tearing down microVM: %v", err)
+	_ = exec.Command(d.engine.binary, "kill", containerName).Run()
+	cancelResolve()
+}
+
+// waitForContainerPID polls the engine for the container's main-process PID until
+// it reports a running value, the timeout elapses, or ctx is cancelled.
+func (d *DockerIsolator) waitForContainerPID(ctx context.Context, containerName string, timeout time.Duration) (int, error) {
+	timeoutCh := time.After(timeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		pid, err := d.inspectContainerPID(ctx, containerName)
+		if err == nil && pid > 0 {
+			return pid, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-timeoutCh:
+			if lastErr != nil {
+				return 0, fmt.Errorf("container %s did not report a running PID within %s: %w", containerName, timeout, lastErr)
+			}
+			return 0, fmt.Errorf("container %s did not report a running PID within %s", containerName, timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+// inspectContainerPID runs `<engine> inspect --format '{{.State.Pid}}'` and
+// parses the result.
+func (d *DockerIsolator) inspectContainerPID(ctx context.Context, containerName string) (int, error) {
+	cmd := exec.CommandContext(ctx, d.engine.binary, "inspect", "--format", "{{.State.Pid}}", containerName)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("inspect %s: %w", containerName, err)
+	}
+	return parseContainerPID(string(out))
+}
+
+// parseContainerPID extracts the integer PID from a `podman/docker inspect
+// --format '{{.State.Pid}}'` output. A created-but-not-yet-running container
+// reports 0; that is returned as an error so callers keep polling.
+func parseContainerPID(inspectOutput string) (int, error) {
+	s := strings.TrimSpace(inspectOutput)
+	if s == "" {
+		return 0, errors.New("empty PID from container inspect")
+	}
+	pid, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("parse container PID %q: %w", s, err)
+	}
+	if pid <= 0 {
+		return 0, fmt.Errorf("container not running yet (PID %d)", pid)
+	}
+	return pid, nil
+}
+
+// containerNetnsPath returns the procfs network-namespace path for a PID, the
+// form OnSandboxStart and the namespace dialer consume.
+func containerNetnsPath(pid int) string {
+	return fmt.Sprintf("/proc/%d/ns/net", pid)
 }
 
 // execIntoContainer runs docker exec into a container with the given command.
@@ -1023,6 +1230,37 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	// Per-session network for proxy isolation
 	if d.networkName != "" {
 		args = append(args, "--network", d.networkName)
+	}
+
+	// krun proxy mode: bind the proxy to host loopback (never LAN-reachable) and
+	// have pasta map the gateway alias to the host's 127.0.0.1, so only this
+	// microVM can reach it - the same model the bwrap backend uses. d.engine.hostAlias
+	// holds the gateway IP for krun, and PROXY_HOST below points the guest at it.
+	if d.engine.microVM && cfg.ProxyEnabled {
+		args = append(args, "--network", "pasta:--map-host-loopback,"+d.engine.hostAlias)
+
+		// Egress lockdown: force all guest traffic through the proxy by deleting
+		// the default route (keeping only a /32 to the gateway) so direct-IP and
+		// DNS exfiltration have no path out. Under libkrun TSI the guest has no
+		// routable interface, so this CANNOT run in-guest; the host applies it in
+		// the VMM's pasta netns after boot (see runMicroVMSession -> egress.go).
+		// The shim only WAITS for that to finish (DEVSANDBOX_EGRESS_LOCKDOWN=1)
+		// before exec'ing the workload - no in-guest NET_ADMIN is needed. Gated on
+		// Linux: the surgery uses nsenter into the VMM netns.
+		if runtime.GOOS == "linux" {
+			args = append(args, "-e", "DEVSANDBOX_EGRESS_LOCKDOWN=1")
+		}
+
+		// The egress-locked guest gets offline mise. Some mise backends' remote
+		// version-list lookups (npm registry, python-build) never traverse the
+		// proxy and hang to their timeout, and mise re-resolves the toolset per
+		// listed row with no negative cache, so one `mise ls` against a config
+		// with `@latest` specs turns into hundreds of doomed lookups (measured:
+		// 14 minutes). Offline mode resolves from installed/cached data instantly
+		// - with host installs seeded, that is the full host toolchain. Boot-time
+		// project installs still run online (installMiseTools overrides this),
+		// and a manual in-sandbox install can too: MISE_OFFLINE=0 mise install.
+		args = append(args, "-e", "MISE_OFFLINE=1")
 	}
 
 	// Resource limits

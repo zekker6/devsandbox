@@ -84,6 +84,16 @@ func main() {
 		args = []string{"/bin/bash"}
 	}
 
+	// krun egress lockdown is applied HOST-side (the isolator locks this
+	// microVM's pasta-netns routing to the proxy gateway). Wait for that to
+	// complete before running the workload so untrusted code never sees open
+	// egress. Fail-closed: abort if the host does not confirm in time.
+	if egressLockdownRequested() {
+		if err := waitForEgressReady(); err != nil {
+			fatal("egress lockdown not confirmed (fail-closed): %v", err)
+		}
+	}
+
 	if len(fsOverlays) > 0 {
 		execWithOverlays(uid, gid, fsOverlays, args)
 		// execWithOverlays does not return on success
