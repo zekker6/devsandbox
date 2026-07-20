@@ -3,6 +3,13 @@
     "github>zekker6/renovate-config",
     "github>zekker6/renovate-config:automerge-github-actions"
   ],
+  "packageRules": [
+    {
+      "description": "goproxy v1.8.5 regressed the MITM path: the client connection is wrapped in a bufio.Writer that is only flushed after resp.Write returns, so response headers and small SSE events stay buffered until the whole body is consumed. Keep v1.8.4 until a fixed release ships.",
+      "matchPackageNames": ["github.com/elazarl/goproxy"],
+      "allowedVersions": "<=1.8.4"
+    }
+  ],
   "customManagers": [
     {
       "customType": "regex",
