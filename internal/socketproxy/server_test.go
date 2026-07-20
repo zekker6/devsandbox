@@ -301,3 +301,55 @@ func TestServer_HandlerContextCancelledOnStop(t *testing.T) {
 		t.Fatal("handler context was not cancelled on Stop")
 	}
 }
+
+// TestStopClosesIdleAcceptedConnections guards a shutdown hang.
+//
+// Handlers that block reading from their connection (a streaming protocol
+// proxy, as opposed to a one-shot request/response one) cannot observe context
+// cancellation: a blocked conn.Read is not interrupted by it. Unless Stop
+// closes accepted connections, such a handler never returns and Stop burns the
+// full drain timeout on every shutdown that has a live client.
+func TestStopClosesIdleAcceptedConnections(t *testing.T) {
+	sockPath := filepath.Join(shortSocketDir(t), "s.sock")
+
+	handlerReturned := make(chan struct{})
+	srv := NewServer(sockPath, 0o600, "test", func(ctx context.Context, conn net.Conn) {
+		defer close(handlerReturned)
+		// Block until the connection is closed from underneath us.
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	})
+
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	client, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Give the accept loop a moment to hand the connection to the handler.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if srv.connCount() > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	start := time.Now()
+	if err := srv.Stop(); err != nil {
+		t.Errorf("Stop returned error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Stop took %v with one idle connection, want it to close connections promptly", elapsed)
+	}
+
+	select {
+	case <-handlerReturned:
+	case <-time.After(time.Second):
+		t.Error("handler never returned after Stop; its connection was not closed")
+	}
+}

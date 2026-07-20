@@ -4,7 +4,13 @@ run:
   timeout: 5m
   modules-download-mode: readonly
 
-issues:
-  exclude-dirs:
-    - vendor
-    - tmp
+linters:
+  exclusions:
+    paths:
+      - vendor
+      - tmp
+    rules:
+      - path: '_test\.go'
+        linters:
+          - staticcheck
+        text: "SA5011"

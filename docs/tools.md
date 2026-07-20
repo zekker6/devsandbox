@@ -605,6 +605,8 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 
 `launch_*` capabilities equal arbitrary host code execution and must be paired with command patterns declared by the tool that requests them. Shell metacharacters (`;`, `&`, `|`, `` ` ``, `$()`, `<`, `>`, etc.) in `sh -c` payloads are rejected outright.
 
+Command patterns also pin the program to its **resolved absolute path** (`exec.LookPath` plus symlink resolution), not just its basename. Basename matching accepted any path ending in the allowed program name, including one inside a directory the sandbox can write - and the revdiff IPC directory is a write-through bind shared with the host at an identical path, so sandboxed code could plant its own `revdiff` there and have kitty run it on the host. If the binary cannot be resolved, every launch is denied rather than falling back.
+
 ### What Gets Mounted
 
 | Resource | Mode | Purpose |
@@ -625,6 +627,86 @@ The host's real kitty socket is **not** bind-mounted into the sandbox.
 - `remote_control_password` in `kitty.conf` is unsupported - use `allow_remote_control = socket-only` instead.
 
 Run `devsandbox tools check kitty` to confirm the tool is detected and see the active mode.
+
+## herdr Terminal Workspace
+
+When running inside a [herdr](https://herdr.dev) session, devsandbox runs a **filtering proxy** for the herdr control socket. The host socket is **not** bind-mounted into the sandbox; only the proxy socket is. Sandboxed code can perform only the herdr operations declared by enabled tools, scoped to tabs and panes the sandbox itself created.
+
+This is the same model as kitty, and the opposite of zellij: herdr speaks newline-delimited JSON with named methods, which makes real per-method filtering practical.
+
+### Why filtering is necessary
+
+herdr exposes 84 methods. Handing the raw socket to sandboxed code would grant `pane.read` (read any pane's contents, including other terminals), `pane.send_text` and `agent.send` (type into any pane), `worktree.*` (mutate git state), `plugin.*` (load code), and `server.stop`. Only the methods below are reachable through the proxy; everything else is denied.
+
+### Activation
+
+The proxy starts when all of:
+
+1. `HERDR_ENV=1` on the host (that is, devsandbox is running inside a herdr session).
+2. The `herdr` binary is on PATH.
+3. The host control socket exists (`$HERDR_SOCKET_PATH`, else `~/.config/herdr/herdr.sock`).
+4. At least one enabled tool declares a herdr capability, or `mode = "enforce"` is set.
+
+### Configuration
+
+```toml
+[tools.herdr]
+mode = "auto"
+```
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Proxy starts only when some enabled tool declares a capability. |
+| `disabled` | Proxy never starts and `HERDR_SOCKET_PATH` is not exported, so the sandboxed CLI cannot reach herdr at all. |
+| `enforce` | Proxy always starts; with no capabilities declared, every request is denied (useful to verify no tool silently uses herdr). |
+
+There is deliberately no `extra_capabilities` setting as kitty has: with this few capabilities it would configure nothing, and each grants host-visible effects.
+
+### Capabilities
+
+| Capability | Permits |
+|------------|---------|
+| `launch_overlay` | `tab.create`, then `pane.send_input` and `tab.close` **scoped to the tab and pane that call returned** |
+| `notify` | `notification.show` |
+
+`ping` is permitted unconditionally, independent of declared capabilities. It is a liveness handshake that observes and mutates nothing, returning only the server's version, protocol number, and feature flags - strictly less than a successful `connect(2)` to the socket already reveals. Without it `herdr status` fails, which is a poor signal for no safety gain. One consequence: under `mode = "enforce"` the proxy answers `ping` and denies everything else.
+
+Ownership is taken from the server's `tab.create` response, never from anything the client claims. `pane.send_input` is generic keystroke injection, so it is additionally restricted to exactly one command plus `Enter`, and the command must match the requesting tool's declared pattern.
+
+### Launch scripts are validated and relocated
+
+Unlike kitty, where the launcher passes an inline command, herdr's `pane run` is invoked as `sh <path>` - the payload is a *file*. That file lives in a directory the sandbox can write, yet it executes on the host, outside the sandbox.
+
+The proxy therefore reads the script **once**, validates the bytes against the declared pattern, writes them to a host-only directory (`~/.cache/devsandbox/herdr-scripts/<session>`, mode `0700`, files `0500`, never bind-mounted into the sandbox), and rewrites the request to name that copy. Validation and execution operate on the same immutable bytes, so there is no window in which the sandbox can swap the script after it passes.
+
+One consequence is user-visible: the command shown in the herdr pane names the relocated copy, not the original path. Relocated scripts are removed when the sandbox exits.
+
+The program named inside the script is pinned to its resolved absolute path, for the same reason described in the kitty section.
+
+### What Gets Mounted
+
+| Resource | Mode | Purpose |
+|----------|------|---------|
+| Proxy socket (`$HOME/.run/<pid>/herdr.sock`) | read-write (proxy is local to the sandbox home) | herdr control via the filtering proxy |
+| Proxy socket, second path (`$HOME/.config/herdr/herdr.sock`) | read-write bind mount | the path herdr's client derives on its own, for subcommands that ignore `HERDR_SOCKET_PATH` |
+| `herdr` binary | read-only | CLI for `herdr tab create`, `herdr pane run`, etc. Skipped when the binary already sits under a mounted directory, as mise installs do. |
+
+The host's real herdr socket is **not** bind-mounted into the sandbox, and neither is the script relocation directory.
+
+The second socket path exists because a few subcommands bypass the environment variable. `herdr session list` connects directly to `<config dir>/herdr.sock` and reports the session `stopped` when that fails - which it always did in the sandbox, since the host socket is never mounted. That probe is `connect(2)` only, with no protocol traffic, so pointing it at the proxy makes the status correct without any request crossing the filter. It is the same filtered socket under a second name, so it grants no additional reach.
+
+### Environment Variables
+
+- `HERDR_SOCKET_PATH` - set to `$HOME/.run/<pid>/herdr.sock` inside the sandbox, and only while the proxy is running. The host value is never exposed.
+- `HERDR_ENV`, `HERDR_SESSION`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID` - passed through from the host as read-only signals about the calling pane. `HERDR_WORKSPACE_ID` matters: launchers read it from the environment rather than querying the API, which is why no read-only introspection capability is needed.
+
+### Limitations
+
+- Streaming methods (`events.subscribe`, `events.wait`, `pane.wait_for_output`) are denied in this iteration.
+- Read-only introspection (`pane.list`, `tab.list`, `pane.current`, `session.snapshot`) is denied; nothing needs it yet. Commands built on them fail with a `forbidden` error rather than degrading quietly.
+- Verified against herdr v0.7.4 (protocol 16). A protocol bump can change parameter shapes the filter validates; the failure mode is denial, not bypass.
+
+Run `devsandbox tools check herdr` to confirm the tool is detected and see the active mode and capabilities.
 
 ## Zellij Terminal Multiplexer
 
