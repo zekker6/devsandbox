@@ -151,7 +151,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 | `.git` directory | Read-only (no commits, no credentials) |
 | mise-managed tools | Read-only |
 | Network (default) | Full access |
-| Network (proxy mode) | Isolated and logged |
+| Network (proxy mode) | Isolated and logged (enforced on bwrap/krun; env-var routing only on Docker) |
 | Outgoing secrets (proxy + redaction) | Blocked or redacted |
 
 Everything is configurable. See [Configuration](docs/configuration.md) for details.

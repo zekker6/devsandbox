@@ -2,9 +2,12 @@
 
 Network isolation, traffic inspection, and HTTP filtering.
 
-Proxy mode routes all HTTP/HTTPS traffic through a local MITM (Man-in-the-Middle) proxy for inspection and logging.
-The sections below describe bwrap backend behavior by default. The Docker backend achieves the same goal with different
-mechanisms - see [Backend-Specific Behavior](#backend-specific-behavior) for details.
+Proxy mode routes HTTP/HTTPS traffic through a local MITM (Man-in-the-Middle) proxy for inspection and logging.
+
+How strongly that routing is enforced depends on the isolation backend. bwrap and krun confine the sandbox to a network
+namespace it cannot route around; Docker only points the container at the proxy through environment variables, which a
+process is free to ignore. The sections below describe bwrap backend behavior by default - read
+[Backend-Specific Behavior](#backend-specific-behavior) before relying on proxy mode as a security boundary.
 
 ## Why Use Proxy Mode?
 
@@ -29,7 +32,9 @@ Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for n
 
 devsandbox includes an embedded pasta binary - no system packages required. To use a system-installed pasta instead, set `use_embedded = false` in [configuration](configuration.md).
 
-> **Docker backend:** The Docker backend does NOT require pasta. It uses per-session Docker networks for isolation instead. See [Backend-Specific Behavior](#backend-specific-behavior).
+> **Other backends:** The Docker backend does NOT require pasta - it uses per-session Docker networks instead. The krun
+> backend requires a system-installed pasta (podman networking; the embedded binary does not satisfy podman) plus `nft`
+> or `iptables` for its egress lockdown. See [Backend-Specific Behavior](#backend-specific-behavior).
 
 Optionally install the system package as a fallback:
 
@@ -121,28 +126,64 @@ If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM ena
 
 ## Backend-Specific Behavior
 
-The proxy achieves the same goal on both backends - intercept and log HTTP/HTTPS traffic - but the underlying mechanisms differ.
+All three backends point the sandbox at the same proxy and intercept the same traffic, but they differ in the mechanism -
+and, more importantly, in whether a process inside the sandbox can bypass the proxy and reach the network directly.
 
 ### bwrap backend
 
+- **Enforcement**: Enforced - the sandbox has no route to the outside except the proxy gateway
 - **Network isolation**: pasta creates a new network namespace with its own network stack
 - **Gateway address**: Traffic is routed through `10.0.2.2` (pasta virtual gateway)
 - **CA certificate path** (inside sandbox): `/tmp/devsandbox-ca.crt`
 - **Requirement**: passt/pasta must be installed
 
+Inside the namespace devsandbox adds a `/32` route to the gateway and deletes the default route, so a process that
+ignores `HTTP_PROXY` has no path to an external address and its connections fail. Two limits are worth knowing: hosts on
+the sandbox interface's own connected subnet stay reachable (deleting the default route does not remove the on-link
+route), and pasta's `--map-host-loopback` maps the whole gateway address to the host's loopback, not only the proxy port.
+
+### krun backend
+
+- **Enforcement**: Enforced - route surgery plus a deny-by-default egress firewall; Linux only
+- **Network isolation**: pasta network namespace around the microVM (system pasta, via rootless podman)
+- **Gateway address**: `10.0.2.2` (pasta gateway mapped to the host loopback the proxy binds to)
+- **CA certificate path** (inside guest): `/etc/ssl/certs/devsandbox-ca.crt`
+- **Requirement**: podman with the krun runtime, system pasta, and `nft` or `iptables`
+
+krun closes the two gaps above. Under libkrun the guest has no routable interface of its own, so the lockdown is applied
+host-side in the VMM's pasta namespace: the same route surgery, paired with a firewall that DROPS by default and permits
+only loopback, established/related return traffic, and new TCP connections to the gateway on the proxy port. LAN hosts,
+cloud metadata endpoints, and direct DNS have no path out. The guest is given IPv4 only, so there is no IPv6 route around
+the IPv4 rules, and the in-guest workload does not start until the host signals the lockdown is complete.
+
+The lockdown is fail-closed: if `nft`/`iptables` is missing or any lockdown command fails, the launch aborts instead of
+running with open egress. Proxy mode with krun on **macOS is refused outright** - the lockdown is not implemented for
+Hypervisor.framework, and degrading to unenforced egress silently is not an option. Run krun proxy mode on Linux, or use
+krun without proxy mode.
+
 ### Docker backend
 
+- **Enforcement**: **Advisory only** - proxy environment variables, no network-level enforcement
 - **Network isolation**: A per-session Docker network is created (no pasta required)
 - **Gateway address**: `host.docker.internal` (Docker's built-in host access)
 - **CA certificate path** (inside container): `/etc/ssl/certs/devsandbox-ca.crt`
 - **Requirement**: Docker daemon running (no additional dependencies)
 
-| Aspect | bwrap | Docker |
-|--------|-------|--------|
-| Network isolation | pasta namespace | Per-session Docker network |
-| Gateway IP | `10.0.2.2` | `host.docker.internal` |
-| CA cert location | `/tmp/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` |
-| Extra dependency | passt/pasta | None (Docker only) |
+The per-session network separates sandboxes from each other, but it is an ordinary bridge network with outbound access:
+nothing removes the container's default route and no firewall rules are applied. Routing to the proxy comes solely from
+`HTTP_PROXY`/`HTTPS_PROXY` (plus tool-specific variants) set in the container environment. Any process that ignores those
+variables, or opens a socket directly, reaches the network without being filtered, redacted, or logged. Treat proxy mode
+on Docker as instrumentation for cooperating tools, not as a containment boundary - use bwrap or krun when the proxy has
+to hold against uncooperative code.
+
+| Aspect | bwrap | krun | Docker |
+|--------|-------|------|--------|
+| Enforcement | Enforced (no default route) | Enforced (no default route + deny-by-default firewall) | Advisory (env vars only) |
+| Network isolation | pasta namespace | pasta namespace around the microVM | Per-session Docker network |
+| Gateway IP | `10.0.2.2` | `10.0.2.2` | `host.docker.internal` |
+| CA cert location | `/tmp/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` |
+| Extra dependency | passt/pasta (embedded) | podman + krun, system pasta, `nft`/`iptables` | None (Docker only) |
+| Proxy mode platforms | Linux | Linux only (refused on macOS) | Linux, macOS |
 
 ## How It Works (bwrap)
 
@@ -177,7 +218,7 @@ A CA certificate is automatically generated for HTTPS interception and stored at
 ~/.local/share/devsandbox/<project>/.ca/ca.crt
 ```
 
-Inside the sandbox, the certificate is available at `/tmp/devsandbox-ca.crt` (bwrap backend) or `/etc/ssl/certs/devsandbox-ca.crt` (Docker backend) and automatically configured via
+Inside the sandbox, the certificate is available at `/tmp/devsandbox-ca.crt` (bwrap backend) or `/etc/ssl/certs/devsandbox-ca.crt` (Docker and krun backends) and automatically configured via
 environment variables:
 
 | Variable              | Purpose         |
