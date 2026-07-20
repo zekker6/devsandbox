@@ -121,10 +121,24 @@ func runDoctor() error {
 	return nil
 }
 
+// hasHintedError reports whether any failing row carries remediation of its own.
+// When it does not, the "How to fix" block holds advisory rows only and must not
+// be read as the remedy for whatever failed the run.
+func hasHintedError(results []checkResult) bool {
+	for _, r := range results {
+		if r.status == "error" && r.hint != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // doctorSummary renders the closing line of a doctor run. Only "error" rows fail
 // the run: the krun prerequisites are advisory by design, so their warnings are
 // counted rather than swallowed - claiming "All checks passed!" directly below a
-// "How to fix" block for unmet krun rows reads as a contradiction.
+// "How to fix" block for unmet krun rows reads as a contradiction. A failing run
+// whose hints are all advisory says so, because the block sits directly above the
+// summary and otherwise reads as the fix for the failure.
 func doctorSummary(results []checkResult) (msg string, failed bool) {
 	warnings := 0
 	hinted := 0
@@ -141,6 +155,10 @@ func doctorSummary(results []checkResult) (msg string, failed bool) {
 	}
 
 	switch {
+	case failed && hinted > 0 && !hasHintedError(results):
+		return fmt.Sprintf("Some checks failed. Please install missing dependencies (the %q block above covers advisory warnings only).", "How to fix"), true
+	case failed && hinted > 0:
+		return fmt.Sprintf("Some checks failed. Please install missing dependencies - see %q above.", "How to fix"), true
 	case failed:
 		return "Some checks failed. Please install missing dependencies.", true
 	case warnings > 0 && hinted > 0:
@@ -418,7 +436,9 @@ func printDoctorResults(results []checkResult) {
 // printDoctorHints prints the remediation attached to unmet checks. The DETAILS
 // column only fits a one-line summary, so without this the guidance a check
 // carries would never reach the user. runDoctor calls it immediately before the
-// summary, which points back at this block.
+// summary, which points back at this block. The heading names the block advisory
+// when no failing row contributed to it, so a run that failed for an unrelated
+// reason does not read as if these entries were the remedy.
 func printDoctorHints(results []checkResult) {
 	var pending []checkResult
 	for _, r := range results {
@@ -430,7 +450,11 @@ func printDoctorHints(results []checkResult) {
 		return
 	}
 
-	fmt.Println("\nHow to fix:")
+	heading := "How to fix:"
+	if !hasHintedError(results) {
+		heading = "How to fix (advisory warnings):"
+	}
+	fmt.Printf("\n%s\n", heading)
 	for _, r := range pending {
 		fmt.Printf("\n  %s:\n", r.name)
 		for _, line := range strings.Split(r.hint, "\n") {

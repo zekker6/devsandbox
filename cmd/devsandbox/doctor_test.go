@@ -167,13 +167,30 @@ func TestDoctorSummary(t *testing.T) {
 			want: "All required checks passed (1 advisory warning(s)).",
 		},
 		{
-			name: "error outranks warnings",
+			name: "error outranks warnings and the advisory-only block is labelled",
 			results: []checkResult{
 				{name: "krun: system pasta", status: "warn", hint: "install passt"},
 				{name: "shell", status: "error"},
 			},
 			wantFailed: true,
+			want:       `Some checks failed. Please install missing dependencies (the "How to fix" block above covers advisory warnings only).`,
+		},
+		{
+			name: "failure with no hints anywhere does not mention the block",
+			results: []checkResult{
+				{name: "bwrap", status: "error"},
+			},
+			wantFailed: true,
 			want:       "Some checks failed. Please install missing dependencies.",
+		},
+		{
+			name: "failing row with its own hint points at the block",
+			results: []checkResult{
+				{name: "krun: system pasta", status: "warn", hint: "install passt"},
+				{name: "bwrap", status: "error", hint: "install bubblewrap"},
+			},
+			wantFailed: true,
+			want:       `Some checks failed. Please install missing dependencies - see "How to fix" above.`,
 		},
 	}
 

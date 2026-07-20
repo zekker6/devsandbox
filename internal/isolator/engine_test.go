@@ -125,8 +125,8 @@ func TestFirstMicroVMGapPrefersArchitecture(t *testing.T) {
 
 // TestCheckSystemPasta asserts the doctor row reports the resolved path when the
 // system pasta binary is present and a warn-with-remediation when it is not. The
-// binary is distinct from the pasta devsandbox embeds for bwrap: podman only
-// sees one on PATH.
+// binary is distinct from the pasta devsandbox embeds for bwrap, which podman
+// never looks at. The probe searches $PATH only, so its remediation must say so.
 func TestCheckSystemPasta(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -162,6 +162,9 @@ func TestCheckSystemPasta(t *testing.T) {
 			}
 			if !strings.Contains(got.Hint, "passt") {
 				t.Errorf("Hint %q should name the passt package", got.Hint)
+			}
+			if !strings.Contains(got.Hint, "helper_binaries_dir") {
+				t.Errorf("Hint %q should note that podman may find pasta outside $PATH", got.Hint)
 			}
 		})
 	}

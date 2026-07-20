@@ -183,7 +183,9 @@ func checkKVMAccess() MicroVMCheck {
 // separate requirement from the pasta devsandbox embeds for the bwrap backend:
 // the embedded copy is extracted into the devsandbox cache and podman never
 // looks there. Like the firewall row this is advisory - doctor warns so the gap
-// surfaces before a launch trips over it.
+// surfaces before a launch trips over it. The probe only searches $PATH, while
+// podman also consults helper_binaries_dir from containers.conf, so the warning
+// says it may be a false positive rather than parsing that config.
 func CheckSystemPasta() MicroVMCheck {
 	return checkSystemPasta(exec.LookPath)
 }
@@ -199,7 +201,10 @@ func checkSystemPasta(lookPath func(string) (string, error)) MicroVMCheck {
 				"  Arch:          sudo pacman -S passt\n" +
 				"  Fedora:        sudo dnf install passt\n" +
 				"  Debian/Ubuntu: sudo apt install passt\n" +
-				"The pasta devsandbox embeds for the bwrap backend does not satisfy podman.",
+				"The pasta devsandbox embeds for the bwrap backend does not satisfy podman.\n" +
+				"This probe searches $PATH only, so a host that installs pasta into podman's\n" +
+				"helper_binaries_dir (containers.conf, e.g. /usr/libexec/podman) may already be\n" +
+				"configured correctly; verify with: podman info --format '{{.Host.Pasta.Executable}}'",
 		}
 	}
 	return MicroVMCheck{Name: systemPastaName, OK: true, Summary: path}
