@@ -1,11 +1,17 @@
 package isolator
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 
 	"devsandbox/internal/network"
 	"devsandbox/internal/sandbox"
@@ -72,7 +78,8 @@ func NewKrunIsolator(cfg DockerConfig) *DockerIsolator {
 // means both consumers agree on what "ready for krun" means.
 type MicroVMCheck struct {
 	// Name identifies the prerequisite: "podman", "runtime" (the krun OCI
-	// runtime), "kvm", or "platform" (unsupported OS or CPU architecture).
+	// runtime), "kvm", "platform" (unsupported OS or CPU architecture),
+	// "firewall", "system pasta", or "rootless id mapping".
 	Name string
 	// OK is true when the prerequisite is satisfied.
 	OK bool
@@ -174,6 +181,147 @@ func checkKVMAccess() MicroVMCheck {
 		return MicroVMCheck{Name: "kvm", OK: false, Summary: fmt.Sprintf("/dev/kvm: %v", cerr)}
 	}
 	return MicroVMCheck{Name: "kvm", OK: true, Summary: "/dev/kvm accessible"}
+}
+
+// CheckSystemPasta reports whether the host provides a system-wide pasta binary.
+// Rootless podman needs one to give the krun guest a network, which is a
+// separate requirement from the pasta devsandbox embeds for the bwrap backend:
+// the embedded copy is extracted into the devsandbox cache and podman never
+// looks there. Like the firewall row this is advisory - doctor warns so the gap
+// surfaces before a launch trips over it.
+func CheckSystemPasta() MicroVMCheck {
+	return checkSystemPasta(exec.LookPath)
+}
+
+func checkSystemPasta(lookPath func(string) (string, error)) MicroVMCheck {
+	path, err := lookPath("pasta")
+	if err != nil {
+		return MicroVMCheck{
+			Name:    "system pasta",
+			OK:      false,
+			Summary: "pasta not installed (rootless podman networking)",
+			Hint: "Install the 'passt' package, which provides pasta:\n" +
+				"  Arch: sudo pacman -S passt   Fedora: sudo dnf install passt   Debian/Ubuntu: sudo apt install passt\n" +
+				"The pasta devsandbox embeds for the bwrap backend does not satisfy podman.",
+		}
+	}
+	return MicroVMCheck{Name: "system pasta", OK: true, Summary: path}
+}
+
+// subUIDPath and subGIDPath are the shadow-utils subordinate id databases that
+// rootless podman consults when building the guest user namespace.
+const (
+	subUIDPath = "/etc/subuid"
+	subGIDPath = "/etc/subgid"
+
+	rootlessIDMappingName = "rootless id mapping"
+)
+
+// CheckRootlessIDMapping reports whether the current user owns subordinate uid
+// and gid ranges. The krun backend runs the guest under rootless podman with
+// --userns=keep-id, which cannot build its user namespace without them. Most
+// distributions provision the ranges when podman is installed, so the row is
+// advisory: doctor warns rather than failing a host that never runs krun.
+func CheckRootlessIDMapping() MicroVMCheck {
+	return checkRootlessIDMapping(user.Current, func(path string) (io.ReadCloser, error) { return os.Open(path) })
+}
+
+func checkRootlessIDMapping(currentUser func() (*user.User, error), open func(string) (io.ReadCloser, error)) MicroVMCheck {
+	u, err := currentUser()
+	if err != nil {
+		return MicroVMCheck{
+			Name:    rootlessIDMappingName,
+			OK:      false,
+			Summary: fmt.Sprintf("cannot resolve the current user: %v", err),
+			Hint:    subIDHint(""),
+		}
+	}
+	// A root podman does not map subordinate ids at all, so an empty database
+	// is not a gap there and must not be reported as one.
+	if u.Uid == "0" {
+		return MicroVMCheck{
+			Name:    rootlessIDMappingName,
+			OK:      true,
+			Summary: "running as root (no subordinate ranges needed)",
+		}
+	}
+
+	owners := []string{u.Username, u.Uid}
+	for _, path := range []string{subUIDPath, subGIDPath} {
+		mapped, ferr := subIDFileMapped(open, path, owners)
+		if ferr != nil {
+			return MicroVMCheck{
+				Name:    rootlessIDMappingName,
+				OK:      false,
+				Summary: fmt.Sprintf("%s: %v", path, ferr),
+				Hint:    subIDHint(u.Username),
+			}
+		}
+		if !mapped {
+			return MicroVMCheck{
+				Name:    rootlessIDMappingName,
+				OK:      false,
+				Summary: fmt.Sprintf("no %s range for %s", path, u.Username),
+				Hint:    subIDHint(u.Username),
+			}
+		}
+	}
+	return MicroVMCheck{
+		Name:    rootlessIDMappingName,
+		OK:      true,
+		Summary: fmt.Sprintf("%s and %s map %s", subUIDPath, subGIDPath, u.Username),
+	}
+}
+
+func subIDFileMapped(open func(string) (io.ReadCloser, error), path string, owners []string) (bool, error) {
+	f, err := open(path)
+	if err != nil {
+		return false, err
+	}
+	mapped, err := subIDMapped(f, owners)
+	if cerr := f.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	return mapped, err
+}
+
+// subIDMapped reports whether the /etc/subuid- or /etc/subgid-formatted content
+// in r allocates a non-empty subordinate range to any of owners. Lines are
+// "owner:start:count"; blanks, comments, and malformed lines are skipped the way
+// shadow-utils tolerates them, so a stray line does not mask a valid entry
+// further down. Both the login name and the numeric id are accepted as owners
+// because either may key a line.
+func subIDMapped(r io.Reader, owners []string) (bool, error) {
+	s := bufio.NewScanner(r)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) != 3 || !slices.Contains(owners, fields[0]) {
+			continue
+		}
+		if _, err := strconv.ParseUint(fields[1], 10, 32); err != nil {
+			continue
+		}
+		if count, err := strconv.ParseUint(fields[2], 10, 32); err != nil || count == 0 {
+			continue
+		}
+		return true, nil
+	}
+	return false, s.Err()
+}
+
+func subIDHint(username string) string {
+	if username == "" {
+		username = "$USER"
+	}
+	return fmt.Sprintf("Rootless podman maps your user into the guest with --userns=keep-id, which needs\n"+
+		"subordinate id ranges. Add them, then reload podman's user namespace:\n"+
+		"  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 %s\n"+
+		"  podman system migrate\n"+
+		"Most distributions provision these when podman is installed.", username)
 }
 
 // microVMArchSupported reports why the krun microVM backend cannot run on the

@@ -13,7 +13,7 @@ The `krun` backend runs the sandbox image inside a [libkrun](https://github.com/
 | Kernel with rootless overlay | Tool dirs (kernel 5.13+) | Any modern distro |
 | `nft` **or** `iptables` (proxy mode only) | Port-scopes guest egress to the proxy inside the VMM netns; **krun + proxy on Linux fails closed without one** | `nft --version` or `iptables --version` (usually already present) |
 
-On Linux you need bare-metal KVM or a VM with **nested virtualization** enabled. If `/dev/kvm` is missing, krun cannot run here. The subuid/subgid mappings are configured by default on most distributions when `podman` is installed. For **proxy mode** you also need `nft` or `iptables` on the host - one is almost always installed already, but if neither is present a krun + proxy launch aborts (`devsandbox doctor` reports this as `krun: firewall`).
+On Linux you need bare-metal KVM or a VM with **nested virtualization** enabled. If `/dev/kvm` is missing, krun cannot run here. The subuid/subgid mappings are configured by default on most distributions when `podman` is installed. For **proxy mode** you also need `nft` or `iptables` on the host - one is almost always installed already, but if neither is present a krun + proxy launch aborts (`devsandbox doctor` reports this as `krun: firewall`). `devsandbox doctor` also checks the rootless prerequisites directly: `krun: system pasta` (the host `pasta` binary podman needs - the copy devsandbox embeds for `bwrap` does not count) and `krun: rootless id mapping` (your `/etc/subuid` and `/etc/subgid` ranges). All krun rows are advisory warnings, so `doctor` still exits zero on a host that only runs `bwrap` or `docker`.
 
 ## Install
 

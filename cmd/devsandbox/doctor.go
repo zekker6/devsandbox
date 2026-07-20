@@ -748,14 +748,20 @@ func checkDockerImage(image string) checkResult {
 
 // checkKrun reports the krun microVM backend prerequisites as informational
 // doctor rows (podman, the krun OCI runtime, and /dev/kvm on Linux). On Linux it
-// also reports whether a firewall backend (nft/iptables) is present: krun + proxy
-// needs one to port-scope guest egress, and the launch fails closed without it, so
-// doctor surfaces the gap ahead of launch. The row is Linux-only because the
-// egress lockdown is Linux-only.
+// adds three rows the run path depends on but CheckMicroVM does not gate: a
+// firewall backend (nft/iptables), which krun + proxy needs to port-scope guest
+// egress and without which the launch fails closed; a system pasta binary for
+// rootless podman networking; and subordinate id ranges for the --userns=keep-id
+// mapping. All three are Linux-only - the egress lockdown, pasta, and rootless
+// id mapping have no macOS equivalent here.
 func checkKrun() []checkResult {
 	results := microVMResults(isolator.CheckMicroVM())
 	if runtime.GOOS == "linux" {
-		results = append(results, microVMResults([]isolator.MicroVMCheck{isolator.CheckFirewallBackend()})...)
+		results = append(results, microVMResults([]isolator.MicroVMCheck{
+			isolator.CheckFirewallBackend(),
+			isolator.CheckSystemPasta(),
+			isolator.CheckRootlessIDMapping(),
+		})...)
 	}
 	return results
 }

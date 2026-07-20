@@ -66,15 +66,25 @@ func TestMicroVMResults_NeverError(t *testing.T) {
 }
 
 // TestCheckKrun_Rows exercises the live doctor section: rows are grouped under
-// "krun:", statuses are ok/warn only, and the KVM row is Linux-only.
+// "krun:", statuses are ok/warn only, and the KVM plus rootless-prerequisite rows
+// are Linux-only.
 func TestCheckKrun_Rows(t *testing.T) {
 	rows := checkKrun()
 	if len(rows) == 0 {
 		t.Fatal("checkKrun returned no rows")
 	}
 
+	linuxOnly := map[string]bool{
+		"krun: kvm":                 false,
+		"krun: firewall":            false,
+		"krun: system pasta":        false,
+		"krun: rootless id mapping": false,
+	}
 	hasKVM := false
 	for _, r := range rows {
+		if _, ok := linuxOnly[r.name]; ok {
+			linuxOnly[r.name] = true
+		}
 		if !strings.HasPrefix(r.name, "krun: ") {
 			t.Errorf("row name %q is not grouped under 'krun: '", r.name)
 		}
@@ -94,9 +104,19 @@ func TestCheckKrun_Rows(t *testing.T) {
 		if !hasKVM {
 			t.Error("expected a 'krun: kvm' row on linux")
 		}
+		for name, present := range linuxOnly {
+			if !present {
+				t.Errorf("expected a %q row on linux", name)
+			}
+		}
 	case "darwin":
 		if hasKVM {
 			t.Error("'krun: kvm' row must be absent on darwin (HVF has no /dev/kvm)")
+		}
+		for name, present := range linuxOnly {
+			if present {
+				t.Errorf("%q row must be absent on darwin (no rootless podman/egress lockdown there)", name)
+			}
 		}
 	}
 }
