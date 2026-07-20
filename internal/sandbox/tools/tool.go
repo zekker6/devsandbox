@@ -6,6 +6,8 @@ package tools
 import (
 	"context"
 
+	"devsandbox/internal/cmdpattern"
+	"devsandbox/internal/herdrproxy"
 	"devsandbox/internal/kittyproxy"
 )
 
@@ -248,4 +250,30 @@ type ToolWithKittyLaunchPatterns interface {
 	Tool
 
 	KittyLaunchPatterns() []kittyproxy.CommandPattern
+}
+
+// ToolWithHerdrRequirements is implemented by tools that need access to the
+// herdr control socket. The herdr tool aggregates declarations from all enabled
+// tools to build the proxy capability allowlist.
+type ToolWithHerdrRequirements interface {
+	Tool
+
+	// HerdrCapabilities returns the herdr capabilities this tool needs.
+	// Returning an empty slice means "do not enable herdr for me."
+	HerdrCapabilities() []herdrproxy.Capability
+}
+
+// ToolWithHerdrLaunchScript is implemented by tools that declare a launch
+// capability and want the scripts they run restricted.
+//
+// This is the herdr counterpart to ToolWithKittyLaunchPatterns, but it declares
+// a ScriptPattern rather than argv patterns: herdr's `pane run` is invoked as
+// `sh <path>`, so what needs validating is a script body, not a command line.
+// Unlike the kitty case, a tool that declares a launch capability without a
+// script pattern is denied rather than warned — an unconstrained script here
+// means arbitrary host execution, so degraded-but-open is not a safe default.
+type ToolWithHerdrLaunchScript interface {
+	Tool
+
+	HerdrLaunchScript() cmdpattern.ScriptPattern
 }

