@@ -8,17 +8,45 @@
 package cmdpattern
 
 import (
+	"fmt"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
-// CommandPattern restricts which commands a tool may pass to `kitty @ launch`.
-// A pattern accepts an argv if Program matches argv[0] (basename or absolute path)
-// and ArgsMatcher returns true for argv[1:].
+// CommandPattern restricts which commands a tool may ask the host to execute.
+// A pattern accepts an argv if the program matches argv[0] and ArgsMatcher
+// returns true for argv[1:].
+//
+// Program matching has two modes:
+//
+//   - ResolvedBin set (preferred): argv[0] must equal ResolvedBin exactly after
+//     cleaning, pinning the pattern to one binary at one path.
+//   - ResolvedBin empty (legacy): argv[0] matches on basename, so any path
+//     ending in Program is accepted.
+//
+// The basename-only mode is unsafe wherever the sandbox can create a file at a
+// path the host sees. Most of the sandbox home is an overlay whose writes never
+// reach the host, but a few directories are write-through bind mounts shared at
+// an identical path on both sides — the revdiff IPC directory is one. A sandbox
+// can drop an executable named `revdiff` there and emit a command naming it;
+// basename matching accepts it and the host runs it as the host user. Setting
+// ResolvedBin closes that, because the real resolved path lives on an overlay
+// the sandbox cannot alter from the host's point of view. Reject is defense in
+// depth for the write-through paths.
 type CommandPattern struct {
 	Program     string
 	ArgsMatcher func(args []string) bool
+
+	// ResolvedBin, when non-empty, is the absolute host path of the only
+	// binary this pattern accepts. Populate it via ResolveProgram.
+	ResolvedBin string
+
+	// Reject lists directory prefixes that may never supply the program, even
+	// when the basename or resolved path would otherwise match. Callers pass
+	// the sandbox's write-through bind destinations here.
+	Reject []string
 }
 
 // MatchesArgv reports whether p accepts the given argv.
@@ -26,7 +54,7 @@ func (p CommandPattern) MatchesArgv(argv []string) bool {
 	if len(argv) == 0 {
 		return false
 	}
-	if !programMatches(p.Program, argv[0]) {
+	if !p.programMatches(argv[0]) {
 		return false
 	}
 	if p.ArgsMatcher == nil {
@@ -35,13 +63,63 @@ func (p CommandPattern) MatchesArgv(argv []string) bool {
 	return p.ArgsMatcher(argv[1:])
 }
 
-// programMatches accepts either an exact basename or an absolute path that
-// resolves to the same basename.
-func programMatches(want, got string) bool {
-	if want == got {
+// programMatches reports whether got is an acceptable argv[0] for p.
+func (p CommandPattern) programMatches(got string) bool {
+	clean := filepath.Clean(got)
+
+	// Rejected prefixes win over every other rule, so a caller can never widen
+	// the pattern back open by also setting Program or ResolvedBin.
+	for _, dir := range p.Reject {
+		if isUnder(clean, dir) {
+			return false
+		}
+	}
+
+	if p.ResolvedBin != "" {
+		return clean == filepath.Clean(p.ResolvedBin)
+	}
+
+	if p.Program == got {
 		return true
 	}
-	return filepath.Base(got) == want
+	return filepath.Base(clean) == p.Program
+}
+
+// isUnder reports whether path is dir itself or lies beneath it. It compares
+// cleaned segments so that "/a/bc" is not treated as living under "/a/b".
+func isUnder(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	dir = filepath.Clean(dir)
+	if path == dir {
+		return true
+	}
+	return strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
+// ResolveProgram returns the absolute, symlink-free host path of name, for use
+// as CommandPattern.ResolvedBin.
+//
+// Callers should treat a failure as fatal to the pattern rather than falling
+// back to basename matching: a pattern that cannot pin its binary should deny
+// everything, not silently widen.
+func ResolveProgram(name string) (string, error) {
+	found, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("resolve program %q: %w", name, err)
+	}
+	abs, err := filepath.Abs(found)
+	if err != nil {
+		return "", fmt.Errorf("resolve program %q: absolute path: %w", name, err)
+	}
+	// EvalSymlinks so a pattern pins the real file, not a symlink that could
+	// later be repointed.
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve program %q: eval symlinks: %w", name, err)
+	}
+	return real, nil
 }
 
 // MatchAny returns a matcher that accepts any args.

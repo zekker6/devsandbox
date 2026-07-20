@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/kittyproxy"
+	"devsandbox/internal/notice"
 )
 
 // revdiffIpcRelPath is the per-session IPC directory root inside the host user's
@@ -91,7 +93,26 @@ func (r *Revdiff) KittyCapabilities() []kittyproxy.Capability {
 }
 
 func (r *Revdiff) KittyLaunchPatterns() []kittyproxy.CommandPattern {
-	innerRevdiff := kittyproxy.CommandPattern{Program: "revdiff", ArgsMatcher: kittyproxy.MatchAny()}
+	// Pin the pattern to the revdiff binary at one resolved path. Matching on
+	// basename alone accepts any path ending in "revdiff", and the IPC
+	// directory below is a write-through bind shared with the host at an
+	// identical path — so the sandbox could drop its own `revdiff` there and
+	// have the host execute it. The resolved path instead lives on an overlay
+	// whose sandbox-side writes never reach the host.
+	//
+	// Resolution failure denies every launch rather than falling back to
+	// basename matching: a pattern that cannot pin its binary must not widen.
+	resolved, err := cmdpattern.ResolveProgram("revdiff")
+	if err != nil {
+		notice.Warn("revdiff: cannot resolve the revdiff binary (%v); kitty launch requests will be denied", err)
+		return nil
+	}
+
+	innerRevdiff := kittyproxy.CommandPattern{
+		Program:     "revdiff",
+		ResolvedBin: resolved,
+		ArgsMatcher: kittyproxy.MatchAny(),
+	}
 	return []kittyproxy.CommandPattern{
 		// Direct revdiff invocation (no wrapping shell).
 		innerRevdiff,
