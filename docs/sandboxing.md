@@ -88,7 +88,7 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 - `~/.gcloud` (Google Cloud SDK credentials)
 - `~/.config/gcloud` (Google Cloud config)
 
-**Environment Files** - Files matching `.env` and `.env.*` patterns (e.g., `.env`, `.env.local`, `.env.production`) in your project are overlaid with `/dev/null`, preventing secrets from being read by sandboxed code. Files like `config.env` that don't start with `.env` are not hidden.
+**Environment Files** - Files matching `.env` and `.env.*` patterns (e.g., `.env`, `.env.local`, `.env.production`) in your project are overlaid with `/dev/null`, preventing secrets from being read by sandboxed code. Files like `config.env` that don't start with `.env` are not hidden. The scan descends up to 3 directory levels below the project root and skips `node_modules`, `.git`, `vendor`, and `.venv`, so matching files deeper than that or inside a skipped directory stay readable.
 
 **Git Credentials** - By default, `~/.gitconfig` is replaced with a sanitized copy containing only user.name and email.
 Use `git.mode = "readwrite"` for full git access.

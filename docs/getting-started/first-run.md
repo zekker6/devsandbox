@@ -64,6 +64,8 @@ which go
 go version
 ```
 
+Masking covers `.env` and `.env.*` files up to 3 directory levels below the project root; `node_modules`, `.git`, `vendor`, and `.venv` are skipped.
+
 Exit with `exit` or Ctrl-D.
 
 ## Step 3 - verify changes from outside

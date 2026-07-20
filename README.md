@@ -13,7 +13,7 @@ devsandbox closes that gap. It wraps any command in a sandbox scoped to your cur
 - **Editor + LSP, prompt, multiplexer.** nvim, helix, starship, tmux, fish, zsh - all preserved.
 - **Sub-second startup.** bubblewrap on Linux shares the host kernel; native file watching works.
 
-The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools - and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files, sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
+The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools - and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files up to 3 directory levels below the project root, sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
 
 ## Prerequisites
 
@@ -137,14 +137,14 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 
 **CAN:** Read/write your project files, use your `mise`-managed tools, inherit your shell and editor configs, run build commands, install dependencies, make API calls (logged in proxy mode).
 
-**CANNOT:** Read SSH keys, access cloud credentials (AWS/Azure/GCloud), read `.env` secrets, see other projects, push to git (by default), or modify your system.
+**CANNOT:** Read SSH keys, access cloud credentials (AWS/Azure/GCloud), read `.env` secrets (masked up to 3 directory levels below the project root), see other projects, push to git (by default), or modify your system.
 
 ### Resource access defaults
 
 | Resource | Default Access |
 |---|---|
 | Project directory | Read/Write |
-| `.env` / `.env.*` files | Hidden (masked with `/dev/null`) |
+| `.env` / `.env.*` files | Hidden (masked with `/dev/null`); scanned up to 3 directory levels below the project root, skipping `node_modules`, `.git`, `vendor`, `.venv` |
 | `~/.ssh` | Not mounted |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted |
 | `~/.gitconfig` | Sanitized (user.name/email only) |
@@ -161,7 +161,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Your real dev env, inside the sandbox** - mise-managed tools, shell configs, editor setups (nvim, starship, tmux) auto-detected and bound, no Dockerfile required
 - **Sub-second startup** - [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux share the host kernel; native file watching works. Docker layer caching keeps macOS restarts at 1-2s
 - **Per-project isolation** - each project gets its own sandbox home, caches, and logs
-- **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files, and git credentials blocked by default
+- **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files up to 3 directory levels below the project root, and git credentials blocked by default
 - **MITM proxy** - optional traffic inspection with log viewing, filtering, and export
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine
