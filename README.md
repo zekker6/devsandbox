@@ -387,6 +387,13 @@ devsandbox image build              # Build Docker image (macOS)
 - File watching (hot reload) may require polling mode. See [File Watching Limitations](docs/sandboxing.md#file-watching-limitations) for workarounds.
 - Network isolation uses HTTP_PROXY instead of pasta
 
+**krun (microVM, experimental):**
+- Proxy-mode egress lockdown is applied host-side in the VMM's pasta network namespace and needs `nft` or `iptables` on the host
+- `devsandbox forward` is best-effort - the session is registered, but reaching a guest listener is not yet validated
+- macOS is not yet validated and requires Apple Silicon; **proxy mode is refused on macOS** because the egress lockdown is Linux-only (fails closed rather than running with open egress)
+- IPv6 is disabled in the guest under proxy mode (pasta runs with `-4`)
+- Every launch boots a fresh microVM - no `keep_container` reuse, and no online boot-time install of the project's mise tools (see [krun backend](docs/getting-started/krun.md))
+
 **Both:**
 - Docker socket access is read-only (no container creation/deletion) - see [Tools docs](docs/tools.md#docker)
 - No nested Docker (cannot run Docker inside the sandbox)

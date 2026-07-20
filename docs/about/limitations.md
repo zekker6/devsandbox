@@ -16,6 +16,16 @@ Known constraints of the current implementation.
 - File watching (hot reload) may require polling mode. See [File Watching Limitations](../sandboxing.md#file-watching-limitations) for workarounds.
 - Network isolation uses `HTTP_PROXY` instead of `pasta`.
 
+## krun (microVM backend, experimental)
+
+- Egress lockdown in proxy mode is applied host-side in the VMM's pasta network namespace and requires `nft` or `iptables` on the host.
+- `devsandbox forward` is best-effort: the session is registered, but reaching a listener inside the guest through the microVM network namespace is not yet validated.
+- macOS (Hypervisor.framework) is not yet validated, and **proxy mode is refused there** because the egress lockdown is Linux-only - krun + proxy on macOS fails closed rather than run with open egress. macOS also requires Apple Silicon; Intel Macs are rejected at launch.
+- IPv6 is disabled in the guest under proxy mode: pasta is invoked with `-4`, so the guest has IPv4 only and no IPv6 egress path.
+- Every launch boots a fresh microVM - there is no `keep_container` reuse, and no online boot-time install of the project's mise tools. See [Tools - mise](../tools.md#tool-management-with-mise).
+
+See [krun backend](../getting-started/krun.md) for the full setup and trust-boundary discussion.
+
 ## Both platforms
 
 - Docker socket access is read-only - no container creation, deletion, or modification from inside the sandbox. See [Supported tools - Docker](../tools.md#docker) for what does work.

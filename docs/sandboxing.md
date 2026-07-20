@@ -733,7 +733,7 @@ File watching (inotify) across the macOS ↔ Docker boundary can be unreliable. 
 WATCHPACK_POLLING=true devsandbox npm run dev
 
 # Vite
-devsandbox - npx vite --force
+devsandbox -- npx vite --force
 
 # Generic: set CHOKIDAR_USEPOLLING for chokidar-based watchers
 CHOKIDAR_USEPOLLING=true devsandbox npm run dev

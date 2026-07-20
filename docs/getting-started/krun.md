@@ -104,7 +104,7 @@ The point of krun is a separate guest kernel. Compare the kernel inside the sand
 
 ```bash
 uname -r                              # host, e.g. 7.0.13-arch1-1
-devsandbox --isolation krun - uname -r   # guest, e.g. 6.12.91
+devsandbox --isolation krun -- uname -r   # guest, e.g. 6.12.91
 ```
 
 A different kernel version inside the sandbox confirms the workload is running behind the hardware virtualization boundary, not just in a namespace on your host kernel.
@@ -126,7 +126,7 @@ enabled = false
 
 ## Build-time trust boundary
 
-The microVM isolates the workload at **run** time, but the sandbox image is built **before** the guest boots. If you point krun at a project-provided Dockerfile (`sandbox.docker.dockerfile` or `--dockerfile`), devsandbox builds it with host `podman build`, so every `RUN` step in that Dockerfile executes **on the host** - outside the krun guest and outside the proxy egress lockdown.
+The microVM isolates the workload at **run** time, but the sandbox image is built **before** the guest boots. If you point krun at a project-provided Dockerfile (`sandbox.docker.dockerfile`), devsandbox builds it with host `podman build`, so every `RUN` step in that Dockerfile executes **on the host** - outside the krun guest and outside the proxy egress lockdown.
 
 krun prints a warning before such a build:
 
