@@ -138,3 +138,54 @@ func TestCheckKrun_Rows(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorSummary(t *testing.T) {
+	tests := []struct {
+		name       string
+		results    []checkResult
+		wantFailed bool
+		want       string
+	}{
+		{
+			name:    "all ok",
+			results: []checkResult{{name: "bwrap", status: "ok"}},
+			want:    "All checks passed!",
+		},
+		{
+			name: "advisory warning with hint points at the How to fix block",
+			results: []checkResult{
+				{name: "bwrap", status: "ok"},
+				{name: "krun: system pasta", status: "warn", hint: "install passt"},
+			},
+			want: `All required checks passed (1 advisory warning(s) - see "How to fix" above).`,
+		},
+		{
+			name: "advisory warning without hint does not reference the block",
+			results: []checkResult{
+				{name: "docker-image", status: "warn"},
+			},
+			want: "All required checks passed (1 advisory warning(s)).",
+		},
+		{
+			name: "error outranks warnings",
+			results: []checkResult{
+				{name: "krun: system pasta", status: "warn", hint: "install passt"},
+				{name: "shell", status: "error"},
+			},
+			wantFailed: true,
+			want:       "Some checks failed. Please install missing dependencies.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, failed := doctorSummary(tt.results)
+			if failed != tt.wantFailed {
+				t.Errorf("failed = %v, want %v", failed, tt.wantFailed)
+			}
+			if got != tt.want {
+				t.Errorf("msg = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

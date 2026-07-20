@@ -3,22 +3,14 @@
     "github>zekker6/renovate-config",
     "github>zekker6/renovate-config:automerge-github-actions"
   ],
+  "osvVulnerabilityAlerts": true,
   "packageRules": [
     {
-      "description": "goproxy v1.8.5 regressed the MITM path: the client connection is wrapped in a bufio.Writer that is only flushed after resp.Write returns, so response headers and small SSE events stay buffered until the whole body is consumed. Keep v1.8.4 until a fixed release ships.",
+      "description": "goproxy v1.8.5 regressed the MITM path: the client connection is wrapped in a bufio.Writer that is only flushed after resp.Write returns, so response headers and small SSE events stay buffered until the whole body is consumed. Keep v1.8.4 until a fixed release ships. goproxy carries all sandboxed MITM traffic, so this cap must never suppress a security fix: osvVulnerabilityAlerts above lets Renovate append its own allowedVersions rule after this one when a CVE is known, which lifts the cap for that update. Such a PR still needs a manual check that the v1.8.5 buffering regression is gone before merge.",
       "matchPackageNames": ["github.com/elazarl/goproxy"],
       "allowedVersions": "<=1.8.4"
     }
   ],
-  "vulnerabilityAlerts": {
-    "packageRules": [
-      {
-        "description": "The allowedVersions cap above must never suppress a security fix. goproxy carries all sandboxed MITM traffic, so a CVE there has to surface even while the cap is in place; the resulting PR needs a manual check that the v1.8.5 buffering regression is gone before merge.",
-        "matchPackageNames": ["github.com/elazarl/goproxy"],
-        "allowedVersions": null
-      }
-    ]
-  },
   "customManagers": [
     {
       "customType": "regex",

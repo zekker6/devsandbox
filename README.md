@@ -13,7 +13,7 @@ devsandbox closes that gap. It wraps any command in a sandbox scoped to your cur
 - **Editor + LSP, prompt, multiplexer.** nvim, helix, starship, tmux, fish, zsh - all preserved.
 - **Sub-second startup.** bubblewrap on Linux shares the host kernel; native file watching works.
 
-The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools - and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files, sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
+The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools - and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files in the project tree ([scan limits](docs/sandboxing.md#security-model)), sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
 
 ## Prerequisites
 

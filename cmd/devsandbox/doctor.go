@@ -41,7 +41,9 @@ Checks (all platforms):
   - Configuration file
   - Recent error logs
   - Docker and Docker image availability
-  - krun microVM prerequisites (podman, krun runtime, KVM; nft/iptables for proxy mode on Linux) - informational, opt-in
+  - krun microVM prerequisites (podman, krun runtime, KVM; on Linux also nft/iptables
+    for proxy mode, a system pasta binary, and /etc/subuid+/etc/subgid ranges for
+    rootless id mapping) - informational, opt-in
 
 Checks (Linux only):
   - Required binaries (bwrap)
@@ -102,21 +104,43 @@ func runDoctor() error {
 	// Print detected tools
 	printDetectedTools()
 
-	hasError := false
+	msg, failed := doctorSummary(results)
+	fmt.Printf("\n%s\n", msg)
+	if failed {
+		return fmt.Errorf("doctor found issues")
+	}
+	return nil
+}
+
+// doctorSummary renders the closing line of a doctor run. Only "error" rows fail
+// the run: the krun prerequisites are advisory by design, so their warnings are
+// counted rather than swallowed - claiming "All checks passed!" directly below a
+// "How to fix" block for unmet krun rows reads as a contradiction.
+func doctorSummary(results []checkResult) (msg string, failed bool) {
+	warnings := 0
+	hinted := 0
 	for _, r := range results {
-		if r.status == "error" {
-			hasError = true
-			break
+		switch r.status {
+		case "error":
+			failed = true
+		case "warn":
+			warnings++
+		}
+		if r.status != "ok" && r.hint != "" {
+			hinted++
 		}
 	}
 
-	if hasError {
-		fmt.Println("\nSome checks failed. Please install missing dependencies.")
-		return fmt.Errorf("doctor found issues")
+	switch {
+	case failed:
+		return "Some checks failed. Please install missing dependencies.", true
+	case warnings > 0 && hinted > 0:
+		return fmt.Sprintf("All required checks passed (%d advisory warning(s) - see %q above).", warnings, "How to fix"), false
+	case warnings > 0:
+		return fmt.Sprintf("All required checks passed (%d advisory warning(s)).", warnings), false
+	default:
+		return "All checks passed!", false
 	}
-
-	fmt.Println("\nAll checks passed!")
-	return nil
 }
 
 func getBinaryVersion(name string) string {
