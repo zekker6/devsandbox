@@ -31,6 +31,9 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 | `[tools.mise]` | `mount_mode`, `ignore_global_config` | [Tool Settings](#tool-specific-configuration) |
 | `[tools.docker]` | `enabled`, `socket` | [Tool Settings](#tool-specific-configuration) |
 | `[tools.portal]` | `notifications` | [Tool Settings](#tool-specific-configuration) |
+| `[tools.kitty]` | `mode`, `extra_capabilities` | [Kitty Terminal](tools.md#kitty-terminal) |
+| `[tools.herdr]` | `mode` | [herdr Terminal Workspace](tools.md#herdr-terminal-workspace) |
+| `[tools.zellij]` | `enabled` | [Zellij Terminal Multiplexer](tools.md#zellij-terminal-multiplexer) |
 | `[logging]` | `attributes`, `receivers` | [Remote Logging](#remote-logging) |
 | `[[include]]` | `if`, `path` | [Per-Project Configuration](#per-project-configuration) |
 
@@ -299,7 +302,8 @@ resource limits), and the same tool bindings and proxy wiring. Notes:
 - **Management commands.** `devsandbox doctor` reports the krun prerequisites
   (podman, the `krun` runtime, `/dev/kvm`) as informational rows - unmet ones
   `warn` rather than `error`, since krun is opt-in and must not fail `doctor` for
-  bwrap/docker users. `devsandbox list` and `prune` cover krun sandboxes: they are
+  bwrap/docker users. `devsandbox sandboxes list` and `sandboxes prune` cover krun
+  sandboxes: they are
   ephemeral (`--rm`), so they are tracked from on-disk metadata like bwrap rather
   than enumerated from a container engine. `devsandbox forward` is **best-effort**
   for krun in this release - the session is registered for forwarding, but
@@ -462,7 +466,9 @@ sandbox_port = 5432
 | `host_port`   | Yes      | -       | Port on host side (1-65535)              |
 | `sandbox_port`| Yes      | -       | Port on sandbox side (1-65535)           |
 
-**Note:** Port forwarding requires proxy mode because network namespace isolation (via pasta on Linux or per-session Docker networks on macOS) is only active in proxy mode. Without it, the sandbox shares the host network stack and ports are directly accessible. Enable proxy mode (`--proxy`) or port forwarding will fail with an error.
+**Note:** Port forwarding requires proxy mode, because only proxy mode gives the sandbox its own network namespace (via pasta). Without it, the sandbox shares the host network stack and its ports are already reachable on `127.0.0.1`, so there is nothing to forward.
+
+**Backend support:** static `[[port_forwarding.rules]]` are wired for the **bwrap** backend only - they become pasta port arguments at launch, and a bwrap run with rules but no network isolation fails with an error. Auto-detection (`auto_detect`) also covers **krun + proxy** sessions, where it is best-effort (see [krun microVM backend](#krun-microvm-backend-experimental)). The **Docker** backend does not wire port forwarding in either form.
 
 #### Examples
 
@@ -577,7 +583,23 @@ while still allowing git operations that need them.
 # With this on, only the project `.mise.toml`, the image's system config (baked
 # node), and `~/.config/mise/settings.toml` apply. Covers bwrap, docker, and krun.
 ignore_global_config = true
+
+# Override the global [overlay] default for mise's bindings (optional).
+# Accepted values: "split", "overlay", "tmpoverlay", "readonly", "readwrite"
+#
+# The global default ("split") is recommended: mise data/cache directories use a
+# persistent overlay so installed tools survive across sessions, while mise config
+# files are protected via tmpoverlay.
+#
+# Set to "overlay" to persist all mise state (config + data) across sessions.
+# Set to "tmpoverlay" to discard all mise state on sandbox exit.
+# mount_mode = "overlay"
 ```
+
+`ignore_global_config` scopes shell and runtime mise invocations inside the sandbox.
+The container backends' boot-time project-tool install already runs with
+`MISE_GLOBAL_CONFIG_FILE=/dev/null` regardless of this setting, so it is unaffected
+either way.
 
 #### Per-Tool Mount Mode Override
 
@@ -598,22 +620,6 @@ The `disabled` value prevents the tool's config/cache/data directories from bein
 #### Migrating Overlay Data to Host
 
 Accumulated overlay data can be promoted to the host filesystem. See [Sandboxing: Migrating Overlay Data](sandboxing.md#migrating-overlay-data-to-host) for the `devsandbox overlay migrate` command reference.
-
-#### Mise
-
-```toml
-[tools.mise]
-# Override the global [overlay] default for mise's bindings (optional).
-# Accepted values: "split", "overlay", "tmpoverlay", "readonly", "readwrite"
-#
-# The global default ("split") is recommended: mise data/cache directories use a
-# persistent overlay so installed tools survive across sessions, while mise config
-# files are protected via tmpoverlay.
-#
-# Set to "overlay" to persist all mise state (config + data) across sessions.
-# Set to "tmpoverlay" to discard all mise state on sandbox exit.
-# mount_mode = "overlay"
-```
 
 #### Docker
 
@@ -1182,4 +1188,4 @@ devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbo
 - [Tools](tools.md) - tool-specific behavior (git modes, mise, Docker socket proxy)
 - [Use Cases](use-cases.md) - practical workflows using these configuration options
 
-[Back to docs index](README.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](../README.md)

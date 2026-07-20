@@ -650,7 +650,7 @@ The base image (`ghcr.io/zekker6/devsandbox:latest`) includes:
 - Debian slim base
 - mise for tool management
 - Common development tools (git, curl, bash, zsh)
-- gosu for privilege dropping
+- `devsandbox-shim`, which drops from container root to the sandbox user itself
 - passt/pasta for network isolation (if needed)
 
 ### Customizing the Image
@@ -739,7 +739,7 @@ devsandbox -- npx vite --force
 CHOKIDAR_USEPOLLING=true devsandbox npm run dev
 ```
 
-### Docker Socket Forwarding - Security Warning
+### Docker Socket Forwarding Security Warning
 
 When `[tools.docker] enabled = true`, the sandbox gains filtered access to the host
 Docker daemon. The proxy allows:
@@ -784,4 +784,4 @@ Container creation, deletion, and image manipulation are blocked by the proxy fi
 - [Configuration](configuration.md) - config file reference, custom mounts, overlay settings
 - [Use Cases](use-cases.md) - workflows and shell setup
 
-[Back to docs index](README.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](../README.md)

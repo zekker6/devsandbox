@@ -88,7 +88,7 @@ To prefer system binaries over embedded, set `use_embedded = false` in [Configur
 
 ### Build from source
 
-Requires Go 1.22+ and [Task](https://taskfile.dev/). With mise installed, `mise install` handles both:
+Requires Go 1.26+ and [Task](https://taskfile.dev/). With mise installed, `mise install` handles both:
 
 ```bash
 mise install

@@ -320,7 +320,7 @@ sudo dnf install bubblewrap passt
 **Build from source:**
 
 ```bash
-# Requires: Go 1.22+ and Task (https://taskfile.dev/)
+# Requires: Go 1.26+ and Task (https://taskfile.dev/)
 # Or use mise to install dependencies: mise install
 task build
 ```

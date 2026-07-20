@@ -947,4 +947,4 @@ devsandbox doctor
 - [Configuration: Port Forwarding](configuration.md#port-forwarding) - forward ports between host and sandbox (requires proxy mode)
 - [Use Cases: Security Monitoring](use-cases.md#security-monitoring) - real-time monitoring and post-session audit scripts
 
-[Back to docs index](README.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](../README.md)

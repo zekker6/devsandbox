@@ -850,4 +850,4 @@ To make additional tools available:
 - [Use Cases: AI Coding Assistants](use-cases.md#ai-coding-assistants) - workflows for Claude Code and Copilot
 - [Use Cases: Development Workflows](use-cases.md#development-workflows) - language-specific examples
 
-[Back to docs index](README.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](../README.md)
