@@ -1146,9 +1146,14 @@ port = 8080
 
 # Overlay filesystem settings (global)
 [overlay]
-# Master switch for overlay filesystem support
-# When disabled, all tools use read-only bind mounts regardless of their settings
-# enabled = true
+# Default mount mode for every tool binding (per-tool mount_mode overrides it):
+# - "split" (default): configs/runtime dirs get a discarded tmpfs overlay,
+#   cache/data/state dirs get a persistent overlay
+# - "overlay": persistent overlay for all bindings
+# - "tmpoverlay": writable overlay, changes discarded when the sandbox exits
+# - "readonly": read-only bind mounts, no writes at all
+# - "readwrite": direct read-write bind mounts to the host (no isolation)
+# default = "split"
 
 # Tool-specific configuration
 # Each tool can have its own section under [tools.<name>]
@@ -1163,14 +1168,15 @@ mode = "readonly"
 
 # Mise tool manager settings
 [tools.mise]
-# Allow mise to install/update tools via overlayfs
-# When enabled, mise directories are mounted with a writable overlay layer
-writable = false
+# Mount mode for the mise directories, overriding [overlay] default.
+# Accepts the same values as overlay.default plus "disabled" to skip mise entirely.
+# mount_mode = "split"
 
-# Persist mise changes across sandbox sessions
-# When false: changes are discarded when sandbox exits (safer)
-# When true: changes are stored in ~/.local/share/devsandbox/<project>/overlay/
-persistent = false
+# Ignore the host's global mise config (~/.config/mise/config.toml) in the sandbox.
+# When true, the global tool list is not resolved at startup — useful when it pins
+# "@latest" versions that stall on a proxied or egress-locked sandbox.
+# The project's .mise.toml and ~/.config/mise/settings.toml still apply.
+ignore_global_config = false
 
 # XDG Desktop Portal settings (Linux only)
 # Provides desktop notifications for sandboxed apps via xdg-desktop-portal.

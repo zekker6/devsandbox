@@ -305,6 +305,54 @@ func TestGenerateDefault(t *testing.T) {
 	}
 }
 
+// TestGenerateDefaultRoundTrip asserts the generated template loads through the
+// normal config loader and emits no keys the current schema has dropped.
+func TestGenerateDefaultRoundTrip(t *testing.T) {
+	output := GenerateDefault()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(output), 0o644); err != nil {
+		t.Fatalf("write generated config: %v", err)
+	}
+	if _, err := LoadFrom(path); err != nil {
+		t.Fatalf("generated config failed to load: %v", err)
+	}
+
+	var cfg Config
+	md, err := toml.Decode(output, &cfg)
+	if err != nil {
+		t.Fatalf("decode generated config: %v", err)
+	}
+	for _, key := range md.Undecoded() {
+		// Tools decodes into map[string]any, so its keys land in Undecoded even
+		// though they are consumed; they are checked against the allowlist below.
+		if strings.HasPrefix(key.String(), "tools.") {
+			continue
+		}
+		t.Errorf("generated config emits key not in the schema: %s", key)
+	}
+
+	// Tools is a map[string]any, so unknown tool keys decode silently. Check them
+	// against the keys the tool implementations actually read.
+	knownToolKeys := map[string]bool{
+		"mount_mode": true, "ignore_global_config": true, "mode": true,
+		"notifications": true, "enabled": true, "socket": true,
+		"extra_capabilities": true,
+	}
+	for tool, raw := range cfg.Tools {
+		toolCfg, ok := raw.(map[string]any)
+		if !ok {
+			t.Errorf("tools.%s is not a table", tool)
+			continue
+		}
+		for key := range toolCfg {
+			if !knownToolKeys[key] {
+				t.Errorf("generated config emits unrecognized key tools.%s.%s", tool, key)
+			}
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name    string
