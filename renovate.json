@@ -3,6 +3,7 @@
     "github>zekker6/renovate-config",
     "github>zekker6/renovate-config:automerge-github-actions"
   ],
+  "description": "osvVulnerabilityAlerts is enabled so Renovate raises OSV-sourced vulnerability updates. It is not set by the extended github>zekker6/renovate-config preset (verified 2026-07-20), and it is what keeps the goproxy allowedVersions cap in packageRules from blocking a security fix: Renovate appends its own allowedVersions rule for a known CVE after that entry, lifting the cap for that update.",
   "osvVulnerabilityAlerts": true,
   "packageRules": [
     {

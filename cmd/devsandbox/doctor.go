@@ -29,6 +29,13 @@ type checkResult struct {
 	hint string
 }
 
+// needsHint reports whether this row's remediation should be printed below the
+// table. doctorSummary counts the same rows it points the user at, so both must
+// agree on the rule.
+func (r checkResult) needsHint() bool {
+	return r.status != "ok" && r.hint != ""
+}
+
 func newDoctorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
@@ -104,6 +111,8 @@ func runDoctor() error {
 	// Print detected tools
 	printDetectedTools()
 
+	printDoctorHints(results)
+
 	msg, failed := doctorSummary(results)
 	fmt.Printf("\n%s\n", msg)
 	if failed {
@@ -126,7 +135,7 @@ func doctorSummary(results []checkResult) (msg string, failed bool) {
 		case "warn":
 			warnings++
 		}
-		if r.status != "ok" && r.hint != "" {
+		if r.needsHint() {
 			hinted++
 		}
 	}
@@ -404,16 +413,16 @@ func printDoctorResults(results []checkResult) {
 	}
 
 	_ = table.Render()
-	printDoctorHints(results)
 }
 
-// printDoctorHints prints the remediation attached to unmet checks below the
-// table. The DETAILS column only fits a one-line summary, so without this the
-// guidance a check carries would never reach the user.
+// printDoctorHints prints the remediation attached to unmet checks. The DETAILS
+// column only fits a one-line summary, so without this the guidance a check
+// carries would never reach the user. runDoctor calls it immediately before the
+// summary, which points back at this block.
 func printDoctorHints(results []checkResult) {
 	var pending []checkResult
 	for _, r := range results {
-		if r.status != "ok" && r.hint != "" {
+		if r.needsHint() {
 			pending = append(pending, r)
 		}
 	}

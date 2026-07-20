@@ -101,7 +101,7 @@ type MicroVMCheck struct {
 // would install for nothing.
 func CheckMicroVM() []MicroVMCheck {
 	var checks []MicroVMCheck
-	if row, ok := microVMArchCheck(runtime.GOOS, runtime.GOARCH); !ok {
+	if row, gap := microVMArchGap(runtime.GOOS, runtime.GOARCH); gap {
 		checks = append(checks, row)
 	}
 	checks = append(checks, checkEngineBinary(krunEngine.binary), checkKrunRuntime())
@@ -192,15 +192,17 @@ func checkSystemPasta(lookPath func(string) (string, error)) MicroVMCheck {
 	path, err := lookPath("pasta")
 	if err != nil {
 		return MicroVMCheck{
-			Name:    "system pasta",
+			Name:    systemPastaName,
 			OK:      false,
 			Summary: "pasta not installed (rootless podman networking)",
 			Hint: "Install the 'passt' package, which provides pasta:\n" +
-				"  Arch: sudo pacman -S passt   Fedora: sudo dnf install passt   Debian/Ubuntu: sudo apt install passt\n" +
+				"  Arch:          sudo pacman -S passt\n" +
+				"  Fedora:        sudo dnf install passt\n" +
+				"  Debian/Ubuntu: sudo apt install passt\n" +
 				"The pasta devsandbox embeds for the bwrap backend does not satisfy podman.",
 		}
 	}
-	return MicroVMCheck{Name: "system pasta", OK: true, Summary: path}
+	return MicroVMCheck{Name: systemPastaName, OK: true, Summary: path}
 }
 
 // subUIDPath and subGIDPath are the shadow-utils subordinate id databases that
@@ -208,7 +210,11 @@ func checkSystemPasta(lookPath func(string) (string, error)) MicroVMCheck {
 const (
 	subUIDPath = "/etc/subuid"
 	subGIDPath = "/etc/subgid"
+)
 
+// Row names for the probes whose verdict is built in more than one place.
+const (
+	systemPastaName       = "system pasta"
 	rootlessIDMappingName = "rootless id mapping"
 )
 
@@ -323,41 +329,42 @@ func subIDHint(username string) string {
 		"configured correctly; verify with: podman unshare cat /proc/self/uid_map", username)
 }
 
-// microVMArchSupported reports why the krun microVM backend cannot run on the
-// given OS/CPU-architecture pair, or nil when the combination is usable. It is a
-// pure function of its inputs so CheckMicroVM (called with runtime.GOOS /
-// runtime.GOARCH) and the unit tests exercise the same decision on any host.
+// microVMArchSupported reports whether the krun microVM backend can run on the
+// given OS/CPU-architecture pair. It is a pure function of its inputs so
+// CheckMicroVM (called with runtime.GOOS / runtime.GOARCH) and the unit tests
+// exercise the same decision on any host.
 //
 // libkrun's macOS backend is Hypervisor.framework on Apple Silicon; Intel Macs
 // have no supported path. Refusing them here fails the launch fast with
 // installation guidance instead of surfacing an opaque runtime error after the
 // image build. Linux gates on /dev/kvm rather than the architecture, so no arch
 // restriction applies there.
-func microVMArchSupported(goos, goarch string) error {
-	if goos != "darwin" || goarch == "arm64" {
-		return nil
-	}
-	return fmt.Errorf("the krun microVM backend requires Apple Silicon (arm64) on macOS, but this host is "+
-		"%s/%s: libkrun uses Hypervisor.framework, which devsandbox supports only on M-series hardware. "+
-		"Use --isolation=docker on Intel Macs, or run krun on a Linux host with /dev/kvm", goos, goarch)
+func microVMArchSupported(goos, goarch string) bool {
+	return goos != "darwin" || goarch == "arm64"
 }
 
-// microVMArchCheck renders the architecture verdict as a doctor row, reporting
-// ok=true (and a zero row) when the pair is usable so CheckMicroVM emits nothing
-// on supported hardware. Splitting it out of CheckMicroVM keeps the row's shape -
-// name, concise summary, verbatim helper text as remediation - testable on any
-// host, which CheckMicroVM itself is not.
-func microVMArchCheck(goos, goarch string) (MicroVMCheck, bool) {
-	err := microVMArchSupported(goos, goarch)
-	if err == nil {
-		return MicroVMCheck{}, true
+// microVMArchGap renders the architecture verdict as a doctor row, reporting
+// gap=true (and the row) only when the pair is unusable so CheckMicroVM emits
+// nothing on supported hardware. Splitting it out of CheckMicroVM keeps the row's
+// shape - name, concise summary, wrapped remediation - testable on any host,
+// which CheckMicroVM itself is not.
+//
+// The Hint is hand-wrapped because it is also the fail-fast launch error
+// (firstMicroVMGap appends it to the Summary) and printDoctorHints indents what
+// it prints, so a single long line would wrap arbitrarily on a normal terminal.
+func microVMArchGap(goos, goarch string) (MicroVMCheck, bool) {
+	if microVMArchSupported(goos, goarch) {
+		return MicroVMCheck{}, false
 	}
 	return MicroVMCheck{
 		Name:    "platform",
 		OK:      false,
 		Summary: fmt.Sprintf("unsupported on %s/%s", goos, goarch),
-		Hint:    err.Error(),
-	}, false
+		Hint: fmt.Sprintf("the krun microVM backend requires Apple Silicon (arm64) on macOS, but this\n"+
+			"host is %s/%s: libkrun uses Hypervisor.framework, which devsandbox\n"+
+			"supports only on M-series hardware.\n"+
+			"Use --isolation=docker on Intel Macs, or run krun on a Linux host with /dev/kvm", goos, goarch),
+	}, true
 }
 
 // microVMProxyUnsupported reports why the krun microVM backend cannot run in

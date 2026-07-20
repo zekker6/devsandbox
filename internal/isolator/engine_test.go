@@ -13,58 +13,45 @@ import (
 // carries no architecture restriction (it gates on /dev/kvm instead).
 func TestMicroVMArchSupported(t *testing.T) {
 	tests := []struct {
-		name    string
-		goos    string
-		goarch  string
-		wantErr bool
+		name   string
+		goos   string
+		goarch string
+		want   bool
 	}{
-		{name: "apple silicon mac supported", goos: "darwin", goarch: "arm64"},
-		{name: "intel mac refused", goos: "darwin", goarch: "amd64", wantErr: true},
-		{name: "linux amd64 supported", goos: "linux", goarch: "amd64"},
-		{name: "linux arm64 supported", goos: "linux", goarch: "arm64"},
+		{name: "apple silicon mac supported", goos: "darwin", goarch: "arm64", want: true},
+		{name: "intel mac refused", goos: "darwin", goarch: "amd64"},
+		{name: "linux amd64 supported", goos: "linux", goarch: "amd64", want: true},
+		{name: "linux arm64 supported", goos: "linux", goarch: "arm64", want: true},
 		// The helper encodes the architecture restriction only; rejecting an
 		// unsupported OS is CheckMicroVM's default case. Hardening the helper to
 		// reject unknown OSes here would make CheckMicroVM emit two "platform" rows.
-		{name: "unknown os deferred to CheckMicroVM", goos: "windows", goarch: "amd64"},
+		{name: "unknown os deferred to CheckMicroVM", goos: "windows", goarch: "amd64", want: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := microVMArchSupported(tt.goos, tt.goarch)
-			if !tt.wantErr {
-				if err != nil {
-					t.Fatalf("microVMArchSupported(%q, %q) = %v, want nil", tt.goos, tt.goarch, err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("microVMArchSupported(%q, %q) = nil, want fail-fast error", tt.goos, tt.goarch)
-			}
-			msg := err.Error()
-			for _, want := range []string{"arm64", "Apple Silicon", tt.goarch, "--isolation=docker"} {
-				if !strings.Contains(msg, want) {
-					t.Errorf("error message missing %q, got: %q", want, msg)
-				}
+			if got := microVMArchSupported(tt.goos, tt.goarch); got != tt.want {
+				t.Errorf("microVMArchSupported(%q, %q) = %v, want %v", tt.goos, tt.goarch, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestMicroVMArchCheck asserts the shape of the row CheckMicroVM emits for the
+// TestMicroVMArchGap asserts the shape of the row CheckMicroVM emits for the
 // architecture verdict, on every OS/arch pair rather than only the host's: the
 // row is named "platform", fails, names the architecture in the one-line summary,
-// and carries the helper text verbatim as remediation without duplicating it into
-// the summary. Supported pairs must emit no row at all.
-func TestMicroVMArchCheck(t *testing.T) {
+// and carries remediation that does not duplicate into the summary. Supported
+// pairs must emit no row at all.
+func TestMicroVMArchGap(t *testing.T) {
 	for _, pair := range []struct{ goos, goarch string }{
 		{"darwin", "arm64"},
 		{"linux", "amd64"},
 		{"linux", "arm64"},
 	} {
 		t.Run(pair.goos+"/"+pair.goarch+" emits no row", func(t *testing.T) {
-			row, ok := microVMArchCheck(pair.goos, pair.goarch)
-			if !ok {
-				t.Fatalf("microVMArchCheck(%q, %q) reported a gap: %+v", pair.goos, pair.goarch, row)
+			row, gap := microVMArchGap(pair.goos, pair.goarch)
+			if gap {
+				t.Fatalf("microVMArchGap(%q, %q) reported a gap: %+v", pair.goos, pair.goarch, row)
 			}
 			if row != (MicroVMCheck{}) {
 				t.Errorf("supported pair produced a non-zero row: %+v", row)
@@ -73,9 +60,9 @@ func TestMicroVMArchCheck(t *testing.T) {
 	}
 
 	t.Run("darwin/amd64 emits a failing platform row", func(t *testing.T) {
-		row, ok := microVMArchCheck("darwin", "amd64")
-		if ok {
-			t.Fatal("microVMArchCheck(darwin, amd64) reported no gap")
+		row, gap := microVMArchGap("darwin", "amd64")
+		if !gap {
+			t.Fatal("microVMArchGap(darwin, amd64) reported no gap")
 		}
 		if row.Name != "platform" {
 			t.Errorf("Name = %q, want %q", row.Name, "platform")
@@ -86,9 +73,20 @@ func TestMicroVMArchCheck(t *testing.T) {
 		if !strings.Contains(row.Summary, "amd64") {
 			t.Errorf("Summary %q should name the unsupported architecture", row.Summary)
 		}
-		want := microVMArchSupported("darwin", "amd64").Error()
-		if row.Hint != want {
-			t.Errorf("Hint = %q, want the helper message verbatim %q", row.Hint, want)
+		for _, want := range []string{"amd64", "Apple Silicon", "--isolation=docker", "/dev/kvm"} {
+			if !strings.Contains(row.Hint, want) {
+				t.Errorf("Hint missing %q, got: %q", want, row.Hint)
+			}
+		}
+		// printDoctorHints indents what it prints, so the Hint must be
+		// hand-wrapped rather than emitted as one long line.
+		if !strings.Contains(row.Hint, "\n") {
+			t.Errorf("Hint is a single unwrapped line: %q", row.Hint)
+		}
+		for _, line := range strings.Split(row.Hint, "\n") {
+			if len(line) > 90 {
+				t.Errorf("Hint line is %d chars, want <= 90 for the doctor table: %q", len(line), line)
+			}
 		}
 		if strings.Contains(row.Summary, row.Hint) {
 			t.Errorf("Summary %q duplicates the remediation Hint", row.Summary)
@@ -101,9 +99,9 @@ func TestMicroVMArchCheck(t *testing.T) {
 // error names the architecture, so a user on an Intel Mac is not sent to install
 // tools that will never help.
 func TestFirstMicroVMGapPrefersArchitecture(t *testing.T) {
-	archRow, ok := microVMArchCheck("darwin", "amd64")
-	if ok {
-		t.Fatal("microVMArchCheck(darwin, amd64) reported no gap")
+	archRow, gap := microVMArchGap("darwin", "amd64")
+	if !gap {
+		t.Fatal("microVMArchGap(darwin, amd64) reported no gap")
 	}
 	checks := []MicroVMCheck{
 		archRow,

@@ -954,6 +954,10 @@ func expandHome(path string) string {
 
 // GenerateDefault returns the default configuration as a TOML string
 // with comments explaining each option.
+//
+// When editing the [sandbox] block, keep the [sandbox.environment] examples
+// last: those sub-tables end the [sandbox] table, so a plain key added after
+// them would land in the wrong section once a user uncomments it.
 func GenerateDefault() string {
 	return `# devsandbox configuration file
 # Location: ~/.config/devsandbox/config.toml
@@ -1094,8 +1098,7 @@ port = 8080
 # Set env vars inside the sandbox. Each key is a variable name; each
 # sub-table is a source (value / env / file, priority: value > env > file).
 # On conflict with env_passthrough, explicit values win.
-# Keep this last in [sandbox]: the sub-tables below end the [sandbox] table, so a
-# plain key uncommented after them would land in the wrong section.
+# These sub-tables end the [sandbox] section: add plain [sandbox] keys above them.
 # [sandbox.environment.GH_TOKEN]
 # value = "placeholder"
 #
