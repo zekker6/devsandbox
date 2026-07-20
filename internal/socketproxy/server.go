@@ -46,6 +46,13 @@ type Server struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	logger   Logger
+
+	// conns tracks accepted connections so Stop can close them. Handlers for
+	// streaming protocols block in conn.Read, which context cancellation does
+	// not interrupt; without closing the connection such a handler would never
+	// return and Stop would always wait out drainTimeout.
+	connMu sync.Mutex
+	conns  map[net.Conn]struct{}
 }
 
 // NewServer constructs a Server. listenPath is the UDS path to create, mode
@@ -81,6 +88,10 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = l
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
+	s.connMu.Lock()
+	s.conns = make(map[net.Conn]struct{})
+	s.connMu.Unlock()
+
 	s.wg.Add(1)
 	go s.acceptLoop()
 	return nil
@@ -95,6 +106,9 @@ func (s *Server) Stop() error {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
+	// Close accepted connections so handlers blocked in a read return; context
+	// cancellation alone does not interrupt a blocking read.
+	s.closeConns()
 
 	done := make(chan struct{})
 	go func() { s.wg.Wait(); close(done) }()
@@ -120,6 +134,11 @@ func (s *Server) acceptLoop() {
 				continue
 			}
 		}
+		if !s.track(conn) {
+			// Stop has run; refuse late connections rather than leaking one.
+			_ = conn.Close()
+			return
+		}
 		s.wg.Add(1)
 		go s.runHandler(conn)
 	}
@@ -127,8 +146,49 @@ func (s *Server) acceptLoop() {
 
 func (s *Server) runHandler(conn net.Conn) {
 	defer s.wg.Done()
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		s.forget(conn)
+		_ = conn.Close()
+	}()
 	s.handler(s.ctx, conn)
+}
+
+// track registers conn, or closes it immediately if Stop already ran so a
+// connection accepted during shutdown cannot outlive the server.
+func (s *Server) track(conn net.Conn) bool {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.conns == nil {
+		return false
+	}
+	s.conns[conn] = struct{}{}
+	return true
+}
+
+func (s *Server) forget(conn net.Conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	delete(s.conns, conn)
+}
+
+// closeConns closes every tracked connection and marks the server closed, so
+// handlers blocked on a read return promptly.
+func (s *Server) closeConns() {
+	s.connMu.Lock()
+	conns := s.conns
+	s.conns = nil
+	s.connMu.Unlock()
+
+	for c := range conns {
+		_ = c.Close()
+	}
+}
+
+// connCount reports the number of tracked connections. Test helper.
+func (s *Server) connCount() int {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return len(s.conns)
 }
 
 func (s *Server) logErr(format string, args ...any) {
