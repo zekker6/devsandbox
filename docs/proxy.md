@@ -136,7 +136,8 @@ and, more importantly, in whether a process inside the sandbox can bypass the pr
 - **Network isolation**: pasta creates a new network namespace with its own network stack
 - **Gateway address**: Traffic is routed through `10.0.2.2` (pasta virtual gateway)
 - **CA certificate path** (inside sandbox): `/tmp/devsandbox-ca.crt`
-- **Requirement**: passt/pasta must be installed
+- **Requirement**: pasta, which is embedded and extracted on first use - a system passt/pasta package is only needed when
+  `use_embedded = false` or extraction fails
 
 Inside the namespace devsandbox adds a `/32` route to the gateway and deletes the default route, so a process that
 ignores `HTTP_PROXY` has no path to an external address and its connections fail. Three limits are worth knowing: hosts
@@ -560,7 +561,7 @@ Default is `host`.
 
 ### Ask Mode
 
-In ask mode, unmatched requests require user approval via a separate monitor terminal. This is particularly useful when running AI agents autonomously - you can approve or block each network request the agent makes, giving you real-time control over what data leaves your machine.
+In ask mode, unmatched requests require user approval via a separate monitor terminal. This is particularly useful when running AI agents autonomously - you can approve or block each request the agent makes that reaches the proxy, giving you real-time control over that traffic. Like every other proxy feature, this is bounded by how strongly the backend routes traffic through the proxy - see [Backend-Specific Behavior](#backend-specific-behavior).
 
 **Step 1**: Start the sandbox with ask mode:
 
@@ -791,7 +792,11 @@ See [Configuration: Proxy Credentials](configuration.md#proxy-credentials) for t
 
 ## Content Redaction
 
-Content redaction scans outgoing requests for secrets before they leave your machine. It checks request bodies, headers, and URLs against configured rules.
+Content redaction scans outgoing requests for secrets and blocks or rewrites them before they leave your machine. It
+checks request bodies, headers, and URLs against configured rules.
+
+Redaction only sees requests that actually reach the proxy, so its coverage is bounded by the same per-backend limits as
+everything else the proxy does - see [Coverage](#redaction-coverage) below before relying on it.
 
 ### Actions
 
@@ -800,6 +805,24 @@ Content redaction scans outgoing requests for secrets before they leave your mac
 | **Block** | Request rejected with HTTP 403. Secret never leaves your machine. |
 | **Redact** | Secret replaced with `[REDACTED:<rule-name>]` in body, headers, and URL. Modified request forwarded to destination. |
 | **Log** | Request forwarded unmodified. Match recorded in proxy logs as a warning. |
+
+### Redaction Coverage
+
+Redaction runs inside the proxy's request handler, so a request is only scanned if it reaches the proxy *and* the proxy
+can read it. Three things bound that:
+
+- **The request has to reach the proxy.** Coverage inherits the enforcement strength of the backend in use - see
+  [Backend-Specific Behavior](#backend-specific-behavior). Under the docker backend the sandbox is only *pointed* at the
+  proxy through `HTTP_PROXY`/`HTTPS_PROXY`, so a process that ignores those variables is never scanned. Under bwrap the
+  route-surgery gaps apply. krun is the only backend that fails closed.
+- **HTTPS needs MITM.** With `--no-mitm`, CONNECT requests are tunneled without interception, so HTTPS bodies,
+  headers, and URLs are never inspected and redaction applies to plain HTTP only. devsandbox prints a warning at startup
+  when redaction is enabled with MITM off.
+- **Only requests, only the configured rules.** Responses are not scanned, and a secret that matches no rule passes
+  through untouched.
+
+Treat redaction as a strong guard against accidental leaks, not as a barrier against code deliberately trying to
+exfiltrate a secret. For that, use `--isolation=krun` with MITM enabled.
 
 ### Quick Start
 
@@ -820,7 +843,7 @@ name = "api-key"
 env = "API_SECRET_KEY"
 ```
 
-Any outgoing request containing the value of `$API_SECRET_KEY` is blocked with HTTP 403.
+Any scanned request containing the value of `$API_SECRET_KEY` is blocked with HTTP 403.
 
 ### Source Types
 
@@ -864,7 +887,8 @@ devsandbox logs proxy --json | jq 'select(.redaction_action != null)'
 
 ### Important Behavior
 
-- Content redaction requires proxy mode (`--proxy`) with MITM enabled.
+- Content redaction requires proxy mode (`--proxy`), and MITM for anything beyond plain HTTP. What it does and does not
+  cover is spelled out under [Redaction Coverage](#redaction-coverage).
 - All source values must resolve at startup. If an environment variable is missing or a file is unreadable, devsandbox exits with an error (**fail-closed**).
 - Log entries for blocked and redacted requests have secrets replaced - secrets never appear in proxy logs.
 - Redaction rules are always **additive** when merging configs. The default action uses most-restrictive-wins.

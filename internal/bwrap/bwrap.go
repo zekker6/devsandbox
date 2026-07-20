@@ -146,13 +146,15 @@ func StartWithPasta(bwrapArgs []string, shellCmd []string, portForwardArgs []str
 	//   Note: This option is not available in older pasta versions (pre-2023)
 	// -f: Run in foreground (pasta exits when child exits)
 	//
-	// The wrapper script restricts network to proxy-only:
-	// 1. Add a host route to gateway via the tap device
-	// 2. Delete the default route to block direct internet access
-	// This routes traffic through our proxy - direct connections to external IPs will fail.
+	// The wrapper script steers traffic toward the proxy:
+	// 1. Add a host route to the gateway via the tap device
+	// 2. Delete the default route, so external addresses have no route out
 	// Best-effort, not a containment boundary: the ip calls discard errors and the exec is
 	// unconditional, so a namespace where the surgery does not apply starts with egress open.
-	// Hosts on the interface's own connected subnet also stay reachable. See docs/proxy.md.
+	// Two gaps remain even when it applies: hosts on the interface's own connected subnet
+	// stay reachable (deleting the default route does not remove the on-link route), and
+	// --map-host-loopback exposes the whole host loopback at the gateway address, not only
+	// the proxy port. No firewall backstops either. See docs/proxy.md.
 	wrapperScript := fmt.Sprintf(`
 		dev=$(ip -o route show default | awk '{print $5}')
 		ip route add %s/32 dev "$dev" 2>/dev/null

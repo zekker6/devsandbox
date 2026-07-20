@@ -118,7 +118,7 @@ echo $STARSHIP_*   # your real prompt</code></pre>
       <li>
         <p class="step-num">03 · isolate</p>
         <h3>Credentials stay out.</h3>
-        <p>SSH keys, cloud creds, <code>.env</code>, sibling projects - invisible. <code>.git</code> is read-only by default. Now <code>--dangerously-skip-permissions</code> actually means something.</p>
+        <p>SSH keys, cloud creds, project <code>.env</code> files (<a href="/devsandbox/docs/sandboxing/#security-model">scan limits</a>), sibling projects - invisible. <code>.git</code> is read-only by default. Now <code>--dangerously-skip-permissions</code> actually means something.</p>
         <pre><code>ls ~/.ssh
 # No such file or directory
 
@@ -158,7 +158,7 @@ devsandbox logs proxy --last 50</code></pre>
         <ul>
           <li><code>~/.ssh</code> - keys, known_hosts</li>
           <li><code>~/.aws</code>, <code>~/.azure</code>, <code>~/.gcloud</code></li>
-          <li><code>.env</code> and <code>.env.*</code> (masked)</li>
+          <li><code>.env</code> and <code>.env.*</code> (masked, <a href="/devsandbox/docs/sandboxing/#security-model">scan limits</a>)</li>
           <li>Parent dirs and sibling projects</li>
           <li>Git commits (<code>.git</code> read-only)</li>
         </ul>

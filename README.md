@@ -137,7 +137,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 
 **CAN:** Read/write your project files, use your `mise`-managed tools, inherit your shell and editor configs, run build commands, install dependencies, make API calls (logged in proxy mode).
 
-**CANNOT:** Read SSH keys, access cloud credentials (AWS/Azure/GCloud), read `.env` secrets (masked up to 3 directory levels below the project root), see other projects, push to git (by default), or modify your system.
+**CANNOT:** Read SSH keys, access cloud credentials (AWS/Azure/GCloud), read `.env` secrets (masked up to 3 directory levels below the project root, skipping `node_modules`, `.git`, `vendor`, `.venv`), see other projects, push to git (by default), or modify your system.
 
 ### Resource access defaults
 
@@ -152,7 +152,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 | mise-managed tools | Read-only |
 | Network (default) | Full access |
 | Network (proxy mode) | Isolated and logged; enforcement strength varies by backend (see [per-backend behavior](docs/proxy.md#backend-specific-behavior)) |
-| Outgoing secrets (proxy + redaction) | Blocked or redacted |
+| Outgoing secrets (proxy + redaction) | Blocked or redacted in requests the proxy sees (see [redaction coverage](docs/proxy.md#redaction-coverage)) |
 
 Everything is configurable. See [Configuration](docs/configuration.md) for details.
 
@@ -164,7 +164,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files ([scan limits](docs/sandboxing.md#security-model)), and git credentials blocked by default
 - **MITM proxy** - optional traffic inspection with log viewing, filtering, and export
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
-- **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine
+- **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine ([coverage](docs/proxy.md#redaction-coverage))
 - **Git modes** - readonly (default), readwrite (with SSH/GPG), or disabled
 - **Desktop notifications** - sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
 

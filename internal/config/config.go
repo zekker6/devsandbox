@@ -1047,8 +1047,9 @@ port = 8080
 # # [proxy.credentials.github.source]
 # # env = "GH_RO_TOKEN"     # read the real token from this host env var
 
-# Content redaction (requires proxy mode)
+# Content redaction (requires proxy mode; MITM for anything beyond plain HTTP)
 # Scans outgoing request bodies, headers, and URLs for secrets.
+# Only requests that reach the proxy are scanned - see docs/proxy.md#redaction-coverage.
 # [proxy.redaction]
 # enabled = true
 # default_action = "block"  # "block", "redact", or "log"

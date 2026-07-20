@@ -87,7 +87,8 @@ Proxy Mode (--proxy):
   - HTTP/HTTPS traffic routed through local proxy (enforcement varies by
     backend: krun fails closed, bwrap best-effort, docker env vars only)
   - MITM proxy with auto-generated CA certificate
-  - bwrap: network isolated via pasta (requires passt package)
+  - bwrap: network isolated via pasta (embedded; system passt package only
+    needed if embedded binaries are disabled or extraction fails)
   - docker: proxy bound to per-session Docker network
   - Request logs: ~/.local/share/devsandbox/<project>/logs/proxy/`,
 		Example: `  devsandbox                      # Interactive shell

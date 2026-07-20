@@ -150,7 +150,7 @@ A section named after a built-in preset (e.g. `[proxy.credentials.github]`) auto
 
 ### Content Redaction
 
-Scan outgoing requests for secrets and block or replace them. See [Proxy: Content Redaction](proxy.md#content-redaction) for actions, behavior, and when to use each.
+Scan outgoing requests for secrets and block or replace them. Only requests that reach the proxy are scanned, and HTTPS only with MITM enabled - see [Proxy: Redaction Coverage](proxy.md#redaction-coverage) for the limits, and [Proxy: Content Redaction](proxy.md#content-redaction) for actions, behavior, and when to use each.
 
 ```toml
 [proxy.redaction]
