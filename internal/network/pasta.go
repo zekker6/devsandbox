@@ -10,8 +10,10 @@ const (
 
 // Pasta implements the Provider interface using pasta (from passt package).
 // Pasta provides user-mode networking for unprivileged network namespaces.
-// When used with bwrap, it creates an isolated network where all traffic
-// must go through the gateway IP (10.0.2.2), which maps to the host's loopback.
+// When used with bwrap, it creates an isolated network reached through the
+// gateway IP (10.0.2.2), which maps to the host's loopback. Pasta itself does
+// not restrict egress to the proxy - that is best-effort route surgery layered
+// on top by bwrap.StartWithPasta.
 type Pasta struct{}
 
 // NewPasta creates a new pasta provider

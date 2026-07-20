@@ -79,7 +79,8 @@ Security Model:
   - Network: enabled (required for package managers, agents)
   - SSH: BLOCKED (no ~/.ssh access)
   - Git: read-only (can view history, cannot push)
-  - .env files: BLOCKED (overlaid with /dev/null, up to 3 levels below the project root)
+  - .env files: BLOCKED (overlaid with /dev/null, up to 3 levels below the
+    project root, skipping node_modules, .git, vendor and .venv)
   - Home directory: sandboxed per-project in ~/.local/share/devsandbox/<project>/
 
 Proxy Mode (--proxy):
@@ -761,6 +762,7 @@ func printInfo(cfg *sandbox.Config) {
 	fmt.Println("  ~/.ssh, ~/.aws, ~/.azure, ~/.gcloud (not mounted)")
 	if cfg.HideEnvFiles {
 		fmt.Println("  .env, .env.* files (hidden, project secrets)")
+		fmt.Println("    scanned up to 3 levels below the project root; node_modules, .git, vendor, .venv skipped")
 	} else {
 		fmt.Println("  .env, .env.* files (visible, hiding disabled)")
 	}

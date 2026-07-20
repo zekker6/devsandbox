@@ -13,7 +13,7 @@ devsandbox closes that gap. It wraps any command in a sandbox scoped to your cur
 - **Editor + LSP, prompt, multiplexer.** nvim, helix, starship, tmux, fish, zsh - all preserved.
 - **Sub-second startup.** bubblewrap on Linux shares the host kernel; native file watching works.
 
-The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools - and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files in the project tree ([scan limits](docs/sandboxing.md#security-model)), sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs every HTTP/HTTPS request for inspection.
+The isolation boundary is still real. Inside the sandbox, the agent sees the project directory and your tools - and nothing else. SSH keys, cloud credentials (`~/.aws`, `~/.azure`, `~/.gcloud`), `.env` files in the project tree ([scan limits](docs/sandboxing.md#security-model)), sibling projects, and parent directories are invisible. `.git` is read-only by default. An optional MITM proxy logs and filters the sandbox's HTTP/HTTPS traffic, with enforcement strength that varies by backend ([per-backend behavior](docs/proxy.md#backend-specific-behavior)).
 
 ## Prerequisites
 
@@ -161,7 +161,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Your real dev env, inside the sandbox** - mise-managed tools, shell configs, editor setups (nvim, starship, tmux) auto-detected and bound, no Dockerfile required
 - **Sub-second startup** - [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux share the host kernel; native file watching works. Docker layer caching keeps macOS restarts at 1-2s
 - **Per-project isolation** - each project gets its own sandbox home, caches, and logs
-- **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files, and git credentials blocked by default
+- **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files ([scan limits](docs/sandboxing.md#security-model)), and git credentials blocked by default
 - **MITM proxy** - optional traffic inspection with log viewing, filtering, and export
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine

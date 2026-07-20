@@ -64,14 +64,14 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 | Resource                          | Access                              |
 |-----------------------------------|-------------------------------------|
 | Project directory                 | Read/Write                          |
-| `.env` files                      | Hidden (overlaid with /dev/null), within the scanned depth below |
+| `.env` files                      | Hidden (overlaid with /dev/null), within the scan scope below |
 | `~/.ssh`                          | Not mounted (configurable)          |
 | `~/.gitconfig`                    | Sanitized copy (configurable)       |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted                         |
 | mise-managed tools                | Read-only or overlay                |
 | Custom mount rules                | User-configurable (see below)       |
 | Network (default)                 | Full access                         |
-| Network (proxy mode)              | Isolated, routed through MITM proxy |
+| Network (proxy mode)              | Isolated, routed through MITM proxy; enforcement strength varies by backend (see [per-backend behavior](proxy.md#backend-specific-behavior)) |
 
 ### What's Not Available (by default)
 

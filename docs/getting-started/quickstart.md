@@ -37,7 +37,7 @@ This prints the sandbox configuration: which directories are mounted read-only, 
 - `.env` and `.env.*` files → masked with `/dev/null`, scanned up to 3 directory levels below the project root (`node_modules`, `.git`, `vendor`, `.venv` are skipped).
 - `.git/` → mounted read-only (no commits, no credentials).
 - mise-managed tools, your shell config, editor setup → mounted read-only so they work inside.
-- Network → full access by default; add `--proxy` to log every HTTP request.
+- Network → full access by default; add `--proxy` to log HTTP requests (enforcement strength varies by backend - see [per-backend behavior](../proxy.md#backend-specific-behavior)).
 
 ## Other tools, same pattern
 

@@ -428,8 +428,9 @@ func (b *Builder) AddSandboxHome() *Builder {
 	home := b.cfg.HomeDir
 
 	// Use shared network unless proxy mode is enabled.
-	// Proxy mode uses pasta which creates an isolated network namespace
-	// where all traffic goes through the gateway to our proxy.
+	// Proxy mode uses pasta which creates an isolated network namespace whose
+	// egress is steered at the gateway toward our proxy on a best-effort basis
+	// (see bwrap.StartWithPasta for the gaps).
 	if !b.cfg.ProxyEnabled {
 		b.ShareNet()
 	}

@@ -15,7 +15,7 @@ free to ignore. The sections below describe bwrap backend behavior by default - 
 - **Audit AI agent activity** - See exactly what API calls your AI coding assistant makes
 - **Debug network issues** - Inspect request/response headers and bodies
 - **Security monitoring** - Detect unexpected network connections
-- **Compliance** - Log all external communications for review
+- **Compliance** - Log external communications for review (see [per-backend enforcement](#backend-specific-behavior))
 
 ## When to Enable Proxy Mode
 
@@ -127,7 +127,7 @@ If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM ena
 
 ## Backend-Specific Behavior
 
-All three backends point the sandbox at the same proxy and intercept the same traffic, but they differ in the mechanism -
+All three backends point the sandbox at the same proxy and intercept what reaches it, but they differ in the mechanism -
 and, more importantly, in whether a process inside the sandbox can bypass the proxy and reach the network directly.
 
 ### bwrap backend

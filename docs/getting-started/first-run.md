@@ -97,5 +97,5 @@ rm -rf /tmp/sandbox-test
 That's it. You've seen the basic flow. From here:
 
 - [Use cases](../use-cases.md) - recipes for common workflows
-- [Proxy mode](../proxy.md) - log/filter all HTTP traffic
+- [Proxy mode](../proxy.md) - log and filter HTTP traffic
 - [Configuration](../configuration.md) - tune mounts, git mode, network policy

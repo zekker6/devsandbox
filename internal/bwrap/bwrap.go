@@ -216,8 +216,10 @@ func StartWithPasta(bwrapArgs []string, shellCmd []string, portForwardArgs []str
 }
 
 // ExecWithPasta wraps bwrap execution inside pasta for network namespace isolation.
-// This creates an isolated network namespace where all traffic must go through
-// pasta's gateway, which we configure to route through our proxy.
+// This creates an isolated network namespace whose only interface is pasta's tap
+// device, and applies the best-effort route surgery in StartWithPasta to steer
+// egress at the gateway toward our proxy. See that function for the gaps this
+// leaves - it is not a containment boundary.
 //
 // The portForwardArgs parameter accepts pasta port forwarding arguments (e.g., -t, -u, -T, -U).
 // Pass nil if no port forwarding is needed.
