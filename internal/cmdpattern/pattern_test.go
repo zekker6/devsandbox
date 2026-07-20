@@ -1,6 +1,9 @@
-package kittyproxy
+package cmdpattern
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestMatchAny(t *testing.T) {
 	m := MatchAny()
@@ -249,5 +252,101 @@ func TestPatternMatchesArgv(t *testing.T) {
 	}
 	if p.MatchesArgv(nil) {
 		t.Error("empty argv should not match")
+	}
+}
+
+func TestCommandPatternResolvedBinPinsExactPath(t *testing.T) {
+	const real = "/usr/local/bin/revdiff"
+
+	p := CommandPattern{Program: "revdiff", ResolvedBin: real, ArgsMatcher: MatchAny()}
+
+	tests := []struct {
+		name string
+		arg0 string
+		want bool
+	}{
+		{"exact resolved path accepted", real, true},
+		{"uncleaned form of the same path accepted", "/usr/local/bin/./revdiff", true},
+		{"same basename elsewhere rejected", "/home/zekker/.cache/devsandbox/revdiff-ipc/abc/revdiff", false},
+		{"same basename in tmp rejected", "/tmp/revdiff", false},
+		{"bare name rejected (host PATH lookup could land anywhere)", "revdiff", false},
+		{"different basename at allowed dir rejected", "/usr/local/bin/evil", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.MatchesArgv([]string{tt.arg0, "--output=/tmp/o"}); got != tt.want {
+				t.Errorf("MatchesArgv(%q) = %v, want %v", tt.arg0, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommandPatternRejectBeatsEverything(t *testing.T) {
+	const ipc = "/home/zekker/.cache/devsandbox/revdiff-ipc/abc"
+
+	// Reject must win even when ResolvedBin names a path inside it, so a
+	// misconfigured caller cannot re-open the hole.
+	p := CommandPattern{
+		Program:     "revdiff",
+		ResolvedBin: ipc + "/revdiff",
+		Reject:      []string{ipc},
+		ArgsMatcher: MatchAny(),
+	}
+	if p.MatchesArgv([]string{ipc + "/revdiff"}) {
+		t.Error("MatchesArgv accepted a program under a rejected prefix, want rejected")
+	}
+}
+
+func TestCommandPatternRejectPrefixIsSegmentAware(t *testing.T) {
+	p := CommandPattern{
+		Program:     "revdiff",
+		Reject:      []string{"/a/b"},
+		ArgsMatcher: MatchAny(),
+	}
+
+	if p.MatchesArgv([]string{"/a/b/revdiff"}) {
+		t.Error("program directly under rejected dir was accepted, want rejected")
+	}
+	if p.MatchesArgv([]string{"/a/b/nested/revdiff"}) {
+		t.Error("program nested under rejected dir was accepted, want rejected")
+	}
+	// "/a/bc" only shares a string prefix with "/a/b"; it is a different tree.
+	if !p.MatchesArgv([]string{"/a/bc/revdiff"}) {
+		t.Error("program under sibling dir /a/bc was rejected, want accepted")
+	}
+}
+
+// TestCommandPatternLegacyBasenameUnchanged pins the pre-existing behavior for
+// patterns that set no ResolvedBin, so extracting this package does not
+// silently change the meaning of any existing caller.
+func TestCommandPatternLegacyBasenameUnchanged(t *testing.T) {
+	p := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
+
+	for _, arg0 := range []string{"revdiff", "/usr/bin/revdiff", "/anywhere/at/all/revdiff"} {
+		if !p.MatchesArgv([]string{arg0}) {
+			t.Errorf("MatchesArgv(%q) = false, want true (legacy basename mode)", arg0)
+		}
+	}
+	if p.MatchesArgv([]string{"/usr/bin/other"}) {
+		t.Error("MatchesArgv(/usr/bin/other) = true, want false")
+	}
+}
+
+func TestResolveProgram(t *testing.T) {
+	// `go` is on PATH in any environment that can run this test.
+	got, err := ResolveProgram("go")
+	if err != nil {
+		t.Fatalf("ResolveProgram(go) returned error: %v", err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("ResolveProgram(go) = %q, want an absolute path", got)
+	}
+	if filepath.Base(got) != "go" {
+		t.Errorf("ResolveProgram(go) = %q, want basename %q", got, "go")
+	}
+
+	if _, err := ResolveProgram("definitely-not-a-real-binary-xyzzy"); err == nil {
+		t.Error("ResolveProgram(nonexistent) returned nil error, want failure so the pattern denies rather than widens")
 	}
 }

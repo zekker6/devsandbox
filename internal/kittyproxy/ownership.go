@@ -3,31 +3,15 @@ package kittyproxy
 import (
 	"encoding/json"
 	"fmt"
-	"sync"
+
+	"devsandbox/internal/cmdpattern"
 )
 
 // OwnedSet is a concurrent-safe set of window IDs the sandbox has launched.
-type OwnedSet struct {
-	mu  sync.RWMutex
-	ids map[int]struct{}
-}
+// The implementation lives in cmdpattern so the herdr proxy can share it.
+type OwnedSet = cmdpattern.OwnedSet[int]
 
-func NewOwnedSet() *OwnedSet {
-	return &OwnedSet{ids: make(map[int]struct{})}
-}
-
-func (s *OwnedSet) Add(id int) {
-	s.mu.Lock()
-	s.ids[id] = struct{}{}
-	s.mu.Unlock()
-}
-
-func (s *OwnedSet) Contains(id int) bool {
-	s.mu.RLock()
-	_, ok := s.ids[id]
-	s.mu.RUnlock()
-	return ok
-}
+func NewOwnedSet() *OwnedSet { return cmdpattern.NewOwnedSet[int]() }
 
 // kittyResponse is the envelope returned by every kitty remote-control command.
 type kittyResponse struct {
