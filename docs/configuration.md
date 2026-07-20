@@ -299,11 +299,13 @@ resource limits), and the same tool bindings and proxy wiring. Notes:
 - **Disable the Docker tool.** Set `[tools.docker] enabled = false` - mounting
   your Docker socket into a microVM meant for untrusted code hands the guest your
   host Docker, defeating the isolation.
-- **Management commands.** `devsandbox doctor` reports the krun prerequisites
-  (podman, the `krun` runtime, `/dev/kvm`) as informational rows - unmet ones
-  `warn` rather than `error`, since krun is opt-in and must not fail `doctor` for
-  bwrap/docker users. `devsandbox sandboxes list` and `sandboxes prune` cover krun
-  sandboxes: they are
+- **Management commands.** `devsandbox doctor` reports the krun prerequisites (the
+  host CPU architecture, podman, the `krun` runtime, `/dev/kvm`, and on Linux an
+  `nft`/`iptables` firewall for proxy mode, a system `pasta` binary for rootless
+  podman networking, and `/etc/subuid`+`/etc/subgid` ranges for `--userns=keep-id`)
+  as informational rows - unmet ones `warn` rather than `error`, since krun is
+  opt-in and must not fail `doctor` for bwrap/docker users. `devsandbox sandboxes
+  list` and `sandboxes prune` cover krun sandboxes: they are
   ephemeral (`--rm`), so they are tracked from on-disk metadata like bwrap rather
   than enumerated from a container engine. `devsandbox forward` is **best-effort**
   for krun in this release - the session is registered for forwarding, but
@@ -326,7 +328,7 @@ this experimental release:
 - **Egress lockdown (host-side, validated on a `/dev/kvm` host).** In proxy mode
   the guest's egress is locked to the proxy gateway with a **deny-by-default**
   firewall in the VMM netns (via `nft`, falling back to `iptables`): it drops all
-  egress except loopback, established/related return traffic, and new TCP to the
+  egress except loopback, established/related return traffic, and TCP to the
   gateway (`10.0.2.2`) on the proxy port. Deny-by-default is what makes this
   structural - a destination is reachable only if a rule names it, so the LAN
   (router UI, NAS, a LAN DNS resolver used for direct DNS exfiltration), cloud

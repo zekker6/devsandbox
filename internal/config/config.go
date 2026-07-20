@@ -1173,7 +1173,7 @@ mode = "readonly"
 # mount_mode = "split"
 
 # Ignore the host's global mise config (~/.config/mise/config.toml) in the sandbox.
-# When true, the global tool list is not resolved at startup — useful when it pins
+# When true, the global tool list is not resolved at startup - useful when it pins
 # "@latest" versions that stall on a proxied or egress-locked sandbox.
 # The project's .mise.toml and ~/.config/mise/settings.toml still apply.
 ignore_global_config = false

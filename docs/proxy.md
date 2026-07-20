@@ -152,7 +152,7 @@ route), and pasta's `--map-host-loopback` maps the whole gateway address to the 
 
 krun closes the two gaps above. Under libkrun the guest has no routable interface of its own, so the lockdown is applied
 host-side in the VMM's pasta namespace: the same route surgery, paired with a firewall that DROPS by default and permits
-only loopback, established/related return traffic, and new TCP connections to the gateway on the proxy port. LAN hosts,
+only loopback, established/related return traffic, and TCP connections to the gateway on the proxy port. LAN hosts,
 cloud metadata endpoints, and direct DNS have no path out. The guest is given IPv4 only, so there is no IPv6 route around
 the IPv4 rules, and the in-guest workload does not start until the host signals the lockdown is complete.
 

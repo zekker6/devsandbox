@@ -36,7 +36,7 @@ const egressSentinelName = ".devsandbox-egress-locked"
 // enough (the connected LAN subnet route survives it, and --map-host-loopback
 // exposes every port of the gateway), so it is paired with a DENY-BY-DEFAULT
 // firewall (buildFirewallCommands) that drops all egress except loopback,
-// established/related return traffic, and new TCP to gateway:proxyPort. The
+// established/related return traffic, and TCP to gateway:proxyPort. The
 // guest is given IPv4 only (the pasta invocation passes -4), so there is no IPv6
 // path for the IPv4 table to miss.
 
@@ -153,8 +153,8 @@ func checkFirewallBackend(lookPath func(string) (string, error)) MicroVMCheck {
 // service and IAM credentials) stay directly reachable, and pasta's
 // --map-host-loopback maps every port of the gateway to the host's 127.0.0.1.
 // Enumerating what to drop misses all of that, so instead the chain DROPS by
-// default and allows only: established/related return traffic, loopback, and new
-// TCP to gateway:proxyPort. Everything else - every other host, every other port
+// default and allows only: established/related return traffic, loopback, and TCP
+// to gateway:proxyPort. Everything else - every other host, every other port
 // of the gateway, DNS - has no path out. DNS is deliberately not excepted: the
 // proxy resolves hostnames itself and all traffic goes through HTTP(S)_PROXY.
 // pasta has no port-scoped host-loopback option (--map-host-loopback takes an

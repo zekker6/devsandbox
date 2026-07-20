@@ -245,7 +245,7 @@ func TestDetectFirewallBackend(t *testing.T) {
 
 // TestBuildFirewallCommands asserts the deny-by-default firewall rules: the chain
 // drops by default and accepts only established/related return traffic, loopback,
-// and new TCP to gateway:proxyPort. This is the guard against the LAN/metadata
+// and TCP to gateway:proxyPort. This is the guard against the LAN/metadata
 // exposure route surgery alone leaves open (the connected subnet route survives
 // `ip route del default`) and the host-loopback exposure (--map-host-loopback
 // maps ALL ports of the gateway to host 127.0.0.1).

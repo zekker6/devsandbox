@@ -1304,8 +1304,8 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "--network", "pasta:-4,--map-host-loopback,"+d.engine.hostAlias)
 
 		// Egress lockdown: a deny-by-default firewall in the VMM netns drops all
-		// guest egress except loopback, established/related return traffic, and new
-		// TCP to the proxy gateway:port, paired with route surgery that removes the
+		// guest egress except loopback, established/related return traffic, and TCP
+		// to the proxy gateway:port, paired with route surgery that removes the
 		// default route - so direct-IP egress (LAN, cloud metadata) and DNS
 		// exfiltration have no path out. Under libkrun TSI the guest has no
 		// routable interface, so this CANNOT run in-guest; the host applies it in
@@ -1323,9 +1323,11 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		// listed row with no negative cache, so one `mise ls` against a config
 		// with `@latest` specs turns into hundreds of doomed lookups (measured:
 		// 14 minutes). Offline mode resolves from installed/cached data instantly
-		// - with host installs seeded, that is the full host toolchain. Boot-time
-		// project installs still run online (installMiseTools overrides this),
-		// and a manual in-sandbox install can too: MISE_OFFLINE=0 mise install.
+		// - with host installs seeded, that is the full host toolchain. There is no
+		// online boot-time project install to override it here: krun is always
+		// constructed with KeepContainer=false, so it takes DockerActionRun, and
+		// installMiseTools only runs on the DockerActionCreate/Exec paths. A manual
+		// in-sandbox install still opts out: MISE_OFFLINE=0 mise install.
 		args = append(args, "-e", "MISE_OFFLINE=1")
 	}
 
