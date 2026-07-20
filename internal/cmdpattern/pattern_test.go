@@ -1,4 +1,4 @@
-package kittyproxy
+package cmdpattern
 
 import "testing"
 
