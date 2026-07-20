@@ -141,7 +141,7 @@ The build still proceeds - this is a disclosure, not a hard stop. Only build Doc
 - **Egress lockdown** (proxy mode) is applied host-side in the VMM's pasta network namespace and is validated on a `/dev/kvm` host. See the [krun backend reference](../configuration.md#krun-microvm-backend-experimental) for the full networking and security-boundary explanation.
 - **`devsandbox forward`** is best-effort for krun: the session is registered, but reaching a listener inside the guest through the microVM network namespace is not yet validated.
 - **macOS (HVF)** is not yet validated, and **proxy mode is refused there** because the egress lockdown is Linux-only; krun + proxy on macOS fails closed rather than run with open egress. Non-proxy krun on macOS is unaffected.
-- **IPv6 egress** is not covered by the lockdown (IPv4 only, matching the bwrap backend).
+- **IPv6** is disabled in the guest under proxy mode: pasta is invoked with `-4`, so the guest is given IPv4 only and has no IPv6 route or IPv6 host-loopback map - there is no IPv6 egress path for the IPv4 lockdown to miss.
 
 ## Next step
 

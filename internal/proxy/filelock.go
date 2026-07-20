@@ -34,7 +34,12 @@ func TryFileLock(path string) (*FileLock, error) {
 }
 
 func acquireFileLock(path string, how int) (*FileLock, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	// O_NOFOLLOW: the lock lives at a predictable path in the shared temp dir, so a
+	// co-tenant could pre-create a symlink there pointing at a file they want the
+	// (possibly privileged) lock holder to truncate/write. O_NOFOLLOW makes the
+	// open fail (ELOOP) on a final-component symlink rather than follow it; a
+	// regular lock file is unaffected.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open lock file: %w", err)
 	}

@@ -714,6 +714,37 @@ func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
 	}
 }
 
+// TestBuilder_SetEnvDefault asserts a default never overwrites a value already
+// configured for the same name (so a user override wins), but does set the name
+// when it is absent.
+func TestBuilder_SetEnvDefault(t *testing.T) {
+	envValue := func(args []string, name string) (string, bool) {
+		for i := 0; i < len(args)-2; i++ {
+			if args[i] == "--setenv" && args[i+1] == name {
+				return args[i+2], true
+			}
+		}
+		return "", false
+	}
+
+	t.Run("does not overwrite an existing value", func(t *testing.T) {
+		b := NewBuilder(&Config{})
+		b.SetEnv("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "30s")
+		b.SetEnvDefault("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
+		if got, _ := envValue(b.Build(), "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT"); got != "30s" {
+			t.Errorf("SetEnvDefault overwrote a user value: got %q, want 30s", got)
+		}
+	})
+
+	t.Run("sets the value when absent", func(t *testing.T) {
+		b := NewBuilder(&Config{})
+		b.SetEnvDefault("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
+		if got, ok := envValue(b.Build(), "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT"); !ok || got != "3s" {
+			t.Errorf("SetEnvDefault did not set an absent var: got %q ok=%v, want 3s", got, ok)
+		}
+	})
+}
+
 func TestBuilder_AddProxyEnvironment_ExtraCAEnv(t *testing.T) {
 	cfg := &Config{
 		ProxyEnabled:    true,

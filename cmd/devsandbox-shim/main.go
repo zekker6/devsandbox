@@ -63,6 +63,20 @@ func main() {
 
 	uid, gid := getHostIDs()
 
+	// krun egress lockdown is applied HOST-side (the isolator locks this microVM's
+	// pasta-netns routing to the proxy gateway). Wait for that to complete BEFORE
+	// running anything guest-influenced - the mise setup below execs the guest's
+	// (persistent, guest-writable) mise binary and data dir, so a prior untrusted
+	// run's planted code must not run while direct egress is still open, nor be
+	// able to plant the go-signal sentinel itself. Nothing between here and the
+	// workload needs the network, so gating first costs nothing. Fail-closed:
+	// abort if the host does not confirm in time.
+	if egressLockdownRequested() {
+		if err := waitForEgressReady(); err != nil {
+			fatal("egress lockdown not confirmed (fail-closed): %v", err)
+		}
+	}
+
 	ensureUser(uid, gid)
 	preferHostMise(uid, gid)
 	// NOTE: .env hiding is now handled at container creation via Docker volume
@@ -132,16 +146,6 @@ func main() {
 		args = []string{"/bin/bash"}
 	}
 
-	// krun egress lockdown is applied HOST-side (the isolator locks this
-	// microVM's pasta-netns routing to the proxy gateway). Wait for that to
-	// complete before running the workload so untrusted code never sees open
-	// egress. Fail-closed: abort if the host does not confirm in time.
-	if egressLockdownRequested() {
-		if err := waitForEgressReady(); err != nil {
-			fatal("egress lockdown not confirmed (fail-closed): %v", err)
-		}
-	}
-
 	if len(fsOverlays) > 0 {
 		execWithOverlays(uid, gid, fsOverlays, args)
 		// execWithOverlays does not return on success
@@ -186,10 +190,14 @@ func envInt(key string, fallback int) int {
 // the ID may be claimed under a different name we did not detect.
 func ensureUser(uid, gid int) {
 	if argv := groupCreateArgs(gid, getentExists); argv != nil {
-		_ = run(argv[0], argv[1:]...)
+		if err := run(argv[0], argv[1:]...); err != nil {
+			warn("create sandbox group (gid %d): %v (the group may be claimed under another name)", gid, err)
+		}
 	}
 	if argv := userCreateArgs(uid, gid, getentExists); argv != nil {
-		_ = run(argv[0], argv[1:]...)
+		if err := run(argv[0], argv[1:]...); err != nil {
+			warn("create sandbox user (uid %d): %v (the uid may be claimed under another name; USER will reflect the real account)", uid, err)
+		}
 	}
 
 	// Fix ownership of sandbox home
@@ -209,6 +217,22 @@ type idExistsFunc func(database, key string) bool
 // falling through to the create path and preserving the original behavior.
 func getentExists(database, key string) bool {
 	return exec.Command("getent", database, key).Run() == nil
+}
+
+// passwdName returns the login name for uid from `getent passwd <uid>`, or "" when
+// there is no entry (or getent is unavailable). Used so USER names the account we
+// actually drop to rather than asserting "sandboxuser", which may be wrong when
+// the uid was provisioned under another name (keep-id) or our own useradd was a
+// no-op on a name collision.
+func passwdName(uid int) string {
+	out, err := exec.Command("getent", "passwd", strconv.Itoa(uid)).Output()
+	if err != nil {
+		return ""
+	}
+	if i := strings.IndexByte(string(out), ':'); i > 0 {
+		return string(out)[:i]
+	}
+	return ""
 }
 
 // groupCreateArgs returns the groupadd argv for the sandbox group, or nil when a
@@ -647,9 +671,16 @@ func dropPrivsAndExec(uid, gid int, args []string) {
 		fatal("setuid(%d): %v", uid, err)
 	}
 
-	// Set HOME for the new user
+	// Set HOME/USER for the new user. Resolve USER from the passwd entry for the
+	// uid we drop to so it names the real account even when the uid was provisioned
+	// under a name other than sandboxuser (keep-id, or a name collision that made
+	// our own useradd a no-op); fall back to sandboxUser only when there is no entry.
+	userName := sandboxUser
+	if n := passwdName(uid); n != "" {
+		userName = n
+	}
 	_ = os.Setenv("HOME", sandboxHome)
-	_ = os.Setenv("USER", sandboxUser)
+	_ = os.Setenv("USER", userName)
 
 	env := os.Environ()
 	if err := syscall.Exec(binary, args, env); err != nil {

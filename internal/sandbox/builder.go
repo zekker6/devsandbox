@@ -322,6 +322,19 @@ func (b *Builder) SetEnvIfSet(name string) *Builder {
 	return b
 }
 
+// SetEnvDefault sets name=value only when no --setenv entry for name exists yet,
+// so a value the user already configured (e.g. via env passthrough, applied
+// earlier) wins over a hardcoded default. Unlike SetEnv, which is last-write-wins
+// by name, this never overwrites an existing entry.
+func (b *Builder) SetEnvDefault(name, value string) *Builder {
+	for i := 0; i < len(b.args)-2; i++ {
+		if b.args[i] == "--setenv" && b.args[i+1] == name {
+			return b
+		}
+	}
+	return b.SetEnv(name, value)
+}
+
 func (b *Builder) AddBaseArgs() *Builder {
 	b.ClearEnv().
 		UnshareUser().
@@ -1090,8 +1103,10 @@ func (b *Builder) AddProxyEnvironment() *Builder {
 	// lookup that escapes the proxy path hangs to the full timeout, and a config
 	// with several such specs stalls every `mise ls`/install for minutes. Bound
 	// the lookups tightly: through the local proxy a working fetch answers well
-	// under this, and a blocked one falls back to installed versions 3s in.
-	b.SetEnv("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
+	// under this, and a blocked one falls back to installed versions 3s in. A
+	// default so a user who configured this var (env passthrough, applied above)
+	// keeps their value.
+	b.SetEnvDefault("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
 
 	// User-defined extra proxy env vars from config
 	for _, name := range b.cfg.ProxyExtraEnv {

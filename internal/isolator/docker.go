@@ -366,7 +366,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		if d.usesMicroVMSession(sandboxCfg.ProxyEnabled) {
 			return d.runMicroVMSession(ctx, cmd, result.ContainerName, cfg.OnSandboxStart, isoCfg.SandboxHome, isoCfg.ProxyPort)
 		}
-		return asCommandExit(cmd.Run())
+		return asEngineOrCommandExit(cmd.Run())
 
 	case DockerActionCreate:
 		createCmd := exec.Command(result.BinaryPath, result.Args...)
@@ -476,15 +476,33 @@ func (d *DockerIsolator) runMicroVMSession(ctx context.Context, cmd *exec.Cmd, c
 	wg.Go(func() {
 		pid, err := d.waitForContainerPID(resolveCtx, containerName, 30*time.Second)
 		if err != nil {
-			// Suppress the warning when the container simply exited first
-			// (resolveCtx cancelled) - that is the normal short-run case.
-			if resolveCtx.Err() == nil {
-				if diag := d.startupDiagnostics(containerName); diag != "" {
-					d.logWarn("port forwarding unavailable for this krun session: %v\nlast %d lines of %s output from %q:\n%s",
-						err, startupLogTailLines, d.engine.binary, containerName, diag)
-				} else {
-					d.logWarn("port forwarding unavailable for this krun session: %v", err)
+			// The container exited before we could resolve its PID: the normal
+			// short-run case (resolveCtx cancelled), nothing to lock down or forward.
+			if resolveCtx.Err() != nil {
+				return
+			}
+			// PID resolution failed while the container is still up. When egress
+			// lockdown is required we cannot lock the netns without the PID, so this
+			// is fail-closed territory: tear down the microVM and record the error
+			// rather than let the sentinel-gated guest sit until it times out with a
+			// misleading "port forwarding unavailable" reason while the lockdown
+			// never runs.
+			diag := d.startupDiagnostics(containerName)
+			if lockdown {
+				wrapped := fmt.Errorf("resolve guest PID to lock egress: %w", err)
+				if diag != "" {
+					wrapped = fmt.Errorf("%w\nlast %d lines of %s output from %q:\n%s",
+						wrapped, startupLogTailLines, d.engine.binary, containerName, diag)
 				}
+				d.recordLockdownFailure(&lockdownMu, &lockdownErr, wrapped, containerName, cancelResolve)
+				return
+			}
+			// No lockdown required (non-proxy krun): only port forwarding is affected.
+			if diag != "" {
+				d.logWarn("port forwarding unavailable for this krun session: %v\nlast %d lines of %s output from %q:\n%s",
+					err, startupLogTailLines, d.engine.binary, containerName, diag)
+			} else {
+				d.logWarn("port forwarding unavailable for this krun session: %v", err)
 			}
 			return
 		}
@@ -531,7 +549,7 @@ func (d *DockerIsolator) runMicroVMSession(ctx context.Context, cmd *exec.Cmd, c
 	if le != nil {
 		return fmt.Errorf("krun egress lockdown failed (fail-closed): %w", le)
 	}
-	return asCommandExit(err)
+	return asEngineOrCommandExit(err)
 }
 
 // recordLockdownFailure stores the first egress-lockdown error and fails closed
@@ -632,7 +650,10 @@ func (d *DockerIsolator) execIntoContainer(dockerBinary, containerName string, i
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	// Carry the workload's exit status up so `devsandbox`'s own exit code matches
+	// (create/exec is the default keep_container path); an engine-level exec
+	// failure (125) surfaces as an error rather than a silent exit code.
+	return asEngineOrCommandExit(cmd.Run())
 }
 
 // waitForContainerReady polls for the ready sentinel file inside the container.
@@ -915,6 +936,27 @@ func acquireMicroVMSessionLock(containerName string) (*proxy.FileLock, error) {
 		return nil, fmt.Errorf("acquire krun session lock for container %q (a session may already be active; stop it before starting another): %w", containerName, err)
 	}
 	return lock, nil
+}
+
+// userConfiguredEnv reports whether the user set name through any env mechanism -
+// an explicit value (Environment/EnvVars) or passthrough of a host var that is
+// actually set - so a hardcoded default can defer to it instead of clobbering it
+// via a later `-e` (which docker/podman resolve last-wins).
+func userConfiguredEnv(cfg *Config, name string) bool {
+	if _, ok := cfg.Environment[name]; ok {
+		return true
+	}
+	if _, ok := cfg.EnvVars[name]; ok {
+		return true
+	}
+	for _, n := range cfg.EnvPassthrough {
+		if n == name {
+			if _, set := os.LookupEnv(name); set {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildExecArgs builds arguments for docker exec into a running container.
@@ -1215,7 +1257,11 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		// with several such specs stalls every `mise ls`/install for minutes. Bound
 		// the lookups tightly: through the local proxy a working fetch answers well
 		// under this, and a blocked one falls back to installed versions 3s in.
-		args = append(args, "-e", "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT=3s")
+		// Only a default: `-e` is last-wins and the user's env is emitted above, so
+		// skip it when the user configured this var themselves (documented override).
+		if !userConfiguredEnv(cfg, "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT") {
+			args = append(args, "-e", "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT=3s")
+		}
 
 		// User-defined extra proxy env vars from config
 		for _, name := range cfg.ProxyExtraEnv {
@@ -1251,11 +1297,17 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	// microVM can reach it - the same model the bwrap backend uses. d.engine.hostAlias
 	// holds the gateway IP for krun, and PROXY_HOST below points the guest at it.
 	if d.engine.microVM && cfg.ProxyEnabled {
-		args = append(args, "--network", "pasta:--map-host-loopback,"+d.engine.hostAlias)
+		// -4: give the guest IPv4 only. Without it pasta configures IPv6 too on a
+		// dual-stack host, and the egress lockdown (nft family ip, `ip route del
+		// default`) is IPv4 only - an IPv6 route (and IPv6 host-loopback map) would
+		// escape it entirely. IPv4-only closes that path at the source.
+		args = append(args, "--network", "pasta:-4,--map-host-loopback,"+d.engine.hostAlias)
 
-		// Egress lockdown: force all guest traffic through the proxy by deleting
-		// the default route (keeping only a /32 to the gateway) so direct-IP and
-		// DNS exfiltration have no path out. Under libkrun TSI the guest has no
+		// Egress lockdown: a deny-by-default firewall in the VMM netns drops all
+		// guest egress except loopback, established/related return traffic, and new
+		// TCP to the proxy gateway:port, paired with route surgery that removes the
+		// default route - so direct-IP egress (LAN, cloud metadata) and DNS
+		// exfiltration have no path out. Under libkrun TSI the guest has no
 		// routable interface, so this CANNOT run in-guest; the host applies it in
 		// the VMM's pasta netns after boot (see runMicroVMSession -> egress.go).
 		// The shim only WAITS for that to finish (DEVSANDBOX_EGRESS_LOCKDOWN=1)

@@ -1436,6 +1436,48 @@ func TestGetToolBindings_SplitMode_OverlayBindingsAreRO(t *testing.T) {
 	}
 }
 
+// TestUserConfiguredEnv asserts a hardcoded default (e.g.
+// MISE_FETCH_REMOTE_VERSIONS_TIMEOUT) can tell whether the user configured the
+// var themselves, through any mechanism, so it defers rather than clobbering the
+// documented override. Passthrough counts only when the host var is actually set.
+func TestUserConfiguredEnv(t *testing.T) {
+	const name = "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT"
+
+	t.Run("explicit Environment value", func(t *testing.T) {
+		cfg := &Config{Environment: map[string]string{name: "10s"}}
+		if !userConfiguredEnv(cfg, name) {
+			t.Error("expected true for a var set in Environment")
+		}
+	})
+	t.Run("explicit EnvVars value", func(t *testing.T) {
+		cfg := &Config{EnvVars: map[string]string{name: "10s"}}
+		if !userConfiguredEnv(cfg, name) {
+			t.Error("expected true for a var set in EnvVars")
+		}
+	})
+	t.Run("passthrough of a set host var", func(t *testing.T) {
+		t.Setenv(name, "10s")
+		cfg := &Config{EnvPassthrough: []string{name}}
+		if !userConfiguredEnv(cfg, name) {
+			t.Error("expected true for a passthrough of a set host var")
+		}
+	})
+	t.Run("passthrough of an unset host var does not count", func(t *testing.T) {
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &Config{EnvPassthrough: []string{name}}
+		if userConfiguredEnv(cfg, name) {
+			t.Error("an unset passthrough var contributes no value, so the default must still apply")
+		}
+	})
+	t.Run("not configured", func(t *testing.T) {
+		if userConfiguredEnv(&Config{}, name) {
+			t.Error("expected false when the user set the var nowhere")
+		}
+	})
+}
+
 func TestDockerIsolator_Build_EnvVarsOverridePassthrough(t *testing.T) {
 	skipIfNoDocker(t)
 	t.Setenv("PASSTHROUGH_CONFLICT", "host-value")

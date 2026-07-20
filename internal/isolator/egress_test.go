@@ -243,12 +243,12 @@ func TestDetectFirewallBackend(t *testing.T) {
 	}
 }
 
-// TestBuildFirewallCommands asserts the port-scoped firewall rules: only new TCP
-// to gateway:proxyPort is accepted (plus established/related), and every other
-// new connection to the gateway is dropped - the accept rules always precede the
-// drop. This is the guard against the host-loopback exposure: --map-host-loopback
-// maps ALL ports of the gateway to host 127.0.0.1, so without the drop the guest
-// could reach any host-loopback service through the gateway.
+// TestBuildFirewallCommands asserts the deny-by-default firewall rules: the chain
+// drops by default and accepts only established/related return traffic, loopback,
+// and new TCP to gateway:proxyPort. This is the guard against the LAN/metadata
+// exposure route surgery alone leaves open (the connected subnet route survives
+// `ip route del default`) and the host-loopback exposure (--map-host-loopback
+// maps ALL ports of the gateway to host 127.0.0.1).
 func TestBuildFirewallCommands(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -259,27 +259,28 @@ func TestBuildFirewallCommands(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name:      "nft rules scope gateway to proxy port",
+			name:      "nft deny-by-default, allow only proxy port",
 			backend:   firewallNft,
 			gateway:   "10.0.2.2",
 			proxyPort: 8080,
 			want: [][]string{
 				{"nft", "add", "table", "ip", "devsandbox_egress"},
-				{"nft", "add", "chain", "ip", "devsandbox_egress", "output", "{ type filter hook output priority 0 ; policy accept ; }"},
+				{"nft", "add", "chain", "ip", "devsandbox_egress", "output", "{ type filter hook output priority 0 ; policy drop ; }"},
 				{"nft", "add", "rule", "ip", "devsandbox_egress", "output", "ct", "state", "established,related", "accept"},
+				{"nft", "add", "rule", "ip", "devsandbox_egress", "output", "oif", "lo", "accept"},
 				{"nft", "add", "rule", "ip", "devsandbox_egress", "output", "ip", "daddr", "10.0.2.2", "tcp", "dport", "8080", "accept"},
-				{"nft", "add", "rule", "ip", "devsandbox_egress", "output", "ip", "daddr", "10.0.2.2", "drop"},
 			},
 		},
 		{
-			name:      "iptables fallback rules scope gateway to proxy port",
+			name:      "iptables fallback deny-by-default, allow only proxy port",
 			backend:   firewallIptables,
 			gateway:   "192.168.99.1",
 			proxyPort: 9090,
 			want: [][]string{
 				{"iptables", "-A", "OUTPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
+				{"iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"},
 				{"iptables", "-A", "OUTPUT", "-d", "192.168.99.1", "-p", "tcp", "--dport", "9090", "-j", "ACCEPT"},
-				{"iptables", "-A", "OUTPUT", "-d", "192.168.99.1", "-j", "DROP"},
+				{"iptables", "-P", "OUTPUT", "DROP"},
 			},
 		},
 		{
@@ -310,25 +311,47 @@ func TestBuildFirewallCommands(t *testing.T) {
 	}
 }
 
-// TestBuildFirewallCommands_DropIsLast asserts the drop rule for the gateway is
-// appended after the accept rules for both backends, so the proxy port stays
-// reachable while everything else to the gateway is denied.
-func TestBuildFirewallCommands_DropIsLast(t *testing.T) {
+// TestBuildFirewallCommands_DenyByDefault asserts the firewall denies by default
+// rather than enumerating what to drop: the chain has a drop policy (nft
+// `policy drop` / iptables `-P OUTPUT DROP`), and the only new-connection accept
+// naming the gateway is scoped to the proxy TCP port - there is no blanket accept
+// of the whole gateway that would re-open the host-loopback exposure. This is what
+// makes the lockdown structural: a destination is reachable only if a rule names
+// it, so the LAN, cloud metadata, and non-proxy gateway ports are all closed
+// without being individually enumerated.
+func TestBuildFirewallCommands_DenyByDefault(t *testing.T) {
 	for _, backend := range []firewallBackend{firewallNft, firewallIptables} {
 		cmds, err := buildFirewallCommands(backend, "10.0.2.2", 8080)
 		if err != nil {
 			t.Fatalf("backend %v: unexpected error: %v", backend, err)
 		}
-		last := cmds[len(cmds)-1]
-		joined := strings.Join(last, " ")
-		if !strings.Contains(joined, "drop") && !strings.Contains(joined, "DROP") {
-			t.Errorf("backend %v: last rule must be the gateway drop, got %v", backend, last)
-		}
-		for _, c := range cmds[:len(cmds)-1] {
+
+		hasDefaultDrop := false
+		hasPortAccept := false
+		for _, c := range cmds {
 			j := strings.Join(c, " ")
-			if strings.Contains(j, " drop") || strings.Contains(j, "-j DROP") {
-				t.Errorf("backend %v: a drop rule precedes the final one: %v", backend, c)
+			// nft encodes the default drop in the chain policy; iptables in the
+			// OUTPUT chain policy. Either establishes deny-by-default.
+			if strings.Contains(j, "policy drop") || strings.Contains(j, "-P OUTPUT DROP") {
+				hasDefaultDrop = true
 			}
+			// The gateway may only be accepted on the proxy port. A gateway accept
+			// without the port would re-expose every host-loopback service.
+			gatewayAccept := strings.Contains(j, "10.0.2.2") &&
+				(strings.Contains(j, "accept") || strings.Contains(j, "ACCEPT"))
+			if gatewayAccept {
+				if strings.Contains(j, "8080") {
+					hasPortAccept = true
+				} else {
+					t.Errorf("backend %v: gateway accepted without a port scope: %v", backend, c)
+				}
+			}
+		}
+		if !hasDefaultDrop {
+			t.Errorf("backend %v: firewall must deny by default (no drop policy found): %v", backend, cmds)
+		}
+		if !hasPortAccept {
+			t.Errorf("backend %v: no accept for the gateway on the proxy port: %v", backend, cmds)
 		}
 	}
 }

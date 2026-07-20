@@ -320,31 +320,34 @@ reach the host - that is the reason to use `krun`. Two things to be aware of in
 this experimental release:
 
 - **Egress lockdown (host-side, validated on a `/dev/kvm` host).** In proxy mode
-  the guest's egress is locked to the proxy gateway: a `/32` route to the gateway
-  (`10.0.2.2`) is kept and the default route is deleted, so direct-IP egress and
-  external DNS exfiltration have no path out. Because `--map-host-loopback` maps
-  *every* port of the gateway to the host's `127.0.0.1` (pasta has no
-  port-scoped host-loopback option), the lockdown also installs a fail-closed
-  firewall in the VMM netns (via `nft`, falling back to `iptables`) that allows
-  only new TCP to the gateway on the proxy port - so the guest cannot reach other
-  host-loopback services through the gateway - and drops everything else to it.
-  If neither `nft` nor `iptables` is available the launch aborts rather than run
-  with the port-wide exposure. Under libkrun the guest uses TSI
-  (transparent socket interception) - it has no routable interface, so its
-  `connect()` calls are executed by the VMM process in the VMM's pasta network
-  namespace and obey *that* namespace's routing table. The lockdown therefore runs
-  **host-side**: after the microVM boots, `devsandbox` enters the VMM netns (via
-  `nsenter --user --net`, as rootless userns-root) and applies the route surgery
-  there. The in-guest shim does **not** touch routes (an in-guest `ip route del`
-  has nothing to act on under TSI); it only **waits** for the host to finish (a
-  sentinel in the sandbox home) before running the workload, so untrusted code
-  never runs while direct egress is still open. The surgery is **fail-closed**
-  (the microVM is torn down and the launch aborts if any step errors), scoped to
-  krun + proxy on Linux. No in-guest `NET_ADMIN` is granted. (The route surgery
-  operates on the IPv4 table only, matching the bwrap backend; IPv6 egress, if the
-  guest is ever given an IPv6 route, is not yet covered. This bounds *data
-  exfiltration*, not host compromise - the kernel boundary is unaffected either
-  way.)
+  the guest's egress is locked to the proxy gateway with a **deny-by-default**
+  firewall in the VMM netns (via `nft`, falling back to `iptables`): it drops all
+  egress except loopback, established/related return traffic, and new TCP to the
+  gateway (`10.0.2.2`) on the proxy port. Deny-by-default is what makes this
+  structural - a destination is reachable only if a rule names it, so the LAN
+  (router UI, NAS, a LAN DNS resolver used for direct DNS exfiltration), cloud
+  metadata (`169.254.169.254`) and every non-proxy port of the gateway are all
+  closed without being individually enumerated. Route surgery (keep a `/32` to the
+  gateway, delete the default route) is applied alongside it, but the firewall is
+  the guarantee: route surgery alone leaves the connected LAN subnet route intact,
+  and `--map-host-loopback` maps *every* port of the gateway to the host's
+  `127.0.0.1` (pasta has no port-scoped host-loopback option). If neither `nft`
+  nor `iptables` is available the launch aborts rather than run open. Under libkrun
+  the guest uses TSI (transparent socket interception) - it has no routable
+  interface, so its `connect()` calls are executed by the VMM process in the VMM's
+  pasta network namespace and obey *that* namespace's routing table. The lockdown
+  therefore runs **host-side**: after the microVM boots, `devsandbox` enters the
+  VMM netns (via `nsenter --user --net`, as rootless userns-root) and applies the
+  rules there. The in-guest shim does **not** touch routes (an in-guest `ip route
+  del` has nothing to act on under TSI); it only **waits** for the host to finish
+  (a sentinel in the sandbox home) before running any guest-influenced code, so
+  untrusted code never runs while direct egress is still open. The lockdown is
+  **fail-closed** (the microVM is torn down and the launch aborts if any step
+  errors), scoped to krun + proxy on Linux. No in-guest `NET_ADMIN` is granted.
+  (The lockdown is IPv4 only: the guest is given IPv4 only - the pasta invocation
+  passes `-4` - so there is no IPv6 route or IPv6 host-loopback map for the IPv4
+  firewall to miss. This bounds *data exfiltration*, not host compromise - the
+  kernel boundary is unaffected either way.)
 - **Status:** experimental. The egress lockdown is validated on a `/dev/kvm` host;
   the `forward` path and macOS (HVF) remain unvalidated. On macOS (HVF) **proxy
   mode is refused** fail-closed because the egress lockdown is Linux-only - krun +

@@ -101,9 +101,10 @@ func TestKrunIsolator_ProxyHostAlias(t *testing.T) {
 
 	// krun binds the proxy to host loopback and reaches it via the pasta gateway
 	// (mapped with --map-host-loopback). It must NOT inject an --add-host or use
-	// the docker alias, and must point the guest at the gateway IP.
-	if !strings.Contains(argsStr, "--network pasta:--map-host-loopback,10.0.2.2") {
-		t.Errorf("krun proxy run must map the pasta gateway to host loopback, got: %s", argsStr)
+	// the docker alias, and must point the guest at the gateway IP. -4 gives the
+	// guest IPv4 only so the IPv4 egress lockdown has no IPv6 path to miss.
+	if !strings.Contains(argsStr, "--network pasta:-4,--map-host-loopback,10.0.2.2") {
+		t.Errorf("krun proxy run must give the guest IPv4 only and map the pasta gateway to host loopback, got: %s", argsStr)
 	}
 	if strings.Contains(argsStr, "--add-host") {
 		t.Errorf("krun must not inject --add-host, got: %s", argsStr)
