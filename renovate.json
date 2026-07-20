@@ -10,6 +10,15 @@
       "allowedVersions": "<=1.8.4"
     }
   ],
+  "vulnerabilityAlerts": {
+    "packageRules": [
+      {
+        "description": "The allowedVersions cap above must never suppress a security fix. goproxy carries all sandboxed MITM traffic, so a CVE there has to surface even while the cap is in place; the resulting PR needs a manual check that the v1.8.5 buffering regression is gone before merge.",
+        "matchPackageNames": ["github.com/elazarl/goproxy"],
+        "allowedVersions": null
+      }
+    ]
+  },
   "customManagers": [
     {
       "customType": "regex",

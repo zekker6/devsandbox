@@ -65,6 +65,24 @@ func TestMicroVMResults_NeverError(t *testing.T) {
 	}
 }
 
+// TestMicroVMResults_CarriesHint asserts the remediation a check builds survives
+// the mapping into doctor rows. The DETAILS column only fits the summary, so a
+// dropped Hint would silently strip every krun fix instruction from the output.
+func TestMicroVMResults_CarriesHint(t *testing.T) {
+	in := []isolator.MicroVMCheck{
+		{Name: "system pasta", OK: false, Summary: "pasta not installed", Hint: "install the passt package"},
+		{Name: "podman", OK: true, Summary: "/usr/bin/podman"},
+	}
+
+	rows := microVMResults(in)
+	if rows[0].hint != "install the passt package" {
+		t.Errorf("hint = %q, want the check's remediation", rows[0].hint)
+	}
+	if rows[1].hint != "" {
+		t.Errorf("satisfied check produced hint %q, want empty", rows[1].hint)
+	}
+}
+
 // TestCheckKrun_Rows exercises the live doctor section: rows are grouped under
 // "krun:", statuses are ok/warn only, and the KVM plus rootless-prerequisite rows
 // are Linux-only.

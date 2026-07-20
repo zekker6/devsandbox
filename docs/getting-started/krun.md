@@ -48,7 +48,7 @@ sudo dnf install -y crun-krun
 
 ### macOS (Apple Silicon)
 
-libkrun uses Hypervisor.framework on Apple Silicon. This path is **not yet validated** for devsandbox; on macOS use the [Docker backend](install.md#macos) for now. Proxy mode is **refused** on macOS: the egress lockdown that forces guest traffic through the proxy is Linux-only, so krun + proxy would otherwise run with open egress. Run krun without proxy mode on macOS, or run on Linux for the full proxy egress lockdown.
+libkrun uses Hypervisor.framework on Apple Silicon. Intel Macs have no supported path and are **refused at preflight** with a `--isolation=docker` remediation, rather than failing opaquely after the image build. On Apple Silicon this path is **not yet validated** for devsandbox; on macOS use the [Docker backend](install.md#macos) for now. Proxy mode is **refused** on macOS: the egress lockdown that forces guest traffic through the proxy is Linux-only, so krun + proxy would otherwise run with open egress. Run krun without proxy mode on macOS, or run on Linux for the full proxy egress lockdown.
 
 ## Verify
 

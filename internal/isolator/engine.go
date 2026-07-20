@@ -101,13 +101,8 @@ type MicroVMCheck struct {
 // would install for nothing.
 func CheckMicroVM() []MicroVMCheck {
 	var checks []MicroVMCheck
-	if err := microVMArchSupported(runtime.GOOS, runtime.GOARCH); err != nil {
-		checks = append(checks, MicroVMCheck{
-			Name:    "platform",
-			OK:      false,
-			Summary: fmt.Sprintf("unsupported on %s/%s", runtime.GOOS, runtime.GOARCH),
-			Hint:    err.Error(),
-		})
+	if row, ok := microVMArchCheck(runtime.GOOS, runtime.GOARCH); !ok {
+		checks = append(checks, row)
 	}
 	checks = append(checks, checkEngineBinary(krunEngine.binary), checkKrunRuntime())
 
@@ -233,7 +228,12 @@ func checkRootlessIDMapping(currentUser func() (*user.User, error), open func(st
 			Name:    rootlessIDMappingName,
 			OK:      false,
 			Summary: fmt.Sprintf("cannot resolve the current user: %v", err),
-			Hint:    subIDHint(""),
+			// Not a subordinate-id gap: devsandbox is built CGO_ENABLED=0, so
+			// this is the pure-Go /etc/passwd parser failing to find the user.
+			// Adding ranges would not help; the name resolution is the problem.
+			Hint: "devsandbox could not resolve your account from /etc/passwd. On a host that resolves\n" +
+				"users through LDAP/SSSD or systemd-homed, this probe cannot verify the subordinate id\n" +
+				"ranges rootless podman needs; check the mapping manually with: podman unshare cat /proc/self/uid_map",
 		}
 	}
 	// A root podman does not map subordinate ids at all, so an empty database
@@ -314,14 +314,13 @@ func subIDMapped(r io.Reader, owners []string) (bool, error) {
 }
 
 func subIDHint(username string) string {
-	if username == "" {
-		username = "$USER"
-	}
 	return fmt.Sprintf("Rootless podman maps your user into the guest with --userns=keep-id, which needs\n"+
 		"subordinate id ranges. Add them, then reload podman's user namespace:\n"+
 		"  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 %s\n"+
 		"  podman system migrate\n"+
-		"Most distributions provision these when podman is installed.", username)
+		"Most distributions provision these when podman is installed. This probe reads the files\n"+
+		"directly, so a host that serves its ranges through libsubid/NSS (LDAP, SSSD) may already be\n"+
+		"configured correctly; verify with: podman unshare cat /proc/self/uid_map", username)
 }
 
 // microVMArchSupported reports why the krun microVM backend cannot run on the
@@ -341,6 +340,24 @@ func microVMArchSupported(goos, goarch string) error {
 	return fmt.Errorf("the krun microVM backend requires Apple Silicon (arm64) on macOS, but this host is "+
 		"%s/%s: libkrun uses Hypervisor.framework, which devsandbox supports only on M-series hardware. "+
 		"Use --isolation=docker on Intel Macs, or run krun on a Linux host with /dev/kvm", goos, goarch)
+}
+
+// microVMArchCheck renders the architecture verdict as a doctor row, reporting
+// ok=true (and a zero row) when the pair is usable so CheckMicroVM emits nothing
+// on supported hardware. Splitting it out of CheckMicroVM keeps the row's shape -
+// name, concise summary, verbatim helper text as remediation - testable on any
+// host, which CheckMicroVM itself is not.
+func microVMArchCheck(goos, goarch string) (MicroVMCheck, bool) {
+	err := microVMArchSupported(goos, goarch)
+	if err == nil {
+		return MicroVMCheck{}, true
+	}
+	return MicroVMCheck{
+		Name:    "platform",
+		OK:      false,
+		Summary: fmt.Sprintf("unsupported on %s/%s", goos, goarch),
+		Hint:    err.Error(),
+	}, false
 }
 
 // microVMProxyUnsupported reports why the krun microVM backend cannot run in
@@ -370,7 +387,15 @@ func microVMProxyUnsupported(goos string, microVM, proxyEnabled bool) error {
 // backend. It reuses CheckMicroVM so the run path and doctor agree on what krun
 // needs.
 func (d *DockerIsolator) availableMicroVM() error {
-	for _, c := range CheckMicroVM() {
+	return firstMicroVMGap(CheckMicroVM())
+}
+
+// firstMicroVMGap turns the first unmet prerequisite into the fail-fast error,
+// which is why CheckMicroVM orders the architecture row ahead of the tool rows:
+// on unusable hardware the user must hear that before being told to install
+// podman for nothing.
+func firstMicroVMGap(checks []MicroVMCheck) error {
+	for _, c := range checks {
 		if c.OK {
 			continue
 		}

@@ -4,9 +4,10 @@ Network isolation, traffic inspection, and HTTP filtering.
 
 Proxy mode routes HTTP/HTTPS traffic through a local MITM (Man-in-the-Middle) proxy for inspection and logging.
 
-How strongly that routing is enforced depends on the isolation backend. bwrap and krun confine the sandbox to a network
-namespace it cannot route around; Docker only points the container at the proxy through environment variables, which a
-process is free to ignore. The sections below describe bwrap backend behavior by default - read
+How strongly that routing is enforced depends on the isolation backend. krun confines the sandbox behind a
+deny-by-default egress firewall; bwrap removes the sandbox's default route, which blocks the common bypasses but leaves
+the gaps noted below; Docker only points the container at the proxy through environment variables, which a process is
+free to ignore. The sections below describe bwrap backend behavior by default - read
 [Backend-Specific Behavior](#backend-specific-behavior) before relying on proxy mode as a security boundary.
 
 ## Why Use Proxy Mode?
@@ -28,7 +29,7 @@ process is free to ignore. The sections below describe bwrap backend behavior by
 
 ## Requirements (bwrap backend)
 
-Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt-basic sandboxing works without it.
+Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt - basic sandboxing works without it.
 
 devsandbox includes an embedded pasta binary - no system packages required. To use a system-installed pasta instead, set `use_embedded = false` in [configuration](configuration.md).
 
@@ -131,16 +132,20 @@ and, more importantly, in whether a process inside the sandbox can bypass the pr
 
 ### bwrap backend
 
-- **Enforcement**: Enforced - the sandbox has no route to the outside except the proxy gateway
+- **Enforcement**: Route-level, with gaps - the default route is removed, but see the limits below
 - **Network isolation**: pasta creates a new network namespace with its own network stack
 - **Gateway address**: Traffic is routed through `10.0.2.2` (pasta virtual gateway)
 - **CA certificate path** (inside sandbox): `/tmp/devsandbox-ca.crt`
 - **Requirement**: passt/pasta must be installed
 
 Inside the namespace devsandbox adds a `/32` route to the gateway and deletes the default route, so a process that
-ignores `HTTP_PROXY` has no path to an external address and its connections fail. Two limits are worth knowing: hosts on
-the sandbox interface's own connected subnet stay reachable (deleting the default route does not remove the on-link
-route), and pasta's `--map-host-loopback` maps the whole gateway address to the host's loopback, not only the proxy port.
+ignores `HTTP_PROXY` has no path to an external address and its connections fail. Three limits are worth knowing: hosts
+on the sandbox interface's own connected subnet stay reachable (deleting the default route does not remove the on-link
+route), pasta's `--map-host-loopback` maps the whole gateway address to the host's loopback rather than only the proxy
+port, and the route surgery is best-effort - it runs as a shell prologue whose `ip route` failures are not fatal, so a
+namespace where the surgery does not apply starts with egress open rather than refusing to start. No firewall backstops
+any of the three. Treat bwrap proxy mode as a strong default, not a containment guarantee; use krun when the proxy has to
+hold against code actively trying to get around it.
 
 ### krun backend
 
@@ -178,7 +183,7 @@ to hold against uncooperative code.
 
 | Aspect | bwrap | krun | Docker |
 |--------|-------|------|--------|
-| Enforcement | Enforced (no default route) | Enforced (no default route + deny-by-default firewall) | Advisory (env vars only) |
+| Enforcement | Route-level, best-effort (no default route, no firewall) | Enforced, fail-closed (no default route + deny-by-default firewall) | Advisory (env vars only) |
 | Network isolation | pasta namespace | pasta namespace around the microVM | Per-session Docker network |
 | Gateway IP | `10.0.2.2` | `10.0.2.2` | `host.docker.internal` |
 | CA cert location | `/tmp/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` |

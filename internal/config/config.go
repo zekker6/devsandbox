@@ -414,7 +414,7 @@ type LoggingConfig struct {
 
 	// LogFilterDecisions controls whether allow filter decisions are emitted
 	// as audit events. When false (default), only deny/ask decisions log.
-	// When true, every filter decision logs — high volume, only enable for
+	// When true, every filter decision logs - high volume, only enable for
 	// audit traces over short windows.
 	LogFilterDecisions bool `toml:"log_filter_decisions"`
 }
@@ -970,7 +970,7 @@ port = 8080
 # When true (default), the proxy intercepts HTTPS connections using a generated CA certificate.
 # When false, HTTPS connections are tunneled through without decryption (transparent proxy).
 # Disabling MITM means credential injection, content redaction, and request filtering
-# will not work for HTTPS traffic — only for plain HTTP.
+# will not work for HTTPS traffic - only for plain HTTP.
 # mitm = true
 
 # Additional environment variables set to the proxy URL when proxy is active.
@@ -1085,9 +1085,17 @@ port = 8080
 # Listed variables are copied from the host; unset variables are silently skipped.
 # env_passthrough = ["MY_API_KEY", "CUSTOM_TOOL_CONFIG"]
 
+# Control visibility of .devsandbox.toml inside the sandbox
+# - "hidden" (default): config file is not visible to sandboxed processes
+# - "readonly": config file is visible but read-only
+# - "readwrite": config file is visible and writable
+# config_visibility = "hidden"
+
 # Set env vars inside the sandbox. Each key is a variable name; each
 # sub-table is a source (value / env / file, priority: value > env > file).
 # On conflict with env_passthrough, explicit values win.
+# Keep this last in [sandbox]: the sub-tables below end the [sandbox] table, so a
+# plain key uncommented after them would land in the wrong section.
 # [sandbox.environment.GH_TOKEN]
 # value = "placeholder"
 #
@@ -1096,12 +1104,6 @@ port = 8080
 #
 # [sandbox.environment.FROM_FILE]
 # file = "~/.config/devsandbox/token"
-
-# Control visibility of .devsandbox.toml inside the sandbox
-# - "hidden" (default): config file is not visible to sandboxed processes
-# - "readonly": config file is visible but read-only
-# - "readwrite": config file is visible and writable
-# config_visibility = "hidden"
 
 # Custom mount rules - control how paths are mounted in the sandbox
 # Note: Home directory paths (~/.ssh, ~/.aws, etc.) are NOT mounted by default.
@@ -1190,7 +1192,7 @@ ignore_global_config = false
 
 # Audit-grade filter decision logging.
 # When false (default), only block/ask decisions emit proxy.filter.decision events.
-# When true, every filter decision (including allow) emits an event — high volume,
+# When true, every filter decision (including allow) emits an event - high volume,
 # only enable for short audit windows.
 # log_filter_decisions = false
 
@@ -1218,10 +1220,10 @@ ignore_global_config = false
 # type = "otlp"
 # endpoint = "http://localhost:4318/v1/logs"
 # protocol = "http"  # default
-# # Static headers — values stored verbatim in the config file.
+# # Static headers - values stored verbatim in the config file.
 # # Use this for non-secret metadata only.
 # headers = { "X-Team" = "platform" }
-# # Header sources — resolved at runtime from env vars, files, or literals.
+# # Header sources - resolved at runtime from env vars, files, or literals.
 # # Use this for auth tokens to keep secrets out of the config file.
 # # The host env var must be set; resolving to an empty string is an error.
 # # [logging.receivers.header_sources.Authorization]

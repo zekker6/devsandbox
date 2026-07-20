@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -332,21 +334,96 @@ func TestGenerateDefaultRoundTrip(t *testing.T) {
 		t.Errorf("generated config emits key not in the schema: %s", key)
 	}
 
-	// Tools is a map[string]any, so unknown tool keys decode silently. Check them
-	// against the keys the tool implementations actually read.
-	knownToolKeys := map[string]bool{
-		"mount_mode": true, "ignore_global_config": true, "mode": true,
-		"notifications": true, "enabled": true, "socket": true,
-		"extra_capabilities": true,
+	assertToolKeys(t, cfg.Tools)
+}
+
+// TestGenerateDefaultCommentedKeys asserts the template's commented example keys
+// name real schema keys, and sit under the section a user uncommenting them in
+// place would land in. Most of the template's documentation lives in commented
+// lines that toml.Decode never sees, which is how an obsolete `[overlay] enabled`
+// key survived several releases; TestGenerateDefaultRoundTrip covers only the
+// handful of keys the template emits live.
+func TestGenerateDefaultCommentedKeys(t *testing.T) {
+	doc := uncommentTemplate(GenerateDefault())
+
+	var cfg Config
+	md, err := toml.Decode(doc, &cfg)
+	if err != nil {
+		t.Fatalf("uncommented template is not valid TOML: %v", err)
 	}
-	for tool, raw := range cfg.Tools {
+	for _, key := range md.Undecoded() {
+		// Tools and Proxy.Credentials decode into map[string]any, so their keys
+		// land in Undecoded even though they are consumed.
+		name := key.String()
+		if strings.HasPrefix(name, "tools.") || strings.HasPrefix(name, "proxy.credentials.") {
+			continue
+		}
+		t.Errorf("template documents a key the schema does not recognize: %s", name)
+	}
+
+	assertToolKeys(t, cfg.Tools)
+}
+
+// tomlKeyLine matches a bare `key = ...` assignment, so prose comments (which
+// carry no `=`, or reach it only past a colon or leading punctuation) are left
+// commented rather than being uncommented into invalid TOML.
+var tomlKeyLine = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_."-]*\s*=`)
+
+// uncommentTemplate returns the generated template with every commented table
+// header and key assignment uncommented in place, so the whole documented
+// surface reaches the decoder. Doubly commented lines (`# # key = ...`) stay
+// commented: they are alternatives to the line above and would collide.
+func uncommentTemplate(template string) string {
+	var out []string
+	for _, line := range strings.Split(template, "\n") {
+		body, ok := strings.CutPrefix(strings.TrimSpace(line), "# ")
+		if !ok {
+			out = append(out, line)
+			continue
+		}
+		body = strings.TrimSpace(body)
+		if strings.HasPrefix(body, "#") {
+			continue
+		}
+		if strings.HasPrefix(body, "[") || tomlKeyLine.MatchString(body) {
+			out = append(out, body)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// assertToolKeys checks the decoded [tools.*] sections against the keys each
+// tool implementation actually reads. Tools is a map[string]any, so the decoder
+// accepts anything and cannot report an unknown key itself. The allowlist mirrors
+// the toolCfg[...] lookups in internal/sandbox/tools (plus mount_mode and
+// ignore_global_config, read here in config.go) and must be updated alongside
+// them; it is keyed per tool so a key valid for one tool is not accepted for all.
+func assertToolKeys(t *testing.T, toolsCfg map[string]any) {
+	t.Helper()
+
+	knownToolKeys := map[string][]string{
+		"git":    {"mode", "mount_mode"},
+		"mise":   {"mount_mode", "ignore_global_config"},
+		"docker": {"enabled", "socket", "mount_mode"},
+		"portal": {"notifications", "mount_mode"},
+		"kitty":  {"mode", "extra_capabilities", "mount_mode"},
+		"herdr":  {"mode", "mount_mode"},
+		"zellij": {"enabled", "mount_mode"},
+	}
+
+	for tool, raw := range toolsCfg {
 		toolCfg, ok := raw.(map[string]any)
 		if !ok {
 			t.Errorf("tools.%s is not a table", tool)
 			continue
 		}
+		known, ok := knownToolKeys[tool]
+		if !ok {
+			t.Errorf("template documents [tools.%s], which has no known key set", tool)
+			continue
+		}
 		for key := range toolCfg {
-			if !knownToolKeys[key] {
+			if !slices.Contains(known, key) {
 				t.Errorf("generated config emits unrecognized key tools.%s.%s", tool, key)
 			}
 		}

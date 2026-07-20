@@ -27,6 +27,10 @@ Two invariants matter, both because they have already been violated:
 
 Scope mutations to resources the sandbox created, taking their ids from the server's response and never from the client. Deny by default: a method with no explicit validator is refused, not passed through.
 
+## Pinned dependencies
+
+`github.com/elazarl/goproxy` is held at **v1.8.4**. v1.8.5 wraps the client connection in a `bufio.Writer` that is only flushed after `resp.Write` returns, so on the MITM path response headers and small SSE events stay buffered until the whole body is consumed - streaming responses arrive all at once. `renovate.json` caps the version, but that does not stop a manual `go get -u`; if `internal/proxy`'s two streaming regression tests start failing, check whether goproxy moved. Lift the cap only once upstream ships a fix, and re-run those tests to confirm.
+
 ## Changelog
 
 `CHANGELOG.md` follows the Keep a Changelog format with an `[Unreleased]` section at the top.

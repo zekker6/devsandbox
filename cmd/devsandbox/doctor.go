@@ -24,6 +24,9 @@ type checkResult struct {
 	name    string
 	status  string // "ok", "warn", "error"
 	message string
+	// hint is optional multi-line remediation printed below the table for rows
+	// that are not "ok". The table cell only fits a one-line message.
+	hint string
 }
 
 func newDoctorCmd() *cobra.Command {
@@ -377,6 +380,30 @@ func printDoctorResults(results []checkResult) {
 	}
 
 	_ = table.Render()
+	printDoctorHints(results)
+}
+
+// printDoctorHints prints the remediation attached to unmet checks below the
+// table. The DETAILS column only fits a one-line summary, so without this the
+// guidance a check carries would never reach the user.
+func printDoctorHints(results []checkResult) {
+	var pending []checkResult
+	for _, r := range results {
+		if r.status != "ok" && r.hint != "" {
+			pending = append(pending, r)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	fmt.Println("\nHow to fix:")
+	for _, r := range pending {
+		fmt.Printf("\n  %s:\n", r.name)
+		for _, line := range strings.Split(r.hint, "\n") {
+			fmt.Printf("    %s\n", line)
+		}
+	}
 }
 
 func printDetectedTools() {
@@ -780,6 +807,7 @@ func microVMResults(checks []isolator.MicroVMCheck) []checkResult {
 			name:    "krun: " + c.Name,
 			status:  status,
 			message: c.Summary,
+			hint:    c.Hint,
 		})
 	}
 	return results

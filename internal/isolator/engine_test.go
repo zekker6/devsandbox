@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os/user"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,6 +22,10 @@ func TestMicroVMArchSupported(t *testing.T) {
 		{name: "intel mac refused", goos: "darwin", goarch: "amd64", wantErr: true},
 		{name: "linux amd64 supported", goos: "linux", goarch: "amd64"},
 		{name: "linux arm64 supported", goos: "linux", goarch: "arm64"},
+		// The helper encodes the architecture restriction only; rejecting an
+		// unsupported OS is CheckMicroVM's default case. Hardening the helper to
+		// reject unknown OSes here would make CheckMicroVM emit two "platform" rows.
+		{name: "unknown os deferred to CheckMicroVM", goos: "windows", goarch: "amd64"},
 	}
 
 	for _, tt := range tests {
@@ -47,37 +50,78 @@ func TestMicroVMArchSupported(t *testing.T) {
 	}
 }
 
-// TestCheckMicroVMArchRow asserts the arch verdict reaches CheckMicroVM without
-// double-wrapping the helper's message: the row carries a concise summary plus
-// the helper text verbatim as remediation, and leads the slice so Available()
-// reports the unusable hardware before any missing tool.
-func TestCheckMicroVMArchRow(t *testing.T) {
-	checks := CheckMicroVM()
-	if len(checks) == 0 {
-		t.Fatal("CheckMicroVM returned no checks")
+// TestMicroVMArchCheck asserts the shape of the row CheckMicroVM emits for the
+// architecture verdict, on every OS/arch pair rather than only the host's: the
+// row is named "platform", fails, names the architecture in the one-line summary,
+// and carries the helper text verbatim as remediation without duplicating it into
+// the summary. Supported pairs must emit no row at all.
+func TestMicroVMArchCheck(t *testing.T) {
+	for _, pair := range []struct{ goos, goarch string }{
+		{"darwin", "arm64"},
+		{"linux", "amd64"},
+		{"linux", "arm64"},
+	} {
+		t.Run(pair.goos+"/"+pair.goarch+" emits no row", func(t *testing.T) {
+			row, ok := microVMArchCheck(pair.goos, pair.goarch)
+			if !ok {
+				t.Fatalf("microVMArchCheck(%q, %q) reported a gap: %+v", pair.goos, pair.goarch, row)
+			}
+			if row != (MicroVMCheck{}) {
+				t.Errorf("supported pair produced a non-zero row: %+v", row)
+			}
+		})
 	}
 
-	archErr := microVMArchSupported(runtime.GOOS, runtime.GOARCH)
-	first := checks[0]
-
-	if archErr == nil {
-		if first.Name == "platform" && !first.OK {
-			t.Errorf("host %s/%s is supported but CheckMicroVM reported %+v", runtime.GOOS, runtime.GOARCH, first)
+	t.Run("darwin/amd64 emits a failing platform row", func(t *testing.T) {
+		row, ok := microVMArchCheck("darwin", "amd64")
+		if ok {
+			t.Fatal("microVMArchCheck(darwin, amd64) reported no gap")
 		}
-		return
+		if row.Name != "platform" {
+			t.Errorf("Name = %q, want %q", row.Name, "platform")
+		}
+		if row.OK {
+			t.Error("OK = true, want false")
+		}
+		if !strings.Contains(row.Summary, "amd64") {
+			t.Errorf("Summary %q should name the unsupported architecture", row.Summary)
+		}
+		want := microVMArchSupported("darwin", "amd64").Error()
+		if row.Hint != want {
+			t.Errorf("Hint = %q, want the helper message verbatim %q", row.Hint, want)
+		}
+		if strings.Contains(row.Summary, row.Hint) {
+			t.Errorf("Summary %q duplicates the remediation Hint", row.Summary)
+		}
+	})
+}
+
+// TestFirstMicroVMGapPrefersArchitecture pins the ordering CheckMicroVM's row
+// placement exists for: with both the hardware and podman unusable, the fail-fast
+// error names the architecture, so a user on an Intel Mac is not sent to install
+// tools that will never help.
+func TestFirstMicroVMGapPrefersArchitecture(t *testing.T) {
+	archRow, ok := microVMArchCheck("darwin", "amd64")
+	if ok {
+		t.Fatal("microVMArchCheck(darwin, amd64) reported no gap")
+	}
+	checks := []MicroVMCheck{
+		archRow,
+		{Name: "podman", OK: false, Summary: "podman not found", Hint: "install podman"},
 	}
 
-	if first.Name != "platform" || first.OK {
-		t.Fatalf("expected a leading failing platform row on %s/%s, got %+v", runtime.GOOS, runtime.GOARCH, first)
+	err := firstMicroVMGap(checks)
+	if err == nil {
+		t.Fatal("firstMicroVMGap returned nil with two failing checks")
 	}
-	if first.Hint != archErr.Error() {
-		t.Errorf("platform Hint = %q, want the helper message verbatim %q", first.Hint, archErr.Error())
+	msg := err.Error()
+	for _, want := range []string{"amd64", "Apple Silicon", "--isolation=docker"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error missing %q, got: %q", want, msg)
+		}
 	}
-	if !strings.Contains(first.Summary, runtime.GOARCH) {
-		t.Errorf("platform Summary %q should name the host architecture %q", first.Summary, runtime.GOARCH)
-	}
-	if strings.Contains(first.Summary, first.Hint) {
-		t.Errorf("platform Summary %q duplicates the remediation Hint", first.Summary)
+	if strings.Contains(msg, "podman") {
+		t.Errorf("error reported the podman gap ahead of the unusable hardware: %q", msg)
 	}
 }
 
@@ -162,7 +206,35 @@ func TestSubIDMapped(t *testing.T) {
 			}
 		})
 	}
+
+	// A mid-read failure must propagate, not be reported as "no range": the file
+	// exists and may well map the user on a line the scanner never reached.
+	t.Run("read error propagates", func(t *testing.T) {
+		readErr := errors.New("input/output error")
+		got, err := subIDMapped(io.MultiReader(strings.NewReader("someone:100000:65536\n"), errReader{readErr}), owners)
+		if !errors.Is(err, readErr) {
+			t.Fatalf("subIDMapped error = %v, want %v", err, readErr)
+		}
+		if got {
+			t.Error("subIDMapped reported a mapping despite failing to read the file")
+		}
+	})
 }
+
+// errReader fails every read, standing in for a mid-read I/O error on a file
+// that opened successfully.
+type errReader struct{ err error }
+
+func (r errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// errCloser wraps a reader whose Close fails, standing in for a file that read
+// cleanly but could not be closed.
+type errCloser struct {
+	io.Reader
+	err error
+}
+
+func (c errCloser) Close() error { return c.err }
 
 // TestCheckRootlessIDMapping asserts the probe verdict for each state podman can
 // find the subordinate id databases in, including an unreadable file (reported,
@@ -189,8 +261,10 @@ func TestCheckRootlessIDMapping(t *testing.T) {
 		uid         string
 		userErr     error
 		files       map[string]string
+		open        func(string) (io.ReadCloser, error)
 		wantOK      bool
 		wantSummary string
+		wantHint    []string
 	}{
 		{
 			name:   "both databases map the user",
@@ -224,9 +298,28 @@ func TestCheckRootlessIDMapping(t *testing.T) {
 			wantSummary: "root",
 		},
 		{
-			name:        "current user unresolvable",
-			userErr:     errors.New("lookup failed"),
+			name:    "current user unresolvable",
+			userErr: errors.New("lookup failed"),
+			// The remediation is the name resolution, not subordinate ranges:
+			// adding ranges cannot help an account the runtime cannot resolve.
 			wantSummary: "lookup failed",
+			wantHint:    []string{"/etc/passwd", "LDAP/SSSD"},
+		},
+		{
+			name: "read error is reported, not read as a missing range",
+			uid:  "1000",
+			open: func(string) (io.ReadCloser, error) {
+				return io.NopCloser(errReader{errors.New("input/output error")}), nil
+			},
+			wantSummary: "input/output error",
+		},
+		{
+			name: "close error is reported",
+			uid:  "1000",
+			open: func(string) (io.ReadCloser, error) {
+				return errCloser{Reader: strings.NewReader(mapping), err: errors.New("close failed")}, nil
+			},
+			wantSummary: "close failed",
 		},
 	}
 
@@ -236,7 +329,11 @@ func TestCheckRootlessIDMapping(t *testing.T) {
 			if tt.userErr != nil {
 				lookup = func() (*user.User, error) { return nil, tt.userErr }
 			}
-			got := checkRootlessIDMapping(lookup, openFiles(tt.files))
+			open := tt.open
+			if open == nil {
+				open = openFiles(tt.files)
+			}
+			got := checkRootlessIDMapping(lookup, open)
 			if got.Name != rootlessIDMappingName {
 				t.Errorf("Name = %q, want %q", got.Name, rootlessIDMappingName)
 			}
@@ -252,34 +349,15 @@ func TestCheckRootlessIDMapping(t *testing.T) {
 				}
 				return
 			}
-			for _, want := range []string{"usermod", "--add-subuids", "--add-subgids", "keep-id"} {
+			wantHint := tt.wantHint
+			if wantHint == nil {
+				wantHint = []string{"usermod", "--add-subuids", "--add-subgids", "keep-id"}
+			}
+			for _, want := range wantHint {
 				if !strings.Contains(got.Hint, want) {
 					t.Errorf("Hint missing %q, got: %q", want, got.Hint)
 				}
 			}
 		})
-	}
-}
-
-// TestKrunAdvisoryProbesDegradeToWarnings guards the opt-in invariant at the
-// source: with every prerequisite missing both probes still return a structured
-// MicroVMCheck carrying remediation, so doctor renders a warn row instead of
-// failing a host that never runs krun.
-func TestKrunAdvisoryProbesDegradeToWarnings(t *testing.T) {
-	missing := func(string) (string, error) { return "", errors.New("not found") }
-	noFiles := func(string) (io.ReadCloser, error) { return nil, errors.New("no such file or directory") }
-	asUser := func() (*user.User, error) { return &user.User{Uid: "1000", Username: "zekker"}, nil }
-
-	checks := []MicroVMCheck{
-		checkSystemPasta(missing),
-		checkRootlessIDMapping(asUser, noFiles),
-	}
-	for _, c := range checks {
-		if c.OK {
-			t.Errorf("probe %q reported OK with nothing installed", c.Name)
-		}
-		if c.Name == "" || c.Summary == "" || c.Hint == "" {
-			t.Errorf("probe %+v must carry a name, summary, and remediation hint", c)
-		}
 	}
 }

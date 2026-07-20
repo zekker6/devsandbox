@@ -84,17 +84,18 @@ devsandbox opencode
 
 Copilot works inside editors running in the sandbox:
 
-nvim and gh are not baked into the default image. Three ways to get them:
+nvim and gh are not baked into the default image. Install them with `mise install neovim gh` inside the sandbox, or add
+them in a derived Dockerfile (`FROM ghcr.io/zekker6/devsandbox`) pointed at by `sandbox.docker.dockerfile`. To bake them
+into the base image instead, build it from a checkout of this repository - `devsandbox image build` takes no flags, so
+call `docker build` directly, from the repository root so the build context includes `go.mod` and `cmd/`:
 
-1. **Rebuild the base image with the build args.** `devsandbox image build` takes no flags, so pass them to `docker build` directly:
+```bash
+docker build --build-arg INSTALL_NVIM=true --build-arg INSTALL_GH=true \
+  -t devsandbox:local -f docker/Dockerfile .
+```
 
-   ```bash
-   docker build --build-arg INSTALL_NVIM=true --build-arg INSTALL_GH=true \
-     -t ghcr.io/zekker6/devsandbox:latest docker/
-   ```
-
-2. **Add them in a derived Dockerfile** (`FROM ghcr.io/zekker6/devsandbox`), pointed at by `sandbox.docker.dockerfile`.
-3. **Install them with mise** inside the sandbox: `mise install neovim gh`.
+Then point `sandbox.docker.dockerfile` at a one-line Dockerfile containing `FROM devsandbox:local`. Tag the build
+locally rather than as `ghcr.io/zekker6/devsandbox:latest`, which would shadow every later pull of the upstream image.
 
 ```bash
 # Run Neovim with Copilot

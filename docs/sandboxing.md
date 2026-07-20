@@ -64,7 +64,7 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 | Resource                          | Access                              |
 |-----------------------------------|-------------------------------------|
 | Project directory                 | Read/Write                          |
-| `.env` files                      | Hidden (overlaid with /dev/null)    |
+| `.env` files                      | Hidden (overlaid with /dev/null), within the scanned depth below |
 | `~/.ssh`                          | Not mounted (configurable)          |
 | `~/.gitconfig`                    | Sanitized copy (configurable)       |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted                         |

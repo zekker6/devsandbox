@@ -299,12 +299,14 @@ resource limits), and the same tool bindings and proxy wiring. Notes:
 - **Disable the Docker tool.** Set `[tools.docker] enabled = false` - mounting
   your Docker socket into a microVM meant for untrusted code hands the guest your
   host Docker, defeating the isolation.
-- **Management commands.** `devsandbox doctor` reports the krun prerequisites (the
-  host CPU architecture, podman, the `krun` runtime, `/dev/kvm`, and on Linux an
+- **Management commands.** `devsandbox doctor` reports the krun prerequisites
+  (podman, the `krun` runtime, `/dev/kvm`, a `platform` row when the host OS or CPU
+  architecture cannot run krun at all, and on Linux an
   `nft`/`iptables` firewall for proxy mode, a system `pasta` binary for rootless
   podman networking, and `/etc/subuid`+`/etc/subgid` ranges for `--userns=keep-id`)
   as informational rows - unmet ones `warn` rather than `error`, since krun is
-  opt-in and must not fail `doctor` for bwrap/docker users. `devsandbox sandboxes
+  opt-in and must not fail `doctor` for bwrap/docker users, and their remediation
+  is printed under a "How to fix" block below the table. `devsandbox sandboxes
   list` and `sandboxes prune` cover krun sandboxes: they are
   ephemeral (`--rm`), so they are tracked from on-disk metadata like bwrap rather
   than enumerated from a container engine. `devsandbox forward` is **best-effort**
@@ -587,19 +589,14 @@ while still allowing git operations that need them.
 ignore_global_config = true
 
 # Override the global [overlay] default for mise's bindings (optional).
-# Accepted values: "split", "overlay", "tmpoverlay", "readonly", "readwrite"
-#
 # The global default ("split") is recommended: mise data/cache directories use a
 # persistent overlay so installed tools survive across sessions, while mise config
-# files are protected via tmpoverlay.
-#
-# Set to "overlay" to persist all mise state (config + data) across sessions.
-# Set to "tmpoverlay" to discard all mise state on sandbox exit.
+# files are protected via tmpoverlay. See Per-Tool Mount Mode Override below.
 # mount_mode = "overlay"
 ```
 
 `ignore_global_config` scopes shell and runtime mise invocations inside the sandbox.
-The container backends' boot-time project-tool install already runs with
+The docker backend's boot-time project-tool install already runs with
 `MISE_GLOBAL_CONFIG_FILE=/dev/null` regardless of this setting, so it is unaffected
 either way.
 

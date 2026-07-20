@@ -733,9 +733,9 @@ func (d *DockerIsolator) installMiseTools(dockerBinary, containerName string, cf
 	}
 
 	userSpec := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
-	// MISE_OFFLINE=0 overrides the offline default the krun proxy guest runs
-	// under: installing the project's pinned tools is the one boot phase that
-	// legitimately needs the network (through the proxy). No-op elsewhere.
+	// MISE_OFFLINE=0 keeps this phase online regardless of an inherited offline
+	// default: installing the project's pinned tools is the one boot phase that
+	// legitimately needs the network (through the proxy when proxy mode is on).
 	checkArgs := []string{
 		"exec",
 		"-u", userSpec,
