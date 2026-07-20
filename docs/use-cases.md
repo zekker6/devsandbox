@@ -85,7 +85,10 @@ devsandbox opencode
 Copilot works inside editors running in the sandbox:
 
 ```bash
-# Run Neovim with Copilot
+# Run Neovim with Copilot.
+# nvim and gh are not baked into the default image; enable them by rebuilding
+# with `--build-arg INSTALL_NVIM=true --build-arg INSTALL_GH=true`, adding them
+# in a derived `FROM ghcr.io/zekker6/devsandbox` Dockerfile, or `mise install neovim gh`.
 devsandbox nvim
 
 # VS Code (if installed via mise or system)

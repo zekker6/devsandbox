@@ -174,7 +174,9 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 **macOS:** Uses Docker containers with volume mounts that mirror the bwrap behavior. Named volumes provide near-native filesystem performance. Containers are cached for 1-2 second restarts.
 
-Both backends automatically detect your shell, tools, and editor configs and make them available read-only inside the sandbox.
+All backends automatically detect your shell, tools, and editor configs and make them available read-only inside the sandbox.
+
+**Untrusted code (experimental):** bwrap and Docker share the host kernel, so a kernel-level exploit escapes both. The opt-in `krun` backend (`--isolation krun`) runs the same sandbox image inside a [libkrun](https://github.com/containers/libkrun) microVM via `podman --runtime krun`, giving the workload its own guest kernel behind a hardware virtualization boundary (KVM on Linux, HVF on macOS). Requires `podman`, a libkrun-enabled `crun`, and `/dev/kvm` (plus `nft` or `iptables` for proxy mode on Linux, usually already present). See [Isolation Backend](docs/configuration.md#krun-microvm-backend-experimental).
 
 ## Usage Examples
 

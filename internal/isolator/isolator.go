@@ -20,6 +20,9 @@ const (
 	BackendBwrap Backend = "bwrap"
 	// BackendDocker uses Docker containers for isolation (cross-platform).
 	BackendDocker Backend = "docker"
+	// BackendKrun runs the sandbox image inside a libkrun microVM (podman +
+	// --runtime krun) for hardware-level isolation of untrusted code.
+	BackendKrun Backend = "krun"
 	// BackendAuto automatically selects the best available backend.
 	BackendAuto Backend = "auto"
 )
@@ -65,6 +68,11 @@ type Isolator interface {
 	Available() error
 	// IsolationType returns the sandbox isolation type for metadata.
 	IsolationType() sandbox.IsolationType
+	// Preflight performs cheap, backend-specific conflict detection before any
+	// expensive setup (proxy startup, image build) runs, so a doomed launch
+	// fails fast with an actionable error instead of after the work is wasted.
+	// No-op for backends without a launch-time conflict.
+	Preflight(ctx context.Context, projectDir string) error
 	// PrepareNetwork sets up backend-specific networking before proxy starts.
 	// Docker: creates per-session network, returns gateway IP for proxy binding.
 	// Bwrap: no-op, returns nil.
@@ -162,6 +170,8 @@ func Detect(requested Backend) (Backend, error) {
 		return BackendBwrap, nil
 	case BackendDocker:
 		return BackendDocker, nil
+	case BackendKrun:
+		return BackendKrun, nil
 	case BackendAuto:
 		return autoDetect()
 	default:
@@ -170,11 +180,38 @@ func Detect(requested Backend) (Backend, error) {
 }
 
 func autoDetect() (Backend, error) {
+	// krun is never auto-selected: it needs podman + the krun OCI runtime +
+	// accessible /dev/kvm (or Apple Silicon HVF), which most hosts lack, and it
+	// trades startup speed for a hardware boundary that only matters for
+	// genuinely untrusted code. It stays opt-in via --isolation krun.
 	if runtime.GOOS == "darwin" {
 		return BackendDocker, nil
 	}
 	// Linux: prefer bwrap
 	return BackendBwrap, nil
+}
+
+// Default microVM resources applied when [sandbox.docker.resources] is left
+// unset for the krun backend. A libkrun guest given no hint can be starved or
+// oversized, so a sane baseline beats the engine default; explicit config is
+// always respected (only empty values are filled).
+const (
+	defaultKrunMemory = "4g"
+	defaultKrunCPUs   = "2"
+)
+
+// krunResourceDefaults fills empty memory/cpu limits with the microVM defaults,
+// leaving explicit values untouched. The result feeds the same
+// DockerConfig.MemoryLimit/CPULimit that buildCommonArgs already emits, so there
+// is exactly one --memory/--cpus code path and no double-emit.
+func krunResourceDefaults(memLimit, cpuLimit string) (string, string) {
+	if memLimit == "" {
+		memLimit = defaultKrunMemory
+	}
+	if cpuLimit == "" {
+		cpuLimit = defaultKrunCPUs
+	}
+	return memLimit, cpuLimit
 }
 
 // New creates an isolator for the specified backend.
@@ -200,6 +237,29 @@ func New(backend Backend, opts ...Option) (Isolator, error) {
 			KeepContainer: o.keepContainer,
 		}
 		iso := NewDockerIsolator(dockerCfg)
+		if err := iso.Available(); err != nil {
+			return nil, err
+		}
+		return iso, nil
+	case BackendKrun:
+		// krun runs ephemeral (a fresh microVM per launch) regardless of the
+		// keep-container setting: a clean guest kernel each run is the whole
+		// point of using a microVM for untrusted code.
+		//
+		// Fill sane VM resource defaults when the user left
+		// [sandbox.docker.resources] unset. This reuses the docker MemoryLimit/
+		// CPULimit fields (and the single buildCommonArgs emission), so no extra
+		// --memory/--cpus path is added; the docker New() case below is untouched
+		// and provably inherits nothing.
+		memLimit, cpuLimit := krunResourceDefaults(o.memoryLimit, o.cpuLimit)
+		krunCfg := DockerConfig{
+			Dockerfile:    o.dockerfile,
+			ConfigDir:     o.configDir,
+			MemoryLimit:   memLimit,
+			CPULimit:      cpuLimit,
+			KeepContainer: false,
+		}
+		iso := NewKrunIsolator(krunCfg)
 		if err := iso.Available(); err != nil {
 			return nil, err
 		}

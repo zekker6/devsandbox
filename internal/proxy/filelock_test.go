@@ -23,8 +23,19 @@ func TestFileLock_AcquireRelease(t *testing.T) {
 		t.Fatalf("Release failed: %v", err)
 	}
 
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("lock file should be removed after release")
+	// The lock file is intentionally left in place after release so the flocked
+	// inode stays stable; unlinking it would reopen a split-lock race. It must
+	// remain re-acquirable.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("lock file should persist after release: %v", err)
+	}
+
+	lock2, err := AcquireFileLock(path)
+	if err != nil {
+		t.Fatalf("re-acquire after release failed: %v", err)
+	}
+	if err := lock2.Release(); err != nil {
+		t.Fatalf("second Release failed: %v", err)
 	}
 }
 
@@ -44,18 +55,21 @@ func TestFileLock_Contention(t *testing.T) {
 	}
 }
 
-func TestFileLock_StaleDetection(t *testing.T) {
+func TestFileLock_LeftoverFileReacquirable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.lock")
 
-	// Create a lock file with a non-existent PID
+	// A lock file left behind by a hard-killed prior holder is never unlinked.
+	// The kernel auto-releases the flock when the holder's fd closes on exit, so
+	// the leftover file (with stale PID content that is ignored on acquire) must
+	// not block a fresh acquisition.
 	if err := os.WriteFile(path, []byte("999999999"), 0o600); err != nil {
-		t.Fatalf("failed to create stale lock: %v", err)
+		t.Fatalf("failed to create leftover lock file: %v", err)
 	}
 
 	lock, err := AcquireFileLock(path)
 	if err != nil {
-		t.Fatalf("should acquire stale lock: %v", err)
+		t.Fatalf("should acquire over a leftover lock file: %v", err)
 	}
 	defer func() { _ = lock.Release() }()
 }

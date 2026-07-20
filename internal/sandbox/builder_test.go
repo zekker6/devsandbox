@@ -687,16 +687,17 @@ func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
 
 	// Check for YARN proxy vars
 	expectedVars := map[string]string{
-		"HTTP_PROXY":         "http://10.0.2.2:8080",
-		"HTTPS_PROXY":        "http://10.0.2.2:8080",
-		"http_proxy":         "http://10.0.2.2:8080",
-		"https_proxy":        "http://10.0.2.2:8080",
-		"YARN_HTTP_PROXY":    "http://10.0.2.2:8080",
-		"YARN_HTTPS_PROXY":   "http://10.0.2.2:8080",
-		"NO_PROXY":           "localhost,127.0.0.1",
-		"no_proxy":           "localhost,127.0.0.1",
-		"NODE_USE_ENV_PROXY": "1",
-		"DEVSANDBOX_PROXY":   "1",
+		"HTTP_PROXY":                         "http://10.0.2.2:8080",
+		"HTTPS_PROXY":                        "http://10.0.2.2:8080",
+		"http_proxy":                         "http://10.0.2.2:8080",
+		"https_proxy":                        "http://10.0.2.2:8080",
+		"YARN_HTTP_PROXY":                    "http://10.0.2.2:8080",
+		"YARN_HTTPS_PROXY":                   "http://10.0.2.2:8080",
+		"NO_PROXY":                           "localhost,127.0.0.1",
+		"no_proxy":                           "localhost,127.0.0.1",
+		"NODE_USE_ENV_PROXY":                 "1",
+		"DEVSANDBOX_PROXY":                   "1",
+		"MISE_FETCH_REMOTE_VERSIONS_TIMEOUT": "3s",
 	}
 
 	for wantName, wantValue := range expectedVars {
@@ -711,6 +712,37 @@ func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
 			t.Errorf("missing env var %s=%s in args", wantName, wantValue)
 		}
 	}
+}
+
+// TestBuilder_SetEnvDefault asserts a default never overwrites a value already
+// configured for the same name (so a user override wins), but does set the name
+// when it is absent.
+func TestBuilder_SetEnvDefault(t *testing.T) {
+	envValue := func(args []string, name string) (string, bool) {
+		for i := 0; i < len(args)-2; i++ {
+			if args[i] == "--setenv" && args[i+1] == name {
+				return args[i+2], true
+			}
+		}
+		return "", false
+	}
+
+	t.Run("does not overwrite an existing value", func(t *testing.T) {
+		b := NewBuilder(&Config{})
+		b.SetEnv("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "30s")
+		b.SetEnvDefault("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
+		if got, _ := envValue(b.Build(), "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT"); got != "30s" {
+			t.Errorf("SetEnvDefault overwrote a user value: got %q, want 30s", got)
+		}
+	})
+
+	t.Run("sets the value when absent", func(t *testing.T) {
+		b := NewBuilder(&Config{})
+		b.SetEnvDefault("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
+		if got, ok := envValue(b.Build(), "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT"); !ok || got != "3s" {
+			t.Errorf("SetEnvDefault did not set an absent var: got %q ok=%v, want 3s", got, ok)
+		}
+	})
 }
 
 func TestBuilder_AddProxyEnvironment_ExtraCAEnv(t *testing.T) {

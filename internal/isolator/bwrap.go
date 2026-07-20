@@ -50,6 +50,13 @@ func (b *BwrapIsolator) IsolationType() sandbox.IsolationType {
 	return sandbox.IsolationBwrap
 }
 
+// Preflight is a no-op for bwrap: concurrent same-project sessions are supported
+// via per-session overlay dirs, not refused, so there is no launch-time conflict
+// to detect.
+func (b *BwrapIsolator) Preflight(_ context.Context, _ string) error {
+	return nil
+}
+
 // PrepareNetwork is a no-op for bwrap. Network setup (pasta) is handled inside Run().
 func (b *BwrapIsolator) PrepareNetwork(_ context.Context, _ string) (*NetworkInfo, error) {
 	return nil, nil
@@ -150,13 +157,15 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		if cfg.OnSandboxStart != nil {
 			cfg.OnSandboxStart(proc.NamespacePID, proc.NamespacePath())
 		}
-		return proc.Wait()
+		return asCommandExit(proc.Wait())
 	}
 
 	if cfg.HasActiveTools || cfg.RemoveOnExit || sandboxCfg.IsConcurrent {
-		return bwrap.ExecRun(bwrapArgs, shellCmd)
+		return asCommandExit(bwrap.ExecRun(bwrapArgs, shellCmd))
 	}
 
+	// bwrap.Exec replaces this process via syscall.Exec, so the child's exit
+	// status becomes ours automatically; a returned error is an exec failure.
 	return bwrap.Exec(bwrapArgs, shellCmd)
 }
 

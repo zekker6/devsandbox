@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -49,7 +50,7 @@ func addSandboxFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("block-domain", nil, "Block domain pattern (can be repeated)")
 
 	// Isolation backend flag
-	cmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker")
+	cmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker, krun")
 
 	// Sandbox lifecycle flag
 	cmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
@@ -127,6 +128,12 @@ Proxy Mode (--proxy):
 	rootCmd.SetVersionTemplate(versionTpl)
 
 	if err := rootCmd.Execute(); err != nil {
+		// A non-zero exit from the sandboxed command is its result, not a
+		// devsandbox failure: propagate the code and stay silent, like a shell.
+		var cmdExit *isolator.CommandExitError
+		if errors.As(err, &cmdExit) {
+			os.Exit(cmdExit.Code)
+		}
 		notice.Error("%v", err)
 		os.Exit(1)
 	}
@@ -354,6 +361,13 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if err := cfg.EnsureSandboxDirs(); err != nil {
+		return err
+	}
+
+	// Fail fast on a backend-specific launch conflict (e.g. a krun microVM
+	// already running for this project) before paying for proxy startup, the
+	// docker socket proxy, and the image build below.
+	if err := iso.Preflight(cmd.Context(), cfg.ProjectDir); err != nil {
 		return err
 	}
 

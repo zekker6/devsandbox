@@ -126,6 +126,114 @@ func TestListSandboxes(t *testing.T) {
 	}
 }
 
+// TestListSandboxes_PreservesKrunIsolation verifies that a krun sandbox is
+// listed through the engine-agnostic metadata path with its Isolation type
+// intact. krun is ephemeral (--rm), so there is no persistent container to
+// enumerate: the on-disk metadata is the single source of truth.
+func TestListSandboxes_PreservesKrunIsolation(t *testing.T) {
+	tmpDir := t.TempDir()
+	sandboxRoot := filepath.Join(tmpDir, "krun-proj")
+	if err := os.MkdirAll(sandboxRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Metadata{
+		Name:       "krun-proj",
+		ProjectDir: "/tmp/krun-proj",
+		CreatedAt:  time.Now(),
+		LastUsed:   time.Now(),
+		Shell:      ShellBash,
+		Isolation:  IsolationKrun,
+	}
+	if err := SaveMetadata(m, sandboxRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	sandboxes, err := ListSandboxes(tmpDir)
+	if err != nil {
+		t.Fatalf("ListSandboxes failed: %v", err)
+	}
+	if len(sandboxes) != 1 {
+		t.Fatalf("expected 1 sandbox, got %d", len(sandboxes))
+	}
+	if sandboxes[0].Isolation != IsolationKrun {
+		t.Errorf("Isolation = %q, want %q", sandboxes[0].Isolation, IsolationKrun)
+	}
+	// Ephemeral krun records no container State on disk; the display path keys
+	// the State column off IsolationDocker, so an empty value is correct here.
+	if sandboxes[0].State != "" {
+		t.Errorf("expected empty State for krun, got %q", sandboxes[0].State)
+	}
+}
+
+// TestListAllSandboxes_PreservesKrunIsolation verifies the combined listing
+// path keeps krun rows intact. ListAllSandboxes calls ListDockerSandboxes
+// unconditionally; that probe degrades gracefully whether or not docker is
+// present and must never clobber the krun isolation recorded on disk.
+func TestListAllSandboxes_PreservesKrunIsolation(t *testing.T) {
+	tmpDir := t.TempDir()
+	sandboxRoot := filepath.Join(tmpDir, "krun-proj")
+	if err := os.MkdirAll(sandboxRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Metadata{
+		Name:       "krun-proj",
+		ProjectDir: "/tmp/krun-proj",
+		CreatedAt:  time.Now(),
+		LastUsed:   time.Now(),
+		Shell:      ShellBash,
+		Isolation:  IsolationKrun,
+	}
+	if err := SaveMetadata(m, sandboxRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	sandboxes, err := ListAllSandboxes(tmpDir)
+	if err != nil {
+		t.Fatalf("ListAllSandboxes failed: %v", err)
+	}
+
+	var found *Metadata
+	for _, s := range sandboxes {
+		if s.Name == "krun-proj" {
+			found = s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("krun sandbox missing from ListAllSandboxes output")
+	}
+	if found.Isolation != IsolationKrun {
+		t.Errorf("Isolation = %q, want %q", found.Isolation, IsolationKrun)
+	}
+}
+
+// TestSelectForPruning_IncludesKrun verifies krun sandboxes are selected by the
+// same engine-agnostic pruning path as bwrap/docker (it operates purely on
+// Metadata fields, not on engine binaries).
+func TestSelectForPruning_IncludesKrun(t *testing.T) {
+	sandboxes := []*Metadata{
+		{Name: "krun-a", Isolation: IsolationKrun},
+		{Name: "bwrap-b", Isolation: IsolationBwrap},
+	}
+
+	toPrune := SelectForPruning(sandboxes, PruneOptions{All: true})
+	if len(toPrune) != 2 {
+		t.Fatalf("expected 2 to prune, got %d", len(toPrune))
+	}
+
+	var foundKrun bool
+	for _, s := range toPrune {
+		if s.Name == "krun-a" && s.Isolation == IsolationKrun {
+			foundKrun = true
+		}
+	}
+	if !foundKrun {
+		t.Error("krun sandbox not selected for pruning")
+	}
+}
+
 func TestListSandboxes_EmptyDir(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -15,6 +15,7 @@ nav = [
     { "Installation" = "getting-started/install.md" },
     { "Quick start" = "getting-started/quickstart.md" },
     { "First run" = "getting-started/first-run.md" },
+    { "krun microVM setup" = "getting-started/krun.md" },
   ] },
   { "Guides" = [
     { "Use cases" = "use-cases.md" },

@@ -3,12 +3,50 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 )
+
+// mountPointSet returns the set of absolute mount-point paths in the current
+// mount namespace, parsed from /proc/self/mountinfo. Best-effort: an empty map
+// is returned on any error so the caller (copyDir) degrades to copying
+// everything rather than failing. Used to skip nested mounts during the krun
+// copy-on-start overlay so the copy never writes through a read-only sub-mount.
+func mountPointSet() map[string]bool {
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return map[string]bool{}
+	}
+	defer func() { _ = f.Close() }()
+
+	set := map[string]bool{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		// mountinfo fields are space-separated; field index 4 is the mount point.
+		// Paths with special chars are octal-escaped (e.g. \040 for space).
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 5 {
+			continue
+		}
+		set[unescapeMountinfo(fields[4])] = true
+	}
+	return set
+}
+
+// unescapeMountinfo decodes the octal escapes (\040, \011, \012, \134) that
+// /proc/self/mountinfo uses for spaces, tabs, newlines, and backslashes.
+func unescapeMountinfo(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	r := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	return r.Replace(s)
+}
 
 func writeIDMap(pid int, filename, content string) {
 	path := fmt.Sprintf("/proc/%d/%s", pid, filename)

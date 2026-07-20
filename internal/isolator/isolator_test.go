@@ -25,6 +25,7 @@ func TestDetect_Explicit(t *testing.T) {
 	}{
 		{BackendBwrap, BackendBwrap},
 		{BackendDocker, BackendDocker},
+		{BackendKrun, BackendKrun},
 	}
 	for _, tt := range tests {
 		backend, err := Detect(tt.requested)

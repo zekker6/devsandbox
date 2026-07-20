@@ -238,6 +238,9 @@ const (
 	IsolationBwrap IsolationBackend = "bwrap"
 	// IsolationDocker uses Docker containers for isolation (cross-platform).
 	IsolationDocker IsolationBackend = "docker"
+	// IsolationKrun runs the sandbox image inside a libkrun microVM
+	// (podman + --runtime krun) for hardware-level isolation.
+	IsolationKrun IsolationBackend = "krun"
 )
 
 // DockerConfig contains Docker-specific sandbox settings.
@@ -691,6 +694,14 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("tools.%s.mount_mode must be 'split', 'overlay', 'tmpoverlay', 'readonly', 'readwrite', or 'disabled', got %q", name, mode)
 			}
 		}
+		// mise: ignore_global_config gates whether the host's global mise config is
+		// read in the sandbox. Reject a non-bool so a typo fails loudly rather than
+		// silently degrading to the default.
+		if v, ok := toolCfg["ignore_global_config"]; ok {
+			if _, isBool := v.(bool); !isBool {
+				return fmt.Errorf("tools.%s.ignore_global_config must be a boolean, got %T", name, v)
+			}
+		}
 	}
 
 	// Validate filter rules
@@ -745,10 +756,10 @@ func (c *Config) Validate() error {
 	// Validate isolation backend
 	if c.Sandbox.Isolation != "" {
 		switch c.Sandbox.Isolation {
-		case IsolationAuto, IsolationBwrap, IsolationDocker:
+		case IsolationAuto, IsolationBwrap, IsolationDocker, IsolationKrun:
 			// valid
 		default:
-			return fmt.Errorf("invalid isolation backend %q: must be one of: auto, bwrap, docker", c.Sandbox.Isolation)
+			return fmt.Errorf("invalid isolation backend %q: must be one of: auto, bwrap, docker, krun", c.Sandbox.Isolation)
 		}
 	}
 

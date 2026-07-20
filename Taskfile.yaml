@@ -66,12 +66,32 @@ tasks:
   test:
     cmds:
       - go test ./internal/... ./cmd/devsandbox/... ./cmd/devsandbox-shim/...
+      # Compile-only check for the KVM-gated krun integration tests. They live
+      # behind the integration_krun build tag and only run on a /dev/kvm host, so
+      # routine tasks never compile them - a helper signature drift would go
+      # unnoticed. `-exec true` builds the test binary but runs `true` instead of
+      # it, so this type-checks the tagged package without booting a microVM.
+      - go test -exec true -tags integration_krun ./test/integration/...
 
   test:e2e:
     deps:
       - build
     cmds:
       - go test -v ./e2e/...
+
+  test:integration:krun:
+    desc: KVM-gated krun integration test (boots a real microVM; skips cleanly without /dev/kvm)
+    cmds:
+      # Skip the whole run on a host without hardware virtualization so the
+      # target is safe to invoke anywhere (the in-test prerequisite checks would
+      # also skip, but this avoids the binary build on non-KVM hosts). The guard
+      # and the test must share one shell so the early return short-circuits it.
+      - |
+        if [ ! -e /dev/kvm ]; then
+          echo "SKIP: /dev/kvm absent - krun integration tests require hardware virtualization"
+          exit 0
+        fi
+        go test -tags integration_krun -v ./test/integration/...
 
   test:all:
     cmds:
@@ -131,6 +151,16 @@ tasks:
     desc: Build the devsandbox Docker image
     cmds:
       - docker build -t devsandbox:local -f docker/Dockerfile .
+
+  krun:build:
+    desc: Build the devsandbox image into podman's store (used by the krun backend)
+    cmds:
+      # krun (podman) has its own image store - docker:build does not reach it.
+      # Tag BOTH names: project Dockerfiles build FROM devsandbox:local, while the
+      # auto-generated config-dir Dockerfile builds FROM the ghcr tag and re-tags
+      # devsandbox:local from it on every launch, which would otherwise revert a
+      # locally built devsandbox:local to a stale base.
+      - podman build -t devsandbox:local -t ghcr.io/zekker6/devsandbox:latest -f docker/Dockerfile .
 
   docker:test:
     desc: Test the devsandbox Docker image
