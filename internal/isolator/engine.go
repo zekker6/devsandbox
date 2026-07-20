@@ -72,7 +72,7 @@ func NewKrunIsolator(cfg DockerConfig) *DockerIsolator {
 // means both consumers agree on what "ready for krun" means.
 type MicroVMCheck struct {
 	// Name identifies the prerequisite: "podman", "runtime" (the krun OCI
-	// runtime), "kvm", or "platform" (unsupported OS).
+	// runtime), "kvm", or "platform" (unsupported OS or CPU architecture).
 	Name string
 	// OK is true when the prerequisite is satisfied.
 	OK bool
@@ -85,12 +85,24 @@ type MicroVMCheck struct {
 }
 
 // CheckMicroVM probes the krun microVM prerequisites and returns one result per
-// check: the container engine (podman), the krun OCI runtime, and - on Linux
-// only - accessible /dev/kvm. macOS uses Hypervisor.framework, which has no
-// /dev/kvm equivalent to probe, so the KVM row is omitted there; an unsupported
-// OS yields a single failing "platform" check.
+// check: the host CPU architecture, the container engine (podman), the krun OCI
+// runtime, and - on Linux only - accessible /dev/kvm. macOS uses
+// Hypervisor.framework, which has no /dev/kvm equivalent to probe, so the KVM row
+// is omitted there; an unsupported OS or CPU architecture yields a failing
+// "platform" check. The architecture row is emitted first so the fail-fast error
+// from Available() names the unusable hardware instead of a missing tool the user
+// would install for nothing.
 func CheckMicroVM() []MicroVMCheck {
-	checks := []MicroVMCheck{checkEngineBinary(krunEngine.binary), checkKrunRuntime()}
+	var checks []MicroVMCheck
+	if err := microVMArchSupported(runtime.GOOS, runtime.GOARCH); err != nil {
+		checks = append(checks, MicroVMCheck{
+			Name:    "platform",
+			OK:      false,
+			Summary: fmt.Sprintf("unsupported on %s/%s", runtime.GOOS, runtime.GOARCH),
+			Hint:    err.Error(),
+		})
+	}
+	checks = append(checks, checkEngineBinary(krunEngine.binary), checkKrunRuntime())
 
 	switch runtime.GOOS {
 	case "linux":
@@ -162,6 +174,25 @@ func checkKVMAccess() MicroVMCheck {
 		return MicroVMCheck{Name: "kvm", OK: false, Summary: fmt.Sprintf("/dev/kvm: %v", cerr)}
 	}
 	return MicroVMCheck{Name: "kvm", OK: true, Summary: "/dev/kvm accessible"}
+}
+
+// microVMArchSupported reports why the krun microVM backend cannot run on the
+// given OS/CPU-architecture pair, or nil when the combination is usable. It is a
+// pure function of its inputs so CheckMicroVM (called with runtime.GOOS /
+// runtime.GOARCH) and the unit tests exercise the same decision on any host.
+//
+// libkrun's macOS backend is Hypervisor.framework on Apple Silicon; Intel Macs
+// have no supported path. Refusing them here fails the launch fast with
+// installation guidance instead of surfacing an opaque runtime error after the
+// image build. Linux gates on /dev/kvm rather than the architecture, so no arch
+// restriction applies there.
+func microVMArchSupported(goos, goarch string) error {
+	if goos != "darwin" || goarch == "arm64" {
+		return nil
+	}
+	return fmt.Errorf("the krun microVM backend requires Apple Silicon (arm64) on macOS, but this host is "+
+		"%s/%s: libkrun uses Hypervisor.framework, which devsandbox supports only on M-series hardware. "+
+		"Use --isolation=docker on Intel Macs, or run krun on a Linux host with /dev/kvm", goos, goarch)
 }
 
 // microVMProxyUnsupported reports why the krun microVM backend cannot run in
