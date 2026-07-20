@@ -66,14 +66,18 @@ Then confirm devsandbox sees the prerequisites:
 devsandbox doctor
 ```
 
-The krun rows should read `ok` (on Linux `doctor` also reports a `krun: firewall`
-row - the `nft`/`iptables` backend proxy mode needs):
+The krun rows should read `ok`. On Linux `doctor` reports three extra rows the run
+path depends on: `krun: firewall` (the `nft`/`iptables` backend proxy mode needs),
+`krun: system pasta` (rootless podman networking) and `krun: rootless id mapping`
+(the subuid/subgid ranges `--userns=keep-id` needs):
 
 ```
-│ krun: podman   │ ✓ ok   │ /usr/bin/podman       │
-│ krun: runtime  │ ✓ ok   │ /usr/bin/krun         │
-│ krun: kvm      │ ✓ ok   │ /dev/kvm accessible   │
-│ krun: firewall │ ✓ ok   │ /usr/sbin/nft         │
+│ krun: podman             │ ✓ ok   │ /usr/bin/podman                     │
+│ krun: runtime            │ ✓ ok   │ /usr/bin/krun                       │
+│ krun: kvm                │ ✓ ok   │ /dev/kvm accessible                 │
+│ krun: firewall           │ ✓ ok   │ /usr/sbin/nft                       │
+│ krun: system pasta       │ ✓ ok   │ /usr/bin/pasta                      │
+│ krun: rootless id mapping│ ✓ ok   │ /etc/subuid and /etc/subgid map you │
 ```
 
 These rows are informational - they `warn` rather than `error` when unmet, so `doctor` never fails for `bwrap`/`docker` users who do not use krun. A missing `krun: firewall` only matters for krun + proxy on Linux, which fails closed at launch without it.

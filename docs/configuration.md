@@ -470,7 +470,7 @@ sandbox_port = 5432
 | `host_port`   | Yes      | -       | Port on host side (1-65535)              |
 | `sandbox_port`| Yes      | -       | Port on sandbox side (1-65535)           |
 
-**Note:** Port forwarding requires proxy mode, because only proxy mode gives the sandbox its own network namespace (via pasta). Without it, the sandbox shares the host network stack and its ports are already reachable on `127.0.0.1`, so there is nothing to forward.
+**Note:** Port forwarding requires proxy mode. On **bwrap**, only proxy mode gives the sandbox its own network namespace (via pasta); without it the sandbox shares the host network stack and its ports are already reachable on `127.0.0.1`, so there is nothing to forward. Docker and krun always place the workload in its own network namespace, but neither wires static rules - see backend support below.
 
 **Backend support:** static `[[port_forwarding.rules]]` are wired for the **bwrap** backend only - they become pasta port arguments at launch, and a bwrap run with rules but no network isolation fails with an error. Auto-detection (`auto_detect`) also covers **krun + proxy** sessions, where it is best-effort (see [krun microVM backend](#krun-microvm-backend-experimental)). The **Docker** backend does not wire port forwarding in either form.
 

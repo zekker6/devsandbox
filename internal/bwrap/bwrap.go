@@ -149,7 +149,10 @@ func StartWithPasta(bwrapArgs []string, shellCmd []string, portForwardArgs []str
 	// The wrapper script restricts network to proxy-only:
 	// 1. Add a host route to gateway via the tap device
 	// 2. Delete the default route to block direct internet access
-	// This forces all traffic through our proxy - direct connections to external IPs will fail.
+	// This routes traffic through our proxy - direct connections to external IPs will fail.
+	// Best-effort, not a containment boundary: the ip calls discard errors and the exec is
+	// unconditional, so a namespace where the surgery does not apply starts with egress open.
+	// Hosts on the interface's own connected subnet also stay reachable. See docs/proxy.md.
 	wrapperScript := fmt.Sprintf(`
 		dev=$(ip -o route show default | awk '{print $5}')
 		ip route add %s/32 dev "$dev" 2>/dev/null

@@ -1081,6 +1081,8 @@ port = 8080
 
 # Hide .env files from the sandbox (default: true)
 # When true, .env files are overlaid with /dev/null to prevent credential leaks.
+# Scanned up to 3 directory levels below the project root, skipping node_modules,
+# .git, vendor and .venv - matches outside that scope stay readable.
 # Set to false if sandboxed tools need to read .env files directly.
 # Can also be overridden at runtime with --no-hide-env flag.
 # hide_env_files = true

@@ -151,7 +151,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 | `.git` directory | Read-only (no commits, no credentials) |
 | mise-managed tools | Read-only |
 | Network (default) | Full access |
-| Network (proxy mode) | Isolated and logged (enforced on bwrap/krun; env-var routing only on Docker) |
+| Network (proxy mode) | Isolated and logged; enforcement strength varies by backend (see [per-backend behavior](docs/proxy.md#backend-specific-behavior)) |
 | Outgoing secrets (proxy + redaction) | Blocked or redacted |
 
 Everything is configurable. See [Configuration](docs/configuration.md) for details.
@@ -176,7 +176,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 All backends automatically detect your shell, tools, and editor configs and make them available read-only inside the sandbox.
 
-**Untrusted code (experimental):** bwrap and Docker share the host kernel, so a kernel-level exploit escapes both. The opt-in `krun` backend (`--isolation krun`) runs the same sandbox image inside a [libkrun](https://github.com/containers/libkrun) microVM via `podman --runtime krun`, giving the workload its own guest kernel behind a hardware virtualization boundary (KVM on Linux, HVF on macOS). Requires `podman`, a libkrun-enabled `crun`, and `/dev/kvm` (plus `nft` or `iptables` for proxy mode on Linux, usually already present). See [Isolation Backend](docs/configuration.md#krun-microvm-backend-experimental).
+**Untrusted code (experimental):** bwrap and Docker share the host kernel, so a kernel-level exploit escapes both. The opt-in `krun` backend (`--isolation krun`) runs the same sandbox image inside a [libkrun](https://github.com/containers/libkrun) microVM via `podman --runtime krun`, giving the workload its own guest kernel behind a hardware virtualization boundary (KVM on Linux, HVF on macOS). Requires `podman`, a libkrun-enabled `crun`, and `/dev/kvm` on Linux or Apple Silicon on macOS (plus `nft` or `iptables` for proxy mode on Linux, usually already present). See [Isolation Backend](docs/configuration.md#krun-microvm-backend-experimental).
 
 ## Usage Examples
 
@@ -262,7 +262,7 @@ Known limitations:
 
 ## Proxy Mode - Monitor Your AI Agent's Network Activity
 
-Route all HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request.
+Route HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request. How strongly the routing is enforced depends on the backend - krun fails closed, bwrap is best-effort, Docker is env-var routing only; see [per-backend behavior](docs/proxy.md#backend-specific-behavior).
 
 ```bash
 # Enable proxy

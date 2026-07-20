@@ -195,7 +195,7 @@ to hold against uncooperative code.
 1. **Network Isolation** - pasta creates a new network namespace with its own network stack
 2. **Gateway Setup** - Traffic is routed through a virtual gateway (10.0.2.2)
 3. **Proxy Server** - A local HTTP/HTTPS proxy runs on the host
-4. **Traffic Enforcement** - All HTTP(S) traffic must go through the proxy
+4. **Traffic Enforcement** - The default route is removed, so a process that ignores `HTTP_PROXY` has no path to an external address. This is best-effort and has the gaps listed under [bwrap backend](#bwrap-backend) - no firewall backstops it
 5. **TLS Interception** - A generated CA certificate enables HTTPS inspection
 
 ### Network Architecture

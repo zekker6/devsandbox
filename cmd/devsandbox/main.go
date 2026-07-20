@@ -79,11 +79,12 @@ Security Model:
   - Network: enabled (required for package managers, agents)
   - SSH: BLOCKED (no ~/.ssh access)
   - Git: read-only (can view history, cannot push)
-  - .env files: BLOCKED (overlaid with /dev/null)
+  - .env files: BLOCKED (overlaid with /dev/null, up to 3 levels below the project root)
   - Home directory: sandboxed per-project in ~/.local/share/devsandbox/<project>/
 
 Proxy Mode (--proxy):
-  - All HTTP/HTTPS traffic routed through local proxy
+  - HTTP/HTTPS traffic routed through local proxy (enforcement varies by
+    backend: krun fails closed, bwrap best-effort, docker env vars only)
   - MITM proxy with auto-generated CA certificate
   - bwrap: network isolated via pasta (requires passt package)
   - docker: proxy bound to per-session Docker network
