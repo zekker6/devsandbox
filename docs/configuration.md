@@ -427,7 +427,11 @@ pattern = "~/.cache/myapp"
 mode = "overlay"
 ```
 
-**Note:** The `hidden` mode only works for files. To hide a directory, use `readonly` or `tmpoverlay` instead.
+**Note:** The `hidden` mode only works for files - a directory cannot be replaced with `/dev/null`, and no other mode conceals
+a directory's contents either (`readonly`, `overlay`, and `tmpoverlay` all keep the host files readable). To keep a
+directory's contents out of the sandbox, write a pattern that matches the *files inside* it: `**/secrets/**` above hides
+every file under any `secrets` directory at any depth (the directory entries themselves stay visible). A pattern that
+resolves to the directory alone - `secrets/**`, `~/secrets` - hides nothing, and devsandbox warns at startup when one does.
 
 ### Port Forwarding
 

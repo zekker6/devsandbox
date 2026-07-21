@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox/mounts"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -52,6 +53,9 @@ type Builder struct {
 	overlaySrcSeen bool // tracks if OverlaySrc was called before overlay mount
 	mounts         []mountInfo
 	err            error // captures errors from build steps (e.g., critical tool setup failures)
+	// warnedHiddenDirs deduplicates the "hidden rule matched a directory" warning
+	// across the three mount passes, keyed by absolute path.
+	warnedHiddenDirs map[string]bool
 }
 
 func NewBuilder(cfg *Config) *Builder {
@@ -689,26 +693,18 @@ func (b *Builder) AddCustomMounts() *Builder {
 		return b
 	}
 
-	// Get all expanded paths with their rules and sort for deterministic ordering
-	expandedPaths := engine.ExpandedPaths()
-	paths := make([]string, 0, len(expandedPaths))
-	for path := range expandedPaths {
+	// Get all expanded paths with their rules
+	outside := make(map[string]mounts.Rule)
+	for path, rule := range engine.ExpandedPaths() {
 		// Skip paths inside project directory - they're handled in AddProjectBindings()
 		// Skip paths inside home directory - they're handled in AddHomeCustomMounts()
 		if b.isInsideProject(path) || b.isInsideHome(path) {
 			continue
 		}
-		paths = append(paths, path)
+		outside[path] = rule
 	}
-	sortedPaths := sortPaths(paths)
 
-	// Apply mounts in sorted order
-	for _, path := range sortedPaths {
-		rule := expandedPaths[path]
-		if b.applyMountRule(path, rule) {
-			engine.EmitMountDecision(path, path, rule)
-		}
-	}
+	b.applyMountRuleSet(engine, outside)
 
 	return b
 }
@@ -727,27 +723,19 @@ func (b *Builder) AddHomeCustomMounts() *Builder {
 		return b
 	}
 
-	expandedPaths := engine.ExpandedPaths()
-	paths := make([]string, 0, len(expandedPaths))
-	for path := range expandedPaths {
+	insideHome := make(map[string]mounts.Rule)
+	for path, rule := range engine.ExpandedPaths() {
 		// Only include paths inside home that are NOT inside the project
 		if b.isInsideHome(path) && !b.isInsideProject(path) {
-			paths = append(paths, path)
+			insideHome[path] = rule
 		}
 	}
 
-	if len(paths) == 0 {
+	if len(insideHome) == 0 {
 		return b
 	}
 
-	sortedPaths := sortPaths(paths)
-
-	for _, path := range sortedPaths {
-		rule := expandedPaths[path]
-		if b.applyMountRule(path, rule) {
-			engine.EmitMountDecision(path, path, rule)
-		}
-	}
+	b.applyMountRuleSet(engine, insideHome)
 
 	return b
 }
@@ -778,43 +766,131 @@ func (b *Builder) isInsideHome(path string) bool {
 	return strings.HasPrefix(cleanPath, home+string(filepath.Separator))
 }
 
-// applyMountRule applies a single custom mount rule to a path. Returns true
-// when the mount was actually applied; callers use this to gate audit-event
-// emission so we don't log mount.decision for paths that get rejected
-// (hidden directories, overlay on non-directories, etc.).
-func (b *Builder) applyMountRule(path string, rule mounts.Rule) bool {
+// mountRuleOutcome reports what applyMountRule did with a path. Callers gate
+// audit-event emission on mountApplied so we don't log mount.decision for paths
+// that get rejected, and report mountSkippedHiddenDir to the user because a
+// hidden rule that hides nothing is a silent security no-op.
+type mountRuleOutcome int
+
+const (
+	mountApplied mountRuleOutcome = iota
+	mountSkipped
+	mountSkippedHiddenDir
+)
+
+// applyMountRule applies a single custom mount rule to a path.
+func (b *Builder) applyMountRule(path string, rule mounts.Rule) mountRuleOutcome {
 	info, err := os.Stat(path)
 	if err != nil {
-		return false // Path doesn't exist
+		return mountSkipped // Path doesn't exist
 	}
 
 	switch rule.Mode {
 	case mounts.ModeHidden:
 		if info.IsDir() {
-			// Hiding directories is not supported - log and skip
-			b.logWarnf("mounts: cannot hide directory %q - use 'readonly', 'overlay', or 'tmpoverlay' mode instead (pattern: %s)", path, rule.Pattern)
-			return false
+			// A directory cannot be replaced by /dev/null - skip it and let the
+			// caller decide whether the user must be told (see reportUnhiddenDirs).
+			return mountSkippedHiddenDir
 		}
 		// For files within mounted paths, overlay with /dev/null
 		b.ROBind("/dev/null", path)
-		return true
+		return mountApplied
 
 	case mounts.ModeReadOnly:
 		b.ROBind(path, path)
-		return true
+		return mountApplied
 
 	case mounts.ModeReadWrite:
 		b.Bind(path, path)
-		return true
+		return mountApplied
 
 	case mounts.ModeOverlay:
-		return b.applyCustomOverlay(path, rule, false)
+		return outcomeFor(b.applyCustomOverlay(path, rule, false))
 
 	case mounts.ModeTmpOverlay:
-		return b.applyCustomOverlay(path, rule, true)
+		return outcomeFor(b.applyCustomOverlay(path, rule, true))
 	}
 
-	return false
+	return mountSkipped
+}
+
+func outcomeFor(applied bool) mountRuleOutcome {
+	if applied {
+		return mountApplied
+	}
+	return mountSkipped
+}
+
+// applyMountRuleSet applies every rule in expandedPaths, parents before children,
+// emitting an audit event per applied mount. Shared by the three call sites that
+// each own a slice of the path space (outside home/project, inside project,
+// inside home).
+func (b *Builder) applyMountRuleSet(engine *mounts.Engine, expandedPaths map[string]mounts.Rule) {
+	paths := make([]string, 0, len(expandedPaths))
+	for path := range expandedPaths {
+		paths = append(paths, path)
+	}
+
+	var hiddenFiles []string
+	var skippedDirs []skippedHiddenDir
+
+	for _, path := range sortPaths(paths) {
+		rule := expandedPaths[path]
+		switch b.applyMountRule(path, rule) {
+		case mountApplied:
+			engine.EmitMountDecision(path, path, rule)
+			if rule.Mode == mounts.ModeHidden {
+				hiddenFiles = append(hiddenFiles, path)
+			}
+		case mountSkippedHiddenDir:
+			skippedDirs = append(skippedDirs, skippedHiddenDir{path: path, pattern: rule.Pattern})
+		case mountSkipped:
+		}
+	}
+
+	b.reportUnhiddenDirs(skippedDirs, hiddenFiles)
+}
+
+// skippedHiddenDir records a directory a "hidden" rule matched but could not hide.
+type skippedHiddenDir struct {
+	path    string
+	pattern string
+}
+
+// reportUnhiddenDirs warns - on the terminal, not just in the log file - about
+// hidden rules that matched a directory and therefore hid nothing at all. No
+// mount mode conceals a directory's contents (readonly, overlay, and tmpoverlay
+// all keep the host path readable), so the only remedy is a pattern that matches
+// the files inside it. A directory whose files this same pass hid is not
+// reported: "**/secrets/**" matches the directory *and* everything under it, the
+// contents are covered, and only the directory entry itself remains.
+//
+// notice.Alert, not notice.Warn: the mount plan is built after the process enters
+// PhaseRunning, where a plain warning goes to the log file and the user sees only
+// a banner at exit - which is the invisibility this warning exists to end.
+func (b *Builder) reportUnhiddenDirs(dirs []skippedHiddenDir, hiddenFiles []string) {
+	for _, d := range dirs {
+		if slices.ContainsFunc(hiddenFiles, func(f string) bool { return isParentPath(d.path, f) }) {
+			continue
+		}
+		// The same directory can surface twice (once via a relative pattern
+		// resolved against the working directory, once via the project pass).
+		abs, err := filepath.Abs(d.path)
+		if err != nil {
+			abs = d.path
+		}
+		if b.warnedHiddenDirs[abs] {
+			continue
+		}
+		if b.warnedHiddenDirs == nil {
+			b.warnedHiddenDirs = make(map[string]bool)
+		}
+		b.warnedHiddenDirs[abs] = true
+
+		notice.Alert("mounts: pattern %q (mode \"hidden\") matched the directory %s, which cannot be hidden - it stays readable inside the sandbox. "+
+			"No mount mode hides a directory; match the files inside it instead, e.g. pattern = %q.",
+			d.pattern, abs, strings.TrimSuffix(d.pattern, "/**")+"/**/*")
+	}
 }
 
 // sortPaths sorts paths so that parent directories come before children.
@@ -942,20 +1018,7 @@ func (b *Builder) applyProjectCustomMounts() {
 		return
 	}
 
-	// Sort paths for deterministic ordering
-	paths := make([]string, 0, len(expandedPaths))
-	for path := range expandedPaths {
-		paths = append(paths, path)
-	}
-	sortedPaths := sortPaths(paths)
-
-	// Apply mounts
-	for _, path := range sortedPaths {
-		rule := expandedPaths[path]
-		if b.applyMountRule(path, rule) {
-			engine.EmitMountDecision(path, path, rule)
-		}
-	}
+	b.applyMountRuleSet(engine, expandedPaths)
 }
 
 func (b *Builder) AddEnvironment() *Builder {

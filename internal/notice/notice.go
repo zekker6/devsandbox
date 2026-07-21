@@ -93,6 +93,12 @@ func LogPath() string {
 }
 
 func writeMessage(level string, format string, args ...any) {
+	writeMessagePhase(level, false, format, args...)
+}
+
+// writeMessagePhase writes an entry, optionally bypassing the phase gate that
+// otherwise diverts messages to the log file once the workload is running.
+func writeMessagePhase(level string, always bool, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -107,7 +113,7 @@ func writeMessage(level string, format string, args ...any) {
 
 	// Decide whether to write to real stderr.
 	p := Phase()
-	writeToStderr := state.verbose || p == PhaseStartup || p == PhaseTeardown
+	writeToStderr := always || state.verbose || p == PhaseStartup || p == PhaseTeardown
 	if writeToStderr {
 		fmt.Fprint(state.stderr, msg) //nolint:errcheck
 		if len(msg) == 0 || msg[len(msg)-1] != '\n' {
@@ -135,6 +141,14 @@ func Warn(format string, args ...any) { writeMessage("warn", format, args...) }
 
 // Error writes a user-facing error (does not terminate — caller handles that).
 func Error(format string, args ...any) { writeMessage("error", format, args...) }
+
+// Alert writes a user-facing warning that reaches the terminal in every phase.
+// Reserved for warnings the user cannot afford to miss - a security rule that
+// silently did not apply, say - because a warning emitted during PhaseRunning is
+// otherwise diverted to the log file and only hinted at by a banner at exit.
+// Sandbox setup runs in PhaseRunning even though the workload has not started
+// yet, so warnings raised while building the mount plan need this.
+func Alert(format string, args ...any) { writeMessagePhase("warn", true, format, args...) }
 
 // AttachSink binds an external sink (typically wired to the audit log
 // dispatcher in main.go) and drains the pre-attach buffer through it.

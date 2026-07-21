@@ -1,11 +1,16 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"devsandbox/internal/isolator"
+	"devsandbox/internal/sandbox"
 )
 
 func TestCheckGit(t *testing.T) {
@@ -170,27 +175,36 @@ func TestDoctorSummary(t *testing.T) {
 			name: "error outranks warnings and the advisory-only block is labelled",
 			results: []checkResult{
 				{name: "krun: system pasta", status: "warn", hint: "install passt"},
-				{name: "shell", status: "error"},
+				{name: "shell", status: "error", missingDep: true},
 			},
 			wantFailed: true,
-			want:       `Some checks failed. Please install missing dependencies (the "How to fix" block above covers advisory warnings only).`,
+			want:       `Some checks failed: shell. Please install the missing dependencies. The "How to fix" block above covers advisory warnings only.`,
 		},
 		{
 			name: "failure with no hints anywhere does not mention the block",
 			results: []checkResult{
-				{name: "bwrap", status: "error"},
+				{name: "bwrap", status: "error", missingDep: true},
 			},
 			wantFailed: true,
-			want:       "Some checks failed. Please install missing dependencies.",
+			want:       "Some checks failed: bwrap. Please install the missing dependencies.",
 		},
 		{
 			name: "failing row with its own hint points at the block",
 			results: []checkResult{
 				{name: "krun: system pasta", status: "warn", hint: "install passt"},
-				{name: "bwrap", status: "error", hint: "install bubblewrap"},
+				{name: "bwrap", status: "error", hint: "install bubblewrap", missingDep: true},
 			},
 			wantFailed: true,
-			want:       `Some checks failed. Please install missing dependencies - see "How to fix" above.`,
+			want:       `Some checks failed: bwrap. Please install the missing dependencies. See "How to fix" above.`,
+		},
+		{
+			name: "failure that is not a missing dependency does not advise installing anything",
+			results: []checkResult{
+				{name: "directories", status: "error"},
+				{name: "config", status: "error"},
+			},
+			wantFailed: true,
+			want:       "Some checks failed: directories, config.",
 		},
 	}
 
@@ -204,5 +218,39 @@ func TestDoctorSummary(t *testing.T) {
 				t.Errorf("msg = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCheckRecentLogsStaysAdvisory pins the logs row to a warning no matter how
+// many errors past runs recorded. Errors already written to a log file say
+// nothing about whether this host can launch a sandbox, so failing the run on
+// them would break `devsandbox doctor` as a CI/script gate.
+func TestCheckRecentLogsStaysAdvisory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	logDir := filepath.Join(home, ".local", "share", sandbox.SandboxBaseDir, "proj", "logs", "internal")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var b strings.Builder
+	now := time.Now()
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&b, "%s [proxy] boom\n", now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339))
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "errors.log"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := checkRecentLogs()
+	if r.status != "warn" {
+		t.Errorf("status = %q, want %q (message: %s)", r.status, "warn", r.message)
+	}
+	if !strings.Contains(r.message, "50 errors in last 24h") {
+		t.Errorf("message = %q, want it to report 50 recent errors", r.message)
+	}
+	if !strings.Contains(r.hint, "devsandbox logs internal") {
+		t.Errorf("hint = %q, want it to name the logs command", r.hint)
 	}
 }

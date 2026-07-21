@@ -305,3 +305,34 @@ func TestConcurrentWritesSafe(t *testing.T) {
 	wg.Wait()
 	// If this test is not race-free, `go test -race` will fail.
 }
+
+// TestAlertWritesDuringRunningPhase pins the one guarantee Alert exists to make:
+// a warning the user must not miss reaches stderr even while the workload owns
+// the terminal, where a plain Warn would only reach the log file.
+func TestAlertWritesDuringRunningPhase(t *testing.T) {
+	resetForTest(t)
+	var buf bytes.Buffer
+	logPath := filepath.Join(t.TempDir(), "w.log")
+	if err := Setup(logPath, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	SetRunning()
+
+	Warn("quiet")
+	if strings.Contains(buf.String(), "quiet") {
+		t.Fatalf("Warn leaked to stderr during running phase: %q", buf.String())
+	}
+
+	Alert("loud")
+	if !strings.Contains(buf.String(), "loud") {
+		t.Fatalf("Alert did not reach stderr during running phase: %q", buf.String())
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "loud") {
+		t.Fatalf("Alert missing from log file; got %q", data)
+	}
+}

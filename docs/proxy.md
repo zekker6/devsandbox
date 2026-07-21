@@ -930,7 +930,7 @@ type = "exact"
 ### Interaction With Other Features
 
 - **Filter (allow/block):** independent. A request blocked by the filter is still skipped from logs if it also matches a `log_skip` rule. If you want to keep a record of blocked attempts, do not log-skip the same hosts you block.
-- **Redaction:** independent. Redaction still scrubs request/response bodies in flight; log-skip just decides whether the (already-redacted) entry gets persisted.
+- **Redaction:** independent. Redaction still scans outbound requests in flight (see [Redaction Coverage](#redaction-coverage) - responses are not scanned); log-skip just decides whether the (already-redacted) entry gets persisted.
 - **Credential injection:** independent. Tokens are still injected on outbound requests; log-skip only affects the local log artifact.
 
 ### Configuration Reference

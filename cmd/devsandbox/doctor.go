@@ -27,6 +27,11 @@ type checkResult struct {
 	// hint is optional multi-line remediation printed below the table for rows
 	// that are not "ok". The table cell only fits a one-line message.
 	hint string
+	// missingDep marks a row that failed because a dependency is absent from the
+	// host. Only such a row justifies the summary telling the user to install
+	// something; other failures (unwritable directory, unreadable config) are not
+	// fixed by installing anything.
+	missingDep bool
 }
 
 // needsHint reports whether this row's remediation should be printed below the
@@ -138,14 +143,22 @@ func hasHintedError(results []checkResult) bool {
 // counted rather than swallowed - claiming "All checks passed!" directly below a
 // "How to fix" block for unmet krun rows reads as a contradiction. A failing run
 // whose hints are all advisory says so, because the block sits directly above the
-// summary and otherwise reads as the fix for the failure.
+// summary and otherwise reads as the fix for the failure. A failure names the rows
+// that failed, and only advises installing something when a row actually reports a
+// missing dependency.
 func doctorSummary(results []checkResult) (msg string, failed bool) {
 	warnings := 0
 	hinted := 0
+	missingDep := false
+	var failedNames []string
 	for _, r := range results {
 		switch r.status {
 		case "error":
 			failed = true
+			failedNames = append(failedNames, r.name)
+			if r.missingDep {
+				missingDep = true
+			}
 		case "warn":
 			warnings++
 		}
@@ -154,13 +167,21 @@ func doctorSummary(results []checkResult) (msg string, failed bool) {
 		}
 	}
 
+	if failed {
+		msg = fmt.Sprintf("Some checks failed: %s.", strings.Join(failedNames, ", "))
+		if missingDep {
+			msg += " Please install the missing dependencies."
+		}
+		switch {
+		case hinted > 0 && hasHintedError(results):
+			msg += fmt.Sprintf(" See %q above.", "How to fix")
+		case hinted > 0:
+			msg += fmt.Sprintf(" The %q block above covers advisory warnings only.", "How to fix")
+		}
+		return msg, true
+	}
+
 	switch {
-	case failed && hinted > 0 && !hasHintedError(results):
-		return fmt.Sprintf("Some checks failed. Please install missing dependencies (the %q block above covers advisory warnings only).", "How to fix"), true
-	case failed && hinted > 0:
-		return fmt.Sprintf("Some checks failed. Please install missing dependencies - see %q above.", "How to fix"), true
-	case failed:
-		return "Some checks failed. Please install missing dependencies.", true
 	case warnings > 0 && hinted > 0:
 		return fmt.Sprintf("All required checks passed (%d advisory warning(s) - see %q above).", warnings, "How to fix"), false
 	case warnings > 0:
@@ -207,9 +228,10 @@ func checkShell() checkResult {
 
 	if _, err := os.Stat(shellPath); os.IsNotExist(err) {
 		return checkResult{
-			name:    "shell",
-			status:  "error",
-			message: fmt.Sprintf("%s not found at %s", shell, shellPath),
+			name:       "shell",
+			status:     "error",
+			message:    fmt.Sprintf("%s not found at %s", shell, shellPath),
+			missingDep: true,
 		}
 	}
 
@@ -524,9 +546,10 @@ func checkEmbeddedBinary(name string, version string, required bool) checkResult
 			msg = fmt.Sprintf("not found (embedded disabled): %v", err)
 		}
 		return checkResult{
-			name:    name,
-			status:  status,
-			message: msg,
+			name:       name,
+			status:     status,
+			message:    msg,
+			missingDep: true,
 		}
 	}
 
@@ -724,15 +747,17 @@ func checkRecentLogs() checkResult {
 		msg += fmt.Sprintf(" (%s)", strings.Join(parts, ", "))
 	}
 
-	status := "warn"
-	if recentErrors > 10 {
-		status = "error"
-	}
-
+	// Advisory only. Errors logged by past sandbox runs say nothing about whether
+	// this host can run a sandbox now, so they must not fail the run: doctor is
+	// used as a CI/script gate, and any project that ever logged an error would
+	// break it with a verdict no install can clear.
 	return checkResult{
 		name:    "logs",
-		status:  status,
+		status:  "warn",
 		message: msg,
+		hint: "Errors recorded by past sandbox runs - they do not block new runs.\n" +
+			"The count spans every project; inspect one at a time with:\n" +
+			"  devsandbox logs internal [sandbox-name] --since 24h",
 	}
 }
 

@@ -486,6 +486,11 @@ Beyond the built-in security rules, you can configure custom mount rules to cont
 | `overlay`    | Writes saved to sandbox home, host unchanged                 |
 | `tmpoverlay` | Writes go to tmpfs, discarded on exit                        |
 
+`hidden` is the only mode that conceals anything, and it applies to files only: a directory cannot be replaced with
+`/dev/null`, so a rule that resolves to a directory is skipped and devsandbox warns at startup. The other modes all leave
+the host files readable. To keep a directory's contents out of the sandbox, match the *files inside* it (`**/secrets/**`,
+`~/secrets/**/*`) rather than the directory itself (`secrets/**`, `~/secrets`).
+
 ### How Custom Mounts Work
 
 Custom mounts are processed **before** the sandbox home is mounted. This means:
@@ -533,6 +538,9 @@ mode = "readonly"
 pattern = "**/secrets/**"
 mode = "hidden"
 ```
+
+The trailing `/**` is what makes this work - it matches the files under every `secrets` directory. `secrets/**` would
+resolve to the directory itself, which cannot be hidden.
 
 **Writable cache with persistence:**
 

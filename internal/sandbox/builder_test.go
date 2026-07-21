@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +10,7 @@ import (
 	"testing"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox/mounts"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -1075,5 +1078,130 @@ func TestBuilder_AddProjectBindings_WorktreeLeavesMainRepoAlone(t *testing.T) {
 	// unrelated builder args.
 	if strings.Contains(joined, repo) {
 		t.Errorf("main repo %q leaked into project bindings:\n%s", repo, joined)
+	}
+}
+
+// TestBuilder_HiddenDirectoryWarnsOnTerminal covers the security-relevant case of
+// a "hidden" rule that resolves to a directory: nothing is hidden, so the user has
+// to hear about it at launch. The warning goes through notice, not the sandbox log
+// file, because a log file nobody reads is the same as no warning at all.
+func TestBuilder_HiddenDirectoryWarnsOnTerminal(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "test")
+	projectDir := filepath.Join(homeDir, "myproject")
+	secretsDir := filepath.Join(projectDir, "secrets")
+
+	if err := os.MkdirAll(filepath.Join(secretsDir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"secrets/token", "secrets/nested/key"} {
+		if err := os.WriteFile(filepath.Join(projectDir, f), []byte("s3cret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name     string
+		pattern  string
+		wantWarn bool
+	}{
+		// Resolves to the directory alone - hides nothing, must be reported.
+		{name: "directory only", pattern: "secrets/**", wantWarn: true},
+		// Matches the directory *and* every file under it - contents are hidden,
+		// so the skipped directory entries are not worth a warning.
+		{name: "files inside", pattern: "**/secrets/**", wantWarn: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if err := notice.Setup("", false, &stderr); err != nil {
+				t.Fatalf("notice.Setup: %v", err)
+			}
+			// The mount plan is built after the process enters the running
+			// phase, where an ordinary notice write is diverted to the log
+			// file. Reproduce that here so the test fails if the warning
+			// regresses to a log-only message.
+			notice.SetRunning()
+			t.Cleanup(func() { _ = notice.Setup("", false, io.Discard) })
+
+			engine := mounts.NewEngine(config.MountsConfig{
+				Rules: []config.MountRule{{Pattern: tt.pattern, Mode: "hidden"}},
+			}, homeDir)
+
+			b := NewBuilder(&Config{
+				HomeDir:      homeDir,
+				ProjectDir:   projectDir,
+				SandboxHome:  filepath.Join(tmpDir, "sandbox", "home"),
+				MountsConfig: engine,
+			})
+			b.AddProjectBindings()
+
+			out := stderr.String()
+			gotWarn := strings.Contains(out, "cannot be hidden")
+			if gotWarn != tt.wantWarn {
+				t.Errorf("warning on stderr = %v, want %v (output: %q)", gotWarn, tt.wantWarn, out)
+			}
+			if tt.wantWarn {
+				if !strings.Contains(out, secretsDir) {
+					t.Errorf("warning does not name the directory: %q", out)
+				}
+				if !strings.Contains(out, `"secrets/**/*"`) {
+					t.Errorf("warning does not suggest a working pattern: %q", out)
+				}
+				for _, bad := range []string{"readonly", "tmpoverlay", "overlay"} {
+					if strings.Contains(out, bad) {
+						t.Errorf("warning recommends %q, which does not hide anything: %q", bad, out)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestBuilder_HiddenFilesInsideDirectoryAreDevNulled asserts the remedy the
+// warning points at actually works: every file under the directory is replaced
+// with /dev/null.
+func TestBuilder_HiddenFilesInsideDirectoryAreDevNulled(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "test")
+	projectDir := filepath.Join(homeDir, "myproject")
+
+	if err := os.MkdirAll(filepath.Join(projectDir, "secrets", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		filepath.Join(projectDir, "secrets", "token"),
+		filepath.Join(projectDir, "secrets", "nested", "key"),
+	}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("s3cret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	engine := mounts.NewEngine(config.MountsConfig{
+		Rules: []config.MountRule{{Pattern: "**/secrets/**", Mode: "hidden"}},
+	}, homeDir)
+
+	b := NewBuilder(&Config{
+		HomeDir:      homeDir,
+		ProjectDir:   projectDir,
+		SandboxHome:  filepath.Join(tmpDir, "sandbox", "home"),
+		MountsConfig: engine,
+	})
+	b.AddProjectBindings()
+	args := b.Build()
+
+	for _, f := range files {
+		found := false
+		for i, arg := range args {
+			if arg == f && i >= 2 && args[i-1] == "/dev/null" && args[i-2] == "--ro-bind" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s is not overlaid with /dev/null, args: %v", f, args)
+		}
 	}
 }

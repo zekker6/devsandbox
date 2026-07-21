@@ -363,7 +363,8 @@ type MountRule struct {
 	Pattern string `toml:"pattern"`
 
 	// Mode specifies how to handle matching paths:
-	// - "hidden": overlay with /dev/null (files only - directory matches are skipped with a warning)
+	// - "hidden": overlay with /dev/null (files only - directory matches are skipped
+	//   with a warning; match the files inside a directory instead, e.g. "**/secrets/**")
 	// - "readonly": mount as read-only bind mount
 	// - "readwrite": mount as read-write bind mount
 	// - "overlay": mount with persistent overlayfs (writes saved to sandbox)
@@ -1121,7 +1122,8 @@ port = 8080
 # - Control read/write access to specific paths
 #
 # Modes:
-# - "hidden": overlay with /dev/null (files only - directory matches are skipped with a warning)
+# - "hidden": overlay with /dev/null (files only - directory matches are skipped with a
+#   warning; no mode hides a directory, so match the files inside it instead)
 # - "readonly": mount as read-only bind mount
 # - "readwrite": mount as read-write bind mount
 # - "overlay": mount with persistent overlayfs (writes saved to sandbox)
