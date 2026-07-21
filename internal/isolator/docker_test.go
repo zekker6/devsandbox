@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1226,6 +1227,79 @@ func TestGetToolBindings_DockerHostRemapped(t *testing.T) {
 	}
 	if !strings.HasPrefix(dockerHost, "unix:///home/sandboxuser/") || !strings.HasSuffix(dockerHost, "/docker.sock") {
 		t.Errorf("DOCKER_HOST should point to a docker.sock under /home/sandboxuser, got: %s", dockerHost)
+	}
+}
+
+// A tmpoverlay directory must be realized as a copyoverlay on every engine, never
+// as a "tmpoverlay" manifest entry. The shim implements that type by forking a
+// child into CLONE_NEWUSER|CLONE_NEWNS, which Docker's default seccomp profile
+// denies for a container without CAP_SYS_ADMIN (the sandbox drops it), so emitting
+// one aborts container setup with "fork overlay child: operation not permitted".
+func TestGetToolBindings_TmpOverlayDirsUseCopyOverlayOnEveryEngine(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "testuser")
+	fishFunctions := filepath.Join(homeDir, ".config", "fish", "functions")
+	if err := os.MkdirAll(fishFunctions, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+	if err := os.MkdirAll(sandboxHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		iso  *DockerIsolator
+	}{
+		{name: "docker", iso: NewDockerIsolator(DockerConfig{})},
+		{name: "krun", iso: NewKrunIsolator(DockerConfig{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				ProjectDir:       filepath.Join(tmpDir, "project"),
+				SandboxHome:      sandboxHome,
+				HomeDir:          homeDir,
+				Shell:            "fish",
+				DefaultMountMode: "split", // config category resolves to tmpoverlay
+			}
+
+			mounts, _, manifest := tc.iso.getToolBindings(cfg)
+
+			dest := "/home/sandboxuser/.config/fish/functions"
+			var entry *OverlayEntry
+			for i := range manifest.Overlays {
+				if manifest.Overlays[i].Type == "tmpoverlay" {
+					t.Fatalf("tmpoverlay entry requires namespaces the container cannot create: %+v", manifest.Overlays[i])
+				}
+				if manifest.Overlays[i].Path == dest {
+					entry = &manifest.Overlays[i]
+				}
+			}
+			if entry == nil {
+				t.Fatalf("expected a manifest entry for %s, got %+v", dest, manifest.Overlays)
+			}
+			if entry.Type != "copyoverlay" {
+				t.Errorf("expected copyoverlay for %s, got %q", dest, entry.Type)
+			}
+			if entry.Source == "" {
+				t.Fatalf("copyoverlay entry for %s needs a shadow source", dest)
+			}
+			if entry.Source == dest {
+				t.Errorf("shadow source must differ from the target, both are %s", dest)
+			}
+
+			// The source is bound read-only at the shadow path, never at the target:
+			// the shim writes the copy to the target and would fail on a :ro mount.
+			wantMount := homeDir + "/.config/fish/functions:" + entry.Source + ":ro"
+			if !slices.Contains(mounts, wantMount) {
+				t.Errorf("expected mount %q, got %v", wantMount, mounts)
+			}
+			for _, m := range mounts {
+				if strings.HasPrefix(m, homeDir+"/.config/fish/functions:"+dest) {
+					t.Errorf("tmpoverlay dir must not be bound at its target: %s", m)
+				}
+			}
+		})
 	}
 }
 

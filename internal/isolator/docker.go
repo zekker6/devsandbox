@@ -1480,8 +1480,10 @@ func (d *DockerIsolator) remapToContainerHome(hostPath, homeDir, projectDir stri
 	return hostPath
 }
 
-// copyOverlayShadowPath returns a deterministic shadow mount path for a container destination.
-// Used on macOS where overlayfs is unavailable inside Docker Desktop containers.
+// copyOverlayShadowPath returns a deterministic shadow mount path for a container
+// destination. The source is bound read-only there and the shim copies it onto the
+// real destination, which is how every engine this isolator drives realizes a
+// tmpoverlay directory (see getToolBindings for the per-engine reasons).
 func copyOverlayShadowPath(containerDest string) string {
 	h := sha256.Sum256([]byte(containerDest))
 	return fmt.Sprintf("/tmp/.overlay-shadow/%x", h[:8])
@@ -1563,12 +1565,19 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 					isDir = info.IsDir()
 				}
 
-				if isTmpOverlay && isDir && (runtime.GOOS == "darwin" || d.engine.microVM) {
-					// macOS: overlayfs unavailable in Docker Desktop.
-					// krun: kernel overlayfs mount fails in the libkrun guest (EPERM
-					// for an overlay whose lowerdir is on virtio-fs inside a nested
-					// userns), so fall back to the same copy strategy.
-					// Mount source read-only at a shadow path; shim copies to target.
+				// Every engine this isolator drives reaches a tmpoverlay directory
+				// through a copy, never a kernel overlayfs mount inside the guest:
+				//   - macOS: overlayfs is unavailable in Docker Desktop.
+				//   - krun: the mount returns EPERM for an overlay whose lowerdir
+				//     is on virtio-fs inside a nested userns.
+				//   - Docker on Linux: the shim's overlayfs needs a child in a new
+				//     CLONE_NEWUSER|CLONE_NEWNS, and Docker's default seccomp
+				//     profile denies clone/unshare carrying namespace flags unless
+				//     the container holds CAP_SYS_ADMIN - which this one
+				//     deliberately never gets (see buildCommonArgs).
+				// Mount the source read-only at a shadow path; the shim copies it
+				// onto the target during startup.
+				if isTmpOverlay && isDir {
 					shadowDest := copyOverlayShadowPath(dest)
 					mounts = append(mounts, b.Source+":"+shadowDest+":ro")
 					manifest.Overlays = append(manifest.Overlays, OverlayEntry{
@@ -1579,21 +1588,13 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 				} else {
 					mount := b.Source + ":" + dest
 					if isTmpOverlay || b.Type == tools.MountOverlay {
-						// Both overlay types mount as :ro in Docker;
-						// shim applies overlayfs on top for tmpoverlay dirs.
+						// A tmpoverlay file (not a directory) and a plain overlay
+						// both mount read-only; only directories get a copy.
 						mount += ":ro"
 					} else if b.ReadOnly {
 						mount += ":ro"
 					}
 					mounts = append(mounts, mount)
-
-					// Add to manifest if it's a tmpoverlay directory
-					if isTmpOverlay && isDir {
-						manifest.Overlays = append(manifest.Overlays, OverlayEntry{
-							Path: dest,
-							Type: "tmpoverlay",
-						})
-					}
 				}
 			}
 		}

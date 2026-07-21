@@ -283,10 +283,11 @@ resource limits), and the same tool bindings and proxy wiring. Notes:
 - **Runs rootless.** The backend uses rootless `podman` with `--userns=keep-id`,
   so files the workload writes to the project directory come back owned by you
   (not a subuid). Overlay/`tmpoverlay` tool dirs use copy-on-start rather than
-  kernel overlayfs (the guest rejects an overlayfs mount over virtio-fs). A
-  `tmpoverlay` dir is reset to the host source on every run - the copy target is
-  cleared first (preserving any nested read-only bindings), so writes from a
-  previous run never persist, matching tmpoverlay's discard-on-exit semantics.
+  kernel overlayfs (the guest rejects an overlayfs mount over virtio-fs; the
+  docker backend uses the same copy for its own reasons). A `tmpoverlay` dir is
+  reset to the host source on every run - the copy target is cleared first
+  (preserving any nested read-only bindings), so writes from a previous run never
+  persist, matching tmpoverlay's discard-on-exit semantics.
 - **Prerequisites:** `podman`, a `crun` built with libkrun (provides the `krun`
   OCI runtime), and access to `/dev/kvm` on Linux (bare-metal or a host with
   nested virtualization) or Apple Silicon on macOS. For **proxy mode on Linux** you

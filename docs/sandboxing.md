@@ -409,6 +409,16 @@ Overlayfs creates a layered filesystem:
 - **tmpoverlay**: Upper layer is tmpfs, discarded on exit
 - **overlay** (persistent): Upper layer stored in `~/.local/share/devsandbox/<project>/home/overlay/`
 
+Only the `bwrap` backend realizes a `tmpoverlay` directory as a kernel overlayfs
+mount. The `docker` and `krun` backends copy the host source into the sandbox on
+start instead: Docker's default seccomp profile denies the namespace creation the
+mount would need in a container without `CAP_SYS_ADMIN` (which the sandbox drops),
+the krun guest rejects an overlayfs whose lower layer is on virtio-fs, and Docker
+Desktop on macOS has no overlayfs at all. The discard semantics are preserved by
+clearing the copy target at the start of every run rather than at exit, so a
+previous run's writes are never visible - but they do sit in the sandbox home
+between runs instead of vanishing when the sandbox stops.
+
 ### Choosing an Overlay Mode
 
 | Mode | Writes persist? | Host modified? | Use when |
@@ -741,7 +751,7 @@ File watching (inotify) across the macOS ↔ Docker boundary can be unreliable. 
 WATCHPACK_POLLING=true devsandbox npm run dev
 
 # Vite
-devsandbox -- npx vite --force
+devsandbox - npx vite --force
 
 # Generic: set CHOKIDAR_USEPOLLING for chokidar-based watchers
 CHOKIDAR_USEPOLLING=true devsandbox npm run dev
