@@ -86,13 +86,12 @@ type DockerConfig struct {
 // implementation drives both the Docker backend and the krun microVM backend
 // (podman + libkrun); the engine field selects which CLI and runtime to use.
 type DockerIsolator struct {
-	config       DockerConfig
-	engine       containerEngine // container CLI/runtime descriptor (docker or krun)
-	imageTag     string          // set after buildImage
-	networkName  string          // per-session network
-	gatewayIP    string          // per-session network gateway IP (proxy bind address)
-	logger       *logging.ComponentLogger
-	manifestPath string // host path to overlay manifest temp file
+	config      DockerConfig
+	engine      containerEngine // container CLI/runtime descriptor (docker or krun)
+	imageTag    string          // set after buildImage
+	networkName string          // per-session network
+	gatewayIP   string          // per-session network gateway IP (proxy bind address)
+	logger      *logging.ComponentLogger
 }
 
 // SetLogger configures the logger for the Docker isolator.
@@ -308,6 +307,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		ProjectDir:       sandboxCfg.ProjectDir,
 		GitRepoRoot:      sandboxCfg.GitRepoRoot,
 		SandboxHome:      sandboxCfg.SandboxHome,
+		SandboxRoot:      sandboxCfg.SandboxRoot,
 		HomeDir:          sandboxCfg.HomeDir,
 		Shell:            string(sandboxCfg.Shell),
 		ShellPath:        sandboxCfg.ShellPath,
@@ -382,8 +382,8 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		notice.Info("Started container")
 
 		if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
-			notice.Warn("Container setup timeout")
-			return d.withStartupDiagnostics(fmt.Errorf("container setup timed out after %s", readinessTimeout), result.ContainerName)
+			notice.Warn("Container setup failed")
+			return d.withStartupDiagnostics(fmt.Errorf("container setup failed: %w", err), result.ContainerName)
 		}
 		notice.Info("Container setup ready")
 
@@ -396,7 +396,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	case DockerActionExec:
 		if result.ContainerJustStarted {
 			if err := d.waitForContainerReady(result.BinaryPath, result.ContainerName, readinessTimeout); err != nil {
-				notice.Warn("Container setup timeout")
+				notice.Warn("Container setup failed")
 				return d.withStartupDiagnostics(fmt.Errorf("container startup failed: %w", err), result.ContainerName)
 			}
 			notice.Info("Container setup ready")
@@ -672,8 +672,35 @@ func (d *DockerIsolator) waitForContainerReady(dockerBinary, containerName strin
 			if check.Run() == nil {
 				return nil
 			}
+			// `exec` fails both while the shim is still starting and after it
+			// has died, so the probe alone cannot tell a slow boot from a dead
+			// container. Without this check a shim that fatals a second into
+			// setup still costs the caller the full timeout.
+			if code, exited := d.containerExitCode(dockerBinary, containerName); exited {
+				return fmt.Errorf("container %s exited with code %d during setup", containerName, code)
+			}
 		}
 	}
+}
+
+// containerExitCode reports the exit code of a container that has stopped.
+// exited is false while the container is still running, and also when its state
+// cannot be read — an unreadable state is not evidence of an exit, so the caller
+// keeps polling until its own timeout rather than failing on a transient
+// inspect error.
+func (d *DockerIsolator) containerExitCode(dockerBinary, containerName string) (code int, exited bool) {
+	out, err := exec.Command(dockerBinary, "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", containerName).Output()
+	if err != nil {
+		return 0, false
+	}
+	var running bool
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%t %d", &running, &code); err != nil {
+		return 0, false
+	}
+	if running {
+		return 0, false
+	}
+	return code, true
 }
 
 // startupLogTailLines is how many trailing lines of container output to surface
@@ -1128,7 +1155,7 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 
 	// Write overlay manifest if any tmpoverlay bindings exist
 	if len(overlayManifest.Overlays) > 0 {
-		manifestPath, err := d.writeOverlayManifest(overlayManifest)
+		manifestPath, err := d.writeOverlayManifest(cfg, overlayManifest)
 		if err != nil {
 			return nil, fmt.Errorf("write overlay manifest: %w", err)
 		}
@@ -1358,11 +1385,12 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 }
 
 // Cleanup performs any post-sandbox cleanup.
-// Removes the per-session Docker network if one was created and cleans up temp files.
+// Removes the per-session Docker network if one was created.
+//
+// The overlay manifest is deliberately not removed: a kept container binds it
+// by path, so deleting it here would break the next restart. It lives in the
+// per-project sandbox state directory and is rewritten on every launch.
 func (d *DockerIsolator) Cleanup() error {
-	if d.manifestPath != "" {
-		_ = os.Remove(d.manifestPath)
-	}
 	if d.networkName != "" {
 		rmNet := exec.Command(d.engine.binary, "network", "rm", d.networkName)
 		if output, err := rmNet.CombinedOutput(); err != nil {
@@ -1372,20 +1400,40 @@ func (d *DockerIsolator) Cleanup() error {
 	return nil
 }
 
-// writeOverlayManifest writes the manifest to a temp file and returns the host path.
-func (d *DockerIsolator) writeOverlayManifest(manifest *OverlayManifest) (string, error) {
-	f, err := os.CreateTemp("", "devsandbox-overlay-manifest-*.json")
-	if err != nil {
-		return "", err
-	}
-	path := f.Name()
-	_ = f.Close()
+// overlayManifestFileName is the manifest's name inside the per-project sandbox
+// state directory.
+const overlayManifestFileName = "overlays.json"
 
+// writeOverlayManifest writes the manifest into the per-project sandbox state
+// directory and returns the host path.
+//
+// The path must be stable across runs, not a temp file: a kept container binds
+// this host path permanently, so a per-run name would leave every later `docker
+// start` pointing at a path that no longer exists. Docker then materializes the
+// missing bind source as a directory and refuses to mount it over a file,
+// failing the restart and forcing a full recreate on every launch.
+//
+// The manifest is rewritten in place (same inode) rather than replaced via
+// rename, so a kept container's existing bind keeps resolving to the current
+// content.
+//
+// SandboxRoot rather than SandboxHome: only SandboxHome is mounted into the
+// container, so a manifest written here cannot be rewritten by the sandbox
+// between the host writing it and the shim reading it.
+func (d *DockerIsolator) writeOverlayManifest(cfg *Config, manifest *OverlayManifest) (string, error) {
+	if cfg.SandboxRoot == "" {
+		return "", errors.New("sandbox root is not set")
+	}
+	path := filepath.Join(cfg.SandboxRoot, overlayManifestFileName)
 	if err := manifest.Write(path); err != nil {
-		_ = os.Remove(path)
 		return "", err
 	}
-	d.manifestPath = path
+	// Write preserves the mode of an existing file, so a manifest left at 0600
+	// by an older devsandbox would stay unreadable to container-root whenever
+	// DAC_OVERRIDE is unavailable. The manifest lists container-side paths only.
+	if err := os.Chmod(path, 0o644); err != nil {
+		return "", fmt.Errorf("chmod overlay manifest: %w", err)
+	}
 	return path, nil
 }
 

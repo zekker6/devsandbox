@@ -92,6 +92,10 @@ type Config struct {
 	GitRepoRoot string
 	// SandboxHome is the per-project sandbox home directory.
 	SandboxHome string
+	// SandboxRoot is the per-project state directory that holds SandboxHome.
+	// Host-only: nothing under it except SandboxHome is exposed to the sandbox,
+	// so it is where host-authored files the guest must not rewrite belong.
+	SandboxRoot string
 	// HomeDir is the user's home directory.
 	HomeDir string
 	// Shell is the shell to run inside the sandbox.
