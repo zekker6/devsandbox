@@ -1,14 +1,18 @@
 package isolator
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"devsandbox/internal/notice"
 )
 
 // newKrunTestIsolator returns a krun isolator with an image tag preset so the
@@ -396,6 +400,54 @@ func TestDockerIsolator_NoResourceDefaults(t *testing.T) {
 	}
 	if slices.Contains(args, "--cpus") {
 		t.Errorf("docker backend must not get a default --cpus, got: %v", args)
+	}
+}
+
+// TestKrunIsolator_SuppressesPIDsLimit verifies krun never emits --pids-limit,
+// and that the dropped limit is reported to the user. Under krun the container
+// is the libkrun VMM process, so the flag would cap host-side VMM threads rather
+// than guest processes - applying it would break the VM and protect nothing, and
+// dropping it silently would leave the user believing a limit is in force.
+func TestKrunIsolator_SuppressesPIDsLimit(t *testing.T) {
+	var stderr bytes.Buffer
+	if err := notice.Setup("", false, &stderr); err != nil {
+		t.Fatalf("notice.Setup: %v", err)
+	}
+	// The argv is assembled after the process enters the running phase, where an
+	// ordinary notice write is diverted to the log file. Reproduce that so the
+	// test fails if the warning regresses to a log-only message.
+	notice.SetRunning()
+	t.Cleanup(func() {
+		notice.SetStartup()
+		_ = notice.Setup("", false, io.Discard)
+	})
+
+	iso := NewKrunIsolator(DockerConfig{PIDsLimit: 64})
+	iso.imageTag = "devsandbox:local"
+	cfg := &Config{
+		ProjectDir:  "/tmp/test-project",
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+
+	args, err := iso.buildRunArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildRunArgs failed: %v", err)
+	}
+	if slices.Contains(args, "--pids-limit") {
+		t.Errorf("krun backend must not emit --pids-limit, got: %v", args)
+	}
+
+	out := stderr.String()
+	if !strings.Contains(out, "pids = 64") {
+		t.Errorf("warning must name the configured limit, got: %q", out)
+	}
+	if !strings.Contains(out, "NOT applied") {
+		t.Errorf("warning must state the limit was not applied, got: %q", out)
+	}
+	if !strings.Contains(out, "microVM") {
+		t.Errorf("warning must explain why krun cannot enforce it, got: %q", out)
 	}
 }
 

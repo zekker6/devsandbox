@@ -2,14 +2,17 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"devsandbox/internal/notice"
 	"devsandbox/internal/source"
 
 	"github.com/BurntSushi/toml"
@@ -651,7 +654,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "invalid docker memory limit",
+			errMsg:  "[sandbox.docker.resources]: invalid memory limit",
 		},
 		{
 			name: "valid docker memory",
@@ -674,7 +677,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "invalid docker cpu limit",
+			errMsg:  "invalid [sandbox.docker.resources] cpu limit",
 		},
 		{
 			name: "valid docker cpus",
@@ -697,7 +700,111 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "invalid docker cpu limit",
+			errMsg:  "invalid [sandbox.docker.resources] cpu limit",
+		},
+		{
+			name: "invalid sandbox memory",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Resources: ResourcesConfig{Memory: "lots"},
+				},
+			},
+			wantErr: true,
+			errMsg:  "[sandbox.resources]: invalid memory limit",
+		},
+		{
+			name: "valid sandbox resources",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Resources: ResourcesConfig{Memory: "512m", CPUs: "0.5", PIDs: 2048},
+				},
+			},
+			wantErr: false,
+		},
+		// A zero memory limit is valid config: `docker --memory 0` is the
+		// documented way to say unlimited, and rejecting it here would stop
+		// devsandbox from starting at all for a docker or macOS user. Only the
+		// systemd scope path rejects it, where MemoryMax=0 means the opposite;
+		// see TestLimits_PropertiesErrors in internal/cgroups.
+		{
+			name: "zero sandbox memory accepted",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Resources: ResourcesConfig{Memory: "0"}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "zero sandbox memory with suffix accepted",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Resources: ResourcesConfig{Memory: "0g"}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "zero docker memory accepted",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Docker: DockerConfig{Resources: DockerResourcesConfig{Memory: "0m"}},
+				},
+			},
+			wantErr: false,
+		},
+		// ParseFloat accepts these, and NaN fails every comparison, so a plain
+		// positivity check lets both through to a backend as a nonsense quota.
+		{
+			name: "nan sandbox cpus",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Resources: ResourcesConfig{CPUs: "NaN"}},
+			},
+			wantErr: true,
+			errMsg:  "invalid [sandbox.resources] cpu limit",
+		},
+		{
+			name: "infinite sandbox cpus",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Resources: ResourcesConfig{CPUs: "Inf"}},
+			},
+			wantErr: true,
+			errMsg:  "invalid [sandbox.resources] cpu limit",
+		},
+		{
+			name: "invalid sandbox cpus",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Resources: ResourcesConfig{CPUs: "abc"},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid [sandbox.resources] cpu limit",
+		},
+		{
+			name: "zero sandbox cpus invalid",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Resources: ResourcesConfig{CPUs: "0"},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid [sandbox.resources] cpu limit",
+		},
+		{
+			name: "negative sandbox pids",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Resources: ResourcesConfig{PIDs: -1},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid [sandbox.resources] pids limit",
+		},
+		{
+			name: "zero sandbox pids accepted as unset",
+			cfg: &Config{
+				Sandbox: SandboxConfig{
+					Resources: ResourcesConfig{PIDs: 0},
+				},
+			},
+			wantErr: false,
 		},
 		{
 			name: "valid otlp header_sources",
@@ -1068,6 +1175,73 @@ func TestSandboxConfig_GetIsolation(t *testing.T) {
 	}
 }
 
+func TestSandboxConfig_ResolvedResources(t *testing.T) {
+	tests := []struct {
+		name     string
+		sandbox  SandboxConfig
+		expected ResourcesConfig
+	}{
+		{
+			name:     "neither set",
+			sandbox:  SandboxConfig{},
+			expected: ResourcesConfig{},
+		},
+		{
+			name: "only new section",
+			sandbox: SandboxConfig{
+				Resources: ResourcesConfig{Memory: "4g", CPUs: "2", PIDs: 2048},
+			},
+			expected: ResourcesConfig{Memory: "4g", CPUs: "2", PIDs: 2048},
+		},
+		{
+			name: "only deprecated section",
+			sandbox: SandboxConfig{
+				Docker: DockerConfig{
+					Resources: DockerResourcesConfig{Memory: "512m", CPUs: "0.5"},
+				},
+			},
+			expected: ResourcesConfig{Memory: "512m", CPUs: "0.5"},
+		},
+		{
+			name: "both set, new section wins",
+			sandbox: SandboxConfig{
+				Docker: DockerConfig{
+					Resources: DockerResourcesConfig{Memory: "512m", CPUs: "0.5"},
+				},
+				Resources: ResourcesConfig{Memory: "4g", CPUs: "2"},
+			},
+			expected: ResourcesConfig{Memory: "4g", CPUs: "2"},
+		},
+		{
+			name: "partial overlap combines new pids with deprecated memory",
+			sandbox: SandboxConfig{
+				Docker: DockerConfig{
+					Resources: DockerResourcesConfig{Memory: "512m", CPUs: "0.5"},
+				},
+				Resources: ResourcesConfig{PIDs: 128},
+			},
+			expected: ResourcesConfig{Memory: "512m", CPUs: "0.5", PIDs: 128},
+		},
+		{
+			name: "new memory overrides deprecated, deprecated cpus kept",
+			sandbox: SandboxConfig{
+				Docker: DockerConfig{
+					Resources: DockerResourcesConfig{Memory: "512m", CPUs: "0.5"},
+				},
+				Resources: ResourcesConfig{Memory: "8g"},
+			},
+			expected: ResourcesConfig{Memory: "8g", CPUs: "0.5"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.sandbox.ResolvedResources(); got != tt.expected {
+				t.Errorf("ResolvedResources() = %+v, want %+v", got, tt.expected)
+			}
+		})
+	}
+}
 func TestConfig_PortForwarding_Validation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1764,5 +1938,112 @@ type = "exact"
 	}
 	if rules[2].Pattern != "/v1/metrics" || rules[2].Scope != "path" || rules[2].Type != "exact" {
 		t.Errorf("rule[2] = %+v, fields mismatched", rules[2])
+	}
+}
+
+func TestLoadWithProjectDir_DeprecatedDockerResourcesWarnsOnce(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalPath := filepath.Join(tmpDir, "config.toml")
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	globalConfig := `
+[sandbox.docker.resources]
+memory = "4g"
+cpus = "2"
+`
+	if err := os.WriteFile(globalPath, []byte(globalConfig), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	localPath := filepath.Join(projectDir, LocalConfigFile)
+	localConfig := `
+[sandbox.docker.resources]
+memory = "8g"
+`
+	if err := os.WriteFile(localPath, []byte(localConfig), 0644); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	trustStore := &TrustStore{}
+	hash, err := HashFile(localPath)
+	if err != nil {
+		t.Fatalf("hash local config: %v", err)
+	}
+	trustStore.AddTrust(projectDir, hash)
+
+	stderr := captureDeprecationWarnings(t)
+
+	cfg, err := LoadWithProjectDir(globalPath, projectDir, &LoadOptions{TrustStore: trustStore})
+	if err != nil {
+		t.Fatalf("LoadWithProjectDir: %v", err)
+	}
+	if cfg.Sandbox.Docker.Resources.Memory != "8g" {
+		t.Errorf("memory = %q, want 8g", cfg.Sandbox.Docker.Resources.Memory)
+	}
+
+	if got := strings.Count(stderr.String(), "[sandbox.docker.resources] is deprecated"); got != 1 {
+		t.Errorf("deprecation warning count = %d, want 1; output: %q", got, stderr.String())
+	}
+
+	// One command can load the config more than once - devsandbox doctor loads
+	// it for the run and again for its config file check - and the same warning
+	// twice reads like two separate problems.
+	if _, err := LoadWithProjectDir(globalPath, projectDir, &LoadOptions{TrustStore: trustStore}); err != nil {
+		t.Fatalf("second LoadWithProjectDir: %v", err)
+	}
+	if got := strings.Count(stderr.String(), "[sandbox.docker.resources] is deprecated"); got != 1 {
+		t.Errorf("deprecation warning count after a second load = %d, want 1; output: %q", got, stderr.String())
+	}
+}
+
+// captureDeprecationWarnings routes notices to a buffer and resets the
+// once-per-process guard, so the count a test observes is its own and not
+// whatever an earlier test in this binary already consumed.
+func captureDeprecationWarnings(t *testing.T) *strings.Builder {
+	t.Helper()
+	var stderr strings.Builder
+	if err := notice.Setup("", false, &stderr); err != nil {
+		t.Fatalf("notice.Setup: %v", err)
+	}
+	deprecatedDockerResourcesWarned = sync.Once{}
+	t.Cleanup(func() {
+		deprecatedDockerResourcesWarned = sync.Once{}
+		_ = notice.Setup("", false, io.Discard)
+	})
+	return &stderr
+}
+
+func TestLoadWithProjectDir_NoDeprecationWarningWithoutDockerResources(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalPath := filepath.Join(tmpDir, "config.toml")
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	globalConfig := `
+[sandbox.resources]
+memory = "4g"
+pids = 2048
+`
+	if err := os.WriteFile(globalPath, []byte(globalConfig), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	stderr := captureDeprecationWarnings(t)
+
+	cfg, err := LoadWithProjectDir(globalPath, projectDir, &LoadOptions{SkipLocalConfig: true})
+	if err != nil {
+		t.Fatalf("LoadWithProjectDir: %v", err)
+	}
+	if cfg.Sandbox.Resources.PIDs != 2048 {
+		t.Errorf("pids = %d, want 2048", cfg.Sandbox.Resources.PIDs)
+	}
+
+	if strings.Contains(stderr.String(), "deprecated") {
+		t.Errorf("unexpected deprecation warning: %q", stderr.String())
 	}
 }

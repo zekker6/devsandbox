@@ -119,6 +119,17 @@ func mergeConfigs(base, overlay *Config) *Config {
 		result.Sandbox.Docker.Resources.CPUs = overlay.Sandbox.Docker.Resources.CPUs
 	}
 
+	// Sandbox resource limits (backend-neutral)
+	if overlay.Sandbox.Resources.Memory != "" {
+		result.Sandbox.Resources.Memory = overlay.Sandbox.Resources.Memory
+	}
+	if overlay.Sandbox.Resources.CPUs != "" {
+		result.Sandbox.Resources.CPUs = overlay.Sandbox.Resources.CPUs
+	}
+	if overlay.Sandbox.Resources.PIDs != 0 {
+		result.Sandbox.Resources.PIDs = overlay.Sandbox.Resources.PIDs
+	}
+
 	// Sandbox mount rules: prepend overlay rules (higher priority)
 	if len(overlay.Sandbox.Mounts.Rules) > 0 {
 		result.Sandbox.Mounts.Rules = append(

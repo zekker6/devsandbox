@@ -220,9 +220,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		isolator.WithDockerConfig(
 			appCfg.Sandbox.Docker.Dockerfile,
 			config.ConfigDir(),
-			appCfg.Sandbox.Docker.Resources.Memory,
-			appCfg.Sandbox.Docker.Resources.CPUs,
 			keepContainer,
+		),
+		isolator.WithResources(
+			appCfg.Sandbox.Resources.Limits(),
+			appCfg.Sandbox.ResolvedResources().Limits(),
 		),
 	)
 	if err != nil {

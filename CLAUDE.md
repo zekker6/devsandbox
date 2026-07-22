@@ -13,6 +13,8 @@ Never bind to all interfaces by default, and do not expose any ports by default.
 
 Errors must always be handled and reported when present. Silent failures are not acceptable.
 
+A limit the user configured must never silently fail to apply. This is stricter than error handling, because the dangerous case is not an error at all - it is a success path that quietly enforces less than promised. systemd, for example, accepts `CPUQuota=` in a user scope and ignores it when the `cpu` controller is not delegated, warning only to the journal. Verify enforceability before launch and abort naming what is missing, rather than degrading to an unlimited run the user believes is capped. Where a value can be accepted but round to nothing (`cpus = "0.004"` becoming `CPUQuota=0%`), reject it at translation time.
+
 ## Terminal socket proxies
 
 Proxies that let sandboxed code drive a host terminal (kitty, herdr) share the same building blocks. Reuse them rather than reimplementing:
@@ -26,6 +28,14 @@ Two invariants matter, both because they have already been violated:
 - **Never validate a file the sandbox can still write.** Read it once, validate those bytes, and copy them somewhere the sandbox cannot reach before handing the path to the host. Validating in place leaves a swap window.
 
 Scope mutations to resources the sandbox created, taking their ids from the server's response and never from the client. Deny by default: a method with no explicit validator is refused, not passed through.
+
+## Platform-specific packages
+
+`internal/bwrap` and `internal/isolator/bwrap.go` have **no build tags** - they compile on darwin even though bwrap is Linux-only. Anything they import must build on darwin too. A Linux-only package pulled into that import graph breaks the darwin release build.
+
+Split such a package three ways: an untagged file holding the types and any pure logic, a `_linux.go` with the real implementation, and a `_other.go` (`//go:build !linux`) whose stub returns a clear "only supported on Linux" error rather than silently succeeding. `internal/cgroups` is the worked example.
+
+`task test`, `task lint` and CI all build for the host only, so this class of break is invisible to them. Run `task cross-build` and `task cross-test` after touching a platform-split package or its importers.
 
 ## Pinned dependencies
 

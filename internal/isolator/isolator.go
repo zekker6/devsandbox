@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"devsandbox/internal/cgroups"
 	"devsandbox/internal/config"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/proxy"
@@ -147,22 +148,87 @@ type Binding struct {
 type Option func(*options)
 
 type options struct {
-	dockerfile    string
-	configDir     string
-	memoryLimit   string
-	cpuLimit      string
-	keepContainer bool
+	dockerfile string
+	configDir  string
+	// limits come from the backend-neutral [sandbox.resources] section alone.
+	limits cgroups.Limits
+	// containerLimits additionally carry the deprecated
+	// [sandbox.docker.resources] section, and are read by the container
+	// backends only. See WithResources.
+	containerLimits cgroups.Limits
+	keepContainer   bool
 }
 
 // WithDockerConfig sets Docker-specific configuration.
-// Ignored by non-Docker backends.
-func WithDockerConfig(dockerfile, configDir, memLimit, cpuLimit string, keep bool) Option {
+func WithDockerConfig(dockerfile, configDir string, keep bool) Option {
 	return func(o *options) {
 		o.dockerfile = dockerfile
 		o.configDir = configDir
-		o.memoryLimit = memLimit
-		o.cpuLimit = cpuLimit
 		o.keepContainer = keep
+	}
+}
+
+// WithResources sets the sandbox resource limits. Empty memory and cpus
+// strings, and a zero pids count, mean unlimited.
+//
+// neutral is the backend-neutral [sandbox.resources] section, and is the only
+// source the bwrap backend honors. container is that section merged over the
+// deprecated [sandbox.docker.resources] one, and is read by docker and krun.
+//
+// The split is what keeps the deprecated alias backward compatible. bwrap never
+// honored a docker-scoped limit, and it enforces limits by aborting the run when
+// the host cannot apply them - so feeding it that section would turn a config
+// written for the docker backend into a refusal to start for a user who
+// daily-drives bwrap. Opting bwrap into enforcement takes an explicit
+// [sandbox.resources] block.
+func WithResources(neutral, container cgroups.Limits) Option {
+	return func(o *options) {
+		o.limits = neutral
+		o.containerLimits = container
+	}
+}
+
+// bwrapConfig builds the bwrap backend configuration from the options.
+func (o options) bwrapConfig() BwrapConfig {
+	return BwrapConfig{Limits: o.limits}
+}
+
+// dockerConfig builds the docker backend configuration from the options.
+// Resource limits are passed through verbatim: docker gets no defaults.
+func (o options) dockerConfig() DockerConfig {
+	return DockerConfig{
+		Dockerfile:    o.dockerfile,
+		ConfigDir:     o.configDir,
+		MemoryLimit:   o.containerLimits.Memory,
+		CPULimit:      o.containerLimits.CPUs,
+		PIDsLimit:     o.containerLimits.PIDs,
+		KeepContainer: o.keepContainer,
+	}
+}
+
+// krunConfig builds the krun backend configuration from the options.
+//
+// krun runs ephemeral (a fresh microVM per launch) regardless of the
+// keep-container setting: a clean guest kernel each run is the whole point of
+// using a microVM for untrusted code.
+//
+// Sane VM resource defaults fill the limits the user left unset. This reuses the
+// docker MemoryLimit/CPULimit fields (and the single buildCommonArgs emission),
+// so no extra --memory/--cpus path is added; dockerConfig is untouched and
+// provably inherits nothing.
+//
+// PIDsLimit is passed through unchanged even though krun cannot enforce it: the
+// suppression and its warning live at the single buildCommonArgs emission site,
+// which needs the configured value to report what it dropped.
+func (o options) krunConfig() DockerConfig {
+	memLimit, cpuLimit := krunResourceDefaults(o.containerLimits.Memory, o.containerLimits.CPUs)
+	return DockerConfig{
+		Dockerfile:    o.dockerfile,
+		ConfigDir:     o.configDir,
+		MemoryLimit:   memLimit,
+		CPULimit:      cpuLimit,
+		PIDsLimit:     o.containerLimits.PIDs,
+		KeepContainer: false,
 	}
 }
 
@@ -195,7 +261,7 @@ func autoDetect() (Backend, error) {
 	return BackendBwrap, nil
 }
 
-// Default microVM resources applied when [sandbox.docker.resources] is left
+// Default microVM resources applied when [sandbox.resources] is left
 // unset for the krun backend. A libkrun guest given no hint can be starved or
 // oversized, so a sane baseline beats the engine default; explicit config is
 // always respected (only empty values are filled).
@@ -227,43 +293,19 @@ func New(backend Backend, opts ...Option) (Isolator, error) {
 
 	switch backend {
 	case BackendBwrap:
-		iso := NewBwrapIsolator()
+		iso := NewBwrapIsolator(o.bwrapConfig())
 		if err := iso.Available(); err != nil {
 			return nil, err
 		}
 		return iso, nil
 	case BackendDocker:
-		dockerCfg := DockerConfig{
-			Dockerfile:    o.dockerfile,
-			ConfigDir:     o.configDir,
-			MemoryLimit:   o.memoryLimit,
-			CPULimit:      o.cpuLimit,
-			KeepContainer: o.keepContainer,
-		}
-		iso := NewDockerIsolator(dockerCfg)
+		iso := NewDockerIsolator(o.dockerConfig())
 		if err := iso.Available(); err != nil {
 			return nil, err
 		}
 		return iso, nil
 	case BackendKrun:
-		// krun runs ephemeral (a fresh microVM per launch) regardless of the
-		// keep-container setting: a clean guest kernel each run is the whole
-		// point of using a microVM for untrusted code.
-		//
-		// Fill sane VM resource defaults when the user left
-		// [sandbox.docker.resources] unset. This reuses the docker MemoryLimit/
-		// CPULimit fields (and the single buildCommonArgs emission), so no extra
-		// --memory/--cpus path is added; the docker New() case below is untouched
-		// and provably inherits nothing.
-		memLimit, cpuLimit := krunResourceDefaults(o.memoryLimit, o.cpuLimit)
-		krunCfg := DockerConfig{
-			Dockerfile:    o.dockerfile,
-			ConfigDir:     o.configDir,
-			MemoryLimit:   memLimit,
-			CPULimit:      cpuLimit,
-			KeepContainer: false,
-		}
-		iso := NewKrunIsolator(krunCfg)
+		iso := NewKrunIsolator(o.krunConfig())
 		if err := iso.Available(); err != nil {
 			return nil, err
 		}

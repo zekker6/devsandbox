@@ -108,7 +108,7 @@ The point of krun is a separate guest kernel. Compare the kernel inside the sand
 
 ```bash
 uname -r                              # host, e.g. 7.0.13-arch1-1
-devsandbox --isolation krun -- uname -r   # guest, e.g. 6.12.91
+devsandbox --isolation krun - uname -r   # guest, e.g. 6.12.91
 ```
 
 A different kernel version inside the sandbox confirms the workload is running behind the hardware virtualization boundary, not just in a namespace on your host kernel.
@@ -146,6 +146,7 @@ The build still proceeds - this is a disclosure, not a hard stop. Only build Doc
 - **`devsandbox forward`** is best-effort for krun: the session is registered, but reaching a listener inside the guest through the microVM network namespace is not yet validated.
 - **macOS (HVF)** is not yet validated, and **proxy mode is refused there** because the egress lockdown is Linux-only; krun + proxy on macOS fails closed rather than run with open egress. Non-proxy krun on macOS is unaffected.
 - **IPv6** is disabled in the guest under proxy mode: pasta is invoked with `-4`, so the guest is given IPv4 only and has no IPv6 route or IPv6 host-loopback map - there is no IPv6 egress path for the IPv4 lockdown to miss.
+- **No `pids` limit.** `memory` and `cpus` from `[sandbox.resources]` apply normally, and krun fills them with microVM defaults of `4g` and `2` when you leave them unset. `pids` is **not enforceable** here: a pids limit caps a container's process cgroup, but a krun sandbox *is* the libkrun VMM process, so the flag would cap the VMM's own host-side threads rather than the processes inside the guest, whose PID space belongs to the guest kernel and cannot be reached from the host. krun skips the flag and prints a warning at startup saying so, rather than breaking the VM while protecting nothing. Use the bwrap or docker backend when you need a pids limit. See [Resource Limits](../configuration.md#resource-limits).
 
 ## Next step
 

@@ -17,3 +17,4 @@ func Phase() phase     { return phase(currentPhase.Load()) }
 func setPhase(p phase) { currentPhase.Store(int32(p)) }
 func SetRunning()      { setPhase(PhaseRunning) }
 func SetTeardown()     { setPhase(PhaseTeardown) }
+func SetStartup()      { setPhase(PhaseStartup) }

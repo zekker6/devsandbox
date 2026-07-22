@@ -78,6 +78,9 @@ type DockerConfig struct {
 	MemoryLimit string
 	// CPULimit is the CPU limit (e.g., "2").
 	CPULimit string
+	// PIDsLimit is the max number of processes/threads. Zero means unlimited.
+	// Not enforceable on the krun engine - see buildCommonArgs.
+	PIDsLimit int
 	// KeepContainer keeps the container after exit for fast restarts.
 	KeepContainer bool
 }
@@ -112,6 +115,19 @@ func (d *DockerIsolator) logInfo(format string, args ...any) {
 func (d *DockerIsolator) logWarn(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	notice.Warn("%s", msg)
+	if d.logger != nil {
+		d.logger.Warnf("%s", msg)
+	}
+}
+
+// logAlert logs a warning that must reach the terminal even though the argv is
+// assembled after the process has entered the running phase, where an ordinary
+// notice write is diverted to the log file. Reserved for a configured limit that
+// did not apply: the user has to see it or they are left believing they are
+// protected.
+func (d *DockerIsolator) logAlert(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	notice.Alert("%s", msg)
 	if d.logger != nil {
 		d.logger.Warnf("%s", msg)
 	}
@@ -1365,6 +1381,23 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	if d.config.CPULimit != "" {
 		args = append(args, "--cpus", d.config.CPULimit)
 	}
+	// --pids-limit caps the container's PID cgroup. Under krun the container is
+	// the libkrun VMM process, so the flag would cap host-side VMM threads (vcpu,
+	// IO) instead of guest processes - the guest kernel owns its own PID space and
+	// cannot be capped from the host. Applying it there would break the VM while
+	// providing none of the fork-bomb protection the user asked for, so skip it
+	// and say so.
+	if d.config.PIDsLimit > 0 {
+		if d.engine.microVM {
+			d.logAlert("krun: pids = %d was NOT applied. The pids limit caps a container's process cgroup, "+
+				"but a krun sandbox is a microVM: the flag would cap the host-side VMM's own threads, not the "+
+				"processes inside the guest, whose PID space belongs to the guest kernel and cannot be limited "+
+				"from the host. Processes inside this sandbox are unlimited. Use the bwrap or docker backend to "+
+				"enforce a pids limit.", d.config.PIDsLimit)
+		} else {
+			args = append(args, "--pids-limit", strconv.Itoa(d.config.PIDsLimit))
+		}
+	}
 
 	// Read-only bindings (host configs)
 	for _, b := range cfg.Bindings {
@@ -1672,6 +1705,7 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 	_, _ = fmt.Fprintf(h, "image=%s\n", d.imageTag)
 	_, _ = fmt.Fprintf(h, "mem=%s\n", d.config.MemoryLimit)
 	_, _ = fmt.Fprintf(h, "cpu=%s\n", d.config.CPULimit)
+	_, _ = fmt.Fprintf(h, "pids=%d\n", d.config.PIDsLimit)
 
 	// Bindings — volume mounts passed to docker create.
 	_, _ = fmt.Fprintf(h, "mount_mode=%s\n", cfg.DefaultMountMode)

@@ -139,6 +139,97 @@ devsandbox uses unprivileged user namespaces:
 - UID/GID mapping preserves file ownership
 - Works on most modern Linux distributions
 
+### Resource Limits
+
+bwrap itself has no cgroup controls, so memory, CPU and process caps are applied
+by running the sandbox inside a **systemd transient scope**. When
+`[sandbox.resources]` is configured, the launch becomes:
+
+```
+systemd-run --user --scope --quiet --collect \
+  --unit=devsandbox-<pid>-<rand> --description="devsandbox sandbox" \
+  -p MemoryMax=4G -p CPUQuota=200% -p TasksMax=2048 \
+  - bwrap [args] - <command>
+```
+
+`--description` is load-bearing: without it systemd derives `Description=` from
+the full command line, writing every host path bound into the sandbox to the
+journal and to `systemctl --user list-units`. `--unit` names the scope
+predictably, with a random suffix so a scope leaked by an earlier run plus PID
+reuse cannot collide. The preflight probe described below creates a second,
+short-lived unit (`...-probe`) that you will see if you are watching
+`systemctl --user`.
+
+`MemoryMax=` bounds `memory.max` only; no `MemorySwapMax=` accompanies it, so
+`memory.swap.max` stays at `max` and **swap is not bounded on bwrap**. A process
+that outgrows the cap is reclaimed into swap and throttled there on a host with
+swap, rather than OOM-killed the instant its RSS crosses the line, and it can
+keep growing in swap past the configured number. On a host with no swap the cap
+is a hard ceiling and the process is OOM-killed at it.
+
+**This is weaker than the container backends**, and knowing so matters on a
+swap-enabled host: docker and krun pass `--memory` with `--memory-swap` unset,
+which the engine expands to a combined memory+swap ceiling of twice the value -
+`memory = "4g"` there means 4g resident plus at most 4g of swap, after which the
+workload is killed. Under bwrap the same config throttles a runaway allocator
+into swap instead of killing it.
+
+Adding `MemorySwapMax=0` was considered and rejected. It would make the
+configured number a hard ceiling, but it cannot be verified: `memory.swap.max`
+exists only with kernel swap accounting, and without it systemd logs a warning
+and starts the scope regardless, which no preflight check can observe. Asserting
+a guarantee the host may not be enforcing is worse than documenting the weaker
+one bwrap actually delivers.
+
+`systemd-run` execs in place, so no supervisor process is added and exit codes
+propagate exactly as before. In proxy mode the scope wraps `pasta`, the
+outermost sandbox process - devsandbox itself stays outside it, so the proxy is
+never capped by the sandbox's memory limit.
+
+**Limits are opt-in and there are no bwrap defaults.** With no
+`[sandbox.resources]` block the sandbox launches byte-for-byte as it always has,
+and nothing about systemd is required. The deprecated
+`[sandbox.docker.resources]` block does **not** opt bwrap in - it stays scoped to
+the container backends, precisely so a config written for docker cannot turn into
+a failed bwrap launch on a host without the requirements below. See
+[Configuration](configuration.md#resource-limits) for the config surface.
+
+Requirements, all checked before the sandbox starts:
+
+- a cgroup v2 unified hierarchy (`/sys/fs/cgroup/cgroup.controllers` present)
+- `systemd-run` on `PATH`
+- a running systemd **user** manager (`systemctl --user is-system-running`)
+- the controllers the limits need, **delegated** to `user@<uid>.service`:
+  `memory` for `memory`, `cpu` for `cpus`, `pids` for `pids`
+
+**Fail fast, never silently unlimited.** A configured limit that cannot be
+enforced aborts the run with an error naming exactly what is missing. devsandbox
+never falls back to running without the limit, because that would leave you
+believing the sandbox is capped when it is not. The three ways enforcement can
+silently fail are each guarded:
+
+- **Controller not delegated.** systemd accepts `CPUQuota=` in a user scope and
+  ignores it with only a journal warning when `cpu` is not delegated. Preflight
+  rejects it instead, naming the controller. Delegation is granted with a drop-in
+  on `user@.service` setting `Delegate=cpu cpuset io memory pids`.
+- **Value rounds to nothing.** `cpus = "0.004"` would become `CPUQuota=0%`, a
+  sandbox that never schedules. It is rejected during translation. A zero memory
+  limit (`memory = "0"`, `"0m"`, `"0g"`) is rejected the same way *on this path*:
+  `MemoryMax=0` would grant the scope no memory at all. The config layer still
+  accepts it, because it is docker's documented spelling of unlimited.
+- **systemd refuses the scope.** A property the user manager rejects at D-Bus
+  time makes `systemd-run` exit 1, which is indistinguishable from the sandboxed
+  command exiting 1. Preflight therefore creates a throwaway probe scope carrying
+  the same properties first, so a refusal surfaces as a specific error before
+  anything launches. When the refusal happens in a session outside
+  `user@<uid>.service` - the usual case on SSH and bare-TTY logins, where the
+  common cgroup ancestor is the root-owned `user-<uid>.slice` and the user
+  manager cannot migrate the process into the scope - the error says so, rather
+  than passing systemd's bare "Permission denied" through.
+
+Hosts without a systemd user manager, or on cgroup v1, cannot use bwrap limits
+at all. They keep working normally as long as no limits are configured.
+
 ## Data Locations
 
 Sandbox data follows XDG conventions:
@@ -734,7 +825,7 @@ Docker Desktop (or equivalent) should be configured with at least:
 - **RAM**: 4 GB+
 - **CPUs**: 2+
 
-These are Docker Desktop minimum allocations. devsandbox containers use these resources but can be further constrained via `[sandbox.docker.resources]` in your config. The container limit cannot exceed what Docker Desktop allocates. Lower values work but may slow builds and tool installations inside the sandbox.
+These are Docker Desktop minimum allocations. devsandbox containers use these resources but can be further constrained via `[sandbox.resources]` in your config. The container limit cannot exceed what Docker Desktop allocates. Lower values work but may slow builds and tool installations inside the sandbox.
 
 #### Volume Performance
 
@@ -788,6 +879,7 @@ Container creation, deletion, and image manipulation are blocked by the proxy fi
 - **No nested containers** - Running Docker inside the sandbox is not supported
 - **Some tools may break** - Tools that require specific system access may fail
 - **Overlay requires kernel support** - Unprivileged overlayfs (inside user namespaces) requires kernel 5.11+
+- **Resource limits need systemd** - `[sandbox.resources]` requires cgroup v2 and a systemd user manager with the relevant controllers delegated; without limits configured, none of that is needed
 
 ### Docker Backend (All Platforms)
 - **Docker required** - Docker Desktop or Docker Engine must be installed and running

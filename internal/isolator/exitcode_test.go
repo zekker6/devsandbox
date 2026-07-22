@@ -1,10 +1,13 @@
 package isolator
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"testing"
+
+	"devsandbox/internal/cgroups"
 )
 
 func TestAsCommandExit(t *testing.T) {
@@ -71,5 +74,39 @@ func TestAsEngineOrCommandExit(t *testing.T) {
 	// nil passes through.
 	if asEngineOrCommandExit(nil) != nil {
 		t.Error("asEngineOrCommandExit(nil) should be nil")
+	}
+}
+
+// A scope systemd refuses must be distinguishable from a workload that exits
+// non-zero. It cannot be told apart by exit status - systemd-run reports its own
+// failure with exit 1, the workload's most common status - so the split is made
+// before launch: cgroups.Preflight fails with a specific error, while the exit
+// path keeps treating 1 as the workload's own status.
+func TestScopeFailureIsDistinguishableFromWorkloadExit(t *testing.T) {
+	// A refused scope aborts at preflight, as a devsandbox error the CLI prints.
+	iso := NewBwrapIsolator(BwrapConfig{Limits: cgroups.Limits{CPUs: "0.004"}})
+	err := iso.Preflight(context.Background(), "/tmp/test-project")
+	if err == nil {
+		t.Fatal("Preflight() = nil, want an error for a limit that cannot be enforced")
+	}
+	var ce *CommandExitError
+	if errors.As(err, &ce) {
+		t.Errorf("an unenforceable limit must not surface as a command exit: %v", err)
+	}
+
+	// The same exit status from the workload itself stays a silent
+	// CommandExitError, so `devsandbox -- false` still exits 1 without an error.
+	workloadErr := asCommandExit(exec.Command("sh", "-c", "exit 1").Run())
+	if !errors.As(workloadErr, &ce) {
+		t.Fatalf("asCommandExit(exit 1) = %v; want *CommandExitError", workloadErr)
+	}
+	if ce.Code != 1 {
+		t.Errorf("CommandExitError.Code = %d; want 1", ce.Code)
+	}
+
+	// An unlimited sandbox never reaches the scope machinery at all.
+	unlimited := NewBwrapIsolator(BwrapConfig{})
+	if err := unlimited.Preflight(context.Background(), "/tmp/test-project"); err != nil {
+		t.Errorf("Preflight() with no limits = %v, want nil", err)
 	}
 }

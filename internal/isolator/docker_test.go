@@ -749,6 +749,67 @@ func TestDockerIsolator_ConfigHash_ChangesOnResourceLimits(t *testing.T) {
 	}
 }
 
+// TestDockerIsolator_ConfigHash_ChangesOnPIDsLimit guards against a kept
+// container being reused with a stale --pids-limit after the config changed.
+func TestDockerIsolator_ConfigHash_ChangesOnPIDsLimit(t *testing.T) {
+	iso1 := NewDockerIsolator(DockerConfig{PIDsLimit: 512})
+	iso2 := NewDockerIsolator(DockerConfig{PIDsLimit: 2048})
+	unset := NewDockerIsolator(DockerConfig{})
+	for _, iso := range []*DockerIsolator{iso1, iso2, unset} {
+		iso.imageTag = "devsandbox:local"
+	}
+
+	cfg := &Config{}
+	if iso1.configHash(cfg) == iso2.configHash(cfg) {
+		t.Error("configHash should differ when pids limit changes")
+	}
+	if iso1.configHash(cfg) == unset.configHash(cfg) {
+		t.Error("configHash should differ between a set and an unset pids limit")
+	}
+}
+
+// TestDockerIsolator_PIDsLimit covers the --pids-limit emission on the docker
+// engine: present for both run and create, absent when unset, emitted once.
+func TestDockerIsolator_PIDsLimit(t *testing.T) {
+	cfg := &Config{
+		ProjectDir:  "/tmp/test-project",
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+
+	iso := NewDockerIsolator(DockerConfig{PIDsLimit: 2048})
+	iso.imageTag = "devsandbox:local"
+
+	runArgs, err := iso.buildRunArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildRunArgs failed: %v", err)
+	}
+	assertFlagValue(t, runArgs, "--pids-limit", "2048")
+	if got := countFlag(runArgs, "--pids-limit"); got != 1 {
+		t.Errorf("expected exactly one --pids-limit in run args, got %d: %v", got, runArgs)
+	}
+
+	createArgs, err := iso.buildCreateArgs(cfg, "devsandbox-test")
+	if err != nil {
+		t.Fatalf("buildCreateArgs failed: %v", err)
+	}
+	assertFlagValue(t, createArgs, "--pids-limit", "2048")
+	if got := countFlag(createArgs, "--pids-limit"); got != 1 {
+		t.Errorf("expected exactly one --pids-limit in create args, got %d: %v", got, createArgs)
+	}
+
+	unset := NewDockerIsolator(DockerConfig{})
+	unset.imageTag = "devsandbox:local"
+	unsetArgs, err := unset.buildRunArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildRunArgs failed: %v", err)
+	}
+	if slices.Contains(unsetArgs, "--pids-limit") {
+		t.Errorf("docker backend must not get a default --pids-limit, got: %v", unsetArgs)
+	}
+}
+
 func TestDockerIsolator_BuildDocker_KeepContainer_ConfigHashLabel(t *testing.T) {
 	skipIfNoDocker(t)
 

@@ -153,6 +153,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 | Network (default) | Full access |
 | Network (proxy mode) | Isolated and logged; enforcement strength varies by backend (see [per-backend behavior](docs/proxy.md#backend-specific-behavior)) |
 | Outgoing secrets (proxy + redaction) | Blocked or redacted in requests the proxy sees (see [redaction coverage](docs/proxy.md#redaction-coverage)) |
+| Host memory, CPU, process count | Unlimited by default on bwrap and docker; krun defaults to 4g memory and 2 CPUs. Cap them with [`[sandbox.resources]`](docs/configuration.md#resource-limits) |
 
 Everything is configurable. See [Configuration](docs/configuration.md) for details.
 
@@ -165,6 +166,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **MITM proxy** - optional traffic inspection with log viewing, filtering, and export
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine ([coverage](docs/proxy.md#redaction-coverage))
+- **Resource limits** - optional memory, CPU and process caps that apply to every backend ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited
 - **Git modes** - readonly (default), readwrite (with SSH/GPG), or disabled
 - **Desktop notifications** - sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
 
@@ -370,7 +372,7 @@ devsandbox image build              # Build Docker image (macOS)
 | [Sandboxing](docs/sandboxing.md) | Isolation backends, security model, filesystem layout, overlay mounts, custom mounts, Docker backend details |
 | [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, content redaction, credential injection, remote logging |
 | [Tools](docs/tools.md) | mise integration, shell/editor/prompt setup, AI assistant configs, Git modes, Docker socket proxy |
-| [Configuration](docs/configuration.md) | Config file reference, per-project configs, conditional includes, port forwarding, overlay settings |
+| [Configuration](docs/configuration.md) | Config file reference, per-project configs, conditional includes, port forwarding, overlay settings, resource limits |
 | [Use Cases](docs/use-cases.md) | Shell aliases, autocompletion, development workflows, security monitoring scripts |
 
 ## Limitations
@@ -380,6 +382,7 @@ devsandbox image build              # Build Docker image (macOS)
 - SELinux or AppArmor may restrict namespace operations (see [Security Modules](docs/sandboxing.md#security-modules))
 - MITM proxy may break tools with certificate pinning
 - GUI applications are not supported (no display server forwarding), but desktop notifications work via XDG Portal
+- `[sandbox.resources]` limits need cgroup v2 and a systemd user manager with the `memory`/`cpu`/`pids` controllers delegated to `user@<uid>.service`; a limit that cannot be enforced aborts the launch. Nothing about systemd is required when no limits are configured
 
 **macOS (Docker):**
 - Requires a running Docker daemon
@@ -392,6 +395,7 @@ devsandbox image build              # Build Docker image (macOS)
 - `devsandbox forward` is best-effort - the session is registered, but reaching a guest listener is not yet validated
 - macOS is not yet validated and requires Apple Silicon; **proxy mode is refused on macOS** because the egress lockdown is Linux-only (fails closed rather than running with open egress)
 - IPv6 is disabled in the guest under proxy mode (pasta runs with `-4`)
+- `pids` from `[sandbox.resources]` is not enforceable - the container is the libkrun VMM process and the guest kernel owns its own PID space, so krun skips the flag and warns; `memory` and `cpus` apply normally (defaulting to `4g`/`2`)
 - Every launch boots a fresh microVM - no `keep_container` reuse, and no online boot-time install of the project's mise tools (see [krun backend](docs/getting-started/krun.md))
 
 **Both:**

@@ -6,13 +6,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"devsandbox/internal/cgroups"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/source"
 	"github.com/BurntSushi/toml"
@@ -265,6 +268,22 @@ type DockerResourcesConfig struct {
 	CPUs string `toml:"cpus"`
 }
 
+// ResourcesConfig contains backend-neutral sandbox resource limits.
+type ResourcesConfig struct {
+	// Memory limit (e.g., "4g", "512m"). Empty means unlimited.
+	Memory string `toml:"memory"`
+	// CPUs limit (e.g., "2", "0.5"). Empty means unlimited.
+	CPUs string `toml:"cpus"`
+	// PIDs is the maximum number of processes/threads. Zero means unlimited.
+	PIDs int `toml:"pids"`
+}
+
+// Limits converts the section to the limit type the isolator and cgroups layers
+// use, so the conversion exists once rather than at each call site.
+func (r ResourcesConfig) Limits() cgroups.Limits {
+	return cgroups.Limits{Memory: r.Memory, CPUs: r.CPUs, PIDs: r.PIDs}
+}
+
 // IsKeepContainerEnabled returns whether container persistence is enabled (defaults to true).
 func (d DockerConfig) IsKeepContainerEnabled() bool {
 	if d.KeepContainer == nil {
@@ -315,6 +334,38 @@ type SandboxConfig struct {
 
 	// Docker contains Docker-specific settings.
 	Docker DockerConfig `toml:"docker"`
+
+	// Resources contains backend-neutral sandbox resource limits honored by
+	// all isolation backends.
+	Resources ResourcesConfig `toml:"resources"`
+}
+
+// ResolvedResources merges the backend-neutral [sandbox.resources] section over the
+// deprecated [sandbox.docker.resources] section, field by field, with the new section
+// winning. Merging per field means setting only pids in the new section does not
+// discard an existing docker-scoped memory limit.
+//
+// This is the value the docker and krun backends read, and only them. The
+// deprecated section names docker in the key path and was never honored by
+// bwrap, so feeding it to bwrap would turn a docker-scoped config into a hard
+// preflight failure on any host that cannot enforce cgroup limits - the
+// opposite of the backward compatibility the alias exists for. bwrap reads
+// Sandbox.Resources directly.
+func (s SandboxConfig) ResolvedResources() ResourcesConfig {
+	resolved := ResourcesConfig{
+		Memory: s.Docker.Resources.Memory,
+		CPUs:   s.Docker.Resources.CPUs,
+	}
+	if s.Resources.Memory != "" {
+		resolved.Memory = s.Resources.Memory
+	}
+	if s.Resources.CPUs != "" {
+		resolved.CPUs = s.Resources.CPUs
+	}
+	if s.Resources.PIDs != 0 {
+		resolved.PIDs = s.Resources.PIDs
+	}
+	return resolved
 }
 
 // GetConfigVisibility returns the config visibility (defaults to hidden).
@@ -774,19 +825,45 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	// Validate Docker resource limits
-	if mem := c.Sandbox.Docker.Resources.Memory; mem != "" {
-		matched, _ := regexp.MatchString(`^\d+[bkmgBKMG]?$`, mem)
-		if !matched {
-			return fmt.Errorf("invalid docker memory limit %q: use format like '512m', '2g'", mem)
-		}
+	// Validate resource limits in both the deprecated docker-scoped section and
+	// the backend-neutral one.
+	deprecated := ResourcesConfig{
+		Memory: c.Sandbox.Docker.Resources.Memory,
+		CPUs:   c.Sandbox.Docker.Resources.CPUs,
 	}
-	if cpus := c.Sandbox.Docker.Resources.CPUs; cpus != "" {
-		if v, err := strconv.ParseFloat(cpus, 64); err != nil || v <= 0 {
-			return fmt.Errorf("invalid docker cpu limit %q: must be a positive number like '0.5', '2'", cpus)
-		}
+	if err := validateResources(deprecated, "sandbox.docker.resources"); err != nil {
+		return err
+	}
+	if err := validateResources(c.Sandbox.Resources, "sandbox.resources"); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+// validateResources checks a resource limit block. section names the TOML block
+// so the error tells the user which one to fix.
+//
+// The memory form is delegated to internal/cgroups rather than restated here, so
+// the config layer can only accept values that package can actually translate.
+// The cpu rules stay local: cgroups additionally rejects values that round to
+// CPUQuota=0%, which is a systemd-scope constraint that says nothing about the
+// same value under docker.
+func validateResources(r ResourcesConfig, section string) error {
+	if err := cgroups.ValidateMemory(r.Memory); err != nil {
+		return fmt.Errorf("[%s]: %w", section, err)
+	}
+	if r.CPUs != "" {
+		// NaN fails every comparison, so a bare v <= 0 lets "NaN" through; Inf
+		// survives it too. Both would reach a backend as a nonsense quota.
+		v, err := strconv.ParseFloat(r.CPUs, 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+			return fmt.Errorf("invalid [%s] cpu limit %q: must be a positive number like '0.5', '2'", section, r.CPUs)
+		}
+	}
+	if r.PIDs < 0 {
+		return fmt.Errorf("invalid [%s] pids limit %d: must be zero (unlimited) or a positive number", section, r.PIDs)
+	}
 	return nil
 }
 
@@ -1154,6 +1231,27 @@ port = 8080
 # Edit it to add custom tools or configuration.
 # dockerfile = "/path/to/Dockerfile"
 
+# Sandbox resource limits. Backend-neutral: the same block applies to bwrap,
+# docker and krun. Every field is optional and unset means unlimited, except on
+# krun, which defaults to memory = "4g" and cpus = "2".
+#
+# On bwrap (the default backend on Linux) the limits are applied with a systemd
+# transient scope, which needs cgroup v2 and a systemd user manager with the
+# memory/cpu/pids controllers delegated to user@<uid>.service. If a configured
+# limit cannot be enforced the launch is aborted with an error naming what is
+# missing, rather than running unlimited - so only set these once you want that
+# guarantee. pids is not enforceable on krun, which warns and skips it.
+#
+# Prefer this block over the deprecated [sandbox.docker.resources], which is
+# still honored but applies to the docker and krun backends only.
+# [sandbox.resources]
+# Memory limit, base 1024; a bare integer means bytes.
+# memory = "4g"
+# CPU limit as a number of cores; "0.5" is half a core.
+# cpus = "2"
+# Maximum number of processes and threads.
+# pids = 2048
+
 # Overlay filesystem settings (global)
 [overlay]
 # Default mount mode for every tool binding (per-tool mount_mode overrides it):
@@ -1349,18 +1447,38 @@ func LoadWithProjectDir(globalPath, projectDir string, opts *LoadOptions) (*Conf
 		}
 	}
 
-	if opts.SkipLocalConfig {
-		return cfg, nil
+	if !opts.SkipLocalConfig {
+		localCfg, err := loadLocalConfig(projectDir, opts)
+		if err != nil {
+			return nil, err
+		}
+		if localCfg != nil {
+			cfg = mergeConfigs(cfg, localCfg)
+		}
 	}
 
-	localCfg, err := loadLocalConfig(projectDir, opts)
-	if err != nil {
-		return nil, err
-	}
-	if localCfg != nil {
-		cfg = mergeConfigs(cfg, localCfg)
-	}
+	// Warn once on the merged result. Warning per file would fire twice for a
+	// user with both a global and a project config.
+	warnDeprecatedDockerResources(cfg)
 	return cfg, nil
+}
+
+// deprecatedDockerResourcesWarned keeps the deprecation notice to one per
+// process. A single command can load the config more than once - devsandbox
+// doctor does, once for the run itself and once for the config file check - and
+// repeating the same warning makes it read like two distinct problems.
+var deprecatedDockerResourcesWarned sync.Once
+
+// warnDeprecatedDockerResources warns when the deprecated docker-scoped resource
+// section is in use. Call it on the fully merged config.
+func warnDeprecatedDockerResources(cfg *Config) {
+	if cfg.Sandbox.Docker.Resources.Memory == "" && cfg.Sandbox.Docker.Resources.CPUs == "" {
+		return
+	}
+	deprecatedDockerResourcesWarned.Do(func() {
+		notice.Warn("[sandbox.docker.resources] is deprecated and is honored by the docker and krun " +
+			"backends only; move it to [sandbox.resources], which every backend including bwrap applies")
+	})
 }
 
 // applyIncludes processes matching include files and merges them into cfg.

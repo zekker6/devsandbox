@@ -23,7 +23,8 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 | `[proxy.redaction]` | `enabled`, `default_action`, `rules` | [Content Redaction](#content-redaction) |
 | `[proxy.filter]` | `default_action`, `ask_timeout`, `cache_decisions`, `rules` | [Proxy Mode docs](proxy.md#http-filtering) |
 | `[sandbox]` | `isolation`, `base_path`, `use_embedded`, `config_visibility` | [Sandbox Settings](#sandbox-settings) |
-| `[sandbox.docker]` | `dockerfile`, `keep_container`, `resources` | [Isolation Backend](#isolation-backend) |
+| `[sandbox.docker]` | `dockerfile`, `keep_container`, `resources` (deprecated) | [Isolation Backend](#isolation-backend) |
+| `[sandbox.resources]` | `memory`, `cpus`, `pids` | [Resource Limits](#resource-limits) |
 | `[sandbox.mounts.rules]` | `pattern`, `mode` | [Custom Mounts](#custom-mounts) |
 | `[overlay]` | `default` | [Overlay Settings](#overlay-settings) |
 | `[port_forwarding]` | `enabled`, `auto_detect`, `rules` | [Port Forwarding](#port-forwarding) |
@@ -243,11 +244,6 @@ isolation = "auto"
 # When true: containers are reused, startup ~1-2s
 # When false: containers are removed on exit
 keep_container = true
-
-# Resource limits (optional)
-[sandbox.docker.resources]
-memory = "4g"
-cpus = "2"
 ```
 
 #### krun microVM backend (experimental)
@@ -264,8 +260,9 @@ host-kernel exploit must not be able to reach the host.
 isolation = "krun"
 ```
 
-It reuses the Docker image build, the `[sandbox.docker]` settings (Dockerfile,
-resource limits), and the same tool bindings and proxy wiring. Notes:
+It reuses the Docker image build, the `[sandbox.docker]` settings (Dockerfile),
+the backend-neutral `[sandbox.resources]` limits, and the same tool bindings and
+proxy wiring. Notes:
 
 - **Opt-in only.** `auto` never selects `krun`; you must request it explicitly
   with `--isolation krun` or `isolation = "krun"`. The microVM needs `podman`, the
@@ -274,12 +271,18 @@ resource limits), and the same tool bindings and proxy wiring. Notes:
   code, so it is never picked automatically.
 - **Ephemeral.** Each launch boots a fresh microVM (no `keep_container` reuse) -
   a clean guest kernel every run.
-- **VM resource defaults.** When `[sandbox.docker.resources]` is unset, krun
+- **VM resource defaults.** When no resource limits are configured, krun
   applies sane microVM defaults (`memory = "4g"`, `cpus = "2"`) so the guest is
   neither starved nor oversized. Set `memory`/`cpus` under
-  `[sandbox.docker.resources]` to override; explicit values are always respected.
+  `[sandbox.resources]` to override; explicit values are always respected.
   (The docker backend keeps the engine default when unset - the krun defaults do
   not apply to it.)
+- **No `pids` limit.** `pids` is ignored on krun, and a launch that configures it
+  prints a warning saying so. A pids limit caps a container's process cgroup, but
+  a krun sandbox is a microVM: the flag would cap the host-side VMM's own threads
+  rather than the processes inside the guest, whose PID space belongs to the guest
+  kernel and cannot be limited from the host. Use the bwrap or docker backend when
+  you need a pids limit. `memory` and `cpus` are unaffected and apply normally.
 - **Runs rootless.** The backend uses rootless `podman` with `--userns=keep-id`,
   so files the workload writes to the project directory come back owned by you
   (not a subuid). Overlay/`tmpoverlay` tool dirs use copy-on-start rather than
@@ -362,6 +365,73 @@ this experimental release:
   mode is refused** fail-closed because the egress lockdown is Linux-only - krun +
   proxy there would run with open egress. Run krun without proxy on macOS, or run on
   Linux for the full proxy egress lockdown.
+
+### Resource Limits
+
+`[sandbox.resources]` caps what the sandbox may consume. It is backend-neutral -
+the same block applies whether you run bwrap, docker or krun.
+
+```toml
+[sandbox.resources]
+# Memory limit (base 1024; a bare integer means bytes). Empty means unlimited.
+memory = "4g"
+# CPU limit, as a number of cores. "0.5" is half a core. Empty means unlimited.
+cpus = "2"
+# Maximum number of processes/threads. Zero means unlimited.
+pids = 2048
+```
+
+All three fields are optional. Defaults differ by backend:
+
+| Backend | Default when unset | `pids` |
+|---|---|---|
+| `bwrap` | **no limits** | enforced |
+| `docker` | **no limits** (the engine default applies) | enforced |
+| `krun` | `memory = "4g"`, `cpus = "2"` | **not enforceable** (see below) |
+
+Only krun applies defaults. On bwrap and docker an unset field means unlimited,
+so the sandbox behaves exactly as it did before you added the block.
+
+`memory` bounds the sandbox's **resident memory** on every backend. What it does
+to *swap* differs, so on a host with swap the same value is not the same
+guarantee everywhere:
+
+| Backend | What `memory = "4g"` bounds | Runaway allocator on a host with swap |
+|---|---|---|
+| `bwrap` | 4g resident; **swap unbounded** | reclaimed into swap and throttled there, and it can keep growing in swap |
+| `docker`, `krun` | 4g resident **plus at most 4g swap** | killed once resident + swap reaches 8g |
+
+bwrap sets systemd's `MemoryMax=` and nothing else, which leaves
+`memory.swap.max` at `max`. docker and krun pass `--memory` with `--memory-swap`
+unset, and the engine then defaults the combined memory+swap ceiling to twice
+the memory value - so swap is capped at the memory value again. On a host with
+**no** swap the two are equivalent: the sandbox is OOM-killed as soon as its
+resident set crosses the cap.
+
+Size the value against the resident memory you want to allow, and on a
+swap-enabled host expect a bwrap sandbox to be throttled into swap where a
+docker one would be killed. `memory = "0"` is accepted as docker's documented
+spelling of *unlimited*, but it is rejected on bwrap, where a systemd
+`MemoryMax=0` means no memory at all.
+
+On bwrap, limits are enforced through a systemd transient scope, which needs
+cgroup v2 and a systemd user manager with the relevant controllers delegated. A
+limit that cannot be enforced aborts the run rather than running unlimited - see
+[Sandboxing: Resource Limits](sandboxing.md#resource-limits) for the
+requirements and the failure modes. docker and krun need none of that.
+
+The older `[sandbox.docker.resources]` block is **deprecated** but still honored,
+and it stays scoped to the container backends: `docker` and `krun` read it,
+`bwrap` does not. That scoping is deliberate. bwrap never honored the
+docker-scoped section, and it refuses to launch when a configured limit cannot be
+enforced - so applying the old section to it would turn a config written for the
+docker backend into a failed launch on any host missing the systemd requirements
+above. **Opting bwrap into enforcement takes an explicit `[sandbox.resources]`
+block.** For docker and krun the two blocks are merged field by field, and the
+newer section wins on any field it sets - setting only `pids` in
+`[sandbox.resources]` does not discard a `memory` value you already have under
+`[sandbox.docker.resources]`. Using the deprecated block prints a one-line
+warning at startup. It has no `pids` field; use `[sandbox.resources]` for that.
 
 ### Sandbox Settings
 
@@ -980,9 +1050,11 @@ isolation = "auto"
 # dockerfile = "/path/to/custom/Dockerfile"
 keep_container = true  # Keep containers for fast restarts
 
-[sandbox.docker.resources]
+# Resource limits, honored by every isolation backend
+[sandbox.resources]
 memory = "4g"
 cpus = "2"
+pids = 2048
 
 [proxy]
 # Enable proxy mode by default for this machine

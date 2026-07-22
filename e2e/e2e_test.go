@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2160,6 +2161,133 @@ func TestSandbox_DockerProxy_DisabledByDefault(t *testing.T) {
 	// Should either be empty or not contain devsandbox proxy path
 	if strings.Contains(outputStr, "devsandbox-docker") {
 		t.Errorf("DOCKER_HOST should not be set to proxy when disabled, got: %s", outputStr)
+	}
+}
+
+// setupResourceLimitTest writes an isolated global config containing the given
+// extra body (appended after the [sandbox] block) and returns a runner for the
+// devsandbox binary bound to that config and a throwaway project directory.
+func setupResourceLimitTest(t *testing.T, extraConfig string) func(args ...string) *exec.Cmd {
+	t.Helper()
+
+	configDir := t.TempDir()
+	sandboxBase := t.TempDir()
+	projectDir := t.TempDir()
+
+	configPath := filepath.Join(configDir, "devsandbox", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	configContent := fmt.Sprintf("[sandbox]\nbase_path = %q\n%s", sandboxBase, extraConfig)
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	return func(args ...string) *exec.Cmd {
+		c := exec.Command(binaryPath, args...)
+		c.Dir = projectDir
+		c.Env = append(os.Environ(), "XDG_CONFIG_HOME="+configDir)
+		return c
+	}
+}
+
+// TestSandbox_ResourceLimitUnenforceableAborts asserts that a configured limit
+// which cannot be enforced aborts the run with a specific error instead of
+// falling back to running unlimited.
+//
+// The limit used here rounds to CPUQuota=0%. That is a translation failure, the
+// one of the three non-enforcement sources that is host-independent: it aborts
+// identically on a runner with no systemd user manager and on a host with a
+// fully delegated one, so the case produces signal everywhere rather than
+// skipping.
+func TestSandbox_ResourceLimitUnenforceableAborts(t *testing.T) {
+	if insideSandbox() {
+		t.Skip("cannot launch nested devsandbox from inside a sandbox session")
+	}
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	run := setupResourceLimitTest(t, "\n[sandbox.resources]\ncpus = \"0.004\"\n")
+
+	output, err := run("echo", "sandbox-ran-unlimited").CombinedOutput()
+	if err == nil {
+		t.Fatalf("unenforceable limit should abort with a non-zero exit, got success\nOutput: %s", output)
+	}
+
+	outputStr := string(output)
+	for _, expected := range []string{"cpu limit", "0.004", "CPUQuota=0%"} {
+		if !strings.Contains(outputStr, expected) {
+			t.Errorf("abort message missing %q, got: %s", expected, outputStr)
+		}
+	}
+	if strings.Contains(outputStr, "sandbox-ran-unlimited") {
+		t.Errorf("sandbox ran despite an unenforceable limit, output: %s", outputStr)
+	}
+}
+
+// TestSandbox_NoResourceLimitsUnaffected asserts the opt-in guarantee end to
+// end: with no [sandbox.resources] section the sandbox runs as it always has
+// and never mentions resource limits.
+func TestSandbox_NoResourceLimitsUnaffected(t *testing.T) {
+	if insideSandbox() {
+		t.Skip("cannot launch nested devsandbox from inside a sandbox session")
+	}
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	run := setupResourceLimitTest(t, "")
+
+	output, err := run("echo", "no-limits-configured").CombinedOutput()
+	if err != nil {
+		t.Fatalf("run without resource limits failed: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := string(output)
+	if !strings.Contains(outputStr, "no-limits-configured") {
+		t.Errorf("echo output unexpected: %s", outputStr)
+	}
+	for _, unexpected := range []string{"resource limits require", "CPUQuota", "systemd-run"} {
+		if strings.Contains(outputStr, unexpected) {
+			t.Errorf("unlimited run mentioned resource limits (%q), got: %s", unexpected, outputStr)
+		}
+	}
+}
+
+// TestSandbox_DeprecatedDockerResourcesDoNotAffectBwrap is the backward
+// compatibility guarantee, end to end. A user who configured
+// [sandbox.docker.resources] for the docker backend and daily-drives bwrap must
+// keep launching exactly as before - the deprecated section is scoped to the
+// container backends and must never opt bwrap into enforcement.
+//
+// The value is the same one TestSandbox_ResourceLimitUnenforceableAborts uses to
+// prove an unenforceable limit aborts. Under [sandbox.resources] it fails the
+// launch on every host; under the deprecated section it must not reach bwrap at
+// all, so this test is exactly that test with the section name changed.
+func TestSandbox_DeprecatedDockerResourcesDoNotAffectBwrap(t *testing.T) {
+	if insideSandbox() {
+		t.Skip("cannot launch nested devsandbox from inside a sandbox session")
+	}
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	run := setupResourceLimitTest(t, "\n[sandbox.docker.resources]\ncpus = \"0.004\"\nmemory = \"4g\"\n")
+
+	output, err := run("echo", "docker-scoped-limits-ignored").CombinedOutput()
+	if err != nil {
+		t.Fatalf("a docker-scoped limit must not abort a bwrap run: %v\nOutput: %s", err, output)
+	}
+
+	outputStr := string(output)
+	if !strings.Contains(outputStr, "docker-scoped-limits-ignored") {
+		t.Errorf("echo output unexpected: %s", outputStr)
+	}
+	for _, unexpected := range []string{"resource limits require", "CPUQuota", "systemd-run"} {
+		if strings.Contains(outputStr, unexpected) {
+			t.Errorf("bwrap applied the deprecated docker-scoped limits (%q), got: %s", unexpected, outputStr)
+		}
 	}
 }
 

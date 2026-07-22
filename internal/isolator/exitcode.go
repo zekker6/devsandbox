@@ -56,3 +56,21 @@ func asEngineOrCommandExit(err error) error {
 	}
 	return asCommandExit(err)
 }
+
+// There is deliberately no asScopeOrCommandExit counterpart for the systemd
+// transient scope the bwrap backend launches under when resource limits are
+// configured.
+//
+// The engine case above works because 125 is a code podman/docker reserve and
+// the shim entrypoint never produces. systemd-run reserves nothing: it exits 1
+// on its own failure, which is also the single most common status a sandboxed
+// workload exits with. Mapping 1 to a launcher failure would report a failing
+// test run, a non-matching grep or a plain `false` as a broken sandbox - a
+// regression far worse than the case it guards.
+//
+// The scope-refused-at-D-Bus-time case is instead caught before launch, by the
+// live probe in cgroups.Preflight: it creates a throwaway scope carrying the
+// same properties, so a refusal surfaces as a specific error naming what
+// systemd rejected rather than as an ambiguous exit status afterwards. That
+// also covers the exec-replace launch path, where devsandbox is gone by the
+// time any exit code exists and no post-hoc mapping is possible at all.

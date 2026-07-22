@@ -430,3 +430,50 @@ func TestMergeConfigs_SandboxEnvironment(t *testing.T) {
 		t.Errorf("SHARED: %+v (expected overlay to win)", got["SHARED"])
 	}
 }
+
+func Test_mergeConfigs_SandboxResources(t *testing.T) {
+	tests := []struct {
+		name     string
+		base     ResourcesConfig
+		overlay  ResourcesConfig
+		expected ResourcesConfig
+	}{
+		{
+			name:     "overlay wins per field",
+			base:     ResourcesConfig{Memory: "1g", CPUs: "1", PIDs: 128},
+			overlay:  ResourcesConfig{Memory: "4g", CPUs: "2", PIDs: 2048},
+			expected: ResourcesConfig{Memory: "4g", CPUs: "2", PIDs: 2048},
+		},
+		{
+			name:     "unset overlay fields keep base",
+			base:     ResourcesConfig{Memory: "1g", CPUs: "1", PIDs: 128},
+			overlay:  ResourcesConfig{},
+			expected: ResourcesConfig{Memory: "1g", CPUs: "1", PIDs: 128},
+		},
+		{
+			name:     "partial overlay merges per field",
+			base:     ResourcesConfig{Memory: "1g", CPUs: "1"},
+			overlay:  ResourcesConfig{PIDs: 2048},
+			expected: ResourcesConfig{Memory: "1g", CPUs: "1", PIDs: 2048},
+		},
+		{
+			name:     "overlay sets fields on empty base",
+			base:     ResourcesConfig{},
+			overlay:  ResourcesConfig{Memory: "512m", CPUs: "0.5", PIDs: 64},
+			expected: ResourcesConfig{Memory: "512m", CPUs: "0.5", PIDs: 64},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &Config{Sandbox: SandboxConfig{Resources: tt.base}}
+			overlay := &Config{Sandbox: SandboxConfig{Resources: tt.overlay}}
+
+			result := mergeConfigs(base, overlay)
+
+			if result.Sandbox.Resources != tt.expected {
+				t.Errorf("resources = %+v, want %+v", result.Sandbox.Resources, tt.expected)
+			}
+		})
+	}
+}
