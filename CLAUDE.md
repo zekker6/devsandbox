@@ -29,6 +29,25 @@ Two invariants matter, both because they have already been violated:
 
 Scope mutations to resources the sandbox created, taking their ids from the server's response and never from the client. Deny by default: a method with no explicit validator is refused, not passed through.
 
+Two more invariants come from the herdr agent-reporting work:
+
+- **Anchor every validator to something derived on the host.** A request is checked against what devsandbox already knows - the pane id herdr gave this process, the agent devsandbox was asked to launch, the session directory that tool's own bindings produce - never against a value the request supplies. Where a bound is a filesystem path, take it from the same function that produces the bind mount so the two cannot drift apart.
+- **Charset-restrict any sandbox-supplied string the host will hand to a shell.** herdr shell-quotes a reported session id and types it into a host pane shell, so the filter caps it at 128 bytes of `[A-Za-z0-9._-]` rather than trusting an unversioned third-party quoter. Length checks are not enough. Confinement of a path that names a location *inside* the sandbox overlay must be lexical - `pathWithin` resolves symlinks against the host filesystem, which proves nothing about a path the host cannot see.
+- **Scan runes, not bytes, when rejecting what a terminal will act on.** A byte-wise `< 0x20` test sees only C0. The C1 controls (U+0080-U+009F, U+009B being CSI) arrive UTF-8-encoded as bytes ≥ 0xC2 and sail straight through it, which defeats the check in the case it exists for. `hasControlRune` in `internal/herdrproxy/filter.go` refuses Cc and Cf; ordinary non-ASCII text stays allowed, because the check bounds behavior, not charset.
+
+**Adding a supported agent touches four places, and missing one fails silently.** `internal/agentid`'s `agents` table (the name, plus the resume shape herdr compiles in - `claude`/`pi` use a flag, `codex` a `resume` subcommand); the tool registered under that same name; `ToolWithAgentSessionDir` on that tool, derived from the same helper its bindings use; and a `CategoryData` binding for that directory so sessions survive the sandbox. The last two fail in opposite directions - a missing binding discards the session, a bound that drifts from the binding denies every real report. A binding alone is not enough either: `Optional` bindings whose host source is missing are skipped, so a directory the agent only ever creates in-sandbox needs a `ToolWithSetup` that creates it on the host (`Codex.Setup` is the worked example).
+
+**State the host trusts must live where the sandbox cannot write it.** `$XDG_STATE_HOME` is repointed at the synthetic home inside the sandbox, which is what makes `~/.local/state/devsandbox/` safe for host-owned records such as `internal/herdrstate`. Anything under the project dir or a bound tool directory is sandbox-writable. Hash any opaque third-party id into the filename rather than letting it choose a path.
+
+## Shell snippets installed on the host
+
+`internal/shellwrap` generates snippets that devsandbox installs into the user's shell config. Two things are load-bearing there:
+
+- **Guard the whole snippet on `DEVSANDBOX`.** `internal/sandbox/tools/shell.go` binds fish's `conf.d` and bash/zsh rc files *into* the sandbox, so anything installed there is also read in there - an unguarded `claude` function would re-invoke `devsandbox claude` recursively. Use non-empty semantics (`test -z "$DEVSANDBOX"` in fish, `-n "${DEVSANDBOX:-}"` in bash/zsh) and match it in Go, so `DEVSANDBOX=""` behaves identically everywhere.
+- **Existence-guard anything sourced from an rc file.** `~/.config/devsandbox` is bound by nothing, while `.bashrc`/`.zshrc` are bound in, so a bare `source` line errors on every in-sandbox shell start. Emit `[ -r <path> ] && . <path>`.
+
+Emit devsandbox's resolved absolute path into generated snippets, not `command devsandbox`: a login or terminal-multiplexer pane shell may have a different `PATH` (mise shims are the common case).
+
 ## Platform-specific packages
 
 `internal/bwrap` and `internal/isolator/bwrap.go` have **no build tags** - they compile on darwin even though bwrap is Linux-only. Anything they import must build on darwin too. A Linux-only package pulled into that import graph breaks the darwin release build.

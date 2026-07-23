@@ -1,12 +1,14 @@
 package tools
 
 import (
+	"net"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/herdrproxy"
 )
 
@@ -265,10 +267,52 @@ func TestHerdr_CheckBranches(t *testing.T) {
 			t.Errorf("issues = %v, want one mentioning the missing socket", res.Issues)
 		}
 	})
+
+	t.Run("agent session reporting active", func(t *testing.T) {
+		defer removeHerdrConsumers(t).restore()
+		t.Setenv("HERDR_ENV", "1")
+		t.Setenv("HERDR_PANE_ID", "pane-7")
+		startHerdrWithHostSocket(t)
+
+		h := &Herdr{}
+		h.Configure(GlobalConfig{LaunchedAgent: "claude"}, nil)
+
+		res := h.Check("")
+		if !hasInfoContaining(res, "agent session reporting: active for claude") {
+			t.Errorf("info = %v, want it to report active reporting for claude", res.Info)
+		}
+		if !hasInfoContaining(res, string(herdrproxy.CapAgentReporting)) {
+			t.Errorf("info = %v, want the agent_reporting capability listed", res.Info)
+		}
+	})
+
+	t.Run("agent session reporting inactive names what is missing", func(t *testing.T) {
+		defer removeHerdrConsumers(t).restore()
+		t.Setenv("HERDR_ENV", "1")
+		t.Setenv("HERDR_PANE_ID", "pane-7")
+		startHerdrWithHostSocket(t)
+
+		h := &Herdr{}
+		h.Configure(GlobalConfig{}, map[string]any{"mode": "enforce"})
+
+		res := h.Check("")
+		if !hasInfoContaining(res, "no known agent was launched") {
+			t.Errorf("info = %v, want it to name the missing agent", res.Info)
+		}
+		if !hasInfoContaining(res, "direct `devsandbox <agent>` launch") {
+			t.Errorf("info = %v, want it to explain what enables reporting", res.Info)
+		}
+	})
 }
 
 func hasIssueContaining(res CheckResult, substr string) bool {
 	return slices.ContainsFunc(res.Issues, func(s string) bool {
+		return strings.Contains(s, substr)
+	})
+}
+
+func hasInfoContaining(res CheckResult, substr string) bool {
+	return slices.ContainsFunc(res.Info, func(s string) bool {
 		return strings.Contains(s, substr)
 	})
 }
@@ -510,5 +554,314 @@ func TestHerdr_BindingsNoSocketWhenProxyStopped(t *testing.T) {
 		if strings.HasSuffix(b.Dest, herdrProxySocketName) {
 			t.Errorf("exposed a socket path %q with no proxy running; it would be a dead endpoint", b.Dest)
 		}
+	}
+}
+
+// removeHerdrConsumers unregisters every tool declaring a herdr capability, so
+// aggregation results depend only on what the test injects. Whether revdiff is
+// installed on the machine running the tests must not change the outcome.
+func removeHerdrConsumers(t *testing.T) savedConsumers {
+	t.Helper()
+	var saved savedConsumers
+	for _, tl := range All() {
+		if _, ok := tl.(ToolWithHerdrRequirements); ok {
+			saved.tools = append(saved.tools, tl)
+			Unregister(tl.Name())
+		}
+	}
+	return saved
+}
+
+// TestHerdr_AgentReportingNeedsBothHostAnchors pins the rule that makes the
+// capability's validator meaningful: it is granted only when devsandbox itself
+// knows both the pane and the agent. Neither can be influenced from inside the
+// sandbox.
+func TestHerdr_AgentReportingNeedsBothHostAnchors(t *testing.T) {
+	defer removeHerdrConsumers(t).restore()
+
+	tests := []struct {
+		name    string
+		paneID  string
+		agent   string
+		want    bool
+		wantWhy string
+	}{
+		{name: "pane and agent present", paneID: "pane-7", agent: "claude", want: true},
+		{name: "pane id missing", paneID: "", agent: "claude", want: false, wantWhy: "HERDR_PANE_ID"},
+		{name: "agent unknown", paneID: "pane-7", agent: "", want: false, wantWhy: "no known agent"},
+		{name: "neither present", paneID: "", agent: "", want: false, wantWhy: "HERDR_PANE_ID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERDR_PANE_ID", tt.paneID)
+
+			h := &Herdr{}
+			h.Configure(GlobalConfig{LaunchedAgent: tt.agent}, nil)
+
+			ok, why := h.agentReporting()
+			if ok != tt.want {
+				t.Fatalf("agentReporting() = %v (%q), want %v", ok, why, tt.want)
+			}
+			if !tt.want && !strings.Contains(why, tt.wantWhy) {
+				t.Errorf("reason = %q, want it to name %q", why, tt.wantWhy)
+			}
+
+			caps, _ := h.capabilities("")
+			has := slices.Contains(caps, herdrproxy.CapAgentReporting)
+			if has != tt.want {
+				t.Errorf("capabilities() = %v, want CapAgentReporting present=%v", caps, tt.want)
+			}
+		})
+	}
+}
+
+func TestHerdr_ConfigureCapturesLaunchedAgent(t *testing.T) {
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude"}, nil)
+
+	if h.launchedAgent != "claude" {
+		t.Errorf("launchedAgent = %q, want the agent devsandbox was asked to launch", h.launchedAgent)
+	}
+}
+
+// TestHerdr_FilterConfigCarriesHostAnchors proves the values the capability
+// decision rests on are the same ones the validator receives. A wiring mistake
+// here would enable the capability while denying every real report.
+func TestHerdr_FilterConfigCarriesHostAnchors(t *testing.T) {
+	t.Setenv("HERDR_PANE_ID", "pane-42")
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude"}, nil)
+
+	cfg := h.filterConfig(nil, cmdpattern.ScriptPattern{}, nil, nil, nil, "/home/test")
+	if cfg.CurrentPaneID != "pane-42" {
+		t.Errorf("CurrentPaneID = %q, want the pane herdr gave this process", cfg.CurrentPaneID)
+	}
+	if cfg.ExpectedAgent != "claude" {
+		t.Errorf("ExpectedAgent = %q, want the host-derived launched agent", cfg.ExpectedAgent)
+	}
+	if want := filepath.Join("/home/test", ".claude", "projects"); cfg.AgentSessionDir != want {
+		t.Errorf("AgentSessionDir = %q, want the launched agent's session directory %q", cfg.AgentSessionDir, want)
+	}
+}
+
+// TestHerdr_AgentSessionDirResolution pins where the agent_session_path bound
+// comes from. An empty home must yield an empty bound rather than
+// "/.claude/projects", which would deny every real report instead of only
+// unbounded paths.
+func TestHerdr_AgentSessionDirResolution(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+
+	tests := []struct {
+		name    string
+		agent   string
+		homeDir string
+		want    string
+	}{
+		{name: "launched agent with a session dir", agent: "claude", homeDir: "/home/test", want: "/home/test/.claude/projects"},
+		{name: "pi resolves to its sessions dir", agent: "pi", homeDir: "/home/test", want: "/home/test/.pi/agent/sessions"},
+		{name: "pi with an unresolved home", agent: "pi", homeDir: "", want: ""},
+		{name: "codex resolves to its sessions dir", agent: "codex", homeDir: "/home/test", want: "/home/test/.codex/sessions"},
+		{name: "codex with an unresolved home", agent: "codex", homeDir: "", want: ""},
+		{name: "no launched agent", agent: "", homeDir: "/home/test", want: ""},
+		{name: "agent with no session dir", agent: "git", homeDir: "/home/test", want: ""},
+		{name: "unknown agent", agent: "nope", homeDir: "/home/test", want: ""},
+		{name: "unresolved home", agent: "claude", homeDir: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Herdr{}
+			h.Configure(GlobalConfig{LaunchedAgent: tt.agent}, nil)
+
+			if got := h.agentSessionDir(tt.homeDir); got != tt.want {
+				t.Errorf("agentSessionDir(%q) = %q, want %q", tt.homeDir, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHerdr_AgentSessionDirHonorsClaudeConfigDir proves the bound tracks the
+// same environment Claude's bindings do, so a custom config dir cannot leave
+// the filter confining paths to a directory the sandbox never uses.
+func TestHerdr_AgentSessionDirHonorsClaudeConfigDir(t *testing.T) {
+	custom := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", custom)
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude"}, nil)
+
+	if got, want := h.agentSessionDir("/home/test"), filepath.Join(custom, "projects"); got != want {
+		t.Errorf("agentSessionDir = %q, want %q", got, want)
+	}
+}
+
+// The same invariant for Codex, whose session directory moves with CODEX_HOME.
+func TestHerdr_AgentSessionDirHonorsCodexHome(t *testing.T) {
+	custom := t.TempDir()
+	t.Setenv("CODEX_HOME", custom)
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "codex"}, nil)
+
+	if got, want := h.agentSessionDir("/home/test"), filepath.Join(custom, "sessions"); got != want {
+		t.Errorf("agentSessionDir = %q, want %q", got, want)
+	}
+}
+
+// startHerdrWithHostSocket stands up a fake host control socket and returns a
+// home directory and a sandbox home for the proxy. They must be distinct: the
+// relocator refuses to place scripts anywhere the sandbox can write.
+func startHerdrWithHostSocket(t *testing.T) (homeDir, sandboxHome string) {
+	t.Helper()
+
+	dir := shortSocketDir(t)
+	upstream := filepath.Join(dir, "upstream.sock")
+	l, err := net.Listen("unix", upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	t.Setenv("HERDR_SOCKET_PATH", upstream)
+	return shortSocketDir(t), shortSocketDir(t)
+}
+
+// TestHerdr_StartAgentAloneStartsProxy covers the phase 1 behavior change: a
+// bare `devsandbox claude` in a herdr pane previously started nothing.
+func TestHerdr_StartAgentAloneStartsProxy(t *testing.T) {
+	defer removeHerdrConsumers(t).restore()
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "pane-7")
+	homeDir, sandboxHome := startHerdrWithHostSocket(t)
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude"}, nil)
+
+	if err := h.Start(t.Context(), homeDir, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = h.Stop() }()
+
+	if h.proxy == nil {
+		t.Fatal("no proxy started for a direct agent launch inside a herdr pane")
+	}
+}
+
+func TestHerdr_StartWithoutAnchorsStartsNothingInAuto(t *testing.T) {
+	defer removeHerdrConsumers(t).restore()
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "pane-7")
+	homeDir, sandboxHome := startHerdrWithHostSocket(t)
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{}, nil) // no launched agent
+
+	if err := h.Start(t.Context(), homeDir, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = h.Stop() }()
+
+	if h.proxy != nil {
+		t.Error("auto mode opened a socket with nothing requesting herdr")
+	}
+}
+
+// TestHerdr_StartEnforceWithoutAgentStillStarts documents that enforce mode is
+// the user asking for the proxy explicitly: it runs and denies, rather than
+// quietly not running.
+func TestHerdr_StartEnforceWithoutAgentStillStarts(t *testing.T) {
+	defer removeHerdrConsumers(t).restore()
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "")
+	homeDir, sandboxHome := startHerdrWithHostSocket(t)
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{}, map[string]any{"mode": "enforce"})
+
+	if err := h.Start(t.Context(), homeDir, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = h.Stop() }()
+
+	if h.proxy == nil {
+		t.Fatal("enforce mode did not start the proxy")
+	}
+	caps, _ := h.capabilities("")
+	if len(caps) != 0 {
+		t.Errorf("capabilities = %v, want none without host anchors", caps)
+	}
+}
+
+// TestHerdr_StaleSocketIsNonFatalInAuto is the regression guard for the hazard
+// Task 4 introduces: auto mode now reaches the socket check for every
+// `devsandbox <agent>` launch, so a socket left behind by a dead herdr server
+// must warn rather than fail the launch.
+func TestHerdr_StaleSocketIsNonFatalInAuto(t *testing.T) {
+	defer removeHerdrConsumers(t).restore()
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "pane-7")
+	t.Setenv("HERDR_SOCKET_PATH", filepath.Join(t.TempDir(), "absent.sock"))
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude"}, nil)
+
+	if err := h.Start(t.Context(), t.TempDir(), t.TempDir()); err != nil {
+		t.Fatalf("auto mode failed the launch over an unreachable host socket: %v", err)
+	}
+	if h.proxy != nil {
+		t.Error("auto mode reported a proxy despite an unreachable host socket")
+	}
+}
+
+func TestHerdr_StaleSocketIsFatalInEnforce(t *testing.T) {
+	defer removeHerdrConsumers(t).restore()
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "pane-7")
+	t.Setenv("HERDR_SOCKET_PATH", filepath.Join(t.TempDir(), "absent.sock"))
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude"}, map[string]any{"mode": "enforce"})
+
+	err := h.Start(t.Context(), t.TempDir(), t.TempDir())
+	if err == nil {
+		t.Fatal("enforce mode accepted an unreachable host socket")
+	}
+	if !strings.Contains(err.Error(), "not reachable") {
+		t.Errorf("error = %v, want it to name the unreachable socket", err)
+	}
+}
+
+// TestHerdr_OutsideHerdrPaneNothingChanges: with HERDR_ENV unset, a devsandbox
+// claude launch must behave exactly as it did before this feature existed.
+func TestHerdr_OutsideHerdrPaneNothingChanges(t *testing.T) {
+	defer removeHerdrConsumers(t).restore()
+
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_PANE_ID", "pane-7")
+	homeDir, sandboxHome := startHerdrWithHostSocket(t)
+
+	h := &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude"}, nil)
+
+	if err := h.Start(t.Context(), homeDir, sandboxHome); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if h.proxy != nil {
+		t.Error("Start opened a proxy outside a herdr session")
+	}
+	if got := h.Environment("/home/u", sandboxHome); got != nil {
+		t.Errorf("Environment() = %v outside a herdr session, want none", got)
+	}
+	if got := h.Bindings("/home/u", sandboxHome); got != nil {
+		t.Errorf("Bindings() = %v outside a herdr session, want none", got)
 	}
 }

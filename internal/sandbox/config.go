@@ -99,6 +99,14 @@ type Config struct {
 	// at its host path (subject to git-mode semantics) so that the worktree's
 	// .git file (which stores an absolute gitdir: pointer) resolves correctly.
 	GitRepoRoot string
+
+	// LaunchedAgent is the canonical name of the AI agent devsandbox was asked
+	// to run, derived host-side from the command argv and empty when the command
+	// is not a known agent. It is a trust anchor for the herdr proxy's agent
+	// reporting, so it must reach every place a tool is configured: the builder
+	// re-Configures tools after the active-tool runner has already started them,
+	// and omitting it here would zero the anchor the running proxy was built on.
+	LaunchedAgent string
 }
 
 // HasWorktree reports whether this Config is rooted at a git worktree

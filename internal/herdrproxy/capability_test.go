@@ -12,6 +12,9 @@ func TestIsLaunch(t *testing.T) {
 	if IsLaunch(CapNotify) {
 		t.Error("IsLaunch(CapNotify) = true, want false — notify runs no host code")
 	}
+	if IsLaunch(CapAgentReporting) {
+		t.Error("IsLaunch(CapAgentReporting) = true, want false — reporting runs no host code")
+	}
 	if IsLaunch(Capability("nonsense")) {
 		t.Error("IsLaunch(unknown) = true, want false")
 	}
@@ -29,6 +32,26 @@ func TestMethodsForLaunchOverlay(t *testing.T) {
 	}
 }
 
+// TestMethodsForAgentReporting pins the capability to the three lifecycle
+// methods Pi's integration sends. pane.clear_agent_authority stays out: it
+// revokes another party's claim on a pane, which reporting one's own identity
+// never needs.
+func TestMethodsForAgentReporting(t *testing.T) {
+	got := methodsFor(CapAgentReporting)
+	want := []string{methodPaneReportAgentSession, methodPaneReportAgent, methodPaneReleaseAgent}
+	if len(got) != len(want) {
+		t.Fatalf("methodsFor(CapAgentReporting) = %v, want exactly %v", got, want)
+	}
+	for _, m := range want {
+		if !slices.Contains(got, m) {
+			t.Errorf("methodsFor(CapAgentReporting) missing %q, got %v", m, got)
+		}
+	}
+	if slices.Contains(got, "pane.clear_agent_authority") {
+		t.Error("methodsFor(CapAgentReporting) grants pane.clear_agent_authority")
+	}
+}
+
 func TestMethodsForUnknownCapabilityGrantsNothing(t *testing.T) {
 	if got := methodsFor(Capability("pane.read")); got != nil {
 		t.Errorf("methodsFor(unknown) = %v, want nil so a typo cannot widen the allowlist", got)
@@ -40,7 +63,11 @@ func TestMethodsForUnknownCapabilityGrantsNothing(t *testing.T) {
 // in-scope set. If someone adds a capability that reaches pane.read or
 // server.stop, this fails.
 func TestNoCapabilityReachesDangerousMethods(t *testing.T) {
-	inScope := []string{methodTabCreate, methodPaneSendInput, methodTabClose, methodNotificationShow}
+	inScope := []string{
+		methodTabCreate, methodPaneSendInput, methodTabClose,
+		methodNotificationShow, methodPaneReportAgentSession,
+		methodPaneReportAgent, methodPaneReleaseAgent,
+	}
 
 	var all []string
 	for _, c := range knownCapabilities() {
@@ -58,6 +85,7 @@ func TestNoCapabilityReachesDangerousMethods(t *testing.T) {
 		"agent.send", "agent.start", "server.stop", "server.reload_config",
 		"plugin.pane.open", "plugin.link", "worktree.create", "worktree.remove",
 		"workspace.close", "events.subscribe", "layout.apply", "session.snapshot",
+		"pane.clear_agent_authority",
 	}
 	for _, m := range forbidden {
 		if slices.Contains(all, m) {
@@ -94,7 +122,29 @@ func TestAllowedMethods(t *testing.T) {
 			name: "both, deduplicated",
 			caps: []Capability{CapLaunchOverlay, CapNotify, CapLaunchOverlay},
 			want: []string{methodTabCreate, methodPaneSendInput, methodTabClose, methodNotificationShow},
-			deny: []string{"pane.read", "server.stop"},
+			deny: []string{
+				"pane.read", "server.stop",
+				methodPaneReportAgentSession, methodPaneReportAgent, methodPaneReleaseAgent,
+			},
+		},
+		{
+			name: "agent reporting only",
+			caps: []Capability{CapAgentReporting},
+			want: []string{methodPaneReportAgentSession, methodPaneReportAgent, methodPaneReleaseAgent},
+			deny: []string{
+				"pane.clear_agent_authority", "pane.read", "agent.send",
+				methodTabCreate, methodPaneSendInput, methodTabClose, methodNotificationShow,
+			},
+		},
+		{
+			name: "agent reporting alongside the others",
+			caps: []Capability{CapLaunchOverlay, CapNotify, CapAgentReporting},
+			want: []string{
+				methodTabCreate, methodPaneSendInput, methodTabClose,
+				methodNotificationShow, methodPaneReportAgentSession,
+				methodPaneReportAgent, methodPaneReleaseAgent,
+			},
+			deny: []string{"pane.clear_agent_authority", "pane.read", "server.stop"},
 		},
 	}
 
@@ -121,8 +171,14 @@ func TestIsKnown(t *testing.T) {
 			t.Errorf("IsKnown(%q) = false for a listed capability", c)
 		}
 	}
+	if !IsKnown(CapAgentReporting) {
+		t.Error("IsKnown(CapAgentReporting) = false; a tool declaring it would silently do nothing")
+	}
 	if IsKnown(Capability("launch_window")) {
 		t.Error(`IsKnown("launch_window") = true, but that is a kitty capability herdr does not implement`)
+	}
+	if IsKnown(Capability("agent_report")) {
+		t.Error(`IsKnown("agent_report") = true, but the capability is named "agent_reporting"`)
 	}
 }
 
@@ -139,6 +195,7 @@ func TestPingIsAlwaysAllowed(t *testing.T) {
 		{name: "no capabilities (enforce mode)", caps: nil},
 		{name: "launch overlay only", caps: []Capability{CapLaunchOverlay}},
 		{name: "notify only", caps: []Capability{CapNotify}},
+		{name: "agent reporting only", caps: []Capability{CapAgentReporting}},
 	}
 
 	for _, tt := range cases {
@@ -170,6 +227,8 @@ func TestNoCapabilitiesStillDeniesEverythingObservable(t *testing.T) {
 	}
 	for _, m := range []string{
 		methodTabCreate, methodPaneSendInput, methodTabClose, methodNotificationShow,
+		methodPaneReportAgentSession, methodPaneReportAgent, methodPaneReleaseAgent,
+		"pane.clear_agent_authority",
 		"pane.read", "agent.send", "server.stop", "pane.list", "worktree.remove",
 	} {
 		if _, ok := allowed[m]; ok {

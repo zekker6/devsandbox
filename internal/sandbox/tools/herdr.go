@@ -44,6 +44,11 @@ type Herdr struct {
 	projectDir string
 	homeDir    string
 
+	// launchedAgent is the canonical agent devsandbox was asked to run, derived
+	// host-side from the command argv. It is one of the two trust anchors for
+	// CapAgentReporting; the other is HERDR_PANE_ID.
+	launchedAgent string
+
 	logger    ErrorLogger
 	proxy     *herdrproxy.Proxy
 	relocator *herdrproxy.Relocator
@@ -75,6 +80,7 @@ func (h *Herdr) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	h.mode = herdrModeAuto
 	h.projectDir = globalCfg.ProjectDir
 	h.homeDir = globalCfg.HomeDir
+	h.launchedAgent = globalCfg.LaunchedAgent
 
 	if toolCfg == nil {
 		return
@@ -251,6 +257,84 @@ func (h *Herdr) aggregate(homeDir string) ([]herdrproxy.Capability, cmdpattern.S
 	return caps, script
 }
 
+// agentReporting reports whether CapAgentReporting may be enabled, and when it
+// may not, why.
+//
+// Both anchors are host-derived and both are mandatory: the pane herdr created
+// for this process, and the agent devsandbox was asked to launch. Neither can
+// be influenced from inside the sandbox, which is what makes the capability's
+// validator meaningful.
+func (h *Herdr) agentReporting() (bool, string) {
+	paneID := os.Getenv("HERDR_PANE_ID")
+	switch {
+	case paneID == "" && h.launchedAgent == "":
+		return false, "HERDR_PANE_ID is unset and no known agent was launched"
+	case paneID == "":
+		return false, "HERDR_PANE_ID is unset"
+	case h.launchedAgent == "":
+		return false, "no known agent was launched; only a direct `devsandbox <agent>` launch enables it"
+	}
+	return true, ""
+}
+
+// capabilities is aggregate plus the capabilities herdr itself contributes.
+// CapAgentReporting is one of those: it is granted on host-derived facts about
+// this launch rather than declared by a tool.
+func (h *Herdr) capabilities(homeDir string) ([]herdrproxy.Capability, cmdpattern.ScriptPattern) {
+	caps, script := h.aggregate(homeDir)
+	if ok, _ := h.agentReporting(); ok {
+		caps = append(caps, herdrproxy.CapAgentReporting)
+	}
+	return caps, script
+}
+
+// agentSessionDir returns the directory bounding agent_session_path for the
+// launched agent, as the sandbox sees it.
+//
+// It is empty when no known agent was launched or when that agent's tool does
+// not record native sessions; the filter denies every path in that case rather
+// than falling back to an unbounded check.
+func (h *Herdr) agentSessionDir(homeDir string) string {
+	if h.launchedAgent == "" || homeDir == "" {
+		return ""
+	}
+	if sd, ok := Get(h.launchedAgent).(ToolWithAgentSessionDir); ok {
+		return sd.AgentSessionDir(homeDir)
+	}
+	return ""
+}
+
+// filterConfig assembles the proxy filter's configuration.
+//
+// It is the single place the host-derived trust anchors are read, so what
+// "this pane" and "this agent" mean cannot drift between the capability
+// decision and the validator that enforces it.
+func (h *Herdr) filterConfig(
+	caps []herdrproxy.Capability,
+	script cmdpattern.ScriptPattern,
+	relocator *herdrproxy.Relocator,
+	tabs, panes *cmdpattern.OwnedSet[string],
+	homeDir string,
+) herdrproxy.FilterConfig {
+	return herdrproxy.FilterConfig{
+		Capabilities: caps,
+		LaunchScript: script,
+		OwnedTabs:    tabs,
+		OwnedPanes:   panes,
+		Relocator:    relocator,
+		ProjectDir:   h.projectDir,
+		WorkspaceID:  os.Getenv("HERDR_WORKSPACE_ID"),
+		// Empty values deny every report, which is the correct outcome when
+		// the agent-reporting capability is off.
+		CurrentPaneID: os.Getenv("HERDR_PANE_ID"),
+		ExpectedAgent: h.launchedAgent,
+		// homeDir must be the resolved one: an empty value here would yield
+		// "/.claude/projects" and deny every real report, so agentSessionDir
+		// returns "" instead — which denies every path, not every report.
+		AgentSessionDir: h.agentSessionDir(homeDir),
+	}
+}
+
 // Start implements ActiveTool.
 func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 	if h.mode == herdrModeDisabled {
@@ -263,7 +347,7 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		homeDir = h.homeDir
 	}
 
-	caps, script := h.aggregate("")
+	caps, script := h.capabilities("")
 	if len(caps) == 0 && h.mode == herdrModeAuto {
 		// Nothing needs herdr; do not open a socket at all.
 		return nil
@@ -271,6 +355,14 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 
 	hostSock := herdrHostSocket(homeDir)
 	if _, err := os.Stat(hostSock); err != nil {
+		// In auto mode the proxy is an enhancement the user never asked for by
+		// name, and any `devsandbox <agent>` launch inside a herdr pane now
+		// reaches this check. A stale socket left behind by a dead server must
+		// not turn that into a failed launch.
+		if h.mode == herdrModeAuto {
+			notice.Warn("herdr: host socket %s not reachable (%v); continuing without the proxy", hostSock, err)
+			return nil
+		}
 		return fmt.Errorf("herdr: host socket %s not reachable: %w", hostSock, err)
 	}
 
@@ -285,15 +377,10 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 
 	ownedTabs := cmdpattern.NewOwnedSet[string]()
 	ownedPanes := cmdpattern.NewOwnedSet[string]()
-	filter := herdrproxy.NewFilter(herdrproxy.FilterConfig{
-		Capabilities: caps,
-		LaunchScript: script,
-		OwnedTabs:    ownedTabs,
-		OwnedPanes:   ownedPanes,
-		Relocator:    relocator,
-		ProjectDir:   h.projectDir,
-		WorkspaceID:  os.Getenv("HERDR_WORKSPACE_ID"),
-	})
+	// homeDir here is the value settled by the fallback above, not the empty
+	// string capabilities() is called with — the session-directory bound is
+	// derived from it.
+	filter := herdrproxy.NewFilter(h.filterConfig(caps, script, relocator, ownedTabs, ownedPanes, homeDir))
 
 	if _, err := ensureRunDir(sandboxHome); err != nil {
 		_ = relocator.Cleanup()
@@ -387,7 +474,14 @@ func (h *Herdr) Check(homeDir string) CheckResult {
 	}
 	result.AddInfo("control socket: " + sock)
 
-	caps, _ := h.aggregate(homeDir)
+	caps, _ := h.capabilities(homeDir)
+	if reporting, why := h.agentReporting(); reporting {
+		result.AddInfo("agent session reporting: active for " + h.launchedAgent)
+	} else {
+		result.AddInfo("agent session reporting: inactive — " + why)
+		result.AddInfo("agent session reporting needs a herdr pane and a direct `devsandbox <agent>` launch; " +
+			"typing the agent name inside a `devsandbox` shell does not enable it")
+	}
 	if len(caps) == 0 {
 		if mode == herdrModeEnforce {
 			result.AddInfo("capabilities: none — proxy runs and denies every request")

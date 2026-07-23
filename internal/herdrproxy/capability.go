@@ -4,7 +4,7 @@ import "slices"
 
 // Capability identifies a group of herdr operations a tool may request.
 //
-// herdr exposes 84 methods, most of which grant broad control over the user's
+// herdr exposes 86 methods, most of which grant broad control over the user's
 // workspace: pane.read returns any pane's contents, pane.send_text and
 // agent.send type into any pane, worktree.* mutates git state, plugin.* loads
 // code, and server.stop kills the session. None of that is reachable here.
@@ -22,15 +22,33 @@ const (
 	// CapNotify permits raising a herdr notification. It carries no ownership
 	// requirement because it neither reads nor mutates workspace state.
 	CapNotify Capability = "notify"
+
+	// CapAgentReporting permits an in-sandbox agent integration to report the
+	// native session identity and lifecycle state of the agent devsandbox itself
+	// launched, so herdr can show its status and resume it later.
+	//
+	// It reports identity and nothing else: no pane contents are readable, no
+	// input can be injected into any pane, and no host command runs. Every method
+	// it grants is bound to host-derived anchors — the pane herdr created for this
+	// process and the agent devsandbox was asked to launch — so a report for
+	// another pane, or claiming another agent, is denied.
+	//
+	// pane.clear_agent_authority stays out deliberately: it revokes another
+	// party's claim on a pane, which is not something reporting one's own
+	// identity ever needs.
+	CapAgentReporting Capability = "agent_reporting"
 )
 
 // herdr method names, as verified against v0.7.4 (protocol 16).
 const (
-	methodTabCreate        = "tab.create"
-	methodTabClose         = "tab.close"
-	methodPaneSendInput    = "pane.send_input"
-	methodNotificationShow = "notification.show"
-	methodPing             = "ping"
+	methodTabCreate              = "tab.create"
+	methodTabClose               = "tab.close"
+	methodPaneSendInput          = "pane.send_input"
+	methodNotificationShow       = "notification.show"
+	methodPaneReportAgentSession = "pane.report_agent_session"
+	methodPaneReportAgent        = "pane.report_agent"
+	methodPaneReleaseAgent       = "pane.release_agent"
+	methodPing                   = "ping"
 )
 
 // IsLaunch reports whether c permits running a command on the host.
@@ -49,6 +67,8 @@ func methodsFor(c Capability) []string {
 		return []string{methodTabCreate, methodPaneSendInput, methodTabClose}
 	case CapNotify:
 		return []string{methodNotificationShow}
+	case CapAgentReporting:
+		return []string{methodPaneReportAgentSession, methodPaneReportAgent, methodPaneReleaseAgent}
 	}
 	return nil
 }
@@ -82,7 +102,7 @@ func allowedMethods(caps []Capability) map[string]struct{} {
 // knownCapabilities lists every capability the proxy understands, so the tool
 // layer can reject a configured name that would otherwise silently do nothing.
 func knownCapabilities() []Capability {
-	return []Capability{CapLaunchOverlay, CapNotify}
+	return []Capability{CapLaunchOverlay, CapNotify, CapAgentReporting}
 }
 
 // IsKnown reports whether c is a capability this proxy implements.

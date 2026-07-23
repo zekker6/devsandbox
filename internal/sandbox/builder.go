@@ -501,6 +501,7 @@ func (b *Builder) configureTool(tool tools.ToolWithConfig, toolName string) {
 		ProjectDir:       b.cfg.ProjectDir,
 		HomeDir:          b.cfg.HomeDir,
 		GitRepoRoot:      b.cfg.GitRepoRoot,
+		LaunchedAgent:    b.cfg.LaunchedAgent,
 	}
 
 	// Get tool's config section from ToolsConfig

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 
 	"devsandbox/internal/cmdpattern"
 )
@@ -51,6 +52,22 @@ type FilterConfig struct {
 
 	// WorkspaceID, when set, is the only workspace a tab may be created in.
 	WorkspaceID string
+
+	// CurrentPaneID is the pane herdr created for this process, read from the
+	// host environment. It is host-derived: a report naming any other pane is
+	// denied, and an empty value denies every report.
+	CurrentPaneID string
+
+	// ExpectedAgent is the canonical agent devsandbox was asked to launch,
+	// derived host-side from the command argv and never from a report. A report
+	// claiming a different agent is denied, and an empty value denies every
+	// report.
+	ExpectedAgent string
+
+	// AgentSessionDir bounds agent_session_path. It is host-derived from the
+	// launched agent's own bindings, expressed as the path the sandbox sees,
+	// because that is what the in-sandbox integration reports.
+	AgentSessionDir string
 }
 
 // Filter decides whether a request may reach the herdr server.
@@ -92,6 +109,12 @@ func (f *Filter) Decide(raw []byte) Decision {
 		return f.decideTabClose(d, req)
 	case methodNotificationShow:
 		return f.decideNotificationShow(d, req)
+	case methodPaneReportAgentSession:
+		return f.decidePaneReportAgentSession(d, req)
+	case methodPaneReportAgent:
+		return f.decidePaneReportAgent(d, req)
+	case methodPaneReleaseAgent:
+		return f.decidePaneReleaseAgent(d, req)
 	}
 
 	// Unreachable while methodsFor and this switch agree; deny rather than
@@ -300,6 +323,326 @@ func (f *Filter) decideNotificationShow(d Decision, req request) Decision {
 	d.Allow = true
 	d.Reason = "notification.show"
 	return d
+}
+
+// maxSessionIDBytes and maxStartSourceBytes bound the two sandbox-controlled
+// tokens this filter forwards.
+const (
+	maxSessionIDBytes   = 128
+	maxStartSourceBytes = 64
+	maxSessionPathBytes = 4096
+)
+
+// paneReportAgentSessionParams mirrors herdr v0.7.4's PaneReportAgentSessionParams
+// (7 fields). Anything else is rejected by strictUnmarshal.
+type paneReportAgentSessionParams struct {
+	PaneID             string `json:"pane_id"`
+	Source             string `json:"source"`
+	Agent              string `json:"agent"`
+	Seq                *int64 `json:"seq,omitempty"`
+	AgentSessionID     string `json:"agent_session_id,omitempty"`
+	AgentSessionPath   string `json:"agent_session_path,omitempty"`
+	SessionStartSource string `json:"session_start_source,omitempty"`
+}
+
+// decidePaneReportAgentSession vets a native session report.
+//
+// Every anchor it checks against is host-derived: the pane herdr created for
+// this process and the agent devsandbox was asked to launch. The report can
+// therefore name only itself. No deny or allow reason repeats a session id —
+// these reasons are logged, and the id is the one secret this method carries.
+func (f *Filter) decidePaneReportAgentSession(d Decision, req request) Decision {
+	var p paneReportAgentSessionParams
+	if err := strictUnmarshal(req.Params, &p); err != nil {
+		d.Reason = "pane.report_agent_session: " + err.Error()
+		return d
+	}
+
+	if why := f.agentAnchorReason(p.PaneID, p.Source, p.Agent, p.Seq); why != "" {
+		d.Reason = "pane.report_agent_session: " + why
+		return d
+	}
+
+	if p.AgentSessionID == "" && p.AgentSessionPath == "" {
+		d.Reason = "pane.report_agent_session: neither agent_session_id nor agent_session_path is present"
+		return d
+	}
+
+	// herdr shell-quotes this value and types it into a host pane shell on
+	// restore. Restricting the charset here means the safety of that never
+	// depends on a third-party quoter this project does not version.
+	if p.AgentSessionID != "" && !isRestrictedToken(p.AgentSessionID, maxSessionIDBytes) {
+		d.Reason = "pane.report_agent_session: agent_session_id is not a permitted token"
+		return d
+	}
+
+	// The transcript filename embeds the session id, so a reason naming the path
+	// would leak it just as surely as naming the id.
+	if p.AgentSessionPath != "" {
+		if why := f.agentSessionPathReason(p.AgentSessionPath); why != "" {
+			d.Reason = "pane.report_agent_session: " + why
+			return d
+		}
+	}
+
+	if p.SessionStartSource != "" && !isRestrictedToken(p.SessionStartSource, maxStartSourceBytes) {
+		d.Reason = "pane.report_agent_session: session_start_source is not a permitted token"
+		return d
+	}
+
+	d.Allow = true
+	d.Reason = "pane.report_agent_session for this pane's launched agent"
+	return d
+}
+
+// paneReportAgentParams mirrors herdr v0.7.4's PaneReportAgentParams (8 fields).
+// Pi's integration sends this on every lifecycle transition; Claude's never
+// does. Anything else is rejected by strictUnmarshal.
+type paneReportAgentParams struct {
+	PaneID           string `json:"pane_id"`
+	Source           string `json:"source"`
+	Agent            string `json:"agent"`
+	State            string `json:"state"`
+	Message          string `json:"message,omitempty"`
+	Seq              *int64 `json:"seq,omitempty"`
+	AgentSessionID   string `json:"agent_session_id,omitempty"`
+	AgentSessionPath string `json:"agent_session_path,omitempty"`
+}
+
+// reportAgentStates is the set of lifecycle states a report may carry. herdr's
+// PaneAgentState also decodes "unknown", which is left out because no shipped
+// integration sends it and a state nothing produces is one less value the
+// sandbox can put on the user's screen.
+var reportAgentStates = []string{"idle", "working", "blocked"}
+
+// decidePaneReportAgent vets a lifecycle state report.
+//
+// It carries the same host-derived anchors as the session report, plus a state
+// and a free-text message herdr renders in the pane. The session ref is
+// optional here: Pi attaches it once it knows one, and omits it before then.
+func (f *Filter) decidePaneReportAgent(d Decision, req request) Decision {
+	var p paneReportAgentParams
+	if err := strictUnmarshal(req.Params, &p); err != nil {
+		d.Reason = "pane.report_agent: " + err.Error()
+		return d
+	}
+
+	if why := f.agentAnchorReason(p.PaneID, p.Source, p.Agent, p.Seq); why != "" {
+		d.Reason = "pane.report_agent: " + why
+		return d
+	}
+
+	if !slices.Contains(reportAgentStates, p.State) {
+		d.Reason = fmt.Sprintf("pane.report_agent: state %q is not one of %v", p.State, reportAgentStates)
+		return d
+	}
+
+	// The message is a one-line status label, so a control character in it is
+	// either an escape sequence aimed at the host terminal or a multi-line
+	// provider error that does not belong in a label. Deny rather than rewrite:
+	// forwarding the line untouched is what keeps this method auditable.
+	if why := agentMessageReason(p.Message); why != "" {
+		d.Reason = "pane.report_agent: " + why
+		return d
+	}
+
+	if p.AgentSessionID != "" && !isRestrictedToken(p.AgentSessionID, maxSessionIDBytes) {
+		d.Reason = "pane.report_agent: agent_session_id is not a permitted token"
+		return d
+	}
+	if p.AgentSessionPath != "" {
+		if why := f.agentSessionPathReason(p.AgentSessionPath); why != "" {
+			d.Reason = "pane.report_agent: " + why
+			return d
+		}
+	}
+
+	d.Allow = true
+	d.Reason = "pane.report_agent for this pane's launched agent"
+	return d
+}
+
+// paneReleaseAgentParams mirrors herdr v0.7.4's PaneReleaseAgentParams
+// (4 fields). Pi sends it when the agent process quits.
+type paneReleaseAgentParams struct {
+	PaneID string `json:"pane_id"`
+	Source string `json:"source"`
+	Agent  string `json:"agent"`
+	Seq    *int64 `json:"seq,omitempty"`
+}
+
+// decidePaneReleaseAgent vets the release herdr receives when the agent exits.
+// It carries no payload beyond the anchors, so releasing is only ever possible
+// for this pane's own launched agent.
+func (f *Filter) decidePaneReleaseAgent(d Decision, req request) Decision {
+	var p paneReleaseAgentParams
+	if err := strictUnmarshal(req.Params, &p); err != nil {
+		d.Reason = "pane.release_agent: " + err.Error()
+		return d
+	}
+
+	if why := f.agentAnchorReason(p.PaneID, p.Source, p.Agent, p.Seq); why != "" {
+		d.Reason = "pane.release_agent: " + why
+		return d
+	}
+
+	d.Allow = true
+	d.Reason = "pane.release_agent for this pane's launched agent"
+	return d
+}
+
+// agentAnchorReason applies the host-derived checks every agent report shares,
+// returning the failing rule or "" when the report names only itself. An empty
+// anchor denies rather than matching, so a proxy started without one grants
+// nothing.
+func (f *Filter) agentAnchorReason(paneID, source, agent string, seq *int64) string {
+	if f.cfg.CurrentPaneID == "" {
+		return "no current pane id configured"
+	}
+	if paneID != f.cfg.CurrentPaneID {
+		return fmt.Sprintf("pane %q is not this sandbox's pane", paneID)
+	}
+
+	if f.cfg.ExpectedAgent == "" {
+		return "no launched agent configured"
+	}
+	if agent != f.cfg.ExpectedAgent {
+		return fmt.Sprintf("agent %q is not the launched agent", agent)
+	}
+	// herdr's own source string for every agent in the v0.7.4 table.
+	if want := "herdr:" + f.cfg.ExpectedAgent; source != want {
+		return fmt.Sprintf("source %q is not %q", source, want)
+	}
+
+	if seq != nil && *seq < 0 {
+		return "seq is negative"
+	}
+	return ""
+}
+
+// agentMessageReason bounds the free-text label a state report puts on screen,
+// returning the failing rule or "" when it is acceptable. The message is never
+// repeated in the reason: it can carry an error string naming a session file.
+func agentMessageReason(msg string) string {
+	if len(msg) > maxLabelBytes {
+		return "message exceeds the length limit"
+	}
+	if hasControlRune(msg) {
+		return "message contains a control character"
+	}
+	return ""
+}
+
+// hasControlRune reports whether s contains a character a terminal may act on
+// rather than render.
+//
+// The check is per rune, not per byte: a byte-wise scan for < 0x20 sees only C0,
+// while the C1 controls (U+0080-U+009F, U+009B being CSI) arrive UTF-8-encoded
+// as bytes >= 0xC2 and would pass it - defeating the check in exactly the case
+// it exists for, since herdr renders this text in a host pane. Format characters
+// (Cf) are refused with them: a bidi override or zero-width joiner in a
+// one-line status label can only misrepresent what the user is looking at.
+func hasControlRune(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// agentSessionPathReason validates agent_session_path, returning the failing
+// rule or "" when the path is acceptable. The path is forwarded unmodified.
+//
+// Confinement is deliberately LEXICAL, and pathWithin is deliberately NOT used
+// here: pathWithin resolves symlinks against the host filesystem, while this
+// path names a directory inside the sandbox's overlay that the host cannot see.
+// Resolving a sandbox path host-side proves nothing about what the sandbox
+// would reach, so every ".." component is rejected outright instead of
+// pretending the resolution means something.
+//
+// The charset is restricted for the same reason agent_session_id's is: herdr
+// persists a path-kind session ref exactly as it persists an id, and on restore
+// agent_resume::plan turns either into resume argv that shell_command_from_argv
+// quotes and types into a host pane shell. Pi reports only a path, so for Pi
+// the path IS the value that reaches that shell. Confinement to the session
+// directory bounds where it points, not what it contains - a file the sandbox
+// creates under that directory can still be named `x'; curl ...|sh; '.jsonl` -
+// so the safety of the whole scheme would otherwise rest on an unversioned
+// third-party quoter, which is the trust this filter refuses everywhere else.
+func (f *Filter) agentSessionPathReason(p string) string {
+	if len(p) > maxSessionPathBytes {
+		return "agent_session_path exceeds the length limit"
+	}
+	if !filepath.IsAbs(p) {
+		return "agent_session_path is not absolute"
+	}
+	if hasControlRune(p) {
+		return "agent_session_path contains a control character"
+	}
+	if !isRestrictedPath(p) {
+		return "agent_session_path contains a character outside [A-Za-z0-9._-] and the separator"
+	}
+	if slices.Contains(strings.Split(p, string(filepath.Separator)), "..") {
+		return "agent_session_path contains a \"..\" component"
+	}
+
+	// An unbounded path is not a path this filter can vouch for: deny rather
+	// than skip the confinement check.
+	base := f.cfg.AgentSessionDir
+	if base == "" || !filepath.IsAbs(base) {
+		return "no agent session directory configured to bound agent_session_path"
+	}
+	base = filepath.Clean(base)
+	if !strings.HasPrefix(filepath.Clean(p), base+string(filepath.Separator)) {
+		return "agent_session_path is outside the launched agent's session directory"
+	}
+	return ""
+}
+
+// isRestrictedToken reports whether s is safe to hand to a host shell as a bare
+// word: 1..maxLen bytes of [A-Za-z0-9._-], not starting with a hyphen so it can
+// never be read as a flag, and neither "." nor ".." in case herdr ever uses the
+// value as a path component.
+func isRestrictedToken(s string, maxLen int) bool {
+	if s == "" || len(s) > maxLen {
+		return false
+	}
+	if s[0] == '-' || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isRestrictedByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isRestrictedPath reports whether every byte of p is safe to hand to a host
+// shell as a bare word: the token charset plus the path separator. Component
+// shape is not constrained beyond that - a leading hyphen is harmless in a
+// component of an absolute path, and Claude's own project directories start
+// with one.
+func isRestrictedPath(p string) bool {
+	for i := 0; i < len(p); i++ {
+		if p[i] != '/' && !isRestrictedByte(p[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isRestrictedByte(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z':
+	case c >= 'a' && c <= 'z':
+	case c >= '0' && c <= '9':
+	case c == '.' || c == '_' || c == '-':
+	default:
+		return false
+	}
+	return true
 }
 
 // strictUnmarshal decodes params and rejects any field the struct does not

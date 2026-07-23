@@ -1,10 +1,53 @@
 package tools
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// TestClaude_AgentSessionDirMatchesProjectsBinding pins the invariant the herdr
+// filter's path confinement rests on: the bound it is given and the directory
+// Claude's sessions are actually persisted in are the same path. If these ever
+// disagree, every real session report is denied.
+func TestClaude_AgentSessionDirMatchesProjectsBinding(t *testing.T) {
+	const homeDir = "/home/test"
+
+	tests := []struct {
+		name      string
+		configDir string
+		want      string
+	}{
+		{name: "default", configDir: "", want: filepath.Join(homeDir, ".claude", "projects")},
+		{name: "CLAUDE_CONFIG_DIR", configDir: "/etc/claude-config", want: "/etc/claude-config/projects"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", tt.configDir)
+
+			c := &Claude{}
+			got := c.AgentSessionDir(homeDir)
+			if got != tt.want {
+				t.Errorf("AgentSessionDir = %q, want %q", got, tt.want)
+			}
+
+			found := false
+			for _, b := range c.Bindings(homeDir, "/tmp/sandbox") {
+				if b.Source == got {
+					found = true
+					if b.Category != CategoryData {
+						t.Errorf("binding for %q has category %q, want %q", got, b.Category, CategoryData)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("AgentSessionDir %q is not among Claude's bindings", got)
+			}
+		})
+	}
+}
 
 func TestClaude_Bindings_DefaultPaths(t *testing.T) {
 	// When CLAUDE_CONFIG_DIR is not set, default bindings should include ~/.claude
@@ -257,5 +300,89 @@ func TestClaude_Check_CustomConfigDir(t *testing.T) {
 
 	if !foundCustom {
 		t.Errorf("Check() should include CLAUDE_CONFIG_DIR in config paths, got: %v", result.ConfigPaths)
+	}
+}
+
+// The projects binding is Optional, and the builder skips an Optional overlay
+// whose host source is missing while ~/.claude itself stays a tmpoverlay - so
+// without this the transcripts of a host-authenticated, sandbox-only user are
+// discarded at exit and a captured herdr session resolves to nothing.
+func TestClaude_SetupCreatesProjectsDirUnderAnExistingClaudeHome(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	homeDir := t.TempDir()
+	claudeHome := filepath.Join(homeDir, ".claude")
+	if err := os.MkdirAll(claudeHome, 0o700); err != nil {
+		t.Fatalf("create claude home: %v", err)
+	}
+
+	c := &Claude{}
+	projects := c.AgentSessionDir(homeDir)
+	if _, err := os.Stat(projects); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("precondition: projects dir must not exist yet, stat err = %v", err)
+	}
+
+	if err := c.Setup(homeDir, "/tmp/sandbox"); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	info, err := os.Stat(projects)
+	if err != nil {
+		t.Fatalf("Setup did not create %s: %v", projects, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", projects)
+	}
+
+	found := false
+	for _, b := range c.Bindings(homeDir, "/tmp/sandbox") {
+		if b.Source == projects {
+			found = true
+			if b.Category != CategoryData {
+				t.Errorf("projects binding category = %q, want %q", b.Category, CategoryData)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no binding for %q", projects)
+	}
+}
+
+// Nothing is created when the Claude home is absent: no tmpoverlay is mounted
+// there in that case, so in-sandbox writes already persist and creating host
+// state for a tool the user never configured would be a side effect.
+func TestClaude_SetupCreatesNothingWithoutAClaudeHome(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	homeDir := t.TempDir()
+	c := &Claude{}
+	if err := c.Setup(homeDir, "/tmp/sandbox"); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".claude")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Setup created ~/.claude, stat err = %v", err)
+	}
+}
+
+// CLAUDE_CONFIG_DIR must move Setup with the bindings: creating projects/ under
+// ~/.claude while the overlay is declared under the custom dir would leave the
+// real source missing and the overlay skipped.
+func TestClaude_SetupHonorsClaudeConfigDir(t *testing.T) {
+	homeDir := t.TempDir()
+	custom := filepath.Join(t.TempDir(), "claude-config")
+	if err := os.MkdirAll(custom, 0o700); err != nil {
+		t.Fatalf("create custom config dir: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", custom)
+
+	c := &Claude{}
+	if err := c.Setup(homeDir, "/tmp/sandbox"); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(custom, "projects")); err != nil {
+		t.Fatalf("Setup did not create projects under CLAUDE_CONFIG_DIR: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".claude")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Setup touched ~/.claude despite CLAUDE_CONFIG_DIR, stat err = %v", err)
 	}
 }

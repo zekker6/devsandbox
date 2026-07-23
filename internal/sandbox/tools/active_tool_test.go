@@ -63,3 +63,48 @@ func TestActiveTool_Interface(t *testing.T) {
 		t.Error("expected stopped=true after Stop()")
 	}
 }
+
+// configRecordingTool captures the GlobalConfig the runner hands to Configure.
+type configRecordingTool struct {
+	mockActiveTool
+	seen GlobalConfig
+}
+
+func (c *configRecordingTool) Configure(globalCfg GlobalConfig, _ map[string]any) {
+	c.seen = globalCfg
+}
+
+// TestActiveToolsRunner_PropagatesLaunchedAgent pins the path the agent name
+// travels: command argv -> ActiveToolsConfig -> GlobalConfig -> the tool. It is
+// the only trusted source of agent identity, so a break here would leave the
+// herdr filter with no anchor to bind reports to.
+func TestActiveToolsRunner_PropagatesLaunchedAgent(t *testing.T) {
+	// Keep the real active tools out of it: this test is about plumbing, and
+	// whether the machine running it happens to be inside a herdr or kitty
+	// session must not change the result.
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("KITTY_LISTEN_ON", "")
+
+	tool := &configRecordingTool{mockActiveTool: mockActiveTool{name: "config-recording-tool"}}
+	Register(tool)
+	defer Unregister(tool.Name())
+
+	start, cleanup := NewActiveToolsRunner(ActiveToolsConfig{
+		HomeDir:       t.TempDir(),
+		SandboxHome:   shortSocketDir(t),
+		ProjectDir:    "/work/proj",
+		LaunchedAgent: "claude",
+	}, nil)
+	defer cleanup()
+
+	if _, err := start(t.Context()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if tool.seen.LaunchedAgent != "claude" {
+		t.Errorf("LaunchedAgent = %q, want %q", tool.seen.LaunchedAgent, "claude")
+	}
+	if tool.seen.ProjectDir != "/work/proj" {
+		t.Errorf("ProjectDir = %q, want the configured project dir", tool.seen.ProjectDir)
+	}
+}

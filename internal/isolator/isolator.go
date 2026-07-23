@@ -91,6 +91,12 @@ type Config struct {
 	// GitRepoRoot is the main git repo root when ProjectDir is a worktree.
 	// Empty in non-worktree mode.
 	GitRepoRoot string
+	// LaunchedAgent is the canonical name of the AI agent devsandbox was asked
+	// to run, or empty when the command is not a known agent. Tools that key
+	// behavior on agent identity must take it from here: it is derived
+	// host-side from the command argv and never from anything the sandbox
+	// reports.
+	LaunchedAgent string
 	// SandboxHome is the per-project sandbox home directory.
 	SandboxHome string
 	// SandboxRoot is the per-project state directory that holds SandboxHome.

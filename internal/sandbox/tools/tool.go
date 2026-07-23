@@ -145,6 +145,13 @@ type GlobalConfig struct {
 	// tool's .git bindings) should prefer this over ProjectDir whenever it is
 	// non-empty and different from ProjectDir.
 	GitRepoRoot string
+
+	// LaunchedAgent is the canonical name of the AI agent devsandbox was asked
+	// to run, derived host-side from the command argv. Empty when the command
+	// is not a known agent — including when the user launches a shell and types
+	// the agent name inside it. Tools must treat it as the only trusted source
+	// of agent identity; nothing reported from inside the sandbox may set it.
+	LaunchedAgent string
 }
 
 // ToolWithConfig extends Tool with configuration support.
@@ -261,6 +268,20 @@ type ToolWithHerdrRequirements interface {
 	// HerdrCapabilities returns the herdr capabilities this tool needs.
 	// Returning an empty slice means "do not enable herdr for me."
 	HerdrCapabilities() []herdrproxy.Capability
+}
+
+// ToolWithAgentSessionDir is implemented by agent tools whose native session
+// records live in a known directory.
+//
+// The path returned is the one the SANDBOX sees, because that is what the
+// in-sandbox integration reports and therefore what the herdr proxy filter
+// bounds agent_session_path against. It is host-computed only because the
+// sandbox's HOME is the host home path and the agent's config-dir environment
+// is passed through unchanged.
+type ToolWithAgentSessionDir interface {
+	Tool
+
+	AgentSessionDir(homeDir string) string
 }
 
 // ToolWithHerdrLaunchScript is implemented by tools that declare a launch

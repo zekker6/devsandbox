@@ -167,6 +167,8 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine ([coverage](docs/proxy.md#redaction-coverage))
 - **Resource limits** - optional memory, CPU and process caps that apply to every backend ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited
+- **Agent shell wrappers** - opt-in shell functions so `claude` means `devsandbox claude`, with `claude-no-ds` and `command claude` as escape hatches ([details](docs/tools.md#shell-wrappers---run-agents-sandboxed-by-default))
+- **herdr agent session restore** - a sandboxed agent reports its native session through the filtered herdr proxy, and a restored pane resumes it back inside the sandbox ([details](docs/tools.md#agent-session-capture-and-restore))
 - **Git modes** - readonly (default), readwrite (with SSH/GPG), or disabled
 - **Desktop notifications** - sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
 
@@ -210,6 +212,9 @@ devsandbox --isolation=docker npm install
 
 # Ephemeral sandbox (removed after exit)
 devsandbox --rm
+
+# Make supported agents sandboxed by default: `claude` becomes `devsandbox claude`
+devsandbox agent-wrappers install
 ```
 
 ## Git Integration
@@ -362,6 +367,9 @@ devsandbox logs proxy               # View proxy logs
 devsandbox logs proxy -f            # Follow logs in real-time
 devsandbox tools list               # List available tools
 devsandbox tools check              # Verify tool setup
+devsandbox agent-wrappers install   # Make `claude` run sandboxed by default
+devsandbox agent-wrappers status    # Show what is wrapped and whether it is current
+devsandbox run-agent claude ...     # Wrapper entrypoint: re-enter the sandbox
 devsandbox image build              # Build Docker image (macOS)
 ```
 

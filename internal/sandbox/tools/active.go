@@ -14,6 +14,10 @@ type ActiveToolsConfig struct {
 	ProjectDir       string
 	GitRepoRoot      string
 	ToolsConfig      map[string]any
+
+	// LaunchedAgent is the canonical agent name derived from the command argv,
+	// or empty when the command is not a known agent.
+	LaunchedAgent string
 }
 
 // ActiveToolsRunner manages the lifecycle of active tools.
@@ -63,6 +67,7 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 				ProjectDir:       r.cfg.ProjectDir,
 				HomeDir:          r.cfg.HomeDir,
 				GitRepoRoot:      r.cfg.GitRepoRoot,
+				LaunchedAgent:    r.cfg.LaunchedAgent,
 			}
 			var toolCfg map[string]any
 			if r.cfg.ToolsConfig != nil {

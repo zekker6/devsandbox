@@ -1040,6 +1040,114 @@ func TestResolveBindingType(t *testing.T) {
 	}
 }
 
+// launchedAgentRecorder captures the GlobalConfig AddTools hands to Configure.
+type launchedAgentRecorder struct{ seen tools.GlobalConfig }
+
+func (r *launchedAgentRecorder) Name() string                                     { return "launched-agent-recorder" }
+func (r *launchedAgentRecorder) Description() string                              { return "test tool" }
+func (r *launchedAgentRecorder) Available(string) bool                            { return true }
+func (r *launchedAgentRecorder) Bindings(_, _ string) []tools.Binding             { return nil }
+func (r *launchedAgentRecorder) Environment(_, _ string) []tools.EnvVar           { return nil }
+func (r *launchedAgentRecorder) ShellInit(string) string                          { return "" }
+func (r *launchedAgentRecorder) Configure(g tools.GlobalConfig, _ map[string]any) { r.seen = g }
+
+// TestAddTools_PropagatesLaunchedAgent pins the second half of the agent-name
+// path. AddTools re-Configures every tool, and it runs AFTER the active-tool
+// runner has already started them - so a GlobalConfig built without
+// LaunchedAgent here does not merely fail to set the anchor, it zeroes the one
+// the running herdr proxy was built on.
+func TestAddTools_PropagatesLaunchedAgent(t *testing.T) {
+	rec := &launchedAgentRecorder{}
+	tools.Register(rec)
+	defer tools.Unregister(rec.Name())
+
+	NewBuilder(&Config{
+		HomeDir:       t.TempDir(),
+		SandboxHome:   t.TempDir(),
+		ProjectDir:    "/work/proj",
+		LaunchedAgent: "claude",
+	}).AddTools()
+
+	if rec.seen.LaunchedAgent != "claude" {
+		t.Errorf("LaunchedAgent = %q, want %q", rec.seen.LaunchedAgent, "claude")
+	}
+}
+
+// TestResolveBindingType_CodexSessionsArePersistent proves the split the Codex
+// tool declares survives mount-mode resolution under the default policy: the
+// session records `codex resume <id>` reads get a persistent overlay, while the
+// Codex home holding config.toml and auth.json stays on tmpoverlay. Asserting
+// the categories alone would not catch a policy change that maps CategoryData
+// back to a discarded layer.
+func TestResolveBindingType_CodexSessionsArePersistent(t *testing.T) {
+	t.Setenv("CODEX_HOME", "")
+
+	codex := &tools.Codex{}
+	sessionsDir := codex.AgentSessionDir("/home/test")
+
+	want := map[string]tools.MountType{
+		"/home/test/.codex": tools.MountTmpOverlay,
+		sessionsDir:         tools.MountOverlay,
+	}
+
+	seen := make(map[string]tools.MountType)
+	for _, b := range codex.Bindings("/home/test", "/tmp/sandbox") {
+		ResolveBindingType(&b, "", "")
+		seen[b.Source] = b.Type
+	}
+
+	for source, wantType := range want {
+		got, ok := seen[source]
+		if !ok {
+			t.Errorf("no binding for %q", source)
+			continue
+		}
+		if got != wantType {
+			t.Errorf("binding %q resolved to %q, want %q", source, got, wantType)
+		}
+	}
+}
+
+// TestResolveBindingType_ClaudeHomeIsNeverBoundReadWrite pins the invariant the
+// herdr session work rests on: the host's ~/.claude tree is never handed to the
+// sandbox as a writable bind under the shipped policy. Transcripts must land in
+// an overlay whose upper lives under the per-project sandbox root, so a session
+// id captured in-sandbox names a sandbox-owned transcript rather than a host one.
+//
+// Both directory bindings are checked under the default policy and under an
+// explicit global "split", since only the latter is written out in config files.
+func TestResolveBindingType_ClaudeHomeIsNeverBoundReadWrite(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	claude := &tools.Claude{}
+	sessionsDir := claude.AgentSessionDir("/home/test")
+
+	dirs := map[string]bool{
+		"/home/test/.claude": true,
+		sessionsDir:          true,
+	}
+
+	for _, globalMode := range []string{"", "split"} {
+		seen := 0
+		for _, b := range claude.Bindings("/home/test", "/tmp/sandbox") {
+			if !dirs[b.Source] {
+				continue
+			}
+			seen++
+			ResolveBindingType(&b, "", globalMode)
+			if b.Type == tools.MountBind && !b.ReadOnly {
+				t.Errorf("global mode %q: %q resolved to a writable bind of the host directory", globalMode, b.Source)
+			}
+			if b.Type != tools.MountTmpOverlay && b.Type != tools.MountOverlay {
+				t.Errorf("global mode %q: %q resolved to %q, want an overlay", globalMode, b.Source, b.Type)
+			}
+		}
+		if seen != len(dirs) {
+			t.Errorf("global mode %q: checked %d of %d Claude directory bindings", globalMode, seen, len(dirs))
+		}
+	}
+}
+
 // TestBuilder_AddProjectBindings_WorktreeLeavesMainRepoAlone verifies that
 // when ProjectDir is a worktree path (GitRepoRoot set and distinct), the
 // project bindings mount only the worktree — the main repo tree must not

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,16 @@ func (c *Claude) Available(homeDir string) bool {
 	return false
 }
 
+// stateDir returns the host path of the Claude directory whose projects/
+// subdirectory holds session history: CLAUDE_CONFIG_DIR when set, otherwise
+// ~/.claude.
+func (c *Claude) stateDir(homeDir string) string {
+	if dir := c.configDir(); dir != "" {
+		return dir
+	}
+	return filepath.Join(homeDir, ".claude")
+}
+
 func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 	bindings := []Binding{
 		// Claude Code system installation (npm global) — explicit escape hatch, read-only
@@ -78,7 +89,7 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 				Optional: true,
 			},
 			Binding{
-				Source:   filepath.Join(dir, "projects"),
+				Source:   c.AgentSessionDir(homeDir),
 				Category: CategoryData,
 				Optional: true,
 			},
@@ -93,7 +104,7 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 				Optional: true,
 			},
 			Binding{
-				Source:   filepath.Join(homeDir, ".claude", "projects"),
+				Source:   c.AgentSessionDir(homeDir),
 				Category: CategoryData,
 				Optional: true,
 			},
@@ -138,6 +149,38 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 	)
 
 	return bindings
+}
+
+// AgentSessionDir implements ToolWithAgentSessionDir. It reuses configDir() so
+// the bound this returns cannot disagree with the projects binding Bindings
+// emits — the two must name the same directory or the herdr proxy would deny
+// every real session report.
+func (c *Claude) AgentSessionDir(homeDir string) string {
+	return filepath.Join(c.stateDir(homeDir), "projects")
+}
+
+// Setup creates the host projects directory so the persistent overlay declared
+// for it actually applies.
+//
+// The binding is Optional, and the builder skips an Optional overlay whose host
+// source is missing. A user who authenticated claude on the host but only ever
+// runs it sandboxed therefore has ~/.claude present — tmpoverlay, writes
+// discarded — and projects/ absent, so every transcript would vanish with the
+// sandbox even with the split binding in place, and a session herdr captured
+// would resolve to nothing on restore.
+//
+// Nothing is created when the Claude directory itself is absent: no tmpoverlay
+// is mounted in that case, so writes already land in the sandbox home and
+// persist.
+func (c *Claude) Setup(homeDir, _ string) error {
+	if _, err := os.Stat(c.stateDir(homeDir)); err != nil {
+		return nil
+	}
+	projects := c.AgentSessionDir(homeDir)
+	if err := os.MkdirAll(projects, 0o700); err != nil {
+		return fmt.Errorf("create claude projects directory %s: %w", projects, err)
+	}
+	return nil
 }
 
 func (c *Claude) Environment(homeDir, sandboxHome string) []EnvVar {
@@ -192,3 +235,11 @@ func (c *Claude) Check(homeDir string) CheckResult {
 
 	return result
 }
+
+// Ensure interfaces are implemented.
+var (
+	_ Tool                    = (*Claude)(nil)
+	_ ToolWithCheck           = (*Claude)(nil)
+	_ ToolWithSetup           = (*Claude)(nil)
+	_ ToolWithAgentSessionDir = (*Claude)(nil)
+)

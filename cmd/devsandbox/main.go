@@ -17,8 +17,10 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"devsandbox/internal/agentid"
 	"devsandbox/internal/config"
 	"devsandbox/internal/embed"
+	"devsandbox/internal/herdrstate"
 	"devsandbox/internal/isolator"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
@@ -123,6 +125,8 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newOverlayCmd())
 	rootCmd.AddCommand(newForwardCmd())
 	rootCmd.AddCommand(newNSDialCmd())
+	rootCmd.AddCommand(newRunAgentCmd())
+	rootCmd.AddCommand(newAgentWrappersCmd())
 
 	versionTpl := fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date)
 	if runtime.GOOS == "linux" {
@@ -366,6 +370,18 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if err := cfg.EnsureSandboxDirs(); err != nil {
+		return err
+	}
+
+	// Derive the launched agent once, here, so the pane record, the active-tool
+	// runner and the builder's tool configuration cannot disagree about it.
+	cfg.LaunchedAgent = agentid.CanonicalAgent(args)
+
+	// Record which sandbox launch owns the current herdr pane. Runs after
+	// worktree resolution above has settled ProjectDir and SandboxRoot, since
+	// the recorded root is what the restore-time worktree guard compares
+	// against.
+	if err := recordHerdrPaneMapping(cfg); err != nil {
 		return err
 	}
 
@@ -809,6 +825,7 @@ func printToolMounts(cfg *sandbox.Config) {
 		ProjectDir:       cfg.ProjectDir,
 		HomeDir:          cfg.HomeDir,
 		GitRepoRoot:      cfg.GitRepoRoot,
+		LaunchedAgent:    cfg.LaunchedAgent,
 	}
 	for _, tool := range tools.Available(homeDir) {
 		if configurable, ok := tool.(tools.ToolWithConfig); ok {
@@ -1104,9 +1121,52 @@ func wrapperLogPath() string {
 	return filepath.Join(base, "devsandbox", "wrapper.log")
 }
 
+// herdrPaneRecord returns the pane mapping to write for this launch, and false
+// when there is nothing to record.
+//
+// Both anchors are host-derived: the pane herdr created for this process and
+// the agent devsandbox was asked to launch. Not being inside a herdr pane, or
+// launching something other than a known agent, is the ordinary case rather
+// than an error.
+func herdrPaneRecord(cfg *sandbox.Config) (herdrstate.Record, bool) {
+	paneID := os.Getenv("HERDR_PANE_ID")
+	if paneID == "" || cfg.LaunchedAgent == "" {
+		return herdrstate.Record{}, false
+	}
+	return herdrstate.Record{
+		PaneID:      paneID,
+		Agent:       cfg.LaunchedAgent,
+		ProjectDir:  cfg.ProjectDir,
+		SandboxRoot: cfg.SandboxRoot,
+	}, true
+}
+
+// recordHerdrPaneMapping persists the pane mapping for this launch. A write
+// failure is reported rather than swallowed: silently skipping it would leave
+// a later restore unable to detect a worktree session and start a fresh one
+// while appearing to resume.
+func recordHerdrPaneMapping(cfg *sandbox.Config) error {
+	rec, ok := herdrPaneRecord(cfg)
+	if !ok {
+		return nil
+	}
+	store, err := herdrstate.DefaultStore()
+	if err != nil {
+		return fmt.Errorf("record herdr pane mapping: %w", err)
+	}
+	if err := store.Save(rec); err != nil {
+		return fmt.Errorf("record herdr pane mapping: %w", err)
+	}
+	return nil
+}
+
 // createActiveToolsRunner creates an active tools runner with the sandbox configuration.
 // Returns a start function and a cleanup function.
 // The start function returns true if any tools were started.
+//
+// cfg.LaunchedAgent is the only trusted source of agent identity: tools that key
+// behavior on which agent is running must take it from there, never from
+// anything reported by the sandbox.
 func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Context) (bool, error), cleanup func()) {
 	// Create error logger for active tools
 	logDir := filepath.Join(cfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
@@ -1124,6 +1184,7 @@ func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Contex
 		ProjectDir:       cfg.ProjectDir,
 		GitRepoRoot:      cfg.GitRepoRoot,
 		ToolsConfig:      cfg.ToolsConfig,
+		LaunchedAgent:    cfg.LaunchedAgent,
 	}
 
 	return tools.NewActiveToolsRunner(toolsCfg, errorLogger)

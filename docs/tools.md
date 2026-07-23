@@ -303,6 +303,49 @@ For other editors, mount their config directories manually or use the sandbox ho
 
 AI coding assistants execute arbitrary code - installing packages, running builds, making network requests. Running them inside devsandbox ensures they can do their job without accessing your credentials, keys, or secrets.
 
+### Shell wrappers - run agents sandboxed by default
+
+Remembering to type `devsandbox` first is the weak point. `devsandbox agent-wrappers` installs shell functions so supported agents go through the sandbox automatically:
+
+```bash
+devsandbox agent-wrappers install     # generate + install the snippet for your shell
+devsandbox agent-wrappers status      # what is installed, and whether it is current
+devsandbox agent-wrappers uninstall   # remove it
+```
+
+All three take `--shell fish|bash|zsh`, defaulting to the base name of `$SHELL`. `install` fails when none of `claude`, `pi`, `codex` are on the host - there would be nothing to wrap.
+
+With the wrappers installed:
+
+```bash
+claude                # -> devsandbox claude, in the current directory
+claude --resume ID    # arguments pass through untouched
+claude-no-ds          # escape hatch: the real binary, unsandboxed
+command claude        # escape hatch: the real binary, unsandboxed
+```
+
+Only agents actually installed on your host are wrapped. The snippet bakes in devsandbox's absolute path, so a login shell with a different `PATH` still resolves it. Re-run `install` after installing a new agent or moving the devsandbox binary; `status` reports the snippet as out of date until you do.
+
+**Where the snippet goes, and what devsandbox will not touch:**
+
+| Shell | Install path | Activation |
+|-------|--------------|------------|
+| fish | `$XDG_CONFIG_HOME/fish/conf.d/devsandbox-agents.fish` | automatic - it is a drop-in, no existing file is edited |
+| bash | `$XDG_CONFIG_HOME/devsandbox/agent-wrappers.bash` | you add the printed `source` line to your startup file |
+| zsh | `$XDG_CONFIG_HOME/devsandbox/agent-wrappers.zsh` | you add the printed `source` line to your startup file |
+
+devsandbox never edits `~/.bashrc`, `~/.zshrc`, or any other startup file - `install` prints the line and `uninstall` prints it back so you can remove it. The printed line is existence-guarded (`[ -r … ] && . …`) on purpose: rc files are mounted into the sandbox while `~/.config/devsandbox` is not, so an unguarded `source` would error on every in-sandbox shell start. `install` and `uninstall` also refuse to touch a file that does not carry the generated header, so a hand-written file of the same name is safe.
+
+**Scope, stated exactly.** fish sources `conf.d` for non-interactive `fish -c` invocations too, so a fish script calling `claude` gets the wrapper. bash and zsh only source their rc file for interactive shells, so scripts there are unaffected. Inside a sandbox nothing is wrapped at all: the whole snippet is guarded on `DEVSANDBOX`, which the sandbox sets.
+
+Each wrapper calls `devsandbox run-agent <agent>`, which decides what to do: inside a sandbox it runs the real agent (so the wrapper cannot recurse), and outside it re-enters devsandbox in the current directory.
+
+The snippet bakes in devsandbox's absolute path, because a herdr pane shell may be a login shell whose `PATH` does not include the one that ran `install` (mise shims being the usual case). If that path no longer exists - `mise use -g` installs into a version-scoped directory, so an upgrade moves the binary - the wrapper fails closed with `devsandbox: no executable at <path> - run 'devsandbox agent-wrappers install' to refresh the wrappers` and exits 127. It deliberately does not fall back to a `PATH` lookup: `PATH` may name a project-local bin directory that sandboxed code can write, and resolving devsandbox through it would run that binary on the host, outside the sandbox. Re-run `install` after an upgrade; `status` reports the snippet as out of date until you do.
+
+The wrappers are a standalone feature, independent of herdr. herdr's native session restore builds on them, so `status` also reports the shell herdr starts panes with (`[terminal] default_shell`, falling back to `$SHELL`) and warns when that shell has no snippet. See [Agent session capture and restore](#agent-session-capture-and-restore).
+
+To undo everything: `devsandbox agent-wrappers uninstall`, then remove the `source` line it prints from your startup file.
+
 ### Claude Code
 
 Claude Code is fully supported:
@@ -326,6 +369,12 @@ Configuration directories are mounted read-write to allow Claude to save setting
 ```
 
 These directories are isolated to the sandbox home - not your real host directories. Claude's conversation state and settings persist across sandbox sessions for the same project but are not shared with your host.
+
+Inside a herdr pane, a direct `devsandbox claude` launch lets Claude's herdr
+integration report its native session to herdr through the filtered proxy, so
+herdr can resume it (`claude --resume <id>`) after a restart. Reports are
+confined to `~/.claude/projects` (honoring `CLAUDE_CONFIG_DIR`). See
+[herdr Terminal Workspace](#herdr-terminal-workspace).
 
 ### aider
 
@@ -372,6 +421,38 @@ The `~/.pi/agent` directory (containing `settings.json` and `auth.json`) is
 mounted with tmpoverlay so API keys and settings are shielded from sandbox
 code. Session history in `~/.pi/agent/sessions` uses a persistent overlay so
 conversations survive across sandbox sessions for the same project.
+
+Inside a herdr pane, a direct `devsandbox pi` launch lets Pi's herdr
+integration report its agent state and native session to herdr through the
+filtered proxy. Reports are confined to `~/.pi/agent/sessions` (honoring
+`PI_CODING_AGENT_DIR`), so a report naming any other path - `auth.json`
+included - is denied. See [herdr Terminal Workspace](#herdr-terminal-workspace).
+
+### Codex CLI
+
+[Codex](https://github.com/openai/codex) is fully supported:
+
+```bash
+devsandbox codex
+```
+
+Configuration directories are mounted with credential protection:
+
+```
+~/.codex           → Sandbox (protected: config.toml + auth credentials)
+~/.codex/sessions  → Sandbox (persistent: recorded sessions preserved)
+```
+
+The Codex home is mounted with tmpoverlay so `auth.json` and `config.toml` are
+shielded from sandbox code, while `~/.codex/sessions` uses a persistent overlay
+so `codex resume <id>` can find a session recorded in an earlier sandbox run.
+Both honor `CODEX_HOME`, whose host value is passed through so codex resolves
+the same path inside.
+
+Inside a herdr pane, a direct `devsandbox codex` launch lets Codex's herdr
+integration report its native session to herdr through the filtered proxy, so
+herdr can resume it (`codex resume <id>`) after a restart. See
+[herdr Terminal Workspace](#herdr-terminal-workspace).
 
 ### GitHub Copilot
 
@@ -662,7 +743,7 @@ This is the same model as kitty, and the opposite of zellij: herdr speaks newlin
 
 ### Why filtering is necessary
 
-herdr exposes 84 methods. Handing the raw socket to sandboxed code would grant `pane.read` (read any pane's contents, including other terminals), `pane.send_text` and `agent.send` (type into any pane), `worktree.*` (mutate git state), `plugin.*` (load code), and `server.stop`. Only the methods below are reachable through the proxy; everything else is denied.
+herdr exposes 86 methods. Handing the raw socket to sandboxed code would grant `pane.read` (read any pane's contents, including other terminals), `pane.send_text` and `agent.send` (type into any pane), `worktree.*` (mutate git state), `plugin.*` (load code), and `server.stop`. Only the methods below are reachable through the proxy; everything else is denied.
 
 ### Activation
 
@@ -672,6 +753,8 @@ The proxy starts when all of:
 2. The `herdr` binary is on PATH.
 3. The host control socket exists (`$HERDR_SOCKET_PATH`, else `~/.config/herdr/herdr.sock`).
 4. At least one enabled tool declares a herdr capability, or `mode = "enforce"` is set.
+
+**Behavior change.** Launching a supported agent directly - `devsandbox claude`, `devsandbox pi`, `devsandbox codex` - now satisfies condition 4 on its own, because that launch enables `agent_reporting`. Such a command inside a herdr pane previously started no proxy at all; it now starts one, binds the proxy socket into the sandbox, and prints the usual `herdr proxy active` notice. Since `auto` mode can now reach the socket check for an ordinary agent launch, an unreachable or stale host socket is a warning there rather than a launch failure - the sandbox starts without a proxy. Under `mode = "enforce"`, where the proxy was asked for explicitly, it is still a hard error.
 
 ### Configuration
 
@@ -694,6 +777,7 @@ There is deliberately no `extra_capabilities` setting as kitty has: with this fe
 |------------|---------|
 | `launch_overlay` | `tab.create`, then `pane.send_input` and `tab.close` **scoped to the tab and pane that call returned** |
 | `notify` | `notification.show` |
+| `agent_reporting` | `pane.report_agent_session`, `pane.report_agent`, `pane.release_agent`, **all confined to this sandbox's own pane and the agent devsandbox launched** |
 
 `ping` is permitted unconditionally, independent of declared capabilities. It is a liveness handshake that observes and mutates nothing, returning only the server's version, protocol number, and feature flags - strictly less than a successful `connect(2)` to the socket already reveals. Without it `herdr status` fails, which is a poor signal for no safety gain. One consequence: under `mode = "enforce"` the proxy answers `ping` and denies everything else.
 
@@ -708,6 +792,46 @@ The proxy therefore reads the script **once**, validates the bytes against the d
 One consequence is user-visible: the command shown in the herdr pane names the relocated copy, not the original path. Relocated scripts are removed when the sandbox exits.
 
 The program named inside the script is pinned to its resolved absolute path, for the same reason described in the kitty section.
+
+### Agent session capture and restore
+
+herdr can remember which agent a pane was running and, after the server restarts, resume that agent by typing its own resume command back into the restored pane (`claude --resume <id>`, `pi --session <id>`, `codex resume <id>`). Both halves need help to work for an agent running inside devsandbox: the report has to cross the filtered proxy, and the resume command has to re-enter the sandbox instead of running the agent on the host.
+
+**What `agent_reporting` permits.** Exactly three methods, all of which only tell herdr *what* the pane is running:
+
+| Method | Sent by | Purpose |
+|--------|---------|---------|
+| `pane.report_agent_session` | Claude, Pi, Codex | the agent's native session ID and/or transcript path |
+| `pane.report_agent` | Pi | the same, plus a status label (`idle`, `working`, `blocked`) |
+| `pane.release_agent` | Pi | the agent is exiting |
+
+**What it deliberately does not permit.** No pane reads, no input injection, no host execution, no `pane.clear_agent_authority`. Every report is bound to two anchors derived on the host, never from the report itself: the pane ID herdr gave this devsandbox process (`HERDR_PANE_ID`), and the agent devsandbox was asked to launch. A report naming another pane, or claiming to be another agent, is denied. The session ID is restricted to `[A-Za-z0-9._-]` and capped at 128 bytes - herdr shell-quotes that value and types it into a host pane shell on restore, so it is treated as hostile input rather than trusted to a third-party quoter. The transcript path must be absolute, control-character free, restricted to `[A-Za-z0-9._-]` plus `/`, contain no `..`, and sit inside that agent's own session directory (`~/.claude/projects`, `~/.pi/agent/sessions`, `~/.codex/sessions`), so a report cannot name `auth.json`. The path carries the same charset restriction as the session ID because herdr persists a path-kind session ref exactly as it persists an ID and types either back into a host pane shell on restore - and Pi reports only a path. Confinement bounds where the path points, not what it is named, so a session under a directory whose name falls outside that charset is not captured.
+
+**Activation.** `agent_reporting` is enabled only for a **direct** `devsandbox <agent>` launch inside a herdr pane - both anchors have to exist. Running `devsandbox` to get a shell and then typing `claude` inside it leaves the launched agent unknown, so the capability is never enabled and the in-sandbox integration's report is denied. `devsandbox tools check herdr` reports whether agent reporting is active and, when it is not, which anchor is missing.
+
+**Setting up restore.** Capture alone is not enough: herdr's resume command is compiled into its binary as a bare `claude --resume <id>`, which would run the host agent against a different, host-side session store. herdr delivers that command as typed input to the pane's shell, so the [shell wrappers](#shell-wrappers---run-agents-sandboxed-by-default) intercept it and re-enter the sandbox.
+
+1. `devsandbox agent-wrappers install` - **for the shell herdr starts panes with**, which is not necessarily your login shell. `devsandbox agent-wrappers status` reads herdr's `[terminal] default_shell` and warns when that shell has no snippet; `install --shell fish` targets another shell.
+2. For bash and zsh, add the printed `source` line to your startup file.
+3. Restart the herdr server so new panes pick up the snippet.
+
+**What is written on the host.** Launching an agent from a herdr pane records one JSON file per pane under `$XDG_STATE_HOME/devsandbox/herdr-panes/` (`~/.local/state/devsandbox/herdr-panes/` when unset), directory `0700`, files `0600`. Each record names the pane, the agent, the project directory and the sandbox state root that launch used - it is what the restore guard below compares against. The pane ID is hashed into the filename, so an opaque herdr-supplied string never influences a path, and the store lives outside every path mounted into the sandbox, so sandboxed code cannot read or write it. Records are **not** pruned by `devsandbox sandboxes prune` or `--rm`; delete the directory to clear them.
+
+**Restoring into the right sandbox.** A recorded session is reachable again only from the directory it was launched in: the agent's session store lives in the synthetic home under that launch's sandbox state root, and the agent keys its own sessions by project path. When a resume-shaped command reaches a pane, `run-agent` checks the record before re-entering, and refuses when the current directory would reach neither the same project directory nor the same sandbox state root. Resume-shaped means herdr's own argv (`claude --resume ID`, `pi --session ID`, `codex resume ID`) plus the agent's own equivalents you may type by hand - `claude -c` / `claude --continue` reach the same session store, so the guard sees them too. The error names the directory to change to, or - for a `--worktree` session - the original invocation to re-run. A record that exists but cannot be read fails closed too; a pane with no record at all re-enters normally.
+
+**Rolling it back.** `devsandbox agent-wrappers uninstall`, then remove the `source` line it prints from your rc file. Delete `~/.local/state/devsandbox/herdr-panes/` to drop the pane records. To stop herdr replaying resume commands at all, set `resume_agents_on_restore = false` under `[session]` in herdr's config. Setting `mode = "disabled"` under `[tools.herdr]` turns off the proxy, and with it capture.
+
+**Session IDs are never logged.** The proxy logs one line per request carrying the method and the reason for the decision. Neither ever includes the session ID, the transcript path, or any part of a rejected value - including for denied reports, where the rejected string is the interesting one.
+
+**Limitations.**
+
+- Capture requires a direct `devsandbox <agent>` launch, as above.
+- Interception only works for panes running fish, bash, or zsh. If herdr's `default_shell` is something else, no wrapper runs and herdr types the resume command to the host agent. That fails on functionality, not on isolation: the ID names a session inside the sandbox's overlay that the host agent cannot see, so it errors or starts fresh.
+- fish's wrapper lives in `conf.d`, which fish also sources for non-interactive `fish -c`. bash and zsh wrap interactive shells only.
+- Sessions launched with `--worktree` **fail closed** on restore, from either directory. Their sandbox state is keyed to the repo root while the session runs in the worktree, so re-entering from the repo root reaches the right state root under the wrong project, and re-entering from the worktree reaches a different state root entirely. Both open a different agent session store, so `run-agent` refuses with a message naming the original invocation to re-run instead.
+- A resume typed from any other directory is refused for the same reason, with the directory to change to named in the error.
+- `devsandbox --rm` destroys the sandbox state a recorded session lives in. herdr will still have the ID; the resume finds nothing and starts fresh.
+- A pane that previously ran an *unsandboxed* agent may carry a herdr-recorded host session ID. Resuming it through the wrapper looks for that ID inside the sandbox, does not find it, and starts a fresh session.
 
 ### What Gets Mounted
 

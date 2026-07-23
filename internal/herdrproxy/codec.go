@@ -30,7 +30,7 @@ const maxLineBytes = 4 << 20 // 4 MiB
 //	{"id":"cli:pane:list","method":"pane.list","params":{}}\n
 
 // request is one client-to-server call. Params stays raw so the filter can
-// apply per-method validation without a union type over 84 methods.
+// apply per-method validation without a union type over 86 methods.
 type request struct {
 	ID     string          `json:"id"`
 	Method string          `json:"method"`
