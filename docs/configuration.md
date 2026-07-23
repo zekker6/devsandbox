@@ -53,6 +53,17 @@ enabled = false
 port = 8080
 ```
 
+**Prerequisite (bwrap and krun).** Proxy mode locks the sandbox's egress down
+deny-by-default, which needs `nft` or `iptables` on the host with the `nf_tables`
+(or `ip_tables`) and `nf_conntrack` kernel modules loaded. The modules cannot be
+autoloaded from an unprivileged user namespace, so a proxy launch **aborts** when
+the lockdown cannot be applied rather than running with open egress. Check with
+`devsandbox doctor` (the `proxy: firewall` row); remediate with
+`sudo modprobe nf_tables nf_conntrack` or by installing `nftables`. Launches
+without proxy mode need none of this. Proxy-mode bwrap sandboxes are also
+**IPv4-only** - pasta is invoked with `-4`, so the IPv4 rule set has no second
+address family to miss. See [Proxy Mode](proxy.md#backend-specific-behavior).
+
 ### Proxy Extra Environment Variables
 
 When proxy mode is active, devsandbox sets standard proxy environment variables
@@ -294,20 +305,25 @@ proxy wiring. Notes:
 - **Prerequisites:** `podman`, a `crun` built with libkrun (provides the `krun`
   OCI runtime), and access to `/dev/kvm` on Linux (bare-metal or a host with
   nested virtualization) or Apple Silicon on macOS. For **proxy mode on Linux** you
-  also need `nft` or `iptables` (usually already present) - the egress lockdown
-  uses it to port-scope guest access to the proxy, and a krun + proxy launch fails
-  closed without one. `devsandbox` fails fast with installation guidance if any are
-  missing; `devsandbox doctor` reports the firewall backend as a `krun: firewall`
-  row on Linux. On Arch: `pacman -S krun`. Sanity check:
+  also need `nft` or `iptables` with the `nf_tables`/`nf_conntrack` modules loaded
+  (usually already present) - the egress lockdown uses it to port-scope guest access
+  to the proxy, and a krun + proxy launch fails closed without it. `devsandbox` fails
+  fast with installation guidance for the podman/runtime/KVM prerequisites; the
+  firewall is checked at lockdown time instead, so a missing binary or an unloadable
+  module aborts a krun proxy launch once the guest is up rather than before it. Check
+  it up front with `devsandbox doctor`, which reports the firewall as the
+  backend-neutral `proxy: firewall` row on Linux (that row gates bwrap proxy mode too,
+  where it *is* verified pre-launch). On Arch: `pacman -S krun`. Sanity check:
   `podman run --rm --runtime krun docker.io/library/alpine true`.
 - **Disable the Docker tool.** Set `[tools.docker] enabled = false` - mounting
   your Docker socket into a microVM meant for untrusted code hands the guest your
   host Docker, defeating the isolation.
 - **Management commands.** `devsandbox doctor` reports the krun prerequisites
   (podman, the `krun` runtime, `/dev/kvm`, a `platform` row when the host OS or CPU
-  architecture cannot run krun at all, and on Linux an
-  `nft`/`iptables` firewall for proxy mode, a system `pasta` binary for rootless
-  podman networking, and `/etc/subuid`+`/etc/subgid` ranges for `--userns=keep-id`)
+  architecture cannot run krun at all, and on Linux a system `pasta` binary for
+  rootless podman networking and `/etc/subuid`+`/etc/subgid` ranges for
+  `--userns=keep-id`; the `nft`/`iptables` firewall proxy mode needs is the separate
+  top-level `proxy: firewall` row, shared with bwrap)
   as informational rows - unmet ones `warn` rather than `error`, since krun is
   opt-in and must not fail `doctor` for bwrap/docker users, and their remediation
   is printed under a "How to fix" block below the table. `devsandbox sandboxes
@@ -548,6 +564,8 @@ sandbox_port = 5432
 **Note:** Port forwarding requires proxy mode. On **bwrap**, only proxy mode gives the sandbox its own network namespace (via pasta); without it the sandbox shares the host network stack and its ports are already reachable on `127.0.0.1`, so there is nothing to forward. Docker and krun always place the workload in its own network namespace, but neither wires static rules - see backend support below.
 
 **Backend support:** static `[[port_forwarding.rules]]` are wired for the **bwrap** backend only - they become pasta port arguments at launch, and a bwrap run with rules but no network isolation fails with an error. Auto-detection (`auto_detect`) also covers **krun + proxy** sessions, where it is best-effort (see [krun microVM backend](#krun-microvm-backend-experimental)). The **Docker** backend does not wire port forwarding in either form.
+
+**Outbound rules must be declared.** In proxy mode the sandbox's egress is locked down deny-by-default, and the gateway `10.0.2.2` is reachable only on ports a rule names: the proxy port, plus one port per configured `outbound` rule. Every other host loopback port is closed at the gateway. Before the lockdown, `--map-host-loopback` made *every* host loopback port reachable at `10.0.2.2` whether or not it was configured, so a host service you reached that way without a rule now needs one. Declaring the rule is the fix - the accept it adds is scoped to exactly that port and protocol.
 
 #### Examples
 

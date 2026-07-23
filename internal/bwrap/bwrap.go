@@ -1,6 +1,7 @@
 package bwrap
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"devsandbox/internal/cgroups"
+	"devsandbox/internal/egress"
 	"devsandbox/internal/embed"
 	"devsandbox/internal/network"
 )
@@ -191,7 +193,18 @@ func (p *SandboxProcess) Wait() error {
 //
 // The portForwardArgs parameter accepts pasta port forwarding arguments (e.g., -t, -u, -T, -U).
 // Pass nil if no port forwarding is needed.
-func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, portForwardArgs []string) (*SandboxProcess, error) {
+//
+// lockdown describes the proxy-only egress restriction. When it is enabled the
+// wrapper script applies a deny-by-default lockdown before it execs the
+// workload, and the launch aborts rather than starting the workload with egress
+// open; a zero value leaves the namespace exactly as it was before.
+//
+// tools are the host binaries that lockdown renders into the wrapper script,
+// resolved by the caller. They are passed in rather than resolved here so the
+// binaries the caller's preflight proved usable are the exact ones the script
+// runs; a second resolution could disagree with the one that was verified. They
+// are unused when the lockdown is disabled.
+func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, portForwardArgs []string, lockdown egress.Lockdown, tools egress.Tools) (*SandboxProcess, error) {
 	pastaPath, err := embed.PastaPath()
 	if err != nil {
 		return nil, fmt.Errorf("pasta not available (required for proxy mode): %w\nRun 'devsandbox doctor' for details", err)
@@ -210,7 +223,7 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 		supportsMapHostLoopback = pastaSupportsMapHostLoopback(pastaPath)
 	}
 
-	prog, args, err := pastaInvocation(limits, pastaPath, bwrapPath, bwrapArgs, shellCmd, portForwardArgs, supportsMapHostLoopback)
+	prog, args, err := pastaInvocation(limits, pastaPath, bwrapPath, bwrapArgs, shellCmd, portForwardArgs, supportsMapHostLoopback, lockdown, tools)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +248,16 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 	namespacePID, err := waitForFirstChildPID(cmd.Process.Pid, pastaStartTimeout(limits))
 	if err != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		waitErr := cmd.Wait()
+		// A lockdown that aborts before the child is observable exits the wrapper
+		// with LockdownExitCode, and that status is the only evidence of what
+		// happened. Discarding it here reports an unapplied security control as a
+		// PID-discovery timeout, so it is surfaced for the caller to map back to a
+		// named lockdown error instead.
+		var ee *exec.ExitError
+		if errors.As(waitErr, &ee) && ee.ExitCode() == egress.LockdownExitCode {
+			return nil, waitErr
+		}
 		return nil, fmt.Errorf("locate sandbox PID under pasta: %w", err)
 	}
 
@@ -248,8 +270,12 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 // pastaInvocation returns the program and the arguments after argv[0] for the
 // proxy launch path, where pasta is the outermost process and therefore the one
 // the scope must contain.
-func pastaInvocation(limits cgroups.Limits, pastaPath, bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []string, mapHostLoopback bool) (string, []string, error) {
-	return wrapLimits(limits, pastaPath, pastaCmdline(bwrapPath, bwrapArgs, shellCmd, portForwardArgs, mapHostLoopback))
+func pastaInvocation(limits cgroups.Limits, pastaPath, bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []string, mapHostLoopback bool, lockdown egress.Lockdown, tools egress.Tools) (string, []string, error) {
+	args, err := pastaCmdline(bwrapPath, bwrapArgs, shellCmd, portForwardArgs, mapHostLoopback, lockdown, tools)
+	if err != nil {
+		return "", nil, err
+	}
+	return wrapLimits(limits, pastaPath, args)
 }
 
 // Budgets for pasta to fork the sandbox process. A systemd transient scope adds
@@ -269,40 +295,74 @@ func pastaStartTimeout(limits cgroups.Limits) time.Duration {
 }
 
 // pastaCmdline assembles pasta's arguments, excluding argv[0].
-func pastaCmdline(bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []string, mapHostLoopback bool) []string {
+func pastaCmdline(bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []string, mapHostLoopback bool, lockdown egress.Lockdown, tools egress.Tools) ([]string, error) {
 	// Build pasta command with network isolation:
-	// pasta --config-net [--map-host-loopback 10.0.2.2] -f -- sh -c '...' _ bwrap [args] -- shell
+	// pasta --config-net [-4] [--map-host-loopback 10.0.2.2] -f -- sh -c '...' _ bwrap [args] -- shell
 	//
 	// --config-net: Configure tap interface in namespace (required for network to work)
+	// -4: IPv4 only, emitted with the lockdown (see below)
 	// --map-host-loopback 10.0.2.2: Map 10.0.2.2 to host's 127.0.0.1 (for proxy access)
 	//   Note: This option is not available in older pasta versions (pre-2023)
 	// -f: Run in foreground (pasta exits when child exits)
-	//
-	// The wrapper script steers traffic toward the proxy:
-	// 1. Add a host route to the gateway via the tap device
-	// 2. Delete the default route, so external addresses have no route out
-	// Best-effort, not a containment boundary: the ip calls discard errors and the exec is
-	// unconditional, so a namespace where the surgery does not apply starts with egress open.
-	// Two gaps remain even when it applies: hosts on the interface's own connected subnet
-	// stay reachable (deleting the default route does not remove the on-link route), and
-	// --map-host-loopback exposes the whole host loopback at the gateway address, not only
-	// the proxy port. No firewall backstops either. See docs/proxy.md.
-	wrapperScript := fmt.Sprintf(`
-		dev=$(ip -o route show default | awk '{print $5}')
-		ip route add %s/32 dev "$dev" 2>/dev/null
-		ip route del default 2>/dev/null
-		exec "$@"
-	`, network.PastaGatewayIP)
+	wrapperScript, err := pastaWrapperScript(lockdown, tools)
+	if err != nil {
+		return nil, err
+	}
+
+	// The lockdown's only egress accept points at the gateway, and the gateway is
+	// reachable only because --map-host-loopback maps it to the host's loopback.
+	// A pasta too old for that option would therefore leave the sandbox with no
+	// default route, a DROP policy, and one accept for an address that maps to
+	// nothing - every connection, the proxy's included, hanging until it times
+	// out with nothing said about why. Refuse instead, naming the missing
+	// prerequisite. Only proxy mode gains this dependency; a non-proxy launch
+	// still runs on such a pasta exactly as before.
+	if lockdown.Enabled && !mapHostLoopback {
+		return nil, fmt.Errorf("proxy mode needs a pasta that supports --map-host-loopback, and this one does not: "+
+			"without it nothing maps the proxy gateway %s, so the egress lockdown would leave the sandbox unable to "+
+			"reach anything at all\nUse the embedded pasta (remove 'use_embedded = false') or upgrade passt", lockdown.Gateway)
+	}
 
 	args := make([]string, 0, len(bwrapArgs)+len(shellCmd)+len(portForwardArgs)+16)
 	args = append(args, "--config-net") // Configure network interface
 
+	if lockdown.Enabled {
+		// IPv4 only, matching internal/isolator/docker.go's krun invocation. The
+		// lockdown's ruleset is IPv4 (the proxy gateway is 10.0.2.2, so every
+		// permitted flow is), and `ip route del default` is IPv4-only too. On a
+		// dual-stack host pasta would otherwise configure IPv6 in the namespace
+		// and leave a second family for which nothing is filtered and no route is
+		// removed - an IPv4-only ruleset with an IPv6-capable namespace enforces
+		// nothing. Removing the family is what keeps the two in sync.
+		args = append(args, "-4")
+	}
+
 	if mapHostLoopback {
-		args = append(args, "--map-host-loopback", network.PastaGatewayIP)
+		// With a lockdown, map the address the rules were built from rather than
+		// the package constant. The two agree today because the only network
+		// provider is pasta, but nothing enforces that, and a disagreement would
+		// map the host loopback at one address while the firewall permitted only
+		// another - the same total, undiagnosed egress loss the guard above
+		// refuses, arriving silently instead.
+		gateway := network.PastaGatewayIP
+		if lockdown.Enabled {
+			gateway = lockdown.Gateway
+		}
+		args = append(args, "--map-host-loopback", gateway)
 	}
 
 	// Add port forwarding arguments
 	args = append(args, portForwardArgs...)
+
+	if lockdown.Enabled {
+		// Turn off pasta's automatic namespace->init forwarding for every protocol
+		// the rules above did not already pin. Left at its `auto` default it binds
+		// each host-listening port inside the namespace on loopback, where the
+		// firewall's mandatory `oif lo accept` waves it through - so the host's own
+		// 127.0.0.1 services would stay directly reachable from the sandbox while
+		// every other direct destination was refused.
+		args = append(args, egress.NoAutoForwardArgs(portForwardArgs)...)
+	}
 
 	args = append(args, "-f") // Foreground mode
 	args = append(args, "--")
@@ -312,22 +372,53 @@ func pastaCmdline(bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []strin
 	args = append(args, "--")
 	args = append(args, shellCmd...)
 
-	return args
+	return args, nil
+}
+
+// pastaWrapperScript returns the shell prologue pasta runs before it execs
+// bwrap. With a lockdown it is the fail-closed egress prologue: the wrapper runs
+// as root in pasta's user namespace, holding CAP_NET_ADMIN over the netns,
+// before the workload exists - so there is no window in which sandboxed code
+// runs with egress open, and any failing step aborts instead of exec'ing.
+//
+// Without one (a non-proxy launch) it is the historical best-effort route
+// surgery, unchanged: the ip calls discard errors and the exec is unconditional.
+// That path has no proxy to steer traffic to, so nothing about it changes here.
+func pastaWrapperScript(lockdown egress.Lockdown, tools egress.Tools) (string, error) {
+	if !lockdown.Enabled {
+		return fmt.Sprintf(`
+		dev=$(ip -o route show default | awk '{print $5}')
+		ip route add %s/32 dev "$dev" 2>/dev/null
+		ip route del default 2>/dev/null
+		exec "$@"
+	`, network.PastaGatewayIP), nil
+	}
+
+	script, err := egress.Script(tools, lockdown)
+	if err != nil {
+		return "", fmt.Errorf("render the egress lockdown: %w", err)
+	}
+	return script, nil
 }
 
 // ExecWithPasta wraps bwrap execution inside pasta for network namespace isolation.
 // This creates an isolated network namespace whose only interface is pasta's tap
-// device, and applies the best-effort route surgery in StartWithPasta to steer
-// egress at the gateway toward our proxy. See that function for the gaps this
-// leaves - it is not a containment boundary.
+// device. With a lockdown, StartWithPasta additionally applies a deny-by-default
+// egress restriction inside that namespace before the workload starts, so the
+// only reachable destination is the proxy port on the gateway.
+//
+// It returns the wrapper's exit error as-is, which for a lockdown launch is
+// ambiguous: an abort and a workload that exits egress.LockdownExitCode look
+// identical here. A caller that needs to tell them apart must check
+// lockdown.ReadyFile with egress.LockdownApplied, as internal/isolator does.
 //
 // The portForwardArgs parameter accepts pasta port forwarding arguments (e.g., -t, -u, -T, -U).
 // Pass nil if no port forwarding is needed.
 //
 // Unlike the regular Exec function, this uses exec.Command instead of syscall.Exec
 // so that the calling process (and its proxy server goroutine) stays alive.
-func ExecWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, portForwardArgs []string) error {
-	proc, err := StartWithPasta(limits, bwrapArgs, shellCmd, portForwardArgs)
+func ExecWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, portForwardArgs []string, lockdown egress.Lockdown, tools egress.Tools) error {
+	proc, err := StartWithPasta(limits, bwrapArgs, shellCmd, portForwardArgs, lockdown, tools)
 	if err != nil {
 		return err
 	}

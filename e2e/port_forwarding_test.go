@@ -210,13 +210,7 @@ sandbox_port = 15005
 // TestPortForwarding_InboundTCP tests inbound TCP port forwarding.
 // It starts a server inside the sandbox and connects from the host.
 func TestPortForwarding_InboundTCP(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if nc (netcat) is available
 	if _, err := exec.LookPath("nc"); err != nil {
@@ -325,13 +319,7 @@ sandbox_port = %d
 // TestPortForwarding_OutboundTCP tests outbound TCP port forwarding.
 // It starts a server on the host and connects from inside the sandbox.
 func TestPortForwarding_OutboundTCP(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if nc (netcat) is available
 	if _, err := exec.LookPath("nc"); err != nil {
@@ -505,13 +493,7 @@ sandbox_port = 15101
 // TestPortForwarding_DefaultProtocol tests that TCP is the default protocol
 // when no protocol is explicitly specified.
 func TestPortForwarding_DefaultProtocol(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Create a temp config directory with port forwarding without explicit protocol
 	tmpConfigDir, err := os.MkdirTemp("", "sandbox-config-default-proto-*")
@@ -577,12 +559,7 @@ sandbox_port = 8500
 //  5. A TCP dial inside the ns to 127.0.0.1:<sandboxPort> succeeds and we
 //     get the expected response.
 func TestPortForwarding_DynamicForward(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available on host")
 	}

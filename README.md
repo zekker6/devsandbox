@@ -174,7 +174,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 ## How It Works
 
-**Linux:** Uses [bubblewrap](https://github.com/containers/bubblewrap) to create namespace-based isolation. No root privileges, no Docker, no system packages required - bwrap and pasta binaries are embedded. Startup is sub-second.
+**Linux:** Uses [bubblewrap](https://github.com/containers/bubblewrap) to create namespace-based isolation. No root privileges, no Docker, no system packages required for the default sandbox - bwrap and pasta binaries are embedded. Startup is sub-second. Proxy mode (`--proxy`) additionally needs `iproute2` and `nft` or `iptables` on the host for its egress lockdown; see [proxy mode](docs/proxy.md#requirements-bwrap-backend).
 
 **macOS:** Uses Docker containers with volume mounts that mirror the bwrap behavior. Named volumes provide near-native filesystem performance. Containers are cached for 1-2 second restarts.
 
@@ -269,7 +269,7 @@ Known limitations:
 
 ## Proxy Mode - Monitor Your AI Agent's Network Activity
 
-Route HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request. How strongly the routing is enforced depends on the backend - krun fails closed, bwrap is best-effort, Docker is env-var routing only; see [per-backend behavior](docs/proxy.md#backend-specific-behavior).
+Route HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request. How strongly the routing is enforced depends on the backend - bwrap and krun both fail closed behind a deny-by-default egress firewall (requires `nft` or `iptables`), Docker is env-var routing only; see [per-backend behavior](docs/proxy.md#backend-specific-behavior).
 
 ```bash
 # Enable proxy
@@ -297,6 +297,7 @@ See [Proxy Mode docs](docs/proxy.md) for filtering rules, log formats, and remot
 Requirements:
 - Linux kernel with unprivileged user namespaces enabled (verify: `unshare --user true` should succeed silently)
 - No system packages required (bwrap and pasta binaries are embedded)
+- Proxy mode only: `iproute2` and `nft` (or `iptables`), with the `nf_tables`/`nf_conntrack` kernel modules loadable - a `--proxy` launch aborts without them
 
 ```bash
 # Option 1: mise
@@ -389,6 +390,7 @@ devsandbox image build              # Build Docker image (macOS)
 - Requires unprivileged user namespaces (see [Troubleshooting](docs/sandboxing.md#troubleshooting) for distro-specific guidance)
 - SELinux or AppArmor may restrict namespace operations (see [Security Modules](docs/sandboxing.md#security-modules))
 - MITM proxy may break tools with certificate pinning
+- Proxy mode needs `nft` or `iptables` with `nf_tables`/`nf_conntrack` loaded for its egress lockdown; a launch aborts rather than run with open egress. Proxy-mode sandboxes are IPv4-only (pasta runs with `-4`)
 - GUI applications are not supported (no display server forwarding), but desktop notifications work via XDG Portal
 - `[sandbox.resources]` limits need cgroup v2 and a systemd user manager with the `memory`/`cpu`/`pids` controllers delegated to `user@<uid>.service`; a limit that cannot be enforced aborts the launch. Nothing about systemd is required when no limits are configured
 

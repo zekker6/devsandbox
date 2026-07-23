@@ -87,10 +87,11 @@ Security Model:
 
 Proxy Mode (--proxy):
   - HTTP/HTTPS traffic routed through local proxy (enforcement varies by
-    backend: krun fails closed, bwrap best-effort, docker env vars only)
+    backend: bwrap and krun fail closed, docker env vars only)
   - MITM proxy with auto-generated CA certificate
   - bwrap: network isolated via pasta (embedded; system passt package only
-    needed if embedded binaries are disabled or extraction fails)
+    needed if embedded binaries are disabled or extraction fails), IPv4 only,
+    with a deny-by-default egress firewall requiring nft or iptables
   - docker: proxy bound to per-session Docker network
   - Request logs: ~/.local/share/devsandbox/<project>/logs/proxy/`,
 		Example: `  devsandbox                      # Interactive shell

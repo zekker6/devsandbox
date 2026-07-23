@@ -13,7 +13,7 @@ The `krun` backend runs the sandbox image inside a [libkrun](https://github.com/
 | Kernel with rootless overlay | Tool dirs (kernel 5.13+) | Any modern distro |
 | `nft` **or** `iptables` (proxy mode only) | Port-scopes guest egress to the proxy inside the VMM netns; **krun + proxy on Linux fails closed without one** | `nft --version` or `iptables --version` (usually already present) |
 
-On Linux you need bare-metal KVM or a VM with **nested virtualization** enabled. If `/dev/kvm` is missing, krun cannot run here. The subuid/subgid mappings are configured by default on most distributions when `podman` is installed. For **proxy mode** you also need `nft` or `iptables` on the host - one is almost always installed already, but if neither is present a krun + proxy launch aborts (`devsandbox doctor` reports this as `krun: firewall`). `devsandbox doctor` also checks the rootless prerequisites directly: `krun: system pasta` (the host `pasta` binary podman needs - the copy devsandbox embeds for `bwrap` does not count) and `krun: rootless id mapping` (your `/etc/subuid` and `/etc/subgid` ranges). All krun rows are advisory warnings, so `doctor` still exits zero on a host that only runs `bwrap` or `docker`.
+On Linux you need bare-metal KVM or a VM with **nested virtualization** enabled. If `/dev/kvm` is missing, krun cannot run here. The subuid/subgid mappings are configured by default on most distributions when `podman` is installed. For **proxy mode** you also need `nft` or `iptables` on the host, with the `nf_tables` and `nf_conntrack` kernel modules loaded - if the lockdown cannot be applied a krun + proxy launch aborts (`devsandbox doctor` reports this as the top-level `proxy: firewall` row, which gates the `bwrap` backend's proxy mode too). `devsandbox doctor` also checks the rootless prerequisites directly: `krun: system pasta` (the host `pasta` binary podman needs - the copy devsandbox embeds for `bwrap` does not count) and `krun: rootless id mapping` (your `/etc/subuid` and `/etc/subgid` ranges). All krun rows are advisory warnings, so `doctor` still exits zero on a host that only runs `bwrap` or `docker`.
 
 ## Install
 
@@ -66,21 +66,22 @@ Then confirm devsandbox sees the prerequisites:
 devsandbox doctor
 ```
 
-The krun rows should read `ok`. On Linux `doctor` reports three extra rows the run
-path depends on: `krun: firewall` (the `nft`/`iptables` backend proxy mode needs),
-`krun: system pasta` (rootless podman networking) and `krun: rootless id mapping`
-(the subuid/subgid ranges `--userns=keep-id` needs):
+The krun rows should read `ok`. On Linux `doctor` reports two extra krun rows the
+run path depends on - `krun: system pasta` (rootless podman networking) and
+`krun: rootless id mapping` (the subuid/subgid ranges `--userns=keep-id` needs) -
+plus the backend-neutral `proxy: firewall` row, which is what proxy mode's egress
+lockdown needs on krun *and* bwrap:
 
 ```
+│ proxy: firewall          │ ✓ ok   │ /usr/sbin/nft (lockdown rules apply)│
 │ krun: podman             │ ✓ ok   │ /usr/bin/podman                     │
 │ krun: runtime            │ ✓ ok   │ /usr/bin/krun                       │
 │ krun: kvm                │ ✓ ok   │ /dev/kvm accessible                 │
-│ krun: firewall           │ ✓ ok   │ /usr/sbin/nft                       │
 │ krun: system pasta       │ ✓ ok   │ /usr/bin/pasta                      │
 │ krun: rootless id mapping│ ✓ ok   │ /etc/subuid and /etc/subgid map you │
 ```
 
-These rows are informational - they `warn` rather than `error` when unmet, so `doctor` never fails for `bwrap`/`docker` users who do not use krun. A missing `krun: firewall` only matters for krun + proxy on Linux, which fails closed at launch without it.
+These rows are informational - they `warn` rather than `error` when unmet, so `doctor` never fails for users who do not use the feature they gate. `proxy: firewall` only matters for proxy mode, which fails closed at launch without it.
 
 ## Run
 

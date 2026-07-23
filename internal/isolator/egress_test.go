@@ -7,60 +7,14 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"devsandbox/internal/egress"
 )
 
-func TestBuildEgressCommands(t *testing.T) {
-	tests := []struct {
-		name    string
-		gateway string
-		dev     string
-		want    [][]string
-	}{
-		{
-			name:    "gateway and tap device",
-			gateway: "10.0.2.2",
-			dev:     "enp5s0",
-			want: [][]string{
-				{"ip", "route", "add", "10.0.2.2/32", "dev", "enp5s0"},
-				{"ip", "route", "del", "default"},
-			},
-		},
-		{
-			name:    "alternate gateway and device substituted",
-			gateway: "192.168.99.1",
-			dev:     "eth0",
-			want: [][]string{
-				{"ip", "route", "add", "192.168.99.1/32", "dev", "eth0"},
-				{"ip", "route", "del", "default"},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := buildEgressCommands(tt.gateway, tt.dev)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("buildEgressCommands(%q, %q) = %v, want %v", tt.gateway, tt.dev, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestBuildEgressCommands_Ordering asserts the add-route command precedes the
-// del-default command so the gateway stays reachable while the default route is
-// removed.
-func TestBuildEgressCommands_Ordering(t *testing.T) {
-	cmds := buildEgressCommands("10.0.2.2", "enp5s0")
-	if len(cmds) != 2 {
-		t.Fatalf("expected 2 commands, got %d", len(cmds))
-	}
-	if cmds[0][1] != "route" || cmds[0][2] != "add" {
-		t.Errorf("first command must be an `ip route add`, got %v", cmds[0])
-	}
-	if cmds[1][1] != "route" || cmds[1][2] != "del" {
-		t.Errorf("second command must be an `ip route del`, got %v", cmds[1])
-	}
-}
+// The rule-content assertions (route command shape, backend detection, and the
+// deny-by-default firewall rules) live in internal/egress, where the rules are
+// now built. What stays here is krun's application mechanism: the nsenter
+// wrapping, the fail-closed sequencing, and the sentinel handshake.
 
 // TestNsenterArgv asserts the surgery is wrapped to enter the target PID's user
 // + net namespaces as userns-root (no --preserve-credentials, which would leave
@@ -126,6 +80,21 @@ func TestParseDefaultRouteDevice(t *testing.T) {
 	}
 }
 
+// testEgressTools is the resolved-binary set the krun lockdown tests inject. The
+// paths are absolute because nsenter runs with a PATH this process does not
+// control.
+var testEgressTools = egress.Tools{IP: "/usr/sbin/ip", Firewall: "/usr/sbin/nft", Backend: egress.BackendNft}
+
+// testLookPath resolves the binaries the lockdown needs, mimicking a host where
+// they live in /usr/sbin.
+func testLookPath(name string) (string, error) {
+	switch name {
+	case "ip", "nft":
+		return "/usr/sbin/" + name, nil
+	}
+	return "", errors.New("absent")
+}
+
 // TestApplyEgressCommands_Success asserts both lockdown commands run, in order,
 // each wrapped in nsenter for the target netns.
 func TestApplyEgressCommands_Success(t *testing.T) {
@@ -135,13 +104,13 @@ func TestApplyEgressCommands_Success(t *testing.T) {
 		return nil
 	}
 
-	if err := applyEgressCommands(7, "10.0.2.2", "enp5s0", runFn); err != nil {
+	if err := applyEgressCommands(7, testEgressTools, "10.0.2.2", "enp5s0", runFn); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	want := [][]string{
-		{"nsenter", "--target", "7", "--user", "--net", "--", "ip", "route", "add", "10.0.2.2/32", "dev", "enp5s0"},
-		{"nsenter", "--target", "7", "--user", "--net", "--", "ip", "route", "del", "default"},
+		{"nsenter", "--target", "7", "--user", "--net", "--", "/usr/sbin/ip", "route", "add", "10.0.2.2/32", "dev", "enp5s0"},
+		{"nsenter", "--target", "7", "--user", "--net", "--", "/usr/sbin/ip", "route", "del", "default"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("commands run = %v, want %v", got, want)
@@ -172,7 +141,7 @@ func TestApplyEgressCommands_FailsClosed(t *testing.T) {
 				return nil
 			}
 
-			err := applyEgressCommands(7, "10.0.2.2", "enp5s0", runFn)
+			err := applyEgressCommands(7, testEgressTools, "10.0.2.2", "enp5s0", runFn)
 			if err == nil {
 				t.Fatal("expected error, got nil (egress would be left open)")
 			}
@@ -202,165 +171,11 @@ func TestLockdownGuestEgress_InvalidPort(t *testing.T) {
 	}
 }
 
-// TestDetectFirewallBackend asserts nft is preferred over iptables, iptables is
-// the fallback, and neither present resolves to firewallNone (which callers turn
-// into a fail-closed error).
-func TestDetectFirewallBackend(t *testing.T) {
-	lookPath := func(present ...string) func(string) (string, error) {
-		set := map[string]bool{}
-		for _, p := range present {
-			set[p] = true
-		}
-		return func(name string) (string, error) {
-			if set[name] {
-				return "/usr/sbin/" + name, nil
-			}
-			return "", errors.New("not found")
-		}
-	}
-
-	tests := []struct {
-		name     string
-		present  []string
-		want     firewallBackend
-		wantPath string
-	}{
-		{name: "nft preferred over iptables", present: []string{"nft", "iptables"}, want: firewallNft, wantPath: "/usr/sbin/nft"},
-		{name: "nft only", present: []string{"nft"}, want: firewallNft, wantPath: "/usr/sbin/nft"},
-		{name: "iptables fallback", present: []string{"iptables"}, want: firewallIptables, wantPath: "/usr/sbin/iptables"},
-		{name: "neither present", present: nil, want: firewallNone, wantPath: ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, gotPath := detectFirewallBackend(lookPath(tt.present...))
-			if got != tt.want {
-				t.Errorf("detectFirewallBackend backend = %v, want %v", got, tt.want)
-			}
-			if gotPath != tt.wantPath {
-				t.Errorf("detectFirewallBackend path = %q, want %q", gotPath, tt.wantPath)
-			}
-		})
-	}
-}
-
-// TestBuildFirewallCommands asserts the deny-by-default firewall rules: the chain
-// drops by default and accepts only established/related return traffic, loopback,
-// and TCP to gateway:proxyPort. This is the guard against the LAN/metadata
-// exposure route surgery alone leaves open (the connected subnet route survives
-// `ip route del default`) and the host-loopback exposure (--map-host-loopback
-// maps ALL ports of the gateway to host 127.0.0.1).
-func TestBuildFirewallCommands(t *testing.T) {
-	tests := []struct {
-		name      string
-		backend   firewallBackend
-		gateway   string
-		proxyPort int
-		want      [][]string
-		wantErr   bool
-	}{
-		{
-			name:      "nft deny-by-default, allow only proxy port",
-			backend:   firewallNft,
-			gateway:   "10.0.2.2",
-			proxyPort: 8080,
-			want: [][]string{
-				{"nft", "add", "table", "ip", "devsandbox_egress"},
-				{"nft", "add", "chain", "ip", "devsandbox_egress", "output", "{ type filter hook output priority 0 ; policy drop ; }"},
-				{"nft", "add", "rule", "ip", "devsandbox_egress", "output", "ct", "state", "established,related", "accept"},
-				{"nft", "add", "rule", "ip", "devsandbox_egress", "output", "oif", "lo", "accept"},
-				{"nft", "add", "rule", "ip", "devsandbox_egress", "output", "ip", "daddr", "10.0.2.2", "tcp", "dport", "8080", "accept"},
-			},
-		},
-		{
-			name:      "iptables fallback deny-by-default, allow only proxy port",
-			backend:   firewallIptables,
-			gateway:   "192.168.99.1",
-			proxyPort: 9090,
-			want: [][]string{
-				{"iptables", "-A", "OUTPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
-				{"iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"},
-				{"iptables", "-A", "OUTPUT", "-d", "192.168.99.1", "-p", "tcp", "--dport", "9090", "-j", "ACCEPT"},
-				{"iptables", "-P", "OUTPUT", "DROP"},
-			},
-		},
-		{
-			name:      "no backend fails closed",
-			backend:   firewallNone,
-			gateway:   "10.0.2.2",
-			proxyPort: 8080,
-			wantErr:   true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildFirewallCommands(tt.backend, tt.gateway, tt.proxyPort)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error for missing firewall backend, got nil (gateway would stay reachable on all ports)")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("buildFirewallCommands = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestBuildFirewallCommands_DenyByDefault asserts the firewall denies by default
-// rather than enumerating what to drop: the chain has a drop policy (nft
-// `policy drop` / iptables `-P OUTPUT DROP`), and the only new-connection accept
-// naming the gateway is scoped to the proxy TCP port - there is no blanket accept
-// of the whole gateway that would re-open the host-loopback exposure. This is what
-// makes the lockdown structural: a destination is reachable only if a rule names
-// it, so the LAN, cloud metadata, and non-proxy gateway ports are all closed
-// without being individually enumerated.
-func TestBuildFirewallCommands_DenyByDefault(t *testing.T) {
-	for _, backend := range []firewallBackend{firewallNft, firewallIptables} {
-		cmds, err := buildFirewallCommands(backend, "10.0.2.2", 8080)
-		if err != nil {
-			t.Fatalf("backend %v: unexpected error: %v", backend, err)
-		}
-
-		hasDefaultDrop := false
-		hasPortAccept := false
-		for _, c := range cmds {
-			j := strings.Join(c, " ")
-			// nft encodes the default drop in the chain policy; iptables in the
-			// OUTPUT chain policy. Either establishes deny-by-default.
-			if strings.Contains(j, "policy drop") || strings.Contains(j, "-P OUTPUT DROP") {
-				hasDefaultDrop = true
-			}
-			// The gateway may only be accepted on the proxy port. A gateway accept
-			// without the port would re-expose every host-loopback service.
-			gatewayAccept := strings.Contains(j, "10.0.2.2") &&
-				(strings.Contains(j, "accept") || strings.Contains(j, "ACCEPT"))
-			if gatewayAccept {
-				if strings.Contains(j, "8080") {
-					hasPortAccept = true
-				} else {
-					t.Errorf("backend %v: gateway accepted without a port scope: %v", backend, c)
-				}
-			}
-		}
-		if !hasDefaultDrop {
-			t.Errorf("backend %v: firewall must deny by default (no drop policy found): %v", backend, cmds)
-		}
-		if !hasPortAccept {
-			t.Errorf("backend %v: no accept for the gateway on the proxy port: %v", backend, cmds)
-		}
-	}
-}
-
 // TestApplyNetnsCommands_FailsClosed asserts a failing firewall command stops the
 // sequence and returns an error, so the netns is never left with the gateway
 // reachable on all ports.
 func TestApplyNetnsCommands_FailsClosed(t *testing.T) {
-	cmds, err := buildFirewallCommands(firewallNft, "10.0.2.2", 8080)
+	cmds, err := egress.FirewallCommands(testEgressTools, egress.Lockdown{Enabled: true, Gateway: "10.0.2.2", ProxyPort: 8080})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -586,9 +401,14 @@ func TestPrepareEgressLockdown(t *testing.T) {
 // firewall.
 func TestLockdownGuestEgressWith_Ordering(t *testing.T) {
 	t.Run("no backend fails before touching the netns", func(t *testing.T) {
-		lookPath := func(string) (string, error) { return "", errors.New("absent") }
+		lookPath := func(name string) (string, error) {
+			if name == "ip" {
+				return "/usr/sbin/ip", nil
+			}
+			return "", errors.New("absent")
+		}
 		resolveCalled := false
-		resolveDev := func(int) (string, error) { resolveCalled = true; return "eth0", nil }
+		resolveDev := func(int, string) (string, error) { resolveCalled = true; return "eth0", nil }
 		ran := 0
 		runFn := func(string, ...string) error { ran++; return nil }
 
@@ -604,7 +424,7 @@ func TestLockdownGuestEgressWith_Ordering(t *testing.T) {
 		}
 	})
 
-	t.Run("route surgery precedes the firewall", func(t *testing.T) {
+	t.Run("missing ip fails before touching the netns", func(t *testing.T) {
 		lookPath := func(name string) (string, error) {
 			if name == "nft" {
 				return "/usr/sbin/nft", nil
@@ -612,18 +432,41 @@ func TestLockdownGuestEgressWith_Ordering(t *testing.T) {
 			return "", errors.New("absent")
 		}
 		resolveCalled := false
-		resolveDev := func(int) (string, error) { resolveCalled = true; return "eth0", nil }
+		resolveDev := func(int, string) (string, error) { resolveCalled = true; return "eth0", nil }
+		ran := 0
+		runFn := func(string, ...string) error { ran++; return nil }
+
+		err := lockdownGuestEgressWith(7, "10.0.2.2", 8080, lookPath, resolveDev, runFn)
+		if !errors.Is(err, egress.ErrNoIPBinary) {
+			t.Fatalf("error = %v, want %v", err, egress.ErrNoIPBinary)
+		}
+		if resolveCalled || ran != 0 {
+			t.Errorf("netns touched with no `ip` binary (resolveDev=%v, ran=%d)", resolveCalled, ran)
+		}
+	})
+
+	t.Run("route surgery precedes the firewall", func(t *testing.T) {
+		resolveCalled := false
+		var gotIPPath string
+		resolveDev := func(_ int, ipPath string) (string, error) {
+			resolveCalled = true
+			gotIPPath = ipPath
+			return "eth0", nil
+		}
 		var order []string
 		runFn := func(name string, args ...string) error {
 			order = append(order, strings.Join(append([]string{name}, args...), " "))
 			return nil
 		}
 
-		if err := lockdownGuestEgressWith(7, "10.0.2.2", 8080, lookPath, resolveDev, runFn); err != nil {
+		if err := lockdownGuestEgressWith(7, "10.0.2.2", 8080, testLookPath, resolveDev, runFn); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !resolveCalled {
 			t.Error("device resolver was never called on the happy path")
+		}
+		if gotIPPath != "/usr/sbin/ip" {
+			t.Errorf("device resolver got ip path %q, want the resolved absolute path", gotIPPath)
 		}
 		if len(order) < 3 {
 			t.Fatalf("expected route surgery + firewall commands, got %d: %v", len(order), order)
@@ -644,50 +487,97 @@ func TestLockdownGuestEgressWith_Ordering(t *testing.T) {
 	})
 }
 
-// TestCheckFirewallBackend asserts the doctor preflight row reports OK with the
-// resolved path when nft or iptables is present and a fail-closed warn (OK=false
-// with a remediation Hint) when neither is, so a user missing the proxy-mode
-// firewall backend is warned at doctor time rather than only at launch.
-func TestCheckFirewallBackend(t *testing.T) {
-	lookPath := func(present ...string) func(string) (string, error) {
-		set := map[string]bool{}
-		for _, p := range present {
-			set[p] = true
+// TestLockdownGuestEgressWith_PropagatesFailures asserts every failure inside
+// the lockdown reaches the caller, which aborts the launch on it. The pieces
+// each fail closed on their own, but only if their error is returned: an
+// unchecked device resolution or a swallowed route-surgery error leaves the
+// guest running with egress open, which is the failure mode the whole lockdown
+// exists to prevent, and no ordering assertion would notice.
+func TestLockdownGuestEgressWith_PropagatesFailures(t *testing.T) {
+	t.Run("device resolution fails", func(t *testing.T) {
+		wantErr := errors.New("no default route in netns")
+		ran := 0
+		err := lockdownGuestEgressWith(7, "10.0.2.2", 8080, testLookPath,
+			func(int, string) (string, error) { return "", wantErr },
+			func(string, ...string) error { ran++; return nil })
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("error = %v, want %v", err, wantErr)
 		}
-		return func(name string) (string, error) {
-			if set[name] {
-				return "/usr/sbin/" + name, nil
-			}
-			return "", errors.New("not found")
+		if ran != 0 {
+			t.Errorf("ran %d netns commands without a resolved device; the netns must not be mutated", ran)
 		}
+	})
+
+	// The route surgery deletes the default route, so a failure part-way through
+	// it must abort before the firewall rules are attempted rather than continue
+	// against a half-configured netns.
+	t.Run("route surgery fails", func(t *testing.T) {
+		wantErr := errors.New("route add refused")
+		ran := 0
+		err := lockdownGuestEgressWith(7, "10.0.2.2", 8080, testLookPath,
+			func(int, string) (string, error) { return "eth0", nil },
+			func(string, ...string) error { ran++; return wantErr })
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("error = %v, want %v", err, wantErr)
+		}
+		if ran != 1 {
+			t.Errorf("ran %d netns commands, want 1 (nothing may run after the route surgery failed)", ran)
+		}
+	})
+
+	// A failing firewall rule leaves the gateway reachable on every port through
+	// --map-host-loopback, so it must abort the launch just as loudly.
+	t.Run("firewall rules fail", func(t *testing.T) {
+		wantErr := errors.New("nft refused the rule")
+		ran := 0
+		err := lockdownGuestEgressWith(7, "10.0.2.2", 8080, testLookPath,
+			func(int, string) (string, error) { return "eth0", nil },
+			func(string, ...string) error {
+				ran++
+				if ran > 2 {
+					return wantErr
+				}
+				return nil
+			})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("error = %v, want %v", err, wantErr)
+		}
+		if ran != 3 {
+			t.Errorf("ran %d netns commands, want 3 (the first firewall rule aborts the rest)", ran)
+		}
+	})
+}
+
+// TestLockdownGuestEgressWith_ArgvUnchanged pins the EXACT argv krun runs, end to
+// end, so moving the rule builders into internal/egress cannot alter what lands
+// in the VMM netns. The rules are now shared with the bwrap backend, and a change
+// made for bwrap that silently rewrote krun's lockdown would be a security
+// regression on a backend nobody was editing.
+func TestLockdownGuestEgressWith_ArgvUnchanged(t *testing.T) {
+	resolveDev := func(int, string) (string, error) { return "eth0", nil }
+	var got [][]string
+	runFn := func(name string, args ...string) error {
+		got = append(got, append([]string{name}, args...))
+		return nil
 	}
 
-	tests := []struct {
-		name    string
-		present []string
-		wantOK  bool
-		wantSum string
-	}{
-		{name: "nft present", present: []string{"nft", "iptables"}, wantOK: true, wantSum: "/usr/sbin/nft"},
-		{name: "iptables fallback", present: []string{"iptables"}, wantOK: true, wantSum: "/usr/sbin/iptables"},
-		{name: "neither present", present: nil, wantOK: false},
+	if err := lockdownGuestEgressWith(7, "10.0.2.2", 8080, testLookPath, resolveDev, runFn); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := checkFirewallBackend(lookPath(tt.present...))
-			if got.Name != "firewall" {
-				t.Errorf("Name = %q, want firewall", got.Name)
-			}
-			if got.OK != tt.wantOK {
-				t.Errorf("OK = %v, want %v", got.OK, tt.wantOK)
-			}
-			if tt.wantOK {
-				if got.Summary != tt.wantSum {
-					t.Errorf("Summary = %q, want %q", got.Summary, tt.wantSum)
-				}
-			} else if got.Hint == "" {
-				t.Error("a failing firewall check must carry a remediation Hint")
-			}
-		})
+
+	// The only change from the pre-extraction argv is that the binaries are now
+	// the absolute paths resolved on the host instead of bare names.
+	nsenter := []string{"nsenter", "--target", "7", "--user", "--net", "--"}
+	want := [][]string{
+		append(append([]string{}, nsenter...), "/usr/sbin/ip", "route", "add", "10.0.2.2/32", "dev", "eth0"),
+		append(append([]string{}, nsenter...), "/usr/sbin/ip", "route", "del", "default"),
+		append(append([]string{}, nsenter...), "/usr/sbin/nft", "add", "table", "ip", "devsandbox_egress"),
+		append(append([]string{}, nsenter...), "/usr/sbin/nft", "add", "chain", "ip", "devsandbox_egress", "output", "{ type filter hook output priority 0 ; policy drop ; }"),
+		append(append([]string{}, nsenter...), "/usr/sbin/nft", "add", "rule", "ip", "devsandbox_egress", "output", "ct", "state", "established,related", "accept"),
+		append(append([]string{}, nsenter...), "/usr/sbin/nft", "add", "rule", "ip", "devsandbox_egress", "output", "oif", "lo", "accept"),
+		append(append([]string{}, nsenter...), "/usr/sbin/nft", "add", "rule", "ip", "devsandbox_egress", "output", "ip", "daddr", "10.0.2.2", "tcp", "dport", "8080", "accept"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("krun lockdown argv changed by the extraction:\n got = %v\nwant = %v", got, want)
 	}
 }

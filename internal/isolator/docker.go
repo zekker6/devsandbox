@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"devsandbox/internal/egress"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
@@ -1345,7 +1346,14 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		// dual-stack host, and the egress lockdown (nft family ip, `ip route del
 		// default`) is IPv4 only - an IPv6 route (and IPv6 host-loopback map) would
 		// escape it entirely. IPv4-only closes that path at the source.
-		args = append(args, "--network", "pasta:-4,--map-host-loopback,"+d.engine.hostAlias)
+		// -T none,-U none: drop pasta's automatic namespace->init port forwarding.
+		// At its `auto` default it binds every host-listening port inside the netns
+		// on loopback, which the lockdown's `oif lo accept` permits - leaving the
+		// host's own 127.0.0.1 services directly reachable from the guest at
+		// 127.0.0.1:<port>. krun configures no port forwards, so nothing needs the
+		// automatic behaviour here.
+		pastaOpts := append([]string{"-4", "--map-host-loopback", d.engine.hostAlias}, egress.NoAutoForwardArgs(nil)...)
+		args = append(args, "--network", "pasta:"+strings.Join(pastaOpts, ","))
 
 		// Egress lockdown: a deny-by-default firewall in the VMM netns drops all
 		// guest egress except loopback, established/related return traffic, and TCP

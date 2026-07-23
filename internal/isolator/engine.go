@@ -79,7 +79,7 @@ func NewKrunIsolator(cfg DockerConfig) *DockerIsolator {
 type MicroVMCheck struct {
 	// Name identifies the prerequisite: "podman", "runtime" (the krun OCI
 	// runtime), "kvm", "platform" (unsupported OS or CPU architecture),
-	// "firewall", "system pasta", or "rootless id mapping".
+	// "system pasta", or "rootless id mapping".
 	Name string
 	// OK is true when the prerequisite is satisfied.
 	OK bool
@@ -182,8 +182,8 @@ func checkKVMAccess() MicroVMCheck {
 // Rootless podman needs one to give the krun guest a network, which is a
 // separate requirement from the pasta devsandbox embeds for the bwrap backend:
 // the embedded copy is extracted into the devsandbox cache and podman never
-// looks there. Like the firewall row this is advisory - doctor warns so the gap
-// surfaces before a launch trips over it. The probe only searches $PATH, while
+// looks there. Like the proxy firewall row this is advisory - doctor warns so
+// the gap surfaces before a launch trips over it. The probe only searches $PATH, while
 // podman also consults helper_binaries_dir from containers.conf, so the warning
 // says it may be a false positive rather than parsing that config.
 func CheckSystemPasta() MicroVMCheck {
@@ -379,9 +379,10 @@ func microVMArchGap(goos, goarch string) (MicroVMCheck, bool) {
 // decision on any host.
 //
 // The egress lockdown that keeps a krun+proxy guest from bypassing the proxy
-// (route surgery plus an in-netns firewall in the VMM's pasta namespace) is
-// implemented Linux-only; macOS/HVF has no route-surgery lockdown yet, so proxy
-// mode there would run with open egress - a silent fallback to weaker isolation.
+// (route surgery plus a deny-by-default in-netns firewall in the VMM's pasta
+// namespace) is implemented Linux-only; macOS/HVF has no equivalent yet, so
+// proxy mode there would run with open egress - a silent fallback to weaker
+// isolation.
 // Refuse that fail-closed rather than run a workload the proxy cannot contain.
 // Non-proxy krun and every non-microVM backend are unaffected.
 func microVMProxyUnsupported(goos string, microVM, proxyEnabled bool) error {
@@ -390,7 +391,7 @@ func microVMProxyUnsupported(goos string, microVM, proxyEnabled bool) error {
 	}
 	return fmt.Errorf("krun proxy mode is not supported on %s: the egress lockdown that forces guest "+
 		"traffic through the proxy is implemented on Linux only, so proxy mode here would run with open "+
-		"egress (no route-surgery lockdown on macOS/HVF yet). Run on Linux, or disable proxy mode to use "+
+		"egress (no egress lockdown on macOS/HVF yet). Run on Linux, or disable proxy mode to use "+
 		"krun without egress filtering", goos)
 }
 

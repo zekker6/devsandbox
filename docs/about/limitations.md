@@ -7,6 +7,10 @@ Known constraints of the current implementation.
 - Requires unprivileged user namespaces. Verify with `unshare --user true` (should succeed silently). See [How sandboxing works - Troubleshooting](../sandboxing.md#troubleshooting) for distro-specific guidance.
 - SELinux or AppArmor may restrict namespace operations. See [Security Modules](../sandboxing.md#security-modules) for known interactions.
 - MITM proxy may break tools with certificate pinning.
+- Proxy mode requires `nft` or `iptables` with the `nf_tables` (or `ip_tables`) and `nf_conntrack` kernel modules loaded, for its deny-by-default [egress lockdown](../proxy.md#bwrap-backend). The modules cannot be autoloaded from an unprivileged user namespace, so a missing one aborts the launch rather than degrading to open egress. `devsandbox doctor` reports this as the `proxy: firewall` row.
+- IPv6 is disabled in proxy mode: pasta is invoked with `-4`, so a proxy-mode sandbox has IPv4 only and no IPv6 egress path.
+- Direct DNS does not work in proxy mode - only the proxy port on the gateway is reachable, and the proxy resolves hostnames itself. A tool that queries a nameserver directly instead of using `HTTP(S)_PROXY` will fail.
+- Host loopback ports are reachable in proxy mode only when declared as an `outbound` [port forwarding rule](../configuration.md#port-forwarding); the gateway is not open on every port.
 - GUI applications are not supported (no display server forwarding). Desktop notifications work via XDG Desktop Portal.
 
 ## macOS (Docker backend)

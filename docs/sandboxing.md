@@ -4,7 +4,9 @@ How filesystem, process, and network isolation works in devsandbox.
 
 devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux or Docker containers on macOS to create
 isolated environments for running untrusted code. On Linux, bwrap and pasta binaries are embedded - no system packages
-required. To use system-installed binaries instead, see [configuration](configuration.md).
+required. To use system-installed binaries instead, see [configuration](configuration.md). Proxy mode is the one
+exception: its egress lockdown needs `iproute2` and `nft`/`iptables` on the host, and a `--proxy` launch aborts without
+them (see [proxy mode](proxy.md#requirements-bwrap-backend)).
 
 > **macOS users:** devsandbox uses the Docker backend on macOS. Skip to [How It Works (Docker)](#how-it-works-docker) for platform-relevant details, or see [Platform Differences](#platform-differences) for a comparison table.
 
@@ -71,7 +73,7 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 | mise-managed tools                | Read-only or overlay                |
 | Custom mount rules                | User-configurable (see below)       |
 | Network (default)                 | Full access                         |
-| Network (proxy mode)              | Isolated, routed through MITM proxy; enforcement strength varies by backend (see [per-backend behavior](proxy.md#backend-specific-behavior)) |
+| Network (proxy mode)              | Isolated, routed through MITM proxy; enforced deny-by-default on bwrap and krun, advisory on Docker (see [per-backend behavior](proxy.md#backend-specific-behavior)) |
 
 ### What's Not Available (by default)
 
@@ -387,6 +389,7 @@ This verifies:
 
 - Required binaries (bwrap - embedded or system-installed)
 - Optional binaries (pasta for proxy mode - embedded or system-installed)
+- The egress firewall proxy mode needs (`proxy: firewall` - `nft`/`iptables` plus the `nf_tables`/`nf_conntrack` modules)
 - User namespace support
 - Directory permissions
 - Overlayfs support (for tool writable layers)

@@ -34,6 +34,12 @@ unshare --user true
 
 No system packages are required - `bwrap` and `pasta` binaries ship embedded in the devsandbox binary.
 
+> **Proxy mode needs two host packages.** `devsandbox --proxy` locks the sandbox's egress to the proxy, which is applied
+> with `iproute2` and `nft` (or `iptables`), plus loadable `nf_tables` and `nf_conntrack` kernel modules. There is no
+> embedded substitute and no degraded mode: a proxy launch aborts if they are missing. `devsandbox doctor` reports this
+> as the `proxy: firewall` row. Launches without `--proxy` are unaffected. See
+> [proxy mode requirements](../proxy.md#requirements-bwrap-backend).
+
 > Want hardware-level isolation for untrusted code? The experimental `krun` microVM backend needs extra packages (`podman`, the `krun` runtime, KVM). See [krun microVM setup](krun.md).
 
 ### macOS

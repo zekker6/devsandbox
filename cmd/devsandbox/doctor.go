@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/egress"
 	"devsandbox/internal/embed"
 	"devsandbox/internal/isolator"
 	"devsandbox/internal/sandbox"
@@ -53,16 +54,18 @@ Checks (all platforms):
   - Configuration file
   - Recent error logs
   - Docker and Docker image availability
-  - krun microVM prerequisites (podman, krun runtime, KVM; on Linux also nft/iptables
-    for proxy mode, a system pasta binary, and /etc/subuid+/etc/subgid ranges for
-    rootless id mapping) - informational, opt-in
+  - krun microVM prerequisites (podman, krun runtime, KVM; on Linux also a system
+    pasta binary and /etc/subuid+/etc/subgid ranges for rootless id mapping) -
+    informational, opt-in
 
 Checks (Linux only):
   - Required binaries (bwrap)
   - Optional binaries (pasta for proxy mode)
   - User namespace support
   - Kernel version
-  - Overlayfs support`,
+  - Overlayfs support
+  - Proxy-mode egress firewall (nft/iptables plus the netfilter modules the
+    lockdown rules need) - advisory, needed only with --proxy`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor()
 		},
@@ -92,6 +95,10 @@ func runDoctor() error {
 		results = append(results, checkUserNamespaces())
 		results = append(results, checkKernelVersion())
 		results = append(results, checkOverlayfs())
+		// Advisory, and Linux-only because the lockdown is: proxy mode on bwrap
+		// and krun both abort without a working firewall backend, so this is not
+		// nested under the krun section.
+		results = append(results, checkEgressFirewall())
 	}
 
 	// Universal checks
@@ -857,22 +864,48 @@ func checkDockerImage(image string) checkResult {
 
 // checkKrun reports the krun microVM backend prerequisites as informational
 // doctor rows (podman, the krun OCI runtime, and /dev/kvm on Linux). On Linux it
-// adds three rows the run path depends on but CheckMicroVM does not gate: a
-// firewall backend (nft/iptables), which krun + proxy needs to port-scope guest
-// egress and without which the launch fails closed; a system pasta binary for
-// rootless podman networking; and subordinate id ranges for the --userns=keep-id
-// mapping. All three are Linux-only - the egress lockdown, pasta, and rootless
-// id mapping have no macOS equivalent here.
+// adds two rows the run path depends on but CheckMicroVM does not gate: a system
+// pasta binary for rootless podman networking, and subordinate id ranges for the
+// --userns=keep-id mapping. Both are Linux-only - pasta and rootless id mapping
+// have no macOS equivalent here. The firewall backend proxy mode needs is NOT
+// here: it gates bwrap too, so it is a top-level row (checkEgressFirewall).
 func checkKrun() []checkResult {
 	results := microVMResults(isolator.CheckMicroVM())
 	if runtime.GOOS == "linux" {
 		results = append(results, microVMResults([]isolator.MicroVMCheck{
-			isolator.CheckFirewallBackend(),
 			isolator.CheckSystemPasta(),
 			isolator.CheckRootlessIDMapping(),
 		})...)
 	}
 	return results
+}
+
+// checkEgressFirewall reports whether this host can apply the proxy-mode egress
+// lockdown, by applying the rule set in a throwaway namespace rather than by
+// looking for a binary - the failure worth catching here is nftables present
+// with nf_conntrack absent.
+//
+// The row is top-level and backend-neutral because the prerequisite is: bwrap
+// (the default backend) and krun both abort a --proxy launch without it. It
+// stays a warn, never an error: proxy mode is opt-in and doctor must not exit
+// non-zero for users who never enable it.
+// egressCheck is indirected so the row's severity is testable on any host: the
+// advisory-not-error property only shows on a host the check FAILS on, and a
+// developer machine with working netfilter never produces one.
+var egressCheck = egress.Check
+
+func checkEgressFirewall() checkResult {
+	res := egressCheck()
+	status := "warn"
+	if res.OK {
+		status = "ok"
+	}
+	return checkResult{
+		name:    "proxy: firewall",
+		status:  status,
+		message: res.Summary,
+		hint:    res.Hint,
+	}
 }
 
 // microVMResults maps structured krun prerequisite checks to doctor rows.

@@ -4,11 +4,11 @@ Network isolation, traffic inspection, and HTTP filtering.
 
 Proxy mode routes HTTP/HTTPS traffic through a local MITM (Man-in-the-Middle) proxy for inspection and logging.
 
-How strongly that routing is enforced depends on the isolation backend. krun confines the sandbox behind a
-deny-by-default egress firewall; bwrap removes the sandbox's default route, which blocks the common bypasses but leaves
-the gaps noted below; Docker only points the container at the proxy through environment variables, which a process is
-free to ignore. The sections below describe bwrap backend behavior by default - read
-[Backend-Specific Behavior](#backend-specific-behavior) before relying on proxy mode as a security boundary.
+How strongly that routing is enforced depends on the isolation backend. bwrap and krun both confine the sandbox behind a
+deny-by-default egress firewall and fail closed if it cannot be applied; Docker only points the container at the proxy
+through environment variables, which a process is free to ignore. The sections below describe bwrap backend behavior by
+default - read [Backend-Specific Behavior](#backend-specific-behavior) before relying on proxy mode as a security
+boundary.
 
 ## Why Use Proxy Mode?
 
@@ -32,6 +32,36 @@ free to ignore. The sections below describe bwrap backend behavior by default - 
 Proxy mode on the bwrap backend requires [passt/pasta](https://passt.top/) for network namespace creation. This is the only feature that requires passt - basic sandboxing works without it.
 
 devsandbox includes an embedded pasta binary - no system packages required. To use a system-installed pasta instead, set `use_embedded = false` in [configuration](configuration.md).
+
+That pasta must support `--map-host-loopback` (passt 2023-08 or newer). It is what maps the proxy gateway `10.0.2.2` to
+the host, and the egress lockdown's only permitted destination is that gateway - so on an older pasta the sandbox would
+be left with a deny-by-default firewall whose one exception points nowhere, and every connection would hang. Proxy mode
+refuses to launch on such a pasta rather than produce that. The embedded binary always supports it; only
+`use_embedded = false` (or a failed extraction) can reach an older one. Non-proxy launches are unaffected.
+
+It also requires **`iproute2`** and **`nft` or `iptables`**, plus the kernel's `nf_tables` (or `ip_tables`) and
+`nf_conntrack` modules, for the [egress lockdown](#bwrap-backend). Module autoload is not permitted from an
+unprivileged user namespace, so an unloaded module is a launch failure, not a silent degrade: a proxy-mode launch aborts
+rather than run with open egress. `devsandbox doctor` reports this as the `proxy: firewall` row, which applies to both
+bwrap and krun.
+
+```bash
+# Arch Linux
+sudo pacman -S iproute2 nftables
+
+# Debian/Ubuntu
+sudo apt install iproute2 nftables
+
+# Fedora
+sudo dnf install iproute nftables
+
+# If the modules are not loaded
+sudo modprobe nf_tables nf_conntrack
+```
+
+The check runs as a pre-flight before the sandbox is started, by applying the real rule set in a throwaway namespace. On
+a host that cannot enforce it the launch fails immediately with `proxy mode needs an enforceable egress lockdown`, naming
+the missing piece - not after pasta and bwrap have already started, and never with the workload running.
 
 > **Other backends:** The Docker backend does NOT require pasta - it uses per-session Docker networks instead. The krun
 > backend requires a system-installed pasta (podman networking; the embedded binary does not satisfy podman) plus `nft`
@@ -132,21 +162,59 @@ and, more importantly, in whether a process inside the sandbox can bypass the pr
 
 ### bwrap backend
 
-- **Enforcement**: Route-level, with gaps - the default route is removed, but see the limits below
-- **Network isolation**: pasta creates a new network namespace with its own network stack
+- **Enforcement**: Enforced, fail-closed - route surgery plus a deny-by-default egress firewall
+- **Network isolation**: pasta creates a new network namespace with its own network stack (IPv4 only in proxy mode)
 - **Gateway address**: Traffic is routed through `10.0.2.2` (pasta virtual gateway)
 - **CA certificate path** (inside sandbox): `/tmp/devsandbox-ca.crt`
 - **Requirement**: pasta, which is embedded and extracted on first use - a system passt/pasta package is only needed when
-  `use_embedded = false` or extraction fails
+  `use_embedded = false` or extraction fails - plus `iproute2` and `nft` or `iptables` with
+  `nf_tables`/`nf_conntrack` loaded
 
-Inside the namespace devsandbox adds a `/32` route to the gateway and deletes the default route, so a process that
-ignores `HTTP_PROXY` has no path to an external address and its connections fail. Three limits are worth knowing: hosts
-on the sandbox interface's own connected subnet stay reachable (deleting the default route does not remove the on-link
-route), pasta's `--map-host-loopback` maps the whole gateway address to the host's loopback rather than only the proxy
-port, and the route surgery is best-effort - it runs as a shell prologue whose `ip route` failures are not fatal, so a
-namespace where the surgery does not apply starts with egress open rather than refusing to start. No firewall backstops
-any of the three. Treat bwrap proxy mode as a strong default, not a containment guarantee; use krun when the proxy has to
-hold against code actively trying to get around it.
+Inside the namespace devsandbox adds a `/32` route to the gateway and deletes the default route, then applies a firewall
+that **DROPS by default** and permits only loopback, established/related return traffic, and TCP to the gateway on the
+proxy port. A process that ignores `HTTP_PROXY` has no path to an external address and its connections fail.
+Deny-by-default is what makes this structural rather than a list of blocked destinations: hosts on the sandbox
+interface's own connected subnet (deleting the default route does not remove the on-link route), cloud metadata at
+`169.254.169.254`, direct DNS, and every non-proxy port of the gateway - `--map-host-loopback` maps the whole gateway
+address to the host's loopback, not just the proxy port - lose their **direct** path without being enumerated.
+
+**The lockdown scopes the path, not the destination.** It reduces the sandbox to exactly one way out - the proxy - and
+what may be reached *through* that way is a separate decision, made by [HTTP filtering](#http-filtering). Filtering is
+off until you set `default_action`, and with it off the proxy connects wherever it is asked to. So a request for
+`http://169.254.169.254/`, a LAN address, or a `127.0.0.1` port is refused as a direct socket and still served if it is
+made through the proxy - by the proxy process, which runs on the host outside the sandbox namespace. That is the point
+at which such a request becomes visible, loggable, and refusable, which is what the lockdown buys; it is not a
+destination filter on its own. If reaching those destinations should fail rather than be logged, set
+`default_action = "block"` and allowlist what the sandbox legitimately needs.
+
+Three properties make it a boundary rather than a default:
+
+- **It lands before the workload exists.** The rules are applied by pasta's wrapper prologue, which runs as root in
+  pasta's user namespace holding `CAP_NET_ADMIN` over the netns, *before* it execs bwrap. There is no window in which
+  sandboxed code runs with egress open.
+- **It is fail-closed.** A missing `nft`/`iptables`, an unloaded `nf_tables`/`nf_conntrack`, an undiscoverable default
+  route device, or any failing rule aborts the launch with a `devsandbox: egress lockdown:` diagnostic on stderr. There
+  is no config key that degrades back to unenforced egress.
+- **The sandbox cannot undo it.** bwrap always runs with `--unshare-user`, and no bwrap path adds capabilities back. The
+  kernel's capability check walks a namespace's *ancestors*, never its descendants, so a process in bwrap's child user
+  namespace holds no `CAP_NET_ADMIN` over a netns owned by pasta's user namespace and cannot flush the table. Unsharing
+  its own netns yields a namespace with only `lo` and no egress path either.
+
+The namespace is given **IPv4 only** (pasta is invoked with `-4` whenever the lockdown is rendered), so there is no
+second address family for the IPv4 ruleset to miss. Direct DNS is deliberately not excepted - the proxy resolves
+hostnames itself, and permitting `:53` to the gateway would re-open a DNS-tunnel exfiltration channel. Configured
+**outbound** [port forwarding rules](configuration.md#port-forwarding) keep working: each one adds an accept for exactly
+its port and protocol on the gateway. A host loopback port that is *not* declared as an outbound rule is no longer
+reachable at `10.0.2.2` - closing that exposure is the point, and declaring the rule is the supported fix.
+
+Pasta's automatic namespace-to-host port forwarding (`-T`/`-U`, which default to `auto`) is switched **off** for every
+protocol without a configured outbound rule. Left on, it binds each host-listening port inside the sandbox namespace on
+loopback, and loopback is the one interface the firewall has to permit - so the host's own `127.0.0.1` services would
+have stayed directly reachable from inside the sandbox at `127.0.0.1:<port>` while every other direct destination was
+refused. Inbound forwarding (`--tcp-ports`/`--udp-ports`) is unaffected.
+
+The rule set is shared with krun (`internal/egress`), so the two backends cannot drift apart. What still separates them
+is the kernel boundary, not the proxy: krun gives the workload its own guest kernel, bwrap shares the host's.
 
 ### krun backend
 
@@ -156,11 +224,14 @@ hold against code actively trying to get around it.
 - **CA certificate path** (inside guest): `/etc/ssl/certs/devsandbox-ca.crt`
 - **Requirement**: podman with the krun runtime, system pasta, and `nft` or `iptables`
 
-krun closes the two gaps above. Under libkrun the guest has no routable interface of its own, so the lockdown is applied
-host-side in the VMM's pasta namespace: the same route surgery, paired with a firewall that DROPS by default and permits
-only loopback, established/related return traffic, and TCP connections to the gateway on the proxy port. LAN hosts,
-cloud metadata endpoints, and direct DNS have no path out. The guest is given IPv4 only, so there is no IPv6 route around
-the IPv4 rules, and the in-guest workload does not start until the host signals the lockdown is complete.
+krun applies the same rule set as bwrap, from a different position. Under libkrun the guest has no routable interface of
+its own, so the lockdown is applied host-side in the VMM's pasta namespace: the same route surgery, paired with a
+firewall that DROPS by default and permits only loopback, established/related return traffic, and TCP connections to the
+gateway on the proxy port. LAN hosts, cloud metadata endpoints, and direct DNS have no direct path out - and, as under
+bwrap, the [lockdown scopes the path, not the destination](#bwrap-backend): what the proxy itself will connect to is
+decided by [HTTP filtering](#http-filtering). The guest is given IPv4
+only, so there is no IPv6 route around the IPv4 rules, and the in-guest workload does not start until the host signals
+the lockdown is complete.
 
 The lockdown is fail-closed: if `nft`/`iptables` is missing or any lockdown command fails, the launch aborts instead of
 running with open egress. Proxy mode with krun on **macOS is refused outright** - the lockdown is not implemented for
@@ -184,11 +255,12 @@ to hold against uncooperative code.
 
 | Aspect | bwrap | krun | Docker |
 |--------|-------|------|--------|
-| Enforcement | Route-level, best-effort (no default route, no firewall) | Enforced, fail-closed (no default route + deny-by-default firewall) | Advisory (env vars only) |
+| Enforcement | Enforced, fail-closed (no default route + deny-by-default firewall) | Enforced, fail-closed (no default route + deny-by-default firewall) | Advisory (env vars only) |
 | Network isolation | pasta namespace | pasta namespace around the microVM | Per-session Docker network |
 | Gateway IP | `10.0.2.2` | `10.0.2.2` | `host.docker.internal` |
 | CA cert location | `/tmp/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` | `/etc/ssl/certs/devsandbox-ca.crt` |
-| Extra dependency | passt/pasta (embedded) | podman + krun, system pasta, `nft`/`iptables` | None (Docker only) |
+| Extra dependency | passt/pasta (embedded), `nft`/`iptables` | podman + krun, system pasta, `nft`/`iptables` | None (Docker only) |
+| Address family | IPv4 only | IPv4 only | IPv4 + IPv6 |
 | Proxy mode platforms | Linux | Linux only (refused on macOS) | Linux, macOS |
 
 ## How It Works (bwrap)
@@ -196,7 +268,7 @@ to hold against uncooperative code.
 1. **Network Isolation** - pasta creates a new network namespace with its own network stack
 2. **Gateway Setup** - Traffic is routed through a virtual gateway (10.0.2.2)
 3. **Proxy Server** - A local HTTP/HTTPS proxy runs on the host
-4. **Traffic Enforcement** - The default route is removed, so a process that ignores `HTTP_PROXY` has no path to an external address. This is best-effort and has the gaps listed under [bwrap backend](#bwrap-backend) - no firewall backstops it
+4. **Traffic Enforcement** - Before the workload starts, the default route is removed and a deny-by-default firewall is applied in the namespace, so a process that ignores `HTTP_PROXY` has no path to an external address. Any step failing aborts the launch - see [bwrap backend](#bwrap-backend)
 5. **TLS Interception** - A generated CA certificate enables HTTPS inspection
 
 ### Network Architecture
@@ -813,8 +885,9 @@ can read it. Three things bound that:
 
 - **The request has to reach the proxy.** Coverage inherits the enforcement strength of the backend in use - see
   [Backend-Specific Behavior](#backend-specific-behavior). Under the docker backend the sandbox is only *pointed* at the
-  proxy through `HTTP_PROXY`/`HTTPS_PROXY`, so a process that ignores those variables is never scanned. Under bwrap the
-  route-surgery gaps apply. krun is the only backend that fails closed.
+  proxy through `HTTP_PROXY`/`HTTPS_PROXY`, so a process that ignores those variables is never scanned. bwrap and krun
+  both fail closed: the deny-by-default lockdown leaves no path out that does not pass through the proxy port, so a
+  request that skips the proxy does not go anywhere rather than going unscanned.
 - **HTTPS needs MITM.** With `--no-mitm`, CONNECT requests are tunneled without interception, so HTTPS bodies,
   headers, and URLs are never inspected and redaction applies to plain HTTP only. devsandbox prints a warning at startup
   when redaction is enabled with MITM off.
@@ -822,7 +895,7 @@ can read it. Three things bound that:
   through untouched.
 
 Treat redaction as a strong guard against accidental leaks, not as a barrier against code deliberately trying to
-exfiltrate a secret. For that, use `--isolation=krun` with MITM enabled.
+exfiltrate a secret. For that, use an enforced backend - `bwrap` or `krun` - with MITM enabled.
 
 ### Quick Start
 
@@ -950,11 +1023,49 @@ devsandbox doctor
 # Install system package as fallback (see Requirements above)
 ```
 
+### "proxy mode needs an enforceable egress lockdown"
+
+The pre-flight refused the launch before anything was started. The message names which piece is missing - `iproute2`,
+`nft`/`iptables`, the throwaway namespace, or a rule the kernel refused:
+
+```bash
+devsandbox doctor              # the `proxy: firewall` row reports the same check
+sudo modprobe nf_tables nf_conntrack
+```
+
+The most common cause is `nftables` installed with `nf_conntrack` unloaded: every binary is present, and the rule set
+still cannot apply because it matches on `ct state`.
+
+### "egress lockdown" aborts the launch
+
+The launch prints a `devsandbox: egress lockdown:` diagnostic and exits instead of starting. This is the same failure
+seen from inside the sandbox network namespace rather than from the pre-flight - most often an undiscoverable default
+route device, or a rule the kernel refused only in that namespace. Proxy mode fails closed, so the workload never ran:
+
+```bash
+devsandbox doctor              # the `proxy: firewall` row names which half failed
+sudo modprobe nf_tables nf_conntrack
+```
+
+There is no setting that degrades back to unenforced egress. Run without `--proxy` if you do not need the proxy.
+
 ### Requests timing out
 
 1. Check if the target allows proxy connections
 2. Some services block known proxy IPs
 3. Try accessing the URL directly to verify it's reachable
+4. Under bwrap or krun, only the proxy port on `10.0.2.2` is reachable - a tool that opens a direct socket instead of
+   honoring `HTTP_PROXY`/`HTTPS_PROXY` will hang until it times out. Direct DNS behaves the same way (see below)
+
+### Direct DNS does not resolve
+
+Only the proxy port on the gateway is permitted, so a query sent straight to a nameserver has no path out. The proxy
+resolves hostnames itself, so anything honoring `HTTP_PROXY`/`HTTPS_PROXY` is unaffected; a tool that resolves names on
+its own is not. This is deliberate - permitting `:53` to the gateway would re-open a DNS-tunnel exfiltration channel.
+
+The sandbox sees the host's `/etc/resolv.conf` (bound read-only), which changes nothing here: on a `systemd-resolved`
+host it names `127.0.0.53`, which inside the namespace is the sandbox's own loopback with nothing listening on it, so
+direct DNS did not work there before the lockdown either.
 
 ### Certificate errors
 

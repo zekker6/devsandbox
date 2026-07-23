@@ -12,8 +12,10 @@ const (
 // Pasta provides user-mode networking for unprivileged network namespaces.
 // When used with bwrap, it creates an isolated network reached through the
 // gateway IP (10.0.2.2), which maps to the host's loopback. Pasta itself does
-// not restrict egress to the proxy - that is best-effort route surgery layered
-// on top by bwrap.StartWithPasta.
+// not restrict egress to the proxy: in proxy mode bwrap.StartWithPasta layers a
+// deny-by-default egress lockdown on top, applied inside the namespace before
+// the workload starts, which leaves the proxy port on the gateway as the only
+// reachable destination.
 type Pasta struct{}
 
 // NewPasta creates a new pasta provider

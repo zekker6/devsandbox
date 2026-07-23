@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"devsandbox/internal/egress"
 )
 
 var binaryPath string
@@ -416,13 +418,7 @@ func TestSandbox_ProxyInfo(t *testing.T) {
 }
 
 func TestSandbox_ProxyEnvironmentVariables(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Run sandbox with proxy and check environment variables
 	cmd := exec.Command(binaryPath, "--proxy", "env")
@@ -450,13 +446,7 @@ func TestSandbox_ProxyEnvironmentVariables(t *testing.T) {
 }
 
 func TestSandbox_ProxyCACertificateAccessible(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Verify CA certificate is accessible inside sandbox at /tmp
 	// (we use /tmp because /etc/ssl is bind-mounted read-only from host)
@@ -474,13 +464,7 @@ func TestSandbox_ProxyCACertificateAccessible(t *testing.T) {
 }
 
 func TestSandbox_ProxyServerRunning(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if curl is available
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -520,13 +504,7 @@ func TestSandbox_ProxyServerRunning(t *testing.T) {
 }
 
 func TestSandbox_ProxyEnvironmentSet(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Verify proxy environment variable is set correctly inside the sandbox
 	cmd := exec.Command(binaryPath, "--proxy", "--proxy-port", "18889",
@@ -560,13 +538,7 @@ func TestSandbox_ProxyEnvironmentSet(t *testing.T) {
 }
 
 func TestSandbox_ProxyBlocksDirectConnections(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if nc (netcat) is available
 	if _, err := exec.LookPath("nc"); err != nil {
@@ -609,13 +581,7 @@ func TestSandbox_ProxyBlocksDirectConnections(t *testing.T) {
 }
 
 func TestSandbox_ProxyAllowsHTTPTraffic(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if curl is available
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -648,13 +614,7 @@ func TestSandbox_ProxyAllowsHTTPTraffic(t *testing.T) {
 }
 
 func TestSandbox_ProxyAllowsHTTPSTraffic(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if curl is available
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -686,13 +646,7 @@ func TestSandbox_ProxyAllowsHTTPSTraffic(t *testing.T) {
 }
 
 func TestSandbox_ProxyLogsCreated(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if curl is available
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -754,13 +708,7 @@ func TestSandbox_ProxyLogsCreated(t *testing.T) {
 }
 
 func TestSandbox_ProxyLogsFiltering(t *testing.T) {
-	if !bwrapAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	if !networkProviderAvailable() {
-		t.Skip("pasta not available")
-	}
+	requireProxySandbox(t)
 
 	// Check if curl is available
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -2335,4 +2283,27 @@ func networkProviderAvailable() bool {
 	cmd := exec.Command(pastaPath, "--help")
 	err = cmd.Run()
 	return err == nil
+}
+
+// requireProxySandbox skips t unless this host can actually run a proxy-mode
+// sandbox. Beyond bwrap and pasta that now includes an enforceable egress
+// lockdown: proxy mode hard-aborts with ErrEgressPreflight on a host without
+// iproute2 and a usable netfilter backend, so without this guard every proxy
+// test on such a host reports a missing prerequisite as a failure - the same
+// reason bwrap and pasta are probed rather than assumed. It runs the same probe
+// the launch preflight does, so the two cannot disagree.
+func requireProxySandbox(t *testing.T) {
+	t.Helper()
+
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	if !networkProviderAvailable() {
+		t.Skip("pasta not available")
+	}
+
+	if res := egress.Check(); !res.OK {
+		t.Skipf("egress lockdown not enforceable on this host: %s", res.Summary)
+	}
 }

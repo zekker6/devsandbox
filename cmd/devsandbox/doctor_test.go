@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"devsandbox/internal/egress"
 	"devsandbox/internal/isolator"
 	"devsandbox/internal/sandbox"
 )
@@ -99,7 +100,6 @@ func TestCheckKrun_Rows(t *testing.T) {
 
 	linuxOnly := map[string]bool{
 		"krun: kvm":                 false,
-		"krun: firewall":            false,
 		"krun: system pasta":        false,
 		"krun: rootless id mapping": false,
 	}
@@ -141,6 +141,92 @@ func TestCheckKrun_Rows(t *testing.T) {
 				t.Errorf("%q row must be absent on darwin (no rootless podman/egress lockdown there)", name)
 			}
 		}
+	}
+}
+
+// TestCheckKrun_NoFirewallRow guards the move: the firewall prerequisite gates
+// bwrap proxy mode too, so nesting it under "krun:" would hide a hard abort of
+// the DEFAULT backend behind a section bwrap users skip.
+func TestCheckKrun_NoFirewallRow(t *testing.T) {
+	for _, r := range checkKrun() {
+		if strings.Contains(r.name, "firewall") {
+			t.Errorf("firewall row %q is still nested under the krun section", r.name)
+		}
+	}
+}
+
+// TestCheckEgressFirewall asserts the proxy firewall row is top-level,
+// backend-neutral, and advisory: proxy mode is opt-in, so an unmet prerequisite
+// must never fail a doctor run for users who do not enable it.
+func TestCheckEgressFirewall(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the egress lockdown, and its row, are Linux-only")
+	}
+
+	r := checkEgressFirewall()
+	if r.name != "proxy: firewall" {
+		t.Errorf("name = %q, want a backend-neutral %q", r.name, "proxy: firewall")
+	}
+	if strings.HasPrefix(r.name, "krun") {
+		t.Errorf("name = %q, want a row not scoped to krun", r.name)
+	}
+	if r.status != "ok" && r.status != "warn" {
+		t.Errorf("status = %q, want ok/warn; proxy mode is opt-in and must not fail doctor", r.status)
+	}
+	if r.message == "" {
+		t.Error("row has an empty message")
+	}
+	if r.status == "warn" {
+		for _, want := range []string{"modprobe", "bwrap", "krun"} {
+			if !strings.Contains(r.hint, want) {
+				t.Errorf("hint = %q, want it to mention %q", r.hint, want)
+			}
+		}
+	}
+}
+
+// TestCheckEgressFirewall_NotInDoctorErrors pins the severity end to end: a host
+// that cannot apply the lockdown produces a warn row, and doctor still exits
+// zero on it. Driving the real function with a failing check is what makes this
+// meaningful - the row is built on a developer machine whose netfilter works, so
+// asserting on the live result could never observe the failing case.
+func TestCheckEgressFirewall_NotInDoctorErrors(t *testing.T) {
+	prev := egressCheck
+	egressCheck = func() egress.CheckResult {
+		return egress.CheckResult{OK: false, Summary: "no nft or iptables", Hint: egress.CheckHint}
+	}
+	t.Cleanup(func() { egressCheck = prev })
+
+	row := checkEgressFirewall()
+	if row.status != "warn" {
+		t.Errorf("status = %q for an unenforceable host, want warn; proxy mode is opt-in and must not fail doctor", row.status)
+	}
+	if row.hint == "" {
+		t.Error("a failing row carries no remediation")
+	}
+
+	rows := []checkResult{{name: "bwrap", status: "ok"}, row}
+	if _, failed := doctorSummary(rows); failed {
+		t.Error("a failing proxy firewall row failed the doctor run; it is advisory")
+	}
+}
+
+// TestCheckEgressFirewall_OKRow asserts the satisfied case reports ok and
+// carries no remediation, so doctor does not tell a working host to install
+// packages it already has.
+func TestCheckEgressFirewall_OKRow(t *testing.T) {
+	prev := egressCheck
+	egressCheck = func() egress.CheckResult {
+		return egress.CheckResult{OK: true, Summary: "/usr/sbin/nft (lockdown rules apply)"}
+	}
+	t.Cleanup(func() { egressCheck = prev })
+
+	row := checkEgressFirewall()
+	if row.status != "ok" {
+		t.Errorf("status = %q for an enforceable host, want ok", row.status)
+	}
+	if row.hint != "" {
+		t.Errorf("hint = %q on a satisfied row, want none", row.hint)
 	}
 }
 

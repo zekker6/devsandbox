@@ -48,6 +48,65 @@ Two more invariants come from the herdr agent-reporting work:
 
 Emit devsandbox's resolved absolute path into generated snippets, not `command devsandbox`: a login or terminal-multiplexer pane shell may have a different `PATH` (mise shims are the common case).
 
+## Proxy egress lockdown
+
+`internal/egress` holds the deny-by-default rule set that makes proxy mode a boundary on **both** bwrap and krun. Four
+invariants are load-bearing, each of them the reason a gap that used to exist is closed:
+
+- **The lockdown lands before the workload exists.** On bwrap it is rendered into pasta's wrapper prologue, which runs as
+  root in pasta's user namespace holding `CAP_NET_ADMIN` over the netns *before* it execs bwrap; on krun the in-guest
+  shim waits on a sentinel. Applying rules after the sandbox starts - the obvious `nsenter`-after-launch shape - reopens
+  a window in which untrusted code runs with egress open. Do not move it later.
+- **One rule set, two application mechanisms.** krun applies the `[][]string` lists via `nsenter`, bwrap renders the same
+  lists into a shell script. Both backends' posture then diverges only by someone deliberately editing shared code, never
+  by drift. A backend-specific rule belongs in `Lockdown`, not in a second builder.
+- **The pasta family restriction and the ruleset family must stay in sync.** The rules are IPv4 (the gateway is
+  `10.0.2.2`), so `-4` is emitted on every pasta invocation that renders a lockdown. Removing `-4` leaves a second
+  address family nothing filters - which is exactly what made IPv6 egress survive the old route surgery.
+- **pasta's automatic port forwarding must be off wherever the lockdown is rendered.** `-T`/`-U` default to `auto`,
+  which binds every host-listening port *inside* the namespace on loopback - and `oif lo accept` is a rule the firewall
+  cannot drop, so that traffic is a direct path to the host's own `127.0.0.1` services that no gateway rule can see.
+  `egress.NoAutoForwardArgs` emits `-T none`/`-U none` for each protocol with no configured outbound forward, and is
+  shared by both backends for the same reason the rule lists are. A configured forward's explicit `-T`/`-U` already
+  overrides the default, so it is left alone; inbound `-t`/`-u` is a different direction and out of this scope.
+- **Fail closed, with no opt-out.** A missing binary, an unloadable `nf_tables`/`nf_conntrack`, an undiscoverable route
+  device, or any failing rule aborts the launch (exit code 78, mapped back to a named error so it is not read as a
+  workload status). Binaries are resolved to absolute paths on the host - a bare name resolved against the invoking
+  user's `PATH` is how the surgery silently never applied on `/usr/sbin` distros. There is deliberately no config key
+  that degrades to unenforced egress.
+
+The preflight and the `doctor` row share one probe that *applies the real rule set* in a throwaway user+net namespace. A
+cheaper check (binary presence, `/sys/module/nf_tables`) passes on a host with `nf_tables` but no `nf_conntrack` and lets
+the launch die mid-script instead. The preflight *returns* the resolved `egress.Tools` and the launch renders those -
+`internal/bwrap` never resolves its own. A second resolution would mean the probe verified one set of binaries and the
+sandbox ran another, which is a security control verified in name only.
+
+**The lockdown scopes the path, not the destination.** It leaves the sandbox one way out - the proxy - and says nothing
+about where that way leads: `internal/proxy`'s filter allows every destination until `default_action` is set, so cloud
+metadata, LAN hosts and host loopback ports are refused as direct sockets and still reachable *through* the proxy. That
+is a real narrowing (those requests become visible, loggable and refusable), and it is not unreachability. Docs and
+comments here say "no direct path", never "closed" unqualified - the overclaim was reported in review once already.
+
+Three things about exit code 78 in the rendered prologue:
+
+- **Every pre-exec failure must leave with exactly 78**, not only the ones guarded by `|| fail`. `set -e` alone exits
+  with the *failing command's* status, and the device lookup runs `awk` and `sleep` through `PATH` - a shell that cannot
+  find them exits 127, which `asLockdownOrCommandExit` passes through as a workload status. An `EXIT` trap converts any
+  such abort; it is cleared immediately before `exec "$@"` so a workload's own status is never rewritten, and `fail`
+  clears it before exiting so the handler cannot re-enter itself.
+- **An abort can also arrive as a start failure, not just from `Wait`.** If the wrapper dies before its child is visible
+  in procfs, `StartWithPasta` sees a PID-discovery error and the 78 is the only evidence of what happened - so it is
+  surfaced rather than discarded, and the launch path maps it the same way.
+- **78 alone does not identify an abort, so the prologue leaves a marker.** The trap is cleared before `exec "$@"`, so a
+  workload that exits 78 itself is status-identical to an abort; classifying on the status alone turns that workload's
+  exit into a security error and replaces its code with 1. `Lockdown.ReadyFile` is created after the last rule and
+  immediately before the exec, and `egress.LockdownApplied` reads it: 78 with the marker is the workload's own status, 78
+  without it is the lockdown. `Script` refuses to render without a marker path rather than reintroduce the guess, and a
+  marker that cannot be written aborts like any other step. The path is rooted at `$XDG_STATE_HOME/devsandbox/egress`,
+  not at `os.MkdirTemp("", …)`: that resolves against `$TMPDIR`, which the invoking user may have pointed at a directory
+  bound read-write into the sandbox - and a workload that can delete the marker makes its own exit 78 read as an abort,
+  destroying the signal. Same reasoning as `internal/herdrstate`; see *State the host trusts* above.
+
 ## Platform-specific packages
 
 `internal/bwrap` and `internal/isolator/bwrap.go` have **no build tags** - they compile on darwin even though bwrap is Linux-only. Anything they import must build on darwin too. A Linux-only package pulled into that import graph breaks the darwin release build.

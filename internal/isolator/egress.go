@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"devsandbox/internal/egress"
 )
 
 // egressCommandTimeout bounds each nsenter lockdown command. The lockdown runs in
@@ -16,6 +18,12 @@ import (
 // netns operation) would otherwise block Run from ever returning. A handful of
 // commands run, each bounded, so the whole lockdown is bounded too.
 const egressCommandTimeout = 15 * time.Second
+
+// egressWaitDelay bounds the wait for a captured output pipe after the deadline
+// has already killed the command. Killing nsenter does not close a pipe the `ip`
+// it spawned still holds, so without this the wait would outlast the timeout
+// indefinitely.
+const egressWaitDelay = 2 * time.Second
 
 // egressSentinelName is the file the host writes into the sandbox home once it
 // has locked the krun guest's egress to the proxy gateway. The in-guest shim
@@ -35,21 +43,15 @@ const egressSentinelName = ".devsandbox-egress-locked"
 // its shared pasta netns, applied one layer out. Route surgery alone is not
 // enough (the connected LAN subnet route survives it, and --map-host-loopback
 // exposes every port of the gateway), so it is paired with a DENY-BY-DEFAULT
-// firewall (buildFirewallCommands) that drops all egress except loopback,
+// firewall (egress.FirewallCommands) that drops all egress except loopback,
 // established/related return traffic, and TCP to gateway:proxyPort. The
 // guest is given IPv4 only (the pasta invocation passes -4), so there is no IPv6
 // path for the IPv4 table to miss.
-
-// buildEgressCommands returns the argv lists that lock guest egress to the proxy
-// gateway: add a /32 host route to the gateway via the default device, then
-// delete the default route. Ordering is significant - the gateway route MUST be
-// added before the default route is deleted so the proxy stays reachable.
-func buildEgressCommands(gateway, dev string) [][]string {
-	return [][]string{
-		{"ip", "route", "add", gateway + "/32", "dev", dev},
-		{"ip", "route", "del", "default"},
-	}
-}
+//
+// The rule content itself lives in internal/egress, shared with the bwrap
+// backend, which renders the same lists into its pasta wrapper script instead of
+// applying them through nsenter. Everything below is krun's application
+// mechanism: the nsenter wrapping, the sequencing, and the sentinel handshake.
 
 // parseDefaultRouteDevice extracts the device backing the default route from the
 // output of `ip -o route show default` (e.g. "default via 10.0.2.2 dev enp5s0 ...").
@@ -88,104 +90,16 @@ func applyNetnsCommands(pid int, cmds [][]string, runFn func(name string, args .
 }
 
 // applyEgressCommands applies the proxy-only route surgery in the target netns.
-func applyEgressCommands(pid int, gateway, dev string, runFn func(name string, args ...string) error) error {
-	return applyNetnsCommands(pid, buildEgressCommands(gateway, dev), runFn)
+func applyEgressCommands(pid int, tools egress.Tools, gateway, dev string, runFn func(name string, args ...string) error) error {
+	return applyNetnsCommands(pid, egress.RouteCommands(tools, gateway, dev), runFn)
 }
 
-// firewallBackend identifies the host firewall tool used to port-scope guest
-// access to the proxy gateway inside the VMM netns.
-type firewallBackend int
-
-const (
-	firewallNone firewallBackend = iota
-	firewallNft
-	firewallIptables
-)
-
-// egressFirewallTable is the nft table the lockdown installs in the VMM netns.
-const egressFirewallTable = "devsandbox_egress"
-
-// detectFirewallBackend prefers nft and falls back to iptables, based on which
-// binary the host provides, returning both the chosen backend and its resolved
-// path so callers can reuse the path without a second lookup. lookPath is
-// injected so the choice is unit-testable without the host binaries actually
-// being present.
-func detectFirewallBackend(lookPath func(string) (string, error)) (firewallBackend, string) {
-	if path, err := lookPath("nft"); err == nil {
-		return firewallNft, path
-	}
-	if path, err := lookPath("iptables"); err == nil {
-		return firewallIptables, path
-	}
-	return firewallNone, ""
-}
-
-// CheckFirewallBackend reports whether the host provides a firewall backend (nft
-// or iptables) that the krun proxy-mode egress lockdown needs to port-scope guest
-// access to the proxy gateway. It is advisory: only krun + proxy on Linux uses it,
-// and the launch already fails closed if it is missing, so doctor surfaces it as a
-// warn to catch the gap before launch rather than at it. Non-proxy krun does not
-// need a firewall backend.
-func CheckFirewallBackend() MicroVMCheck {
-	return checkFirewallBackend(exec.LookPath)
-}
-
-func checkFirewallBackend(lookPath func(string) (string, error)) MicroVMCheck {
-	switch backend, path := detectFirewallBackend(lookPath); backend {
-	case firewallNft, firewallIptables:
-		return MicroVMCheck{Name: "firewall", OK: true, Summary: path}
-	default:
-		return MicroVMCheck{
-			Name:    "firewall",
-			OK:      false,
-			Summary: "no nft or iptables (needed for krun proxy-mode egress lockdown)",
-			Hint: "Install nftables or iptables; krun + proxy uses it to restrict guest egress to the\n" +
-				"proxy port. Usually already present. Non-proxy krun does not need it.",
-		}
-	}
-}
-
-// buildFirewallCommands returns the argv lists that lock guest egress to the
-// proxy gateway with a DENY-BY-DEFAULT firewall in the VMM netns. The route
-// surgery alone only removes the default route: the connected on-link subnet
-// route survives, so LAN hosts (the router UI, a NAS, the LAN DNS resolver -
-// direct DNS exfiltration - and, on a cloud host, the 169.254.169.254 metadata
-// service and IAM credentials) stay directly reachable, and pasta's
-// --map-host-loopback maps every port of the gateway to the host's 127.0.0.1.
-// Enumerating what to drop misses all of that, so instead the chain DROPS by
-// default and allows only: established/related return traffic, loopback, and TCP
-// to gateway:proxyPort. Everything else - every other host, every other port
-// of the gateway, DNS - has no path out. DNS is deliberately not excepted: the
-// proxy resolves hostnames itself and all traffic goes through HTTP(S)_PROXY.
-// pasta has no port-scoped host-loopback option (--map-host-loopback takes an
-// address only, confirmed against the current pasta(1) man page), which is why
-// the scoping is done here. This is IPv4 only, matching the family the guest is
-// given: the pasta invocation passes -4, so the guest has no IPv6 route or
-// IPv6 host-loopback map for this table to need to cover.
-func buildFirewallCommands(backend firewallBackend, gateway string, proxyPort int) ([][]string, error) {
-	port := strconv.Itoa(proxyPort)
-	switch backend {
-	case firewallNft:
-		return [][]string{
-			{"nft", "add", "table", "ip", egressFirewallTable},
-			{"nft", "add", "chain", "ip", egressFirewallTable, "output", "{ type filter hook output priority 0 ; policy drop ; }"},
-			{"nft", "add", "rule", "ip", egressFirewallTable, "output", "ct", "state", "established,related", "accept"},
-			{"nft", "add", "rule", "ip", egressFirewallTable, "output", "oif", "lo", "accept"},
-			{"nft", "add", "rule", "ip", egressFirewallTable, "output", "ip", "daddr", gateway, "tcp", "dport", port, "accept"},
-		}, nil
-	case firewallIptables:
-		// Append the accepts before flipping the policy to DROP so no in-flight
-		// return traffic is dropped in the window between the two.
-		return [][]string{
-			{"iptables", "-A", "OUTPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
-			{"iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"},
-			{"iptables", "-A", "OUTPUT", "-d", gateway, "-p", "tcp", "--dport", port, "-j", "ACCEPT"},
-			{"iptables", "-P", "OUTPUT", "DROP"},
-		}, nil
-	default:
-		return nil, fmt.Errorf("no firewall backend (nft or iptables) available to lock guest egress to the proxy port; install nftables or iptables")
-	}
-}
+// The doctor row for the firewall backend used to live here as a krun-scoped
+// MicroVMCheck. It is now egress.Check: bwrap proxy mode hard-aborts without a
+// working backend too, and a row named "krun: firewall" is one a bwrap user
+// reasonably ignores. The check also no longer stops at resolving a binary - it
+// applies the rule set (egress.Probe), which is what catches a host with
+// nf_tables loaded but nf_conntrack absent.
 
 // lockdownGuestEgress resolves the default-route device inside the VMM's network
 // namespace and applies, via nsenter, both the proxy-only route surgery and a
@@ -197,19 +111,19 @@ func lockdownGuestEgress(pid int, gateway string, proxyPort int) error {
 }
 
 // lockdownGuestEgressWith is lockdownGuestEgress with the host-touching seams
-// injected - the firewall-binary lookup, the netns device resolver, and the
-// command runner - so the security-relevant sequencing is unit-testable without a
-// real nsenter or a running microVM. Two orderings matter and are asserted by the
-// tests through these seams: the firewall backend is resolved BEFORE any netns
-// command runs (a host lacking both nft and iptables fails closed without
-// half-applying the lockdown), and the route surgery runs BEFORE the port-scoped
-// firewall.
+// injected - the binary lookup, the netns device resolver, and the command
+// runner - so the security-relevant sequencing is unit-testable without a real
+// nsenter or a running microVM. Two orderings matter and are asserted by the
+// tests through these seams: the binaries (and with them the firewall backend)
+// are resolved BEFORE any netns command runs (a host lacking `ip`, or lacking
+// both nft and iptables, fails closed without half-applying the lockdown), and
+// the route surgery runs BEFORE the port-scoped firewall.
 func lockdownGuestEgressWith(
 	pid int,
 	gateway string,
 	proxyPort int,
 	lookPath func(string) (string, error),
-	resolveDev func(pid int) (string, error),
+	resolveDev func(pid int, ipPath string) (string, error),
 	runFn func(name string, args ...string) error,
 ) error {
 	if gateway == "" {
@@ -218,31 +132,53 @@ func lockdownGuestEgressWith(
 	if proxyPort <= 0 {
 		return fmt.Errorf("egress lockdown requested but proxy port is invalid: %d", proxyPort)
 	}
-	// Resolve the firewall backend BEFORE mutating the netns so a host with
-	// neither nft nor iptables fails closed without half-applying the lockdown.
-	backend, _ := detectFirewallBackend(lookPath)
-	firewallCmds, err := buildFirewallCommands(backend, gateway, proxyPort)
+	// Resolve the binaries (and with them the firewall backend) BEFORE mutating
+	// the netns so a host with no `ip`, or with neither nft nor iptables, fails
+	// closed without half-applying the lockdown. Resolution yields absolute
+	// paths: nsenter runs the command with a PATH this process does not control,
+	// and /usr/sbin is commonly absent from it.
+	tools, err := egress.ResolveTools(lookPath)
 	if err != nil {
 		return err
 	}
-	dev, err := resolveDev(pid)
+	firewallCmds, err := egress.FirewallCommands(tools, egress.Lockdown{
+		Enabled:   true,
+		Gateway:   gateway,
+		ProxyPort: proxyPort,
+	})
+	if err != nil {
+		return err
+	}
+	dev, err := resolveDev(pid, tools.IP)
 	if err != nil {
 		return err
 	}
 	// Route surgery first (keep a /32 to the gateway, delete the default route),
 	// then the port-scoped firewall (restrict that gateway to the proxy port).
-	if err := applyEgressCommands(pid, gateway, dev, runFn); err != nil {
+	if err := applyEgressCommands(pid, tools, gateway, dev, runFn); err != nil {
 		return err
 	}
 	return applyNetnsCommands(pid, firewallCmds, runFn)
 }
 
 // defaultRouteDeviceInNetns resolves the default-route device inside the target
-// PID's network namespace.
-func defaultRouteDeviceInNetns(pid int) (string, error) {
+// PID's network namespace. ipPath is the absolute path resolved on the host:
+// nsenter runs the command with a PATH this process does not control, and on
+// hosts where iproute2 lives only in /usr/sbin a bare `ip` would not resolve.
+func defaultRouteDeviceInNetns(pid int, ipPath string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), egressCommandTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nsenter", nsenterArgv(pid, "ip", "-o", "route", "show", "default")...).Output()
+	cmd := exec.CommandContext(ctx, "nsenter", nsenterArgv(pid, ipPath, "-o", "route", "show", "default")...)
+	// WaitDelay is what makes egressCommandTimeout a real bound here. The output
+	// is captured, so os/exec pipes it and Wait blocks until every writer closes
+	// the pipe - while the context cancellation kills only nsenter, not the `ip`
+	// it spawned, which keeps the inherited fd open if it wedges on netlink.
+	// Without this the lockdown goroutine would block past the deadline and with
+	// it the run path's wg.Wait(). runEgressCommand needs no counterpart: it
+	// assigns os.Stderr, a real *os.File, which os/exec hands to the child
+	// directly rather than pumping through a pipe.
+	cmd.WaitDelay = egressWaitDelay
+	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("query default route in netns of pid %d timed out after %s", pid, egressCommandTimeout)
