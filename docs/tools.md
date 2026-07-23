@@ -39,6 +39,7 @@ Example output:
 │ pi            │ available │ Pi coding agent AI assistant                  │
 │ portal        │ available │ XDG Desktop Portal (notifications)            │
 │ powerlevel10k │ missing   │ Powerlevel10k zsh theme                       │
+│ rtk           │ available │ rtk CLI proxy (token-optimized output)         │
 │ starship      │ available │ Starship prompt with sandbox indicator        │
 │ tmux          │ missing   │ Tmux terminal multiplexer with sandbox indicator │
 └───────────────┴───────────┴───────────────────────────────────────────────┘
@@ -461,6 +462,39 @@ Works inside editors (Neovim, VS Code) running in the sandbox.
 ### Other AI Tools
 
 Any CLI-based AI tool works in the sandbox. This includes Continue, Cline, and similar tools. If the tool runs as a CLI process, wrap it with `devsandbox`.
+
+## rtk CLI Proxy
+
+[rtk](https://github.com/rtk-ai/rtk) filters command output before it reaches an agent's context. It is usually installed as a
+Claude Code hook, so it runs on almost every command the agent issues inside the sandbox and needs both its configuration and
+its tracking database to be present.
+
+rtk resolves its directories through XDG. devsandbox points `XDG_CONFIG_HOME` and `XDG_DATA_HOME` at `$HOME/.config` and
+`$HOME/.local/share`, with `$HOME` being the host home path, so the host directories below are the same paths rtk resolves
+inside the sandbox:
+
+```
+~/.config/rtk      → Sandbox (tmpoverlay - writes discarded)
+~/.local/share/rtk → Sandbox (persistent overlay - writes kept per sandbox)
+```
+
+| Path | Contents |
+|------|----------|
+| `~/.config/rtk/config.toml` | Tracking, display, tee, telemetry and hook settings |
+| `~/.config/rtk/filters.toml`, `~/.config/rtk/filters/*.toml` | Global output filters |
+| `~/.local/share/rtk/history.db` | SQLite tracking database behind `rtk gain` |
+| `~/.local/share/rtk/trusted_filters.json` | Trust store for project-local filters |
+| `~/.local/share/rtk/tee/`, `hook-audit.log` | Tee'd command output and hook rewrite audit log |
+
+Configuration is mounted with the default `tmpoverlay`, so your filters and `config.toml` are visible but `rtk config --create`
+inside the sandbox cannot rewrite them. The data directory gets a persistent overlay: savings recorded in the sandbox accumulate
+across runs of that sandbox, while the host's `history.db` is never modified.
+
+A project's own `.rtk/filters.toml` lives in the project directory and is writable as usual. `rtk trust` marks it trusted inside
+the sandbox only - the host trust store is untouched.
+
+`rtk discover`, `rtk session` and `rtk learn` read Claude Code history from `~/.claude/projects`, which the `claude` tool already
+mounts.
 
 ## Git
 
