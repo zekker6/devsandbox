@@ -86,6 +86,32 @@ func TestRelocateHappyPath(t *testing.T) {
 	}
 }
 
+// TestRelocateAcceptsQuotedPath covers the form the revdiff launcher actually
+// emits: it shell-quotes the script path before handing it to `herdr pane run`.
+func TestRelocateAcceptsQuotedPath(t *testing.T) {
+	r := newTestRelocator(t)
+	src := writeScript(t, validBody())
+
+	got, isScript, err := r.Relocate("sh '"+src+"'", testScriptPattern())
+	if err != nil {
+		t.Fatalf("Relocate returned error: %v", err)
+	}
+	if !isScript {
+		t.Fatal("Relocate reported the quoted text is not a script form, want true")
+	}
+
+	dest := strings.TrimPrefix(got, "sh ")
+	if dest == src {
+		t.Fatal("Relocate returned the original path; the script must be copied out of sandbox reach")
+	}
+	if strings.ContainsAny(dest, "'\" ") {
+		t.Errorf("Relocate emitted a path needing quoting: %q", dest)
+	}
+	if _, err := os.ReadFile(dest); err != nil {
+		t.Fatalf("read relocated script: %v", err)
+	}
+}
+
 // TestRelocateIsTOCTOUFree is the property the whole mechanism exists for.
 func TestRelocateIsTOCTOUFree(t *testing.T) {
 	r := newTestRelocator(t)
@@ -202,8 +228,15 @@ func TestRelocateIgnoresNonScriptForms(t *testing.T) {
 		"sh relative/path",
 		"sh /tmp/a /tmp/b",
 		"sh /tmp/a;curl evil",
-		"sh '/tmp/quoted'",
 		"sh /tmp/../etc/passwd",
+		// Quoting is stripped exactly once and only when the result is a plain
+		// path: a still-quoted or escape-bearing remainder must stay unhandled.
+		`sh '/tmp/a'\''b'`,
+		`sh "/tmp/quoted"`,
+		"sh ''/tmp/a''",
+		"sh '/tmp/a",
+		"sh /tmp/a'",
+		"sh ''",
 	}
 
 	for _, text := range tests {

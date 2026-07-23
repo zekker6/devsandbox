@@ -109,7 +109,7 @@ func parseShScript(text string) (string, bool) {
 	if fields[0] != "sh" && fields[0] != "/bin/sh" {
 		return "", false
 	}
-	path := fields[1]
+	path := unquoteSingle(fields[1])
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", false
 	}
@@ -119,6 +119,24 @@ func parseShScript(text string) (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+// unquoteSingle removes one layer of single quotes, which is how the launcher
+// shell-quotes the script path before sending `sh '<path>'` to `herdr pane run`.
+//
+// Only the trivial case is unwrapped: a remainder that still contains a quote
+// is left as-is, so shell escaping of an embedded quote never round-trips into
+// a path the caller would treat as literal and re-emit unquoted. Such a field
+// then fails the absolute-path and metacharacter checks above, as it must.
+func unquoteSingle(field string) string {
+	if len(field) < 2 || field[0] != '\'' || field[len(field)-1] != '\'' {
+		return field
+	}
+	inner := field[1 : len(field)-1]
+	if strings.ContainsRune(inner, '\'') {
+		return field
+	}
+	return inner
 }
 
 // readScript reads the script once, refusing symlinks and oversized files.
