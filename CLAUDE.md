@@ -39,14 +39,15 @@ Two more invariants come from the herdr agent-reporting work:
 
 **State the host trusts must live where the sandbox cannot write it.** `$XDG_STATE_HOME` is repointed at the synthetic home inside the sandbox, which is what makes `~/.local/state/devsandbox/` safe for host-owned records such as `internal/herdrstate`. Anything under the project dir or a bound tool directory is sandbox-writable. Hash any opaque third-party id into the filename rather than letting it choose a path.
 
-## Shell snippets installed on the host
+## Shell snippets evaluated on the host
 
-`internal/shellwrap` generates snippets that devsandbox installs into the user's shell config. Two things are load-bearing there:
+`internal/shellwrap` generates the snippet `devsandbox agent-wrappers activate <shell>` prints. devsandbox writes nothing to the user's shell config: the user pastes an activation line that evaluates the command's stdout at every shell start, like `mise activate`. Three things are load-bearing there:
 
-- **Guard the whole snippet on `DEVSANDBOX`.** `internal/sandbox/tools/shell.go` binds fish's `conf.d` and bash/zsh rc files *into* the sandbox, so anything installed there is also read in there - an unguarded `claude` function would re-invoke `devsandbox claude` recursively. Use non-empty semantics (`test -z "$DEVSANDBOX"` in fish, `-n "${DEVSANDBOX:-}"` in bash/zsh) and match it in Go, so `DEVSANDBOX=""` behaves identically everywhere.
-- **Existence-guard anything sourced from an rc file.** `~/.config/devsandbox` is bound by nothing, while `.bashrc`/`.zshrc` are bound in, so a bare `source` line errors on every in-sandbox shell start. Emit `[ -r <path> ] && . <path>`.
+- **Guard the whole snippet on `DEVSANDBOX`.** `internal/sandbox/tools/shell.go` binds fish's config directory and bash/zsh rc files *into* the sandbox, so anything evaluated there is also evaluated in there - an unguarded `claude` function would re-invoke `devsandbox claude` recursively. Use non-empty semantics (`test -z "$DEVSANDBOX"` in fish, `-n "${DEVSANDBOX:-}"` in bash/zsh) and match it in Go, so `DEVSANDBOX=""` behaves identically everywhere.
+- **Guard the activation line itself on `DEVSANDBOX` too.** The snippet's own guard is too late: the rc files are bound in while devsandbox itself need not exist in the sandbox, so an unguarded line fails with command-not-found on every in-sandbox shell start. Same reason the old installed-file model needed an existence guard on its `source` line.
+- **`activate` must not fail on a host with no agent installed.** It runs on every shell start, so it emits a comment - still valid shell - rather than an error that would break the startup file.
 
-Emit devsandbox's resolved absolute path into generated snippets, not `command devsandbox`: a login or terminal-multiplexer pane shell may have a different `PATH` (mise shims are the common case).
+Emit devsandbox's resolved absolute path into the generated definitions, not `command devsandbox`: a login or terminal-multiplexer pane shell may have a different `PATH` (mise shims are the common case), and a project-local bin directory on `PATH` is sandbox-writable. The activation line is the one place `PATH` is used, because it runs before devsandbox can resolve anything and an absolute path there would break on every upgrade that moves the binary.
 
 ## Proxy egress lockdown
 

@@ -213,8 +213,9 @@ devsandbox --isolation=docker npm install
 # Ephemeral sandbox (removed after exit)
 devsandbox --rm
 
-# Make supported agents sandboxed by default: `claude` becomes `devsandbox claude`
-devsandbox agent-wrappers install
+# Make supported agents sandboxed by default: `claude` becomes `devsandbox claude`.
+# Add to ~/.bashrc (fish and zsh forms: devsandbox agent-wrappers --help)
+if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash)"; fi
 ```
 
 ## Git Integration
@@ -368,8 +369,7 @@ devsandbox logs proxy               # View proxy logs
 devsandbox logs proxy -f            # Follow logs in real-time
 devsandbox tools list               # List available tools
 devsandbox tools check              # Verify tool setup
-devsandbox agent-wrappers install   # Make `claude` run sandboxed by default
-devsandbox agent-wrappers status    # Show what is wrapped and whether it is current
+devsandbox agent-wrappers activate  # Print wrappers to eval from your startup file
 devsandbox run-agent claude ...     # Wrapper entrypoint: re-enter the sandbox
 devsandbox image build              # Build Docker image (macOS)
 ```

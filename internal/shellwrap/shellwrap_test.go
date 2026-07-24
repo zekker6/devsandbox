@@ -15,13 +15,12 @@ func TestSnippetFishExactOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
-	want := Header + `
-if test -z "$DEVSANDBOX"
+	want := `if test -z "$DEVSANDBOX"
     function claude --wraps claude
         if test -x '/usr/local/bin/devsandbox'
             '/usr/local/bin/devsandbox' run-agent claude $argv
         else
-            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- run 'devsandbox agent-wrappers install' to refresh the wrappers" >&2
+            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2
             return 127
         end
     end
@@ -40,13 +39,12 @@ func TestSnippetFishSeveralAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
-	want := Header + `
-if test -z "$DEVSANDBOX"
+	want := `if test -z "$DEVSANDBOX"
     function claude --wraps claude
         if test -x '/usr/local/bin/devsandbox'
             '/usr/local/bin/devsandbox' run-agent claude $argv
         else
-            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- run 'devsandbox agent-wrappers install' to refresh the wrappers" >&2
+            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2
             return 127
         end
     end
@@ -57,7 +55,7 @@ if test -z "$DEVSANDBOX"
         if test -x '/usr/local/bin/devsandbox'
             '/usr/local/bin/devsandbox' run-agent codex $argv
         else
-            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- run 'devsandbox agent-wrappers install' to refresh the wrappers" >&2
+            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2
             return 127
         end
     end
@@ -76,9 +74,8 @@ func TestSnippetBashExactOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
-	want := Header + `
-if [ -n "${DEVSANDBOX:-}" ]; then :; else
-  claude() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- run 'devsandbox agent-wrappers install' to refresh the wrappers" >&2; return 127; fi; }
+	want := `if [ -n "${DEVSANDBOX:-}" ]; then :; else
+  claude() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
   claude-no-ds() { command claude "$@"; }
 fi
 `
@@ -92,11 +89,10 @@ func TestSnippetZshSeveralAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
-	want := Header + `
-if [ -n "${DEVSANDBOX:-}" ]; then :; else
-  claude() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- run 'devsandbox agent-wrappers install' to refresh the wrappers" >&2; return 127; fi; }
+	want := `if [ -n "${DEVSANDBOX:-}" ]; then :; else
+  claude() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
   claude-no-ds() { command claude "$@"; }
-  codex() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent codex "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- run 'devsandbox agent-wrappers install' to refresh the wrappers" >&2; return 127; fi; }
+  codex() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent codex "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
   codex-no-ds() { command codex "$@"; }
 fi
 `
@@ -105,8 +101,8 @@ fi
 	}
 }
 
-// The guard is not decoration: fish's conf.d and the bash/zsh rc files are
-// bound into the sandbox, where an unguarded wrapper would recurse.
+// The guard is not decoration: the shell startup files that evaluate the
+// snippet are bound into the sandbox, where an unguarded wrapper would recurse.
 func TestSnippetGuardWrapsEveryDefinition(t *testing.T) {
 	for _, shell := range SupportedShells() {
 		t.Run(shell, func(t *testing.T) {
@@ -118,18 +114,15 @@ func TestSnippetGuardWrapsEveryDefinition(t *testing.T) {
 			if len(lines) < 3 {
 				t.Fatalf("snippet too short:\n%s", got)
 			}
-			if lines[0] != Header {
-				t.Errorf("first line = %q, want header", lines[0])
-			}
-			guard := lines[1]
+			guard := lines[0]
 			if !strings.Contains(guard, "DEVSANDBOX") {
-				t.Errorf("second line %q does not guard on DEVSANDBOX", guard)
+				t.Errorf("first line %q does not guard on DEVSANDBOX", guard)
 			}
 			last := lines[len(lines)-1]
 			if last != "end" && last != "fi" {
 				t.Errorf("last line = %q, want the guard's closing keyword", last)
 			}
-			for _, l := range lines[2 : len(lines)-1] {
+			for _, l := range lines[1 : len(lines)-1] {
 				if strings.TrimSpace(l) == "" {
 					continue
 				}
@@ -208,8 +201,8 @@ func TestSnippetFailsClosedWhenBakedPathIsGone(t *testing.T) {
 		if strings.Contains(got, "command claude run-agent") || strings.Contains(got, "command devsandbox claude") {
 			t.Errorf("%s snippet skips run-agent:\n%s", tt.shell, got)
 		}
-		if !strings.Contains(got, "agent-wrappers install") {
-			t.Errorf("%s snippet does not name the reinstall command:\n%s", tt.shell, got)
+		if !strings.Contains(got, "start a new shell") {
+			t.Errorf("%s snippet does not say how to recover:\n%s", tt.shell, got)
 		}
 		if !strings.Contains(got, "return 127") {
 			t.Errorf("%s snippet does not exit non-zero when the binary is gone:\n%s", tt.shell, got)
@@ -279,48 +272,50 @@ func TestSnippetQuotesPathWithSpaces(t *testing.T) {
 	}
 }
 
-func TestInstallPath(t *testing.T) {
-	tests := []struct {
-		name    string
-		shell   string
-		xdg     string
-		want    string
-		wantAbs bool
-	}{
-		{name: "fish default", shell: ShellFish, want: "/home/u/.config/fish/conf.d/devsandbox-agents.fish"},
-		{name: "bash default", shell: ShellBash, want: "/home/u/.config/devsandbox/agent-wrappers.bash"},
-		{name: "zsh default", shell: ShellZsh, want: "/home/u/.config/devsandbox/agent-wrappers.zsh"},
-		{name: "fish xdg", shell: ShellFish, xdg: "/xdg", want: "/xdg/fish/conf.d/devsandbox-agents.fish"},
-		{name: "bash xdg", shell: ShellBash, xdg: "/xdg", want: "/xdg/devsandbox/agent-wrappers.bash"},
-		{name: "relative xdg ignored", shell: ShellBash, xdg: "relative", want: "/home/u/.config/devsandbox/agent-wrappers.bash"},
-		{name: "unsupported shell", shell: "nu", want: ""},
+func TestActivateLine(t *testing.T) {
+	tests := map[string]string{
+		ShellFish: `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish | source; end`,
+		ShellBash: `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash)"; fi`,
+		ShellZsh:  `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh)"; fi`,
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("XDG_CONFIG_HOME", tt.xdg)
-			if got := InstallPath(tt.shell, "/home/u"); got != tt.want {
-				t.Errorf("InstallPath(%q) = %q, want %q", tt.shell, got, tt.want)
-			}
-		})
+	for shell, want := range tests {
+		if got := ActivateLine(shell); got != want {
+			t.Errorf("ActivateLine(%q) = %q, want %q", shell, got, want)
+		}
+	}
+	if got := ActivateLine("nu"); got != "" {
+		t.Errorf("unsupported shell activation line = %q, want empty", got)
+	}
+	for _, shell := range SupportedShells() {
+		if ActivateLine(shell) == "" {
+			t.Errorf("supported shell %q has no activation line", shell)
+		}
+		if StartupFile(shell) == "" {
+			t.Errorf("supported shell %q has no startup file", shell)
+		}
 	}
 }
 
-func TestSourceLineIsExistenceGuarded(t *testing.T) {
-	const p = "/home/u/.config/devsandbox/agent-wrappers.bash"
-	for _, shell := range []string{ShellBash, ShellZsh} {
-		got := SourceLine(shell, p)
-		if !strings.HasPrefix(got, "[ -r '"+p+"' ]") {
-			t.Errorf("%s source line is not existence-guarded: %q", shell, got)
+// The startup files are bound into the sandbox while devsandbox itself need not
+// exist in there, so the line has to be guarded before it invokes anything -
+// the snippet's own guard is too late to prevent a command-not-found per shell
+// start. Empty and unset must mean the same thing, as everywhere else.
+func TestActivateLineIsGuardedOnDevsandbox(t *testing.T) {
+	for _, shell := range SupportedShells() {
+		line := ActivateLine(shell)
+		guard, rest, ok := strings.Cut(line, ActivateCommand)
+		if !ok {
+			t.Fatalf("%s activation line does not run %q: %q", shell, ActivateCommand, line)
 		}
-		if !strings.Contains(got, "&& . '"+p+"'") {
-			t.Errorf("%s source line does not source the file: %q", shell, got)
+		if !strings.Contains(guard, "DEVSANDBOX") {
+			t.Errorf("%s activation line invokes devsandbox unguarded: %q", shell, line)
 		}
-	}
-	if got := SourceLine(ShellFish, p); got != "" {
-		t.Errorf("fish source line = %q, want empty (conf.d is a drop-in)", got)
-	}
-	if got := SourceLine("nu", p); got != "" {
-		t.Errorf("unsupported shell source line = %q, want empty", got)
+		if strings.Contains(guard, "set -q") {
+			t.Errorf("%s activation guard uses set -q, which is true for an empty value: %q", shell, line)
+		}
+		if !strings.Contains(rest, shell) {
+			t.Errorf("%s activation line does not pass the shell name: %q", shell, line)
+		}
 	}
 }
 
@@ -370,19 +365,25 @@ func runShell(t *testing.T, shell, snippet, body string, env []string) string {
 // the behavior under test.
 func runShellAllowingFailure(t *testing.T, shell, snippet, body string, env []string) (string, error) {
 	t.Helper()
-	bin, err := exec.LookPath(shell)
-	if err != nil {
-		t.Skipf("%s not installed", shell)
-	}
-
 	dir := t.TempDir()
 	snippetPath := filepath.Join(dir, "snippet."+shell)
 	if err := os.WriteFile(snippetPath, []byte(snippet), 0o644); err != nil {
 		t.Fatalf("write snippet: %v", err)
 	}
-	driverPath := filepath.Join(dir, "driver."+shell)
-	driver := "source '" + snippetPath + "'\n" + body
-	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+	return runShellBody(t, shell, "source '"+snippetPath+"'\n"+body, env)
+}
+
+// runShellBody runs script under shell, returning its combined output and exit
+// error.
+func runShellBody(t *testing.T, shell, script string, env []string) (string, error) {
+	t.Helper()
+	bin, err := exec.LookPath(shell)
+	if err != nil {
+		t.Skipf("%s not installed", shell)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "driver."+shell)
+	if err := os.WriteFile(driverPath, []byte(script), 0o644); err != nil {
 		t.Fatalf("write driver: %v", err)
 	}
 
@@ -502,8 +503,8 @@ func TestSnippetBehaviorBakedPathMissing(t *testing.T) {
 					if !strings.Contains(out, gone) {
 						t.Errorf("error does not name the missing path; output:\n%s", out)
 					}
-					if !strings.Contains(out, "agent-wrappers install") {
-						t.Errorf("error does not name the reinstall command; output:\n%s", out)
+					if !strings.Contains(out, "start a new shell") {
+						t.Errorf("error does not say how to recover; output:\n%s", out)
 					}
 				})
 			}
@@ -556,15 +557,52 @@ func TestSnippetBehaviorPathNeedingQuoting(t *testing.T) {
 	}
 }
 
-// SourceLine is pasted into an rc file, so it needs the same quoting guarantee
-// as the snippet body - and it embeds the path twice.
-func TestSourceLineQuotesPath(t *testing.T) {
-	const p = `/opt/it's a \ dir/agent-wrappers.bash`
-	for _, shell := range []string{ShellBash, ShellZsh} {
-		line := SourceLine(shell, p)
-		quoted := `'/opt/it'\''s a \ dir/agent-wrappers.bash'`
-		if want := "[ -r " + quoted + " ] && . " + quoted; line != want {
-			t.Errorf("%s SourceLine = %q, want %q", shell, line, want)
-		}
+// The activation line is what the user pastes into a startup file, so its
+// evaluation form has to be valid in the shell it names - fish takes a pipe into
+// `source`, the POSIX shells an `eval` of a command substitution. The guard is
+// checked the same way: inside the sandbox devsandbox must not be invoked at
+// all, because it need not exist in there.
+func TestActivateLineBehavior(t *testing.T) {
+	for _, shell := range SupportedShells() {
+		t.Run(shell, func(t *testing.T) {
+			binDir := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "invoked")
+			fake := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + marker + "'\necho 'echo activated'\n"
+			if err := os.WriteFile(filepath.Join(binDir, "devsandbox"), []byte(fake), 0o755); err != nil {
+				t.Fatalf("write fake devsandbox: %v", err)
+			}
+			baseEnv := []string{"PATH=" + binDir + ":/usr/bin:/bin", "HOME=" + t.TempDir()}
+			line := ActivateLine(shell) + "\n"
+
+			out, err := runShellBody(t, shell, line, baseEnv)
+			if err != nil {
+				t.Fatalf("%s failed: %v\noutput:\n%s", shell, err, out)
+			}
+			if out != "activated\n" {
+				t.Errorf("output = %q, want the emitted snippet to be evaluated", out)
+			}
+			args, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			if want := "agent-wrappers activate " + shell + "\n"; string(args) != want {
+				t.Errorf("devsandbox invoked as %q, want %q", args, want)
+			}
+
+			if err := os.Remove(marker); err != nil {
+				t.Fatalf("reset marker: %v", err)
+			}
+			sandboxed := append(append([]string{}, baseEnv...), "DEVSANDBOX=1")
+			out, err = runShellBody(t, shell, line, sandboxed)
+			if err != nil {
+				t.Fatalf("%s failed inside the sandbox: %v\noutput:\n%s", shell, err, out)
+			}
+			if out != "" {
+				t.Errorf("output = %q, want nothing inside the sandbox", out)
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Errorf("devsandbox was invoked inside the sandbox")
+			}
+		})
 	}
 }

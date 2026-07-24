@@ -24,8 +24,8 @@ func newRunAgentCmd() *cobra.Command {
 		Short: "Run a supported AI agent inside devsandbox",
 		Long: `Run a supported AI agent inside devsandbox.
 
-This is the target of the shell wrappers installed by
-` + "`devsandbox agent-wrappers install`" + `: typing ` + "`claude`" + ` runs
+This is the target of the shell wrappers emitted by
+` + "`devsandbox agent-wrappers activate`" + `: typing ` + "`claude`" + ` runs
 ` + "`devsandbox run-agent claude`" + `, which re-enters the sandbox in the current
 directory. Arguments are passed through untouched, so ` + "`claude --resume ID`" + `
 resumes the session inside the sandbox that created it.

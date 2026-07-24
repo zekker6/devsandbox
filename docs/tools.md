@@ -306,17 +306,17 @@ AI coding assistants execute arbitrary code - installing packages, running build
 
 ### Shell wrappers - run agents sandboxed by default
 
-Remembering to type `devsandbox` first is the weak point. `devsandbox agent-wrappers` installs shell functions so supported agents go through the sandbox automatically:
+Remembering to type `devsandbox` first is the weak point. `devsandbox agent-wrappers activate` prints shell functions that send supported agents through the sandbox automatically. Nothing is written to disk: you evaluate the output from your own startup file, the way `mise activate` works.
 
-```bash
-devsandbox agent-wrappers install     # generate + install the snippet for your shell
-devsandbox agent-wrappers status      # what is installed, and whether it is current
-devsandbox agent-wrappers uninstall   # remove it
-```
+| Shell | Startup file | Line to add |
+|-------|--------------|-------------|
+| fish | `~/.config/fish/config.fish` | `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish \| source; end` |
+| bash | `~/.bashrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash)"; fi` |
+| zsh | `~/.zshrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh)"; fi` |
 
-All three take `--shell fish|bash|zsh`, defaulting to the base name of `$SHELL`. `install` fails when none of `claude`, `pi`, `codex` are on the host - there would be nothing to wrap.
+The `if ... $DEVSANDBOX ...` guard on each line is load-bearing, not boilerplate: these startup files are bind-mounted into the sandbox, where `devsandbox` need not exist, so an unguarded line would fail with command-not-found on every in-sandbox shell start. See **Two guards** below.
 
-With the wrappers installed:
+The shell argument defaults to the base name of `$SHELL`, so `devsandbox agent-wrappers activate` alone works for a quick look at what would be defined. Once the line is in place:
 
 ```bash
 claude                # -> devsandbox claude, in the current directory
@@ -325,27 +325,19 @@ claude-no-ds          # escape hatch: the real binary, unsandboxed
 command claude        # escape hatch: the real binary, unsandboxed
 ```
 
-Only agents actually installed on your host are wrapped. The snippet bakes in devsandbox's absolute path, so a login shell with a different `PATH` still resolves it. Re-run `install` after installing a new agent or moving the devsandbox binary; `status` reports the snippet as out of date until you do.
+Only agents actually installed on your host are wrapped. Because the snippet is regenerated at every shell start, it cannot go stale: install a new agent, or upgrade devsandbox into a new directory, and the next shell picks it up with nothing to re-run. With none of `claude`, `pi`, `codex` on the host the output is a comment saying so, which is still valid shell - your startup file keeps working.
 
-**Where the snippet goes, and what devsandbox will not touch:**
+**Two guards, and why the line carries one of its own.** The emitted snippet wraps every definition in a `DEVSANDBOX` test, so nothing is wrapped inside a sandbox and a wrapper cannot recurse. The line you paste repeats that test: startup files are mounted into the sandbox while devsandbox itself need not exist in there, so an unguarded line would fail with command-not-found on every in-sandbox shell start.
 
-| Shell | Install path | Activation |
-|-------|--------------|------------|
-| fish | `$XDG_CONFIG_HOME/fish/conf.d/devsandbox-agents.fish` | automatic - it is a drop-in, no existing file is edited |
-| bash | `$XDG_CONFIG_HOME/devsandbox/agent-wrappers.bash` | you add the printed `source` line to your startup file |
-| zsh | `$XDG_CONFIG_HOME/devsandbox/agent-wrappers.zsh` | you add the printed `source` line to your startup file |
+**Scope, stated exactly.** fish sources `config.fish` for non-interactive `fish -c` invocations too, so a fish script calling `claude` gets the wrapper. bash and zsh only source their rc file for interactive shells, so scripts there are unaffected.
 
-devsandbox never edits `~/.bashrc`, `~/.zshrc`, or any other startup file - `install` prints the line and `uninstall` prints it back so you can remove it. The printed line is existence-guarded (`[ -r … ] && . …`) on purpose: rc files are mounted into the sandbox while `~/.config/devsandbox` is not, so an unguarded `source` would error on every in-sandbox shell start. `install` and `uninstall` also refuse to touch a file that does not carry the generated header, so a hand-written file of the same name is safe.
+Each wrapper calls `devsandbox run-agent <agent>`, which decides what to do: inside a sandbox it runs the real agent, and outside it re-enters devsandbox in the current directory.
 
-**Scope, stated exactly.** fish sources `conf.d` for non-interactive `fish -c` invocations too, so a fish script calling `claude` gets the wrapper. bash and zsh only source their rc file for interactive shells, so scripts there are unaffected. Inside a sandbox nothing is wrapped at all: the whole snippet is guarded on `DEVSANDBOX`, which the sandbox sets.
+**PATH resolution, exactly where it is safe.** The activation line resolves `devsandbox` through `PATH`, because it runs once per shell start and an absolute path there would break on every upgrade that moved the binary. The snippet that command emits bakes in the absolute path it resolved for itself, so no agent invocation goes through `PATH`: a project-local bin directory on `PATH` is writable by the sandbox, and resolving devsandbox through it would run that binary on the host. If the baked path disappears mid-session, the wrapper fails closed with `devsandbox: no executable at <path> - reinstall devsandbox, then start a new shell to refresh the wrappers` and exits 127 rather than falling back to a lookup.
 
-Each wrapper calls `devsandbox run-agent <agent>`, which decides what to do: inside a sandbox it runs the real agent (so the wrapper cannot recurse), and outside it re-enters devsandbox in the current directory.
+The wrappers are a standalone feature, independent of herdr. herdr's native session restore builds on them, which means the line has to be in the startup file of the shell herdr opens panes with (`[terminal] default_shell`, falling back to `$SHELL`) - not only your login shell. See [Agent session capture and restore](#agent-session-capture-and-restore).
 
-The snippet bakes in devsandbox's absolute path, because a herdr pane shell may be a login shell whose `PATH` does not include the one that ran `install` (mise shims being the usual case). If that path no longer exists - `mise use -g` installs into a version-scoped directory, so an upgrade moves the binary - the wrapper fails closed with `devsandbox: no executable at <path> - run 'devsandbox agent-wrappers install' to refresh the wrappers` and exits 127. It deliberately does not fall back to a `PATH` lookup: `PATH` may name a project-local bin directory that sandboxed code can write, and resolving devsandbox through it would run that binary on the host, outside the sandbox. Re-run `install` after an upgrade; `status` reports the snippet as out of date until you do.
-
-The wrappers are a standalone feature, independent of herdr. herdr's native session restore builds on them, so `status` also reports the shell herdr starts panes with (`[terminal] default_shell`, falling back to `$SHELL`) and warns when that shell has no snippet. See [Agent session capture and restore](#agent-session-capture-and-restore).
-
-To undo everything: `devsandbox agent-wrappers uninstall`, then remove the `source` line it prints from your startup file.
+To undo everything: remove the line from your startup file.
 
 ### Claude Code
 
@@ -845,15 +837,14 @@ herdr can remember which agent a pane was running and, after the server restarts
 
 **Setting up restore.** Capture alone is not enough: herdr's resume command is compiled into its binary as a bare `claude --resume <id>`, which would run the host agent against a different, host-side session store. herdr delivers that command as typed input to the pane's shell, so the [shell wrappers](#shell-wrappers---run-agents-sandboxed-by-default) intercept it and re-enter the sandbox.
 
-1. `devsandbox agent-wrappers install` - **for the shell herdr starts panes with**, which is not necessarily your login shell. `devsandbox agent-wrappers status` reads herdr's `[terminal] default_shell` and warns when that shell has no snippet; `install --shell fish` targets another shell.
-2. For bash and zsh, add the printed `source` line to your startup file.
-3. Restart the herdr server so new panes pick up the snippet.
+1. Add the activation line to the startup file of **the shell herdr starts panes with**, which is not necessarily your login shell - herdr uses `[terminal] default_shell`, falling back to `$SHELL`. `devsandbox agent-wrappers activate <shell>` prints the definitions for any supported shell, and the line to add is in `devsandbox agent-wrappers --help`.
+2. Restart the herdr server so new panes pick up the wrappers.
 
 **What is written on the host.** Launching an agent from a herdr pane records one JSON file per pane under `$XDG_STATE_HOME/devsandbox/herdr-panes/` (`~/.local/state/devsandbox/herdr-panes/` when unset), directory `0700`, files `0600`. Each record names the pane, the agent, the project directory and the sandbox state root that launch used - it is what the restore guard below compares against. The pane ID is hashed into the filename, so an opaque herdr-supplied string never influences a path, and the store lives outside every path mounted into the sandbox, so sandboxed code cannot read or write it. Records are **not** pruned by `devsandbox sandboxes prune` or `--rm`; delete the directory to clear them.
 
 **Restoring into the right sandbox.** A recorded session is reachable again only from the directory it was launched in: the agent's session store lives in the synthetic home under that launch's sandbox state root, and the agent keys its own sessions by project path. When a resume-shaped command reaches a pane, `run-agent` checks the record before re-entering, and refuses when the current directory would reach neither the same project directory nor the same sandbox state root. Resume-shaped means herdr's own argv (`claude --resume ID`, `pi --session ID`, `codex resume ID`) plus the agent's own equivalents you may type by hand - `claude -c` / `claude --continue` reach the same session store, so the guard sees them too. The error names the directory to change to, or - for a `--worktree` session - the original invocation to re-run. A record that exists but cannot be read fails closed too; a pane with no record at all re-enters normally.
 
-**Rolling it back.** `devsandbox agent-wrappers uninstall`, then remove the `source` line it prints from your rc file. Delete `~/.local/state/devsandbox/herdr-panes/` to drop the pane records. To stop herdr replaying resume commands at all, set `resume_agents_on_restore = false` under `[session]` in herdr's config. Setting `mode = "disabled"` under `[tools.herdr]` turns off the proxy, and with it capture.
+**Rolling it back.** Remove the activation line from your rc file. Delete `~/.local/state/devsandbox/herdr-panes/` to drop the pane records. To stop herdr replaying resume commands at all, set `resume_agents_on_restore = false` under `[session]` in herdr's config. Setting `mode = "disabled"` under `[tools.herdr]` turns off the proxy, and with it capture.
 
 **Session IDs are never logged.** The proxy logs one line per request carrying the method and the reason for the decision. Neither ever includes the session ID, the transcript path, or any part of a rejected value - including for denied reports, where the rejected string is the interesting one.
 
