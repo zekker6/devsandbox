@@ -32,7 +32,7 @@ func fakeLookPath(found map[string]string) func(string) (string, error) {
 }
 
 func TestPlanAgentInvocationRejectsUnknownAgent(t *testing.T) {
-	for _, agent := range []string{"", "bash", "opencode", "claude-wrapper", "/usr/local/bin/claude", "/usr/local/bin/pi", "/usr/local/bin/codex"} {
+	for _, agent := range []string{"", "bash", "aider", "claude-wrapper", "/usr/local/bin/claude", "/usr/local/bin/pi", "/usr/local/bin/codex", "/usr/local/bin/opencode", "/usr/local/bin/copilot"} {
 		t.Run(agent, func(t *testing.T) {
 			_, err := planAgentInvocation(agent, nil, "", fakeSelf("/usr/bin/devsandbox"), fakeLookPath(map[string]string{"claude": "/usr/bin/claude"}))
 			if err == nil {

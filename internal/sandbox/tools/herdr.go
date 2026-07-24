@@ -260,10 +260,16 @@ func (h *Herdr) aggregate(homeDir string) ([]herdrproxy.Capability, cmdpattern.S
 // agentReporting reports whether CapAgentReporting may be enabled, and when it
 // may not, why.
 //
-// Both anchors are host-derived and both are mandatory: the pane herdr created
-// for this process, and the agent devsandbox was asked to launch. Neither can
-// be influenced from inside the sandbox, which is what makes the capability's
-// validator meaningful.
+// Three host-derived facts are all mandatory: the pane herdr created for this
+// process, the agent devsandbox was asked to launch, and that agent recording a
+// native session devsandbox can capture. None can be influenced from inside the
+// sandbox, which is what makes the capability's validator meaningful.
+//
+// The session-recording check is what keeps a wrapper-only agent (opencode,
+// copilot - in agentid for the wrappers, but with no ToolWithAgentSessionDir
+// because herdr cannot replay them) from turning a plain `devsandbox <agent>`
+// launch in a herdr pane into a filtered-proxy start for a capability that could
+// capture nothing.
 func (h *Herdr) agentReporting() (bool, string) {
 	paneID := os.Getenv("HERDR_PANE_ID")
 	switch {
@@ -273,6 +279,9 @@ func (h *Herdr) agentReporting() (bool, string) {
 		return false, "HERDR_PANE_ID is unset"
 	case h.launchedAgent == "":
 		return false, "no known agent was launched; only a direct `devsandbox <agent>` launch enables it"
+	}
+	if _, ok := Get(h.launchedAgent).(ToolWithAgentSessionDir); !ok {
+		return false, h.launchedAgent + " does not record a native session devsandbox can capture"
 	}
 	return true, ""
 }

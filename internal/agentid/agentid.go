@@ -30,16 +30,22 @@ type agent struct {
 	resumeAliases []string
 }
 
-// agents is the set of agents this build recognizes, with the resume shape
-// herdr v0.7.4 compiles in for each (read out of `herdr::agent_resume::plan`:
-// source "herdr:codex" builds the argv ["codex", "resume", <id>], where the
-// others build ["<agent>", "<flag>", <id>]).
+// agents is the set of agents this build recognizes.
+//
+// resumeFlag/resumeSubcommand hold the resume shape herdr v0.7.4 compiles in
+// (read out of `herdr::agent_resume::plan`: source "herdr:codex" builds the argv
+// ["codex", "resume", <id>], where the others build ["<agent>", "<flag>", <id>]).
+// herdr knows only claude/pi/codex, so opencode and copilot carry no herdr
+// resume flag; their resume verbs live in resumeAliases, which the worktree
+// guard consults for the resumes a user types by hand.
 var agents = []agent{
 	// claude's -c/--continue reopens the most recent conversation for the
 	// current project, which is the same store --resume reaches.
 	{name: "claude", resumeFlag: "--resume", resumeAliases: []string{"--continue", "-c"}},
 	{name: "pi", resumeFlag: "--session"},
 	{name: "codex", resumeSubcommand: "resume"},
+	{name: "opencode", resumeAliases: []string{"--continue", "-c", "--session", "-s"}},
+	{name: "copilot", resumeAliases: []string{"--resume", "-r", "--continue"}},
 }
 
 // KnownAgents returns every agent this build recognizes, in a stable order.

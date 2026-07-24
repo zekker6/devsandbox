@@ -7,7 +7,7 @@ import (
 
 func TestKnownAgents(t *testing.T) {
 	got := KnownAgents()
-	want := []string{"claude", "pi", "codex"}
+	want := []string{"claude", "pi", "codex", "opencode", "copilot"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("KnownAgents() = %v, want %v", got, want)
 	}
@@ -44,6 +44,13 @@ func TestCanonicalAgent(t *testing.T) {
 		{"codex absolute path", []string{"/usr/local/bin/codex", "resume", "abc"}, "codex"},
 		{"codex substring prefix", []string{"codexctl"}, ""},
 		{"codex no-ds companion", []string{"codex-no-ds"}, ""},
+		{"opencode bare name", []string{"opencode"}, "opencode"},
+		{"opencode absolute path", []string{"/usr/local/bin/opencode", "--continue"}, "opencode"},
+		{"opencode substring prefix", []string{"opencoder"}, ""},
+		{"opencode no-ds companion", []string{"opencode-no-ds"}, ""},
+		{"copilot bare name", []string{"copilot"}, "copilot"},
+		{"copilot absolute path", []string{"/usr/local/bin/copilot", "--resume"}, "copilot"},
+		{"copilot no-ds companion", []string{"copilot-no-ds"}, ""},
 		{"directory-like argv0", []string{"/usr/local/bin/"}, ""},
 	}
 
@@ -88,7 +95,19 @@ func TestIsResumeInvocation(t *testing.T) {
 		{"codex with claude's flag", "codex", []string{"--resume", "abc"}, false},
 		{"codex no args", "codex", nil, false},
 		{"codex bare prompt", "codex", []string{"fix the build"}, false},
-		{"unknown agent", "opencode", []string{"--session", "abc"}, false},
+		{"opencode continue", "opencode", []string{"--continue"}, true},
+		{"opencode short continue", "opencode", []string{"-c"}, true},
+		{"opencode session value", "opencode", []string{"--session", "abc"}, true},
+		{"opencode short session", "opencode", []string{"-s", "abc"}, true},
+		{"opencode after double dash", "opencode", []string{"--", "--continue"}, false},
+		{"opencode bare prompt", "opencode", []string{"fix the build"}, false},
+		{"copilot resume", "copilot", []string{"--resume"}, true},
+		{"copilot short resume", "copilot", []string{"-r", "abc"}, true},
+		{"copilot resume equals", "copilot", []string{"--resume=abc"}, true},
+		{"copilot continue", "copilot", []string{"--continue"}, true},
+		{"copilot session-id not a resume verb", "copilot", []string{"--session-id", "abc"}, false},
+		{"copilot no args", "copilot", nil, false},
+		{"unknown agent", "aider", []string{"--session", "abc"}, false},
 		{"empty agent", "", []string{"--resume", "abc"}, false},
 	}
 

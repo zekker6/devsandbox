@@ -325,7 +325,7 @@ claude-no-ds          # escape hatch: the real binary, unsandboxed
 command claude        # escape hatch: the real binary, unsandboxed
 ```
 
-Only agents actually installed on your host are wrapped. Because the snippet is regenerated at every shell start, it cannot go stale: install a new agent, or upgrade devsandbox into a new directory, and the next shell picks it up with nothing to re-run. With none of `claude`, `pi`, `codex` on the host the output is a comment saying so, which is still valid shell - your startup file keeps working.
+The wrappable agents are `claude`, `pi`, `codex`, `opencode`, and `copilot` (the standalone GitHub Copilot CLI). Only the ones actually installed on your host are wrapped. Because the snippet is regenerated at every shell start, it cannot go stale: install a new agent, or upgrade devsandbox into a new directory, and the next shell picks it up with nothing to re-run. With none of them on the host the output is a comment saying so, which is still valid shell - your startup file keeps working.
 
 **Two guards, and why the line carries one of its own.** The emitted snippet wraps every definition in a `DEVSANDBOX` test, so nothing is wrapped inside a sandbox and a wrapper cannot recurse. The line you paste repeats that test: startup files are mounted into the sandbox while devsandbox itself need not exist in there, so an unguarded line would fail with command-not-found on every in-sandbox shell start.
 
@@ -449,7 +449,10 @@ herdr can resume it (`codex resume <id>`) after a restart. See
 
 ### GitHub Copilot
 
-Works inside editors (Neovim, VS Code) running in the sandbox.
+Two products share the name, and devsandbox mounts both:
+
+- The **standalone Copilot CLI** (`npm install -g @github/copilot`, invoked as `copilot`) keeps its config, MCP servers, sessions and auth under `~/.copilot`. That directory is mounted read-write and **persistent**, so a sandboxed `copilot` runs authenticated and `copilot --resume` / `--continue` finds sessions from an earlier run. It is one of the agents the [shell wrappers](#shell-wrappers---run-agents-sandboxed-by-default) wrap.
+- The older **`gh copilot` extension** uses `~/.config/github-copilot` and `~/.cache/github-copilot`, mounted as config and cache. It also works inside editors (Neovim, VS Code) running in the sandbox.
 
 ### Other AI Tools
 

@@ -590,6 +590,10 @@ func TestHerdr_AgentReportingNeedsBothHostAnchors(t *testing.T) {
 		{name: "pane id missing", paneID: "", agent: "claude", want: false, wantWhy: "HERDR_PANE_ID"},
 		{name: "agent unknown", paneID: "pane-7", agent: "", want: false, wantWhy: "no known agent"},
 		{name: "neither present", paneID: "", agent: "", want: false, wantWhy: "HERDR_PANE_ID"},
+		// A wrapper-only agent (in agentid, but no ToolWithAgentSessionDir)
+		// must not enable reporting: there is nothing herdr can capture or
+		// replay, so a plain launch stays off the filtered proxy.
+		{name: "wrapper-only agent", paneID: "pane-7", agent: "opencode", want: false, wantWhy: "does not record a native session"},
 	}
 
 	for _, tt := range tests {
