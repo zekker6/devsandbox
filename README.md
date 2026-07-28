@@ -1,6 +1,6 @@
 # devsandbox
 
-Your real dev environment, sandboxed per project. Run Claude Code, Copilot, aider, and other AI coding agents safely - without giving up your shell, your `mise`-managed tools, or your editor configs.
+Your real dev environment, sandboxed per project. Run Claude Code, Codex, Copilot, and other AI coding agents safely - without giving up your shell, your `mise`-managed tools, or your editor configs.
 
 ## The DX gap
 
@@ -17,7 +17,7 @@ The isolation boundary is still real. Inside the sandbox, the agent sees the pro
 
 ## Prerequisites
 
-devsandbox requires [mise](https://mise.jdx.dev/) for tool version management. Install it before proceeding.
+devsandbox runs without [mise](https://mise.jdx.dev/), but the recommended install method uses it, and it is what makes your host toolchain (Go, Node, Python, kubectl) available inside the sandbox. Without it, everything else still works - you just bring your own tools.
 
 **Linux:**
 
@@ -38,7 +38,7 @@ echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc
 echo '~/.local/bin/mise activate fish | source' >> ~/.config/fish/config.fish
 ```
 
-Additionally, your kernel must support unprivileged user namespaces. Verify with:
+**Required on Linux:** your kernel must support unprivileged user namespaces. Verify with:
 
 ```bash
 unshare --user true
@@ -81,9 +81,9 @@ devsandbox --info
 
 devsandbox sandboxes the current working directory - `cd` into your project first, then run `devsandbox`. Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts - safe inside the sandbox because devsandbox provides the security boundary.
 
-**Works with:** Claude Code, GitHub Copilot, aider, Cursor, Continue, Cline, OpenCode, and any CLI-based development tool.
+**Works with:** Claude Code, Codex CLI, GitHub Copilot, Pi, OpenCode, aider, and any other CLI-based development tool. The first five also get [shell wrappers](docs/tools.md#shell-wrappers---run-agents-sandboxed-by-default) and session persistence across sandbox restarts.
 
-That's it. No config files needed. On Linux, devsandbox includes embedded binaries - zero dependencies. On macOS, a Docker runtime is required (see [Installation Details](#installation-details)).
+That's it. No config files needed. On Linux the default sandbox needs no system packages - bwrap and pasta are embedded. Proxy mode (`--proxy`) is the one exception: it needs `iproute2` and `nft` or `iptables` on the host for its egress lockdown, and aborts rather than starting with open egress. On macOS, a Docker runtime is required (see [Installation Details](#installation-details)).
 
 Run `devsandbox doctor` to verify your setup.
 
@@ -159,7 +159,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 ## Features
 
-- **Your real dev env, inside the sandbox** - mise-managed tools, shell configs, editor setups (nvim, starship, tmux) auto-detected and bound, no Dockerfile required
+- **Your real dev env, inside the sandbox** - mise-managed tools, shell configs, editor setups (nvim, starship, tmux) auto-detected and bound, no Dockerfile required. On Linux, the `docker` and `krun` backends share the host's mise installs too, so your toolchain resolves in-guest without reinstalling ([details](docs/tools.md#tool-management-with-mise))
 - **Sub-second startup** - [bubblewrap](https://github.com/containers/bubblewrap) namespaces on Linux share the host kernel; native file watching works. Docker layer caching keeps macOS restarts at 1-2s
 - **Per-project isolation** - each project gets its own sandbox home, caches, and logs
 - **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files ([scan limits](docs/sandboxing.md#security-model)), and git credentials blocked by default
@@ -169,6 +169,8 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Resource limits** - optional memory, CPU and process caps that apply to every backend ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited
 - **Agent shell wrappers** - opt-in shell functions so `claude` means `devsandbox claude`, with `claude-no-ds` and `command claude` as escape hatches ([details](docs/tools.md#shell-wrappers---run-agents-sandboxed-by-default))
 - **herdr agent session restore** - a sandboxed agent reports its native session through the filtered herdr proxy, and a restored pane resumes it back inside the sandbox ([details](docs/tools.md#agent-session-capture-and-restore))
+- **Agent sessions survive the sandbox** - `claude`, `codex`, `copilot`, `pi` and `opencode` keep their native session stores on the host, so `--resume` / `--continue` finds conversations started in an earlier run ([details](docs/tools.md#ai-coding-assistants))
+- **Dev tool integrations** - `rtk` keeps its filters and tracking database ([details](docs/tools.md#rtk-cli-proxy)), `revdiff` opens review overlays in kitty or herdr, and the Docker socket is proxied read-only
 - **Git modes** - readonly (default), readwrite (with SSH/GPG), or disabled
 - **Desktop notifications** - sandboxed apps can send notifications to the host via XDG Desktop Portal (Linux)
 
@@ -178,7 +180,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 **macOS:** Uses Docker containers with volume mounts that mirror the bwrap behavior. Named volumes provide near-native filesystem performance. Containers are cached for 1-2 second restarts.
 
-All backends automatically detect your shell, tools, and editor configs and make them available read-only inside the sandbox.
+All backends automatically detect your shell, tools, and editor configs and make them available read-only inside the sandbox. On a Linux host, the container backends additionally share the host's mise installs, so your toolchain resolves in-guest without a reinstall; a macOS host shares nothing, so tools are installed inside the sandbox there ([details](docs/tools.md#tool-management-with-mise)).
 
 **Untrusted code (experimental):** bwrap and Docker share the host kernel, so a kernel-level exploit escapes both. The opt-in `krun` backend (`--isolation krun`) runs the same sandbox image inside a [libkrun](https://github.com/containers/libkrun) microVM via `podman --runtime krun`, giving the workload its own guest kernel behind a hardware virtualization boundary (KVM on Linux, HVF on macOS). Requires `podman`, a libkrun-enabled `crun`, and `/dev/kvm` on Linux or Apple Silicon on macOS (plus `nft` or `iptables` for proxy mode on Linux, usually already present). See [Isolation Backend](docs/configuration.md#krun-microvm-backend-experimental).
 
@@ -362,13 +364,21 @@ devsandbox --proxy                  # Enable proxy mode
 devsandbox --rm                     # Ephemeral sandbox
 devsandbox --info                   # Show sandbox configuration
 devsandbox doctor                   # Check installation
+devsandbox scratchpad [name]        # Sandbox in a clean scratch workspace (alias: sp)
+devsandbox scratchpad list          # List scratchpads
 devsandbox config init              # Generate config file
+devsandbox config show              # Print the resolved configuration
+devsandbox config path              # Print the config file location
 devsandbox sandboxes list           # List all sandboxes
-devsandbox sandboxes prune          # Remove orphaned sandboxes
+devsandbox sandboxes prune          # Remove stale sandboxes
+devsandbox sessions                 # List running sandbox sessions
+devsandbox forward 3000             # Forward a host port into a running sandbox
 devsandbox logs proxy               # View proxy logs
 devsandbox logs proxy -f            # Follow logs in real-time
 devsandbox tools list               # List available tools
 devsandbox tools check              # Verify tool setup
+devsandbox trust add <path>         # Trust a local .devsandbox.toml
+devsandbox overlay migrate          # Promote overlay contents to the host path
 devsandbox agent-wrappers activate  # Print wrappers to eval from your startup file
 devsandbox run-agent claude ...     # Wrapper entrypoint: re-enter the sandbox
 devsandbox image build              # Build Docker image (macOS)
@@ -380,7 +390,7 @@ devsandbox image build              # Build Docker image (macOS)
 |---|---|
 | [Sandboxing](docs/sandboxing.md) | Isolation backends, security model, filesystem layout, overlay mounts, custom mounts, Docker backend details |
 | [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, content redaction, credential injection, remote logging |
-| [Tools](docs/tools.md) | mise integration, shell/editor/prompt setup, AI assistant configs, Git modes, Docker socket proxy |
+| [Tools](docs/tools.md) | mise integration, shell/editor/prompt setup, AI assistant configs and shell wrappers, rtk, Git modes, Docker socket proxy, kitty/herdr/zellij terminal integration, XDG desktop portal |
 | [Configuration](docs/configuration.md) | Config file reference, per-project configs, conditional includes, port forwarding, overlay settings, resource limits |
 | [Use Cases](docs/use-cases.md) | Shell aliases, autocompletion, development workflows, security monitoring scripts |
 
