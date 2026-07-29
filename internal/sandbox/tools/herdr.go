@@ -443,9 +443,9 @@ func sandboxVisiblePaths(homeDir, sandboxHome string) []string {
 		paths = append(paths, sandboxHome)
 	}
 	if homeDir != "" {
-		// The revdiff IPC directory is a write-through bind shared with the
+		// The shared temp directory is a write-through bind shared with the
 		// host at an identical path.
-		paths = append(paths, filepath.Join(homeDir, revdiffIpcRelPath))
+		paths = append(paths, SharedTmpRoot(homeDir))
 	}
 	return paths
 }

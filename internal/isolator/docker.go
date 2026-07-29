@@ -1544,6 +1544,15 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		LaunchedAgent:    cfg.LaunchedAgent,
 	}
 
+	// $TMPDIR for the shared temp directory, exported once when any tool
+	// depends on it rather than by each dependent tool.
+	if tools.NeedsSharedTmp(cfg.HomeDir) {
+		for _, env := range tools.SharedTmpEnv(cfg.HomeDir, cfg.SandboxHome) {
+			envVars = append(envVars, env.Name+"="+strings.ReplaceAll(env.Value, cfg.HomeDir, containerHome))
+		}
+	}
+
+	sharedTmpApplied := false
 	for _, tool := range tools.Available(cfg.HomeDir) {
 		// Configure tool if it supports configuration
 		if configurable, ok := tool.(tools.ToolWithConfig); ok {
@@ -1564,8 +1573,17 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 			continue
 		}
 
-		// Get Docker-specific bindings if available
+		// The shared temp directory is emitted once for the first enabled tool
+		// that declares it, independently of whether that tool also provides
+		// Docker-specific bindings — several tools may depend on it, and
+		// mounting the same destination twice is an error.
 		var toolBindings []tools.Binding
+		if _, ok := tool.(tools.ToolWithSharedTmp); ok && !sharedTmpApplied {
+			toolBindings = tools.SharedTmpBinding(cfg.HomeDir, cfg.SandboxHome)
+			sharedTmpApplied = true
+		}
+
+		// Get Docker-specific bindings if available
 		if dockerTool, ok := tool.(tools.ToolWithDocker); ok {
 			dockerMounts := dockerTool.DockerBindings(cfg.HomeDir, cfg.SandboxHome)
 			for _, m := range dockerMounts {
@@ -1582,63 +1600,64 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 				mounts = append(mounts, mount)
 			}
 		} else {
-			// Convert regular bindings to Docker mounts
-			toolBindings = tool.Bindings(cfg.HomeDir, cfg.SandboxHome)
-			for _, b := range toolBindings {
-				sandbox.ResolveBindingType(&b, toolMountMode, cfg.DefaultMountMode)
-				if b.Source == "" {
+			toolBindings = append(toolBindings, tool.Bindings(cfg.HomeDir, cfg.SandboxHome)...)
+		}
+
+		// Convert regular bindings to Docker mounts
+		for _, b := range toolBindings {
+			sandbox.ResolveBindingType(&b, toolMountMode, cfg.DefaultMountMode)
+			if b.Source == "" {
+				continue
+			}
+			if _, err := os.Stat(b.Source); os.IsNotExist(err) {
+				if b.Optional {
 					continue
 				}
-				if _, err := os.Stat(b.Source); os.IsNotExist(err) {
-					if b.Optional {
-						continue
-					}
-				}
-				dest := b.Dest
-				if dest == "" {
-					// Remap home directory paths to /home/sandboxuser
-					// Paths under project dir stay unchanged (project mounted at host path)
-					dest = d.remapToContainerHome(b.Source, cfg.HomeDir, cfg.ProjectDir)
-				}
+			}
+			dest := b.Dest
+			if dest == "" {
+				// Remap home directory paths to /home/sandboxuser
+				// Paths under project dir stay unchanged (project mounted at host path)
+				dest = d.remapToContainerHome(b.Source, cfg.HomeDir, cfg.ProjectDir)
+			}
 
-				// Determine if this is a tmpoverlay candidate
-				isTmpOverlay := b.Type == tools.MountTmpOverlay
-				isDir := false
-				if info, err := os.Stat(b.Source); err == nil {
-					isDir = info.IsDir()
-				}
+			// Determine if this is a tmpoverlay candidate
+			isTmpOverlay := b.Type == tools.MountTmpOverlay
+			isDir := false
+			if info, err := os.Stat(b.Source); err == nil {
+				isDir = info.IsDir()
+			}
 
-				// Every engine this isolator drives reaches a tmpoverlay directory
-				// through a copy, never a kernel overlayfs mount inside the guest:
-				//   - macOS: overlayfs is unavailable in Docker Desktop.
-				//   - krun: the mount returns EPERM for an overlay whose lowerdir
-				//     is on virtio-fs inside a nested userns.
-				//   - Docker on Linux: the shim's overlayfs needs a child in a new
-				//     CLONE_NEWUSER|CLONE_NEWNS, and Docker's default seccomp
-				//     profile denies clone/unshare carrying namespace flags unless
-				//     the container holds CAP_SYS_ADMIN - which this one
-				//     deliberately never gets (see buildCommonArgs).
-				// Mount the source read-only at a shadow path; the shim copies it
-				// onto the target during startup.
-				if isTmpOverlay && isDir {
-					shadowDest := copyOverlayShadowPath(dest)
-					mounts = append(mounts, b.Source+":"+shadowDest+":ro")
-					manifest.Overlays = append(manifest.Overlays, OverlayEntry{
-						Path:   dest,
-						Source: shadowDest,
-						Type:   "copyoverlay",
-					})
-				} else {
-					mount := b.Source + ":" + dest
-					if isTmpOverlay || b.Type == tools.MountOverlay {
-						// A tmpoverlay file (not a directory) and a plain overlay
-						// both mount read-only; only directories get a copy.
-						mount += ":ro"
-					} else if b.ReadOnly {
-						mount += ":ro"
-					}
-					mounts = append(mounts, mount)
+			// Every engine this isolator drives reaches a tmpoverlay directory
+			// through a copy, never a kernel overlayfs mount inside the guest:
+			//   - macOS: overlayfs is unavailable in Docker Desktop.
+			//   - krun: the mount returns EPERM for an overlay whose lowerdir
+			//     is on virtio-fs inside a nested userns.
+			//   - Docker on Linux: the shim's overlayfs needs a child in a new
+			//     CLONE_NEWUSER|CLONE_NEWNS, and Docker's default seccomp
+			//     profile denies clone/unshare carrying namespace flags unless
+			//     the container holds CAP_SYS_ADMIN - which this one
+			//     deliberately never gets (see buildCommonArgs).
+			// Mount the source read-only at a shadow path; the shim copies it
+			// onto the target during startup.
+			if isTmpOverlay && isDir {
+				shadowDest := copyOverlayShadowPath(dest)
+				mounts = append(mounts, b.Source+":"+shadowDest+":ro")
+				manifest.Overlays = append(manifest.Overlays, OverlayEntry{
+					Path:   dest,
+					Source: shadowDest,
+					Type:   "copyoverlay",
+				})
+			} else {
+				mount := b.Source + ":" + dest
+				if isTmpOverlay || b.Type == tools.MountOverlay {
+					// A tmpoverlay file (not a directory) and a plain overlay
+					// both mount read-only; only directories get a copy.
+					mount += ":ro"
+				} else if b.ReadOnly {
+					mount += ":ro"
 				}
+				mounts = append(mounts, mount)
 			}
 		}
 

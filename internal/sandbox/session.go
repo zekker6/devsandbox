@@ -4,16 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"devsandbox/internal/fsutil"
 )
 
 // CleanupSessionOverlays removes the overlay directories for a specific session.
 //
 // Session overlays may contain read-only directories (e.g. Go module caches
 // created by tooling running inside the sandbox), so removal must use
-// forceRemoveAll rather than a plain os.RemoveAll.
+// fsutil.RemoveAllForce rather than a plain os.RemoveAll.
 func CleanupSessionOverlays(sandboxHome, sessionID string) error {
 	sessionDir := filepath.Join(sandboxHome, "overlay", "sessions", sessionID)
-	if err := forceRemoveAll(sessionDir); err != nil {
+	if err := fsutil.RemoveAllForce(sessionDir); err != nil {
 		return fmt.Errorf("failed to remove session overlay dir: %w", err)
 	}
 	return nil
@@ -59,7 +61,7 @@ func CleanupLegacyReadonlyBindOverlays(sandboxHome, homeDir string) (int, error)
 		if !info.IsDir() {
 			continue
 		}
-		if err := forceRemoveAll(overlayDir); err != nil {
+		if err := fsutil.RemoveAllForce(overlayDir); err != nil {
 			return removed, fmt.Errorf("remove legacy overlay %s: %w", overlayDir, err)
 		}
 		removed++
@@ -86,7 +88,7 @@ func CleanupStaleSessionDirs(sandboxHome string) (int, error) {
 			continue
 		}
 		sessionDir := filepath.Join(sessionsDir, entry.Name())
-		if err := forceRemoveAll(sessionDir); err != nil {
+		if err := fsutil.RemoveAllForce(sessionDir); err != nil {
 			return removed, fmt.Errorf("failed to remove stale session %s: %w", entry.Name(), err)
 		}
 		removed++

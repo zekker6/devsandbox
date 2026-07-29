@@ -684,6 +684,43 @@ Example output:
     mode: enabled (read-only + exec)
 ```
 
+## Shared temp directory
+
+Some tools have to hand files to a helper that runs **on the host**. The `revdiff` overlay launcher is the built-in example: it writes a sentinel and an output file, then asks kitty or herdr to run a viewer on the host that reads them back.
+
+For that, devsandbox mounts one directory read-write at an **identical path on both sides**:
+
+```
+~/.cache/devsandbox/tmp/<session>
+```
+
+The path has to be the same string in both mount namespaces, because the host-side helper receives it as literal text. It is created only when an installed tool needs it - today that means only when the `revdiff` binary is on PATH.
+
+### It is also `$TMPDIR`
+
+The launchers that need this directory are third-party shell scripts that resolve their scratch base as `${TMPDIR:-/tmp}` and offer no other hook, so `$TMPDIR` is pointed at it for every sandboxed process. That has a consequence worth knowing: **every** temporary file in the sandbox lands there, not just the handful of IPC files. Without the directory, `$TMPDIR` is unset and temporary files go to `/tmp`, which the sandbox mounts as a fresh tmpfs - private and discarded at exit.
+
+So while it is active, temporary files are:
+
+- **visible to the host**, at the same path, and writable from both sides;
+- **on disk**, not in RAM;
+- **persistent** across sandbox restarts unless something removes them.
+
+Nothing else in the sandbox home behaves this way: the rest is an overlay whose writes never reach the host.
+
+### Cleanup
+
+Left alone, the directory grows without bound - build caches, test scratch trees and agent scratchpads accumulate on disk forever. devsandbox reclaims it at launch:
+
+| Situation | What happens |
+|---|---|
+| No other devsandbox session is using this project | The directory is emptied, restoring the lifetime you would expect of `$TMPDIR`. |
+| Another session for the same project is live | Its files may be in use, so only entries with nothing modified in the last 7 days are removed. |
+
+A directory belonging to a different project is never touched, and the previous location (`~/.cache/devsandbox/revdiff-ipc/`) is reclaimed the first time the project launches.
+
+Because the sandbox can write here, nothing the host has to trust may live in this directory - host-owned records go under `$XDG_STATE_HOME/devsandbox/` instead.
+
 ## Kitty Terminal
 
 When running inside [kitty](https://sw.kovidgoyal.net/kitty/) with remote control enabled, devsandbox runs a **filtering proxy** for the kitty remote-control socket. The host kitty socket is **not** bind-mounted into the sandbox; only the proxy socket is. Sandboxed code can perform only the kitty operations declared by enabled tools, scoped to windows the sandbox itself opened (ownership tracking).
@@ -741,7 +778,7 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 
 `launch_*` capabilities equal arbitrary host code execution and must be paired with command patterns declared by the tool that requests them. Shell metacharacters (`;`, `&`, `|`, `` ` ``, `$()`, `<`, `>`, etc.) in `sh -c` payloads are rejected outright.
 
-Command patterns also pin the program to its **resolved absolute path** (`exec.LookPath` plus symlink resolution), not just its basename. Basename matching accepted any path ending in the allowed program name, including one inside a directory the sandbox can write - and the revdiff IPC directory is a write-through bind shared with the host at an identical path, so sandboxed code could plant its own `revdiff` there and have kitty run it on the host. If the binary cannot be resolved, every launch is denied rather than falling back.
+Command patterns also pin the program to its **resolved absolute path** (`exec.LookPath` plus symlink resolution), not just its basename. Basename matching accepted any path ending in the allowed program name, including one inside a directory the sandbox can write - and the [shared temp directory](#shared-temp-directory) is a write-through bind shared with the host at an identical path, so sandboxed code could plant its own `revdiff` there and have kitty run it on the host. If the binary cannot be resolved, every launch is denied rather than falling back.
 
 ### What Gets Mounted
 

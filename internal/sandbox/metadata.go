@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"devsandbox/internal/fsutil"
 )
 
 const MetadataFile = "metadata.json"
@@ -268,29 +270,10 @@ func SelectForPruning(sandboxes []*Metadata, opts PruneOptions) []*Metadata {
 // Sandboxes can contain Go module caches ($GOPATH/pkg/mod), which lay down
 // directories with mode 0555. A plain os.RemoveAll fails on such trees with
 // "permission denied" on unlinkat, because removing a directory entry needs
-// write permission on the *parent* directory. forceRemoveAll walks the tree
-// first and chmods every directory writable before removal.
+// write permission on the *parent* directory. fsutil.RemoveAllForce walks the
+// tree first and chmods every directory writable before removal.
 func RemoveSandbox(sandboxRoot string) error {
-	return forceRemoveAll(sandboxRoot)
-}
-
-// forceRemoveAll removes path, restoring write permission on every directory
-// it encounters first. This handles read-only trees such as Go's module cache.
-// If path does not exist, it returns nil (matching os.RemoveAll).
-func forceRemoveAll(path string) error {
-	// First pass: make every directory writable so unlinkat can remove its
-	// children. Walk errors are tolerated here — the subsequent RemoveAll
-	// will surface any real failure with full context.
-	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			_ = os.Chmod(p, 0o700)
-		}
-		return nil
-	})
-	return os.RemoveAll(path)
+	return fsutil.RemoveAllForce(sandboxRoot)
 }
 
 // FormatSize formats bytes as human-readable string

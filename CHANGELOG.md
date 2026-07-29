@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.18.0...HEAD)
 
+### Changed
+
+- **The sandbox's `$TMPDIR` is now cleaned up instead of growing forever.** When a tool needs a directory the host can read - `revdiff` is the only built-in case, so this applies only when the `revdiff` binary is on PATH - devsandbox points `$TMPDIR` at a directory shared with the host. Because `$TMPDIR` is global, *every* temporary file in the sandbox landed there: build caches, test scratch trees and agent scratchpads accumulated on disk indefinitely, where a normal `/tmp` would have discarded them at exit. Launching now empties the directory when no other session for the project is live, and otherwise removes only entries untouched for 7 days, so a concurrent session's working files are never pulled out from under it. See [Shared temp directory](docs/tools.md#shared-temp-directory).
+- **That directory moved from `~/.cache/devsandbox/revdiff-ipc/<session>/` to `~/.cache/devsandbox/tmp/<session>/`,** and is no longer owned by the `revdiff` tool: any tool can now declare it needs a host-visible temp directory and get the mount, the `$TMPDIR` export and the cleanup from one place. The old directory is removed automatically the first time a project launches. Nothing needs to be reconfigured.
+
 ## [v0.18.0](https://github.com/zekker6/devsandbox/releases/tag/v0.18.0) - 2026-07-24
 
 ### Breaking Changes

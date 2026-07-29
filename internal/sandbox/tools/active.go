@@ -53,6 +53,15 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 		r.logger.LogErrorf("tools", "clean stale run dirs: %v", err)
 	}
 
+	// Provision the shared temp directory before any tool starts: it is the
+	// bind source for a non-optional mount and the value of $TMPDIR, so a
+	// failure here is fatal rather than degraded.
+	if NeedsSharedTmp(home) {
+		if err := prepareSharedTmp(home, sandboxHome, r.logger); err != nil {
+			return false, err
+		}
+	}
+
 	// Find and start active tools
 	for _, tool := range Available(home) {
 		at, ok := tool.(ActiveTool)

@@ -478,11 +478,22 @@ func (b *Builder) AddTools() *Builder {
 		}
 	}
 
-	// Apply bindings from all available tools
+	// Apply bindings from all available tools. The shared temp directory is
+	// emitted once for the first enabled tool that declares it: several tools
+	// may depend on it, and mounting the same destination twice is a builder
+	// panic.
+	sharedTmpApplied := false
 	for _, tool := range tools.Available(home) {
 		toolMountMode := b.getToolMountMode(tool.Name())
 		if toolMountMode == "disabled" {
 			continue // Skip all bindings for this tool
+		}
+		if _, ok := tool.(tools.ToolWithSharedTmp); ok && !sharedTmpApplied {
+			for _, binding := range tools.SharedTmpBinding(home, sandboxHome) {
+				ResolveBindingType(&binding, toolMountMode, b.cfg.DefaultMountMode)
+				b.applyBinding(binding, sandboxHome)
+			}
+			sharedTmpApplied = true
 		}
 		for _, binding := range tool.Bindings(home, sandboxHome) {
 			ResolveBindingType(&binding, toolMountMode, b.cfg.DefaultMountMode)
@@ -1057,7 +1068,13 @@ func (b *Builder) AddEnvironment() *Builder {
 	b.SetEnv("DEVSANDBOX", "1")
 	b.SetEnv("DEVSANDBOX_PROJECT", b.cfg.ProjectName)
 
-	// Add environment from all available tools
+	// Add environment from all available tools, plus the $TMPDIR export owned
+	// by the shared temp directory when any tool depends on it.
+	if tools.NeedsSharedTmp(home) {
+		for _, env := range tools.SharedTmpEnv(home, sandboxHome) {
+			b.SetEnv(env.Name, env.Value)
+		}
+	}
 	for _, tool := range tools.Available(home) {
 		for _, env := range tool.Environment(home, sandboxHome) {
 			if env.FromHost {
