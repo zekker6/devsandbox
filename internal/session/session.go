@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"devsandbox/internal/fsutil"
 )
 
 // Session represents a running sandbox instance.
@@ -304,14 +306,8 @@ func (s *Store) write(sess *Session) error {
 		return fmt.Errorf("marshal session %q: %w", sess.Name, err)
 	}
 
-	path := s.filePath(sess.Name)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(s.filePath(sess.Name), data, 0o600); err != nil {
 		return fmt.Errorf("write session %q: %w", sess.Name, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit session %q: %w", sess.Name, err)
 	}
 	return nil
 }

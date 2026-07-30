@@ -172,15 +172,14 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	return b.launch(cfg, bwrapArgs, shellCmd, portForwardArgs)
 }
 
-// bwrapLaunchers holds the three bwrap entry points the dispatch chooses
-// between. They are indirected so a test can observe what each one is handed:
-// the configured limits reach the sandbox through these arguments and through
-// nothing else, so an argument that silently stopped carrying them would
-// otherwise leave every check in this package - and in internal/bwrap - green.
+// bwrapLaunchers holds the two bwrap entry points the dispatch chooses between.
+// They are indirected so a test can observe what each one is handed: the
+// configured limits reach the sandbox through these arguments and through nothing
+// else, so an argument that silently stopped carrying them would otherwise leave
+// every check in this package - and in internal/bwrap - green.
 type bwrapLaunchers struct {
 	startWithPasta func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error)
-	execRun        func(cgroups.Limits, []string, []string) error
-	exec           func(cgroups.Limits, []string, []string) error
+	execRun        func(cgroups.Limits, []string, []string, func(pid int)) error
 }
 
 // launchers is process-global and swapped by tests, so those tests must not call
@@ -188,15 +187,18 @@ type bwrapLaunchers struct {
 var launchers = bwrapLaunchers{
 	startWithPasta: bwrap.StartWithPasta,
 	execRun:        bwrap.ExecRun,
-	exec:           bwrap.Exec,
 }
 
 // launch runs the sandbox through the bwrap entry point cfg selects. Every
 // launch path funnels through here, so there is exactly one place a configured
 // limit could fail to reach the sandbox.
+//
+// Both paths keep this process alive as the sandbox's parent. Replacing it with
+// bwrap outright - which the plain path used to do via syscall.Exec - leaves
+// nothing host-side to notice that the sandbox was OOM-killed, and a sandbox that
+// dies without a trace is exactly what the monitoring here exists to end.
 func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, shellCmd, portForwardArgs []string) error {
-	switch {
-	case cfg.SandboxCfg.ProxyEnabled:
+	if cfg.SandboxCfg.ProxyEnabled {
 		lockdown := egressLockdown(cfg)
 		tools, err := preflightEgressLockdown(lockdown)
 		if err != nil {
@@ -224,16 +226,18 @@ func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, shellCmd, portForwardA
 		if cfg.OnSandboxStart != nil {
 			cfg.OnSandboxStart(proc.NamespacePID, proc.NamespacePath())
 		}
-		return asLockdownOrCommandExit(proc.Wait(), lockdown.ReadyFile)
-
-	case cfg.HasActiveTools || cfg.RemoveOnExit || cfg.SandboxCfg.IsConcurrent:
-		return asCommandExit(launchers.execRun(b.config.Limits, bwrapArgs, shellCmd))
-
-	default:
-		// bwrap.Exec replaces this process via syscall.Exec, so the child's exit
-		// status becomes ours automatically; a returned error is an exec failure.
-		return launchers.exec(b.config.Limits, bwrapArgs, shellCmd)
+		monitor := startOOMMonitor(cfg, b.config.Limits, proc.Pid())
+		waitErr := proc.Wait()
+		monitor.finish(waitErr)
+		return asLockdownOrCommandExit(waitErr, lockdown.ReadyFile)
 	}
+
+	var monitor *oomMonitor
+	waitErr := launchers.execRun(b.config.Limits, bwrapArgs, shellCmd, func(pid int) {
+		monitor = startOOMMonitor(cfg, b.config.Limits, pid)
+	})
+	monitor.finish(waitErr)
+	return asCommandExit(waitErr)
 }
 
 // egressMarkerDir creates the host directory the lockdown marker is written in,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"syscall"
 	"testing"
 
 	"devsandbox/internal/cgroups"
@@ -40,6 +41,42 @@ func TestAsCommandExit(t *testing.T) {
 	var ce2 *CommandExitError
 	if errors.As(asCommandExit(setupErr), &ce2) {
 		t.Error("a setup error must not become a CommandExitError")
+	}
+}
+
+// A terminated sandbox is the sandbox's result too, not a devsandbox failure, and
+// the CLI re-raises this signal on itself so the calling shell sees what it saw
+// before devsandbox stopped replacing itself with bwrap: 130 for a Ctrl-C, 137 for
+// an OOM kill, and a `while` loop that stops on an interrupt.
+func TestAsCommandExitReportsATerminatingSignal(t *testing.T) {
+	runErr := exec.Command("sh", "-c", "kill -9 $$").Run()
+	if runErr == nil {
+		t.Fatal("expected non-nil error from a self-killed helper")
+	}
+
+	got := asCommandExit(runErr)
+	var cs *CommandSignalError
+	if !errors.As(got, &cs) {
+		t.Fatalf("asCommandExit(signaled) = %v (%T); want *CommandSignalError", got, got)
+	}
+	if cs.Signal != syscall.SIGKILL {
+		t.Errorf("CommandSignalError.Signal = %v; want SIGKILL", cs.Signal)
+	}
+
+	// A terminated command is not an exit status, and must not be mistaken for one:
+	// exiting with a code would tell the shell the sandbox ran to completion.
+	var ce *CommandExitError
+	if errors.As(got, &ce) {
+		t.Errorf("a signaled command became a CommandExitError with code %d", ce.Code)
+	}
+
+	// The underlying *exec.ExitError stays reachable, which is what keeps the
+	// session.end audit event reporting the same -1 it reported before.
+	var ee *exec.ExitError
+	if !errors.As(got, &ee) {
+		t.Error("CommandSignalError must keep wrapping the *exec.ExitError")
+	} else if ee.ExitCode() != -1 {
+		t.Errorf("wrapped ExitCode() = %d, want -1", ee.ExitCode())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"syscall"
 )
 
 // CommandExitError reports the exit status of the sandboxed workload command, as
@@ -16,10 +17,30 @@ func (e *CommandExitError) Error() string {
 	return fmt.Sprintf("sandboxed command exited with status %d", e.Code)
 }
 
+// CommandSignalError reports that the sandboxed workload was terminated by a
+// signal instead of exiting with a status. The CLI re-raises the same signal on
+// itself so devsandbox dies the way the sandbox did, which is what the shell
+// running it expects: 130 for a Ctrl-C, 137 for an OOM kill, and a batch loop that
+// still stops on an interrupt.
+//
+// It wraps the underlying *exec.ExitError so callers that only care about a
+// process-style exit code - the session.end audit event is the one - keep reading
+// the same -1 they read before this type existed.
+type CommandSignalError struct {
+	Signal syscall.Signal
+	Err    error
+}
+
+func (e *CommandSignalError) Error() string {
+	return fmt.Sprintf("sandboxed command was terminated by %v", e.Signal)
+}
+
+func (e *CommandSignalError) Unwrap() error { return e.Err }
+
 // asCommandExit converts the error from running the sandboxed command into a
-// CommandExitError carrying its exit code. A process terminated by a signal
-// (ExitCode() == -1) and any non-ExitError (a setup or plumbing failure) pass
-// through unchanged so the caller still treats them as devsandbox errors.
+// CommandExitError carrying its exit code, or a CommandSignalError when it was
+// terminated by a signal. Any non-ExitError (a setup or plumbing failure) passes
+// through unchanged so the caller still treats it as a devsandbox error.
 func asCommandExit(err error) error {
 	if err == nil {
 		return nil
@@ -28,6 +49,9 @@ func asCommandExit(err error) error {
 	if errors.As(err, &ee) {
 		if code := ee.ExitCode(); code >= 0 {
 			return &CommandExitError{Code: code}
+		}
+		if status, ok := ee.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return &CommandSignalError{Signal: status.Signal(), Err: err}
 		}
 	}
 	return err

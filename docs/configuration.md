@@ -449,6 +449,47 @@ newer section wins on any field it sets - setting only `pids` in
 `[sandbox.docker.resources]`. Using the deprecated block prints a one-line
 warning at startup. It has no `pids` field; use `[sandbox.resources]` for that.
 
+#### OOM Tracking
+
+No configuration needed. On bwrap it is active whenever resource limits are
+enabled, which is what gives the sandbox a cgroup of its own; on docker and krun
+the container always has one, so it is always active.
+
+Three things happen when a kill is observed:
+
+- A message on stderr as it happens, naming whether the sandbox itself went down
+  or a process inside it was killed while the sandbox carried on. The second case
+  is the common one under a memory limit, and it is the one that used to look like
+  an agent quietly disappearing.
+- A `sandbox.oom` audit event, with the kill count and whether it was fatal. It
+  goes wherever your [logging](#logging) destinations point.
+- A record in the sandbox's metadata, which `devsandbox sandboxes list` shows in
+  its `STATUS` column as `oom-killed` (the sandbox died) or `oom-kills(N)` (it
+  survived). This is what outlives the killed process; it is cleared when the next
+  session on that sandbox starts, and it is in `--json` output too.
+
+All three backends are watched the same way - an inotify watch on the cgroup's
+`memory.events` - but what that cgroup can see differs, and three cases are not
+covered:
+
+- **A container with `keep_container = false`.** That launch is an anonymous
+  `docker run --rm`, so the engine cannot be asked for its PID or its ID and there
+  is nothing to resolve a cgroup from. The default (`keep_container = true`) is
+  covered, including kills of processes started by `docker exec`.
+- **An OOM inside a krun guest.** The host cgroup bounds the microVM, so a host
+  OOM kill of the VM is reported, but memory pressure *inside* the guest is decided
+  by the guest kernel and never reaches a host counter.
+- **macOS.** The container engine's PIDs belong to the VM its daemon runs in, and
+  there is no host cgroup hierarchy to resolve them against.
+
+A bwrap sandbox with no limits is not watched at all, and gets a weaker signal
+instead: if it exits on SIGKILL, devsandbox reports that and says explicitly that
+it cannot tell whether the OOM killer was responsible. Configure a `memory` limit
+to get an answer. A sandbox that *is* watched and exits on SIGKILL with no OOM
+counter behind it gets nothing said about it - its own cgroup already answered the
+question, so that is an ordinary `kill -9` and devsandbox stays as quiet about it
+as a shell does.
+
 ### Sandbox Settings
 
 ```toml

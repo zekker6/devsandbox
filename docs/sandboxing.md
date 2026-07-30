@@ -183,10 +183,19 @@ and starts the scope regardless, which no preflight check can observe. Asserting
 a guarantee the host may not be enforcing is worse than documenting the weaker
 one bwrap actually delivers.
 
-`systemd-run` execs in place, so no supervisor process is added and exit codes
-propagate exactly as before. In proxy mode the scope wraps `pasta`, the
-outermost sandbox process - devsandbox itself stays outside it, so the proxy is
-never capped by the sandbox's memory limit.
+`systemd-run` execs in place, so the scope adds no process of its own. devsandbox
+does stay alive as the sandbox's parent, and deliberately: nothing host-side can
+notice that a sandbox was OOM-killed once devsandbox has replaced itself with
+bwrap. It stays out of the way of the exit - it returns as soon as the sandbox
+does, propagates its exit status, and for a sandbox that was *terminated* raises
+the same signal on itself so it dies the same way, escalating to `SIGKILL` if that
+signal turns out to be blocked. Dying of the signal is what a status code cannot
+express: a shell only aborts a `while` loop on a child that actually died of
+`SIGINT`. `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT` aimed at devsandbox alone are
+forwarded on to the sandbox, since the terminal delivers them to the whole process
+group anyway. In proxy mode the scope wraps `pasta`, the outermost sandbox process
+- devsandbox itself stays outside it, so the proxy is never capped by the sandbox's
+memory limit.
 
 **Limits are opt-in and there are no bwrap defaults.** With no
 `[sandbox.resources]` block the sandbox launches byte-for-byte as it always has,
@@ -231,6 +240,39 @@ silently fail are each guarded:
 
 Hosts without a systemd user manager, or on cgroup v1, cannot use bwrap limits
 at all. They keep working normally as long as no limits are configured.
+
+#### Detecting the OOM kill
+
+A limit that is doing its job eventually kills something, and the kernel does that
+silently. The scope makes it observable: while the session runs, devsandbox watches
+the scope's `memory.events` for `oom_kill` and `oom_group_kill`, and reports each
+increase to stderr, to a `sandbox.oom` audit event, and to the sandbox's metadata
+where `devsandbox sandboxes list` shows it. See
+[Configuration: OOM Tracking](configuration.md#oom-tracking) for what is reported.
+
+Three details make it work rather than nearly work:
+
+- **The watch is driven by inotify, not polling.** The kernel notifies from the OOM
+  path itself, while the victim is still dying. The cgroup - and with it
+  `memory.events` - is removed a few milliseconds after the last process in it
+  exits, so a poll interval cheap enough to leave running would lose that race on
+  exactly the case that matters most, a sandbox killed outright.
+- **The cgroup must be ours.** The scope is matched by unit name, not by position
+  in the hierarchy, because systemd chooses the slice a user scope lands in. Only
+  the scope this launch asked for is trusted; a sandbox with no limits is left
+  alone rather than credited with the OOM kills of everything else sharing the
+  invoking shell's cgroup.
+- **Monitoring never delays the sandbox, at either end.** The watch attaches in the
+  background, because waiting for systemd to publish the scope would otherwise sit
+  in front of the launch, and a process stays a member of the cgroup it was launched
+  in until it is reaped - so a launch that never reaches its scope would keep that
+  wait going right through the sandbox's exit. When the sandbox ends, an attach
+  still in flight is abandoned rather than waited out.
+
+Where the counters cannot be read, devsandbox says so instead of leaving you to
+assume a sandbox is monitored. The exception is the states where there was never
+anything to watch: a launch with no limits, and a sandbox that exited before its
+scope resolved.
 
 ## Data Locations
 

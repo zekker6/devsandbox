@@ -104,9 +104,9 @@ func TestBwrapLaunchCarriesTheConfiguredLimits(t *testing.T) {
 			wantLaunch: "execRun",
 		},
 		{
-			name:       "plain run replaces the process",
+			name:       "a plain run keeps the parent alive too, so the sandbox can be monitored",
 			cfg:        &RunConfig{SandboxCfg: &sandbox.Config{}},
-			wantLaunch: "exec",
+			wantLaunch: "execRun",
 		},
 	}
 
@@ -123,12 +123,12 @@ func TestBwrapLaunchCarriesTheConfiguredLimits(t *testing.T) {
 					gotLaunch, got = "startWithPasta", l
 					return nil, sentinel
 				},
-				execRun: func(l cgroups.Limits, _, _ []string) error {
+				execRun: func(l cgroups.Limits, _, _ []string, onStart func(int)) error {
 					gotLaunch, got = "execRun", l
-					return sentinel
-				},
-				exec: func(l cgroups.Limits, _, _ []string) error {
-					gotLaunch, got = "exec", l
+					// The real launcher reports the started PID here, and the
+					// monitor attaches from it. PID 0 has no cgroup, so the
+					// attach fails fast and silently on every host.
+					onStart(0)
 					return sentinel
 				},
 			}
@@ -155,7 +155,7 @@ func TestBwrapLaunchUnlimitedPassesZeroLimits(t *testing.T) {
 	sentinel := errors.New("stub launcher")
 
 	prev := launchers
-	launchers = bwrapLaunchers{exec: func(l cgroups.Limits, _, _ []string) error {
+	launchers = bwrapLaunchers{execRun: func(l cgroups.Limits, _, _ []string, _ func(int)) error {
 		got = l
 		return sentinel
 	}}
@@ -563,7 +563,7 @@ func TestBwrapNonProxyLaunchNeedsNoFirewall(t *testing.T) {
 
 	var launched bool
 	prev := launchers
-	launchers = bwrapLaunchers{exec: func(cgroups.Limits, []string, []string) error {
+	launchers = bwrapLaunchers{execRun: func(cgroups.Limits, []string, []string, func(int)) error {
 		launched = true
 		return nil
 	}}
@@ -577,8 +577,8 @@ func TestBwrapNonProxyLaunchNeedsNoFirewall(t *testing.T) {
 	}
 }
 
-// The execRun branch carries the same exit-status mapping, and is the path taken
-// whenever tools are active, --rm is set, or the session is concurrent.
+// The execRun branch carries the same exit-status mapping, and is now the path
+// taken by every non-proxy launch.
 func TestBwrapLaunchExecRunMapsExitStatus(t *testing.T) {
 	runErr := exec.Command("/bin/sh", "-c", "exit 3").Run()
 	var ee *exec.ExitError
@@ -588,7 +588,7 @@ func TestBwrapLaunchExecRunMapsExitStatus(t *testing.T) {
 
 	prev := launchers
 	launchers = bwrapLaunchers{
-		execRun: func(cgroups.Limits, []string, []string) error { return ee },
+		execRun: func(cgroups.Limits, []string, []string, func(int)) error { return ee },
 	}
 	t.Cleanup(func() { launchers = prev })
 

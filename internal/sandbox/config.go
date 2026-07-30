@@ -226,6 +226,11 @@ func (c *Config) EnsureSandboxDirs() error {
 	} else {
 		m, err := LoadMetadata(c.SandboxRoot)
 		if err == nil {
+			// A new session starts with no OOM record: the mark reports what
+			// happened to the session you are looking at, so leaving the
+			// previous one in place would keep flagging a sandbox that has since
+			// run fine.
+			m.LastOOM = nil
 			_ = m.UpdateLastUsed()
 		}
 	}

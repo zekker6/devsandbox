@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"devsandbox/internal/fsutil"
 	"devsandbox/internal/sandbox"
 )
 
@@ -92,9 +93,8 @@ func (s *Store) filePath(paneID string) string {
 	return filepath.Join(s.dir, hex.EncodeToString(sum[:])+".json")
 }
 
-// Save writes rec atomically: a temp file in the same directory, fsync'd, then
-// renamed over the destination, so a concurrent Load sees either the old
-// record or the new one but never a partial write.
+// Save writes rec atomically, so a concurrent Load sees either the old record or
+// the new one but never a partial write.
 //
 // UpdatedAt is stamped when the caller left it zero.
 func (s *Store) Save(rec Record) error {
@@ -125,35 +125,10 @@ func (s *Store) Save(rec Record) error {
 		return fmt.Errorf("herdrstate: create %s: %w", s.dir, err)
 	}
 
-	tmp, err := os.CreateTemp(s.dir, ".pane-*.tmp")
-	if err != nil {
-		return fmt.Errorf("herdrstate: create temp record: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if err := writeAndSync(tmp, data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
+	if err := fsutil.WriteFileAtomic(s.filePath(rec.PaneID), data, 0o600); err != nil {
 		return fmt.Errorf("herdrstate: write record: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("herdrstate: close record: %w", err)
-	}
-	if err := os.Rename(tmpPath, s.filePath(rec.PaneID)); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("herdrstate: commit record: %w", err)
-	}
 	return nil
-}
-
-func writeAndSync(f *os.File, data []byte) error {
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	return f.Sync()
 }
 
 // Load returns the record for paneID. It reports ErrNotFound when no record

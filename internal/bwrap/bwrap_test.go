@@ -79,19 +79,6 @@ func TestInvocationsUnlimitedAreUnchanged(t *testing.T) {
 
 	wantArgs := []string{"--unshare-pid", "--bind", "/src", "/src", "--", "bash", "-lc", "echo hi"}
 
-	t.Run("exec", func(t *testing.T) {
-		prog, argv, err := execInvocation(cgroups.Limits{}, "/opt/bwrap", testBwrapArgs, testShellCmd)
-		if err != nil {
-			t.Fatalf("execInvocation() error: %v", err)
-		}
-		if prog != "/opt/bwrap" {
-			t.Errorf("program = %q, want the bwrap path unchanged", prog)
-		}
-		if want := append([]string{"bwrap"}, wantArgs...); !slices.Equal(argv, want) {
-			t.Errorf("argv = %v, want %v", argv, want)
-		}
-	})
-
 	t.Run("run", func(t *testing.T) {
 		prog, args, err := runInvocation(cgroups.Limits{}, "/opt/bwrap", testBwrapArgs, testShellCmd)
 		if err != nil {
@@ -139,45 +126,32 @@ func TestInvocationsUnlimitedAreUnchanged(t *testing.T) {
 	})
 }
 
-// Exec and ExecRun disagree on argv[0] by construction: syscall.Exec requires
-// the caller to supply it, exec.Command derives it from the program path. The
-// prefix must be applied under both conventions without dropping a flag, so the
-// two argvs are asserted against each other directly.
-func TestExecAndRunArgv0Asymmetry(t *testing.T) {
+// exec.Command derives argv[0] from the program path, so the arguments handed to
+// it must never carry one. A stray argv[0] would be passed to the program as its
+// first real argument - to systemd-run as an unparseable positional when limits
+// are set, or to bwrap as a bogus option when they are not.
+func TestRunInvocationCarriesNoArgv0(t *testing.T) {
 	withFakeWrap(t)
 
 	for _, tc := range []struct {
-		name      string
-		limits    cgroups.Limits
-		wantProg  string
-		wantArgv0 string
+		name     string
+		limits   cgroups.Limits
+		wantProg string
+		argv0    string
 	}{
-		{name: "unlimited", limits: cgroups.Limits{}, wantProg: "/opt/bwrap", wantArgv0: "bwrap"},
-		{name: "limited", limits: testLimits, wantProg: fakeSystemdRun, wantArgv0: "systemd-run"},
+		{name: "unlimited", limits: cgroups.Limits{}, wantProg: "/opt/bwrap", argv0: "bwrap"},
+		{name: "limited", limits: testLimits, wantProg: fakeSystemdRun, argv0: "systemd-run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			execProg, argv, err := execInvocation(tc.limits, "/opt/bwrap", testBwrapArgs, testShellCmd)
-			if err != nil {
-				t.Fatalf("execInvocation() error: %v", err)
-			}
-			runProg, args, err := runInvocation(tc.limits, "/opt/bwrap", testBwrapArgs, testShellCmd)
+			prog, args, err := runInvocation(tc.limits, "/opt/bwrap", testBwrapArgs, testShellCmd)
 			if err != nil {
 				t.Fatalf("runInvocation() error: %v", err)
 			}
-
-			if execProg != tc.wantProg || runProg != tc.wantProg {
-				t.Errorf("programs = %q / %q, want both %q", execProg, runProg, tc.wantProg)
+			if prog != tc.wantProg {
+				t.Errorf("program = %q, want %q", prog, tc.wantProg)
 			}
-			if argv[0] != tc.wantArgv0 {
-				t.Errorf("exec argv[0] = %q, want %q", argv[0], tc.wantArgv0)
-			}
-			// The exec argv is exactly the exec.Command args with argv[0] in
-			// front. Anything else means one path lost or gained a flag.
-			if !slices.Equal(argv[1:], args) {
-				t.Errorf("exec argv[1:] = %v, want it to equal the exec.Command args %v", argv[1:], args)
-			}
-			if slices.Contains(args, tc.wantArgv0) && tc.limits.IsZero() {
-				t.Errorf("exec.Command args must not carry argv[0]: %v", args)
+			if len(args) > 0 && args[0] == tc.argv0 {
+				t.Errorf("args must not carry argv[0]: %v", args)
 			}
 		})
 	}
@@ -185,17 +159,6 @@ func TestExecAndRunArgv0Asymmetry(t *testing.T) {
 
 func TestInvocationsLimitedCarryTheScopePrefix(t *testing.T) {
 	withFakeWrap(t)
-
-	t.Run("exec wraps bwrap", func(t *testing.T) {
-		prog, argv, err := execInvocation(testLimits, "/opt/bwrap", testBwrapArgs, testShellCmd)
-		if err != nil {
-			t.Fatalf("execInvocation() error: %v", err)
-		}
-		if prog != fakeSystemdRun {
-			t.Errorf("program = %q, want %q", prog, fakeSystemdRun)
-		}
-		assertWrapped(t, argv[1:], "/opt/bwrap")
-	})
 
 	t.Run("run wraps bwrap", func(t *testing.T) {
 		prog, args, err := runInvocation(testLimits, "/opt/bwrap", testBwrapArgs, testShellCmd)
@@ -246,19 +209,13 @@ func TestInvocationsPropagateWrapErrors(t *testing.T) {
 	wantErr := errors.New("cpu limit rounds to CPUQuota=0%")
 	withFailingWrap(t, wantErr)
 
-	t.Run("exec", func(t *testing.T) {
-		prog, argv, err := execInvocation(testLimits, "/opt/bwrap", testBwrapArgs, testShellCmd)
-		if !errors.Is(err, wantErr) {
-			t.Fatalf("execInvocation() error = %v, want %v", err, wantErr)
-		}
-		if prog != "" || argv != nil {
-			t.Errorf("execInvocation() returned %q / %v alongside an error, want empty results", prog, argv)
-		}
-	})
-
 	t.Run("run", func(t *testing.T) {
-		if _, _, err := runInvocation(testLimits, "/opt/bwrap", testBwrapArgs, testShellCmd); !errors.Is(err, wantErr) {
+		prog, args, err := runInvocation(testLimits, "/opt/bwrap", testBwrapArgs, testShellCmd)
+		if !errors.Is(err, wantErr) {
 			t.Fatalf("runInvocation() error = %v, want %v", err, wantErr)
+		}
+		if prog != "" || args != nil {
+			t.Errorf("runInvocation() returned %q / %v alongside an error, want empty results", prog, args)
 		}
 	})
 

@@ -142,10 +142,40 @@ Proxy Mode (--proxy):
 		if errors.As(err, &cmdExit) {
 			os.Exit(cmdExit.Code)
 		}
+		// Same reasoning for a sandbox that was terminated rather than exited.
+		var cmdSignal *isolator.CommandSignalError
+		if errors.As(err, &cmdSignal) {
+			dieOf(cmdSignal.Signal)
+		}
 		notice.Error("%v", err)
 		os.Exit(1)
 	}
 }
+
+// dieOf terminates devsandbox with the signal that terminated the sandbox, so the
+// calling shell sees what it saw when this process was replaced by bwrap outright:
+// a Ctrl-C reported as an interrupt rather than as a devsandbox failure. It is
+// called after cobra's Execute returns, so every deferred cleanup has already run.
+func dieOf(sig syscall.Signal) {
+	// Without this the signal is delivered to devsandbox's own handler - proxy mode
+	// registers one for SIGINT and SIGTERM - and swallowed.
+	signal.Reset(sig)
+
+	// Delivery is asynchronous through the runtime's signal goroutine, so give the
+	// signal time to take effect rather than racing it.
+	_ = syscall.Kill(os.Getpid(), sig)
+	time.Sleep(dieOfGrace)
+
+	// Still here: the signal was ignored or blocked. SIGKILL can be neither, and
+	// 128+signal is the status a shell reports for a terminated child.
+	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+	os.Exit(128 + int(sig))
+}
+
+// dieOfGrace is how long the sandbox's own signal gets to terminate devsandbox
+// before it is forced. A signal that lands needs microseconds, so only one that
+// never arrives waits this out.
+const dieOfGrace = 2 * time.Second
 
 func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	verbose, _ := cmd.Flags().GetBool("verbose")

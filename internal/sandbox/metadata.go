@@ -32,6 +32,11 @@ type Metadata struct {
 	LastUsed   time.Time     `json:"last_used"`
 	Shell      Shell         `json:"shell"`
 	Isolation  IsolationType `json:"isolation,omitempty"`
+	// LastOOM records OOM kills observed in the current or most recent session,
+	// and is cleared when a new session starts. Nil means none were observed —
+	// which is not the same as none having happened, because a sandbox can only
+	// be monitored when it runs in a cgroup of its own. See RecordOOM.
+	LastOOM *OOMRecord `json:"last_oom,omitempty"`
 	// Computed fields (not persisted)
 	SandboxRoot string `json:"-"`
 	SizeBytes   int64  `json:"-"`
@@ -40,20 +45,67 @@ type Metadata struct {
 	State       string `json:"-"` // For Docker: "running", "stopped", "exited"
 }
 
-// SaveMetadata writes metadata to the sandbox directory
-func SaveMetadata(m *Metadata, sandboxRoot string) error {
-	path := filepath.Join(sandboxRoot, MetadataFile)
+// OOMRecord is the OOM activity observed for a sandbox session. It exists so an
+// OOM kill leaves a trace the user can find after the fact: the killed sandbox
+// cannot report anything itself, and its session file is removed on exit.
+type OOMRecord struct {
+	// At is when the kill was observed.
+	At time.Time `json:"at"`
+	// Kills is how many processes in the sandbox an OOM killer has killed during
+	// the session.
+	Kills int `json:"kills"`
+	// Fatal reports that the sandbox itself was killed, rather than a process
+	// inside it while the sandbox carried on.
+	Fatal bool `json:"fatal"`
+}
 
+// Status renders the record for a listing's status column.
+func (r *OOMRecord) Status() string {
+	if r == nil {
+		return ""
+	}
+	if r.Fatal {
+		return "oom-killed"
+	}
+	return fmt.Sprintf("oom-kills(%d)", r.Kills)
+}
+
+// SaveMetadata writes metadata to the sandbox directory.
+//
+// The write is atomic because the file now has a mid-session writer (RecordOOM) as
+// well as a start-of-session one. See fsutil.WriteFileAtomic for why a torn write
+// here is worse than a failed one.
+func SaveMetadata(m *Metadata, sandboxRoot string) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(filepath.Join(sandboxRoot, MetadataFile), data, 0o644); err != nil {
 		return fmt.Errorf("failed to write metadata: %w", err)
 	}
 
 	return nil
+}
+
+// RecordOOM persists an OOM observation for the sandbox rooted at sandboxRoot,
+// so `sandboxes list` can report it both while the session runs and after a
+// sandbox that was killed outright is gone.
+//
+// kills is cumulative for the session and fatal reports whether the sandbox
+// itself died, so repeated calls for the same session overwrite rather than
+// accumulate. A fatal record is never downgraded: the final observation of a
+// killed sandbox arrives after the live one that saw the same kill.
+func RecordOOM(sandboxRoot string, kills int, fatal bool, at time.Time) error {
+	m, err := LoadMetadata(sandboxRoot)
+	if err != nil {
+		return fmt.Errorf("record OOM kill: %w", err)
+	}
+	if m.LastOOM != nil && m.LastOOM.Fatal {
+		fatal = true
+	}
+	m.LastOOM = &OOMRecord{At: at, Kills: kills, Fatal: fatal}
+	return SaveMetadata(m, sandboxRoot)
 }
 
 // LoadMetadata reads metadata from a sandbox directory

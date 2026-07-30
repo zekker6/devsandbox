@@ -369,6 +369,49 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		return err
 	}
 
+	// Watch the container's cgroup for OOM kills for as long as the session runs.
+	// It is started before the action rather than inside each branch: all three end
+	// with a running container, and the attach waits for one in the background.
+	monitor := d.startOOMMonitor(cfg, result)
+	err = d.runAction(ctx, cfg, isoCfg, result)
+	monitor.finish(err)
+	return err
+}
+
+// startOOMMonitor attaches OOM monitoring to the container this launch produced.
+//
+// The engine is the only thing that knows the container's PID and ID, and it can
+// only answer once the container is running, so both are resolved on the monitor's
+// attach goroutine rather than here.
+func (d *DockerIsolator) startOOMMonitor(cfg *RunConfig, result *DockerBuildResult) *oomMonitor {
+	name := result.ContainerName
+	if name == "" {
+		// An anonymous `docker run` - keep_container disabled - cannot be inspected,
+		// so there is no PID to resolve a cgroup from and no ID to verify it against.
+		m := newOOMMonitor(cfg, d.config.MemoryLimit, true)
+		m.skipAttach(errNoContainerName)
+		return m
+	}
+
+	return startContainerOOMMonitor(cfg, d.config.MemoryLimit, func(ctx context.Context) (int, string, error) {
+		pid, err := d.waitForContainerPID(ctx, name, oomContainerTimeout)
+		if err != nil {
+			return 0, "", err
+		}
+		id, err := d.inspectContainerID(ctx, name)
+		if err != nil {
+			return 0, "", err
+		}
+		return pid, id, nil
+	})
+}
+
+// runAction runs the workload through the action BuildDocker selected. It is split
+// out of Run so the OOM monitor has one place to observe how the session ended,
+// rather than one per branch.
+func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *Config, result *DockerBuildResult) error {
+	sandboxCfg := cfg.SandboxCfg
+
 	readinessTimeout := 90 * time.Second
 	// Handle different actions
 	switch result.Action {
@@ -623,6 +666,21 @@ func (d *DockerIsolator) inspectContainerPID(ctx context.Context, containerName 
 		return 0, fmt.Errorf("inspect %s: %w", containerName, err)
 	}
 	return parseContainerPID(string(out))
+}
+
+// inspectContainerID runs `<engine> inspect --format '{{.Id}}'` and returns the
+// full container ID. The full form is what appears in the container's cgroup path,
+// which is how OOM monitoring proves the cgroup it found is this container's.
+func (d *DockerIsolator) inspectContainerID(ctx context.Context, containerName string) (string, error) {
+	out, err := exec.CommandContext(ctx, d.engine.binary, "inspect", "--format", "{{.Id}}", containerName).Output()
+	if err != nil {
+		return "", fmt.Errorf("inspect %s for its container ID: %w", containerName, err)
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" {
+		return "", fmt.Errorf("container %s reported an empty container ID", containerName)
+	}
+	return id, nil
 }
 
 // parseContainerPID extracts the integer PID from a `podman/docker inspect

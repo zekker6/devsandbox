@@ -327,6 +327,28 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 	return cmd
 }
 
+// formatSandboxStatus renders the status column: the sandbox's lifecycle state
+// plus anything notable about how its last session ended. An OOM kill goes here
+// because it is the one outcome the sandbox cannot report itself — the process is
+// gone and its session file with it, so the listing is where the user finds out.
+func formatSandboxStatus(s *sandbox.Metadata) string {
+	var parts []string
+	if s.Orphaned {
+		parts = append(parts, "orphaned")
+	}
+	if s.Active {
+		parts = append(parts, "active")
+	}
+	// For Docker containers, show the container state
+	if s.Isolation == sandbox.IsolationDocker && s.State != "" {
+		parts = append(parts, s.State)
+	}
+	if oom := s.LastOOM.Status(); oom != "" {
+		parts = append(parts, oom)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func printJSON(sandboxes []*sandbox.Metadata) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -343,25 +365,7 @@ func printTable(sandboxes []*sandbox.Metadata, showSize bool) error {
 	}
 
 	for _, s := range sandboxes {
-		status := ""
-		if s.Orphaned {
-			status = "orphaned"
-		}
-		if s.Active {
-			if status != "" {
-				status = status + ", active"
-			} else {
-				status = "active"
-			}
-		}
-		// For Docker containers, show the container state
-		if s.Isolation == sandbox.IsolationDocker && s.State != "" {
-			if status != "" {
-				status = status + ", " + s.State
-			} else {
-				status = s.State
-			}
-		}
+		status := formatSandboxStatus(s)
 
 		projectDir := s.ProjectDir
 		if len(projectDir) > 40 {

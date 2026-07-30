@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+
+	"devsandbox/internal/fsutil"
 )
 
 //go:embed bin/amd64/* bin/arm64/*
@@ -85,31 +87,10 @@ func extractBinary(name string, dir string) (string, error) {
 		return "", fmt.Errorf("cannot create cache directory %s: %w", dir, err)
 	}
 
-	// Write to temp file then rename atomically to avoid races
-	tmpFile, err := os.CreateTemp(dir, name+".tmp.*")
-	if err != nil {
-		return "", fmt.Errorf("cannot create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("cannot write binary: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("cannot close temp file: %w", err)
-	}
-
-	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("cannot set executable permission: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("cannot move binary to cache: %w", err)
+	// Written atomically so a concurrent launch either finds no binary or finds a
+	// complete, executable one - never a half-extracted file it would try to run.
+	if err := fsutil.WriteFileAtomic(targetPath, data, 0o755); err != nil {
+		return "", fmt.Errorf("cannot extract binary to cache: %w", err)
 	}
 
 	return targetPath, nil

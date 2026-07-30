@@ -501,3 +501,145 @@ func TestRemoveSandbox_ReadOnlyDirs(t *testing.T) {
 		t.Errorf("sandboxRoot still present after RemoveSandbox: err=%v", err)
 	}
 }
+
+// seedMetadata writes a minimal sandbox metadata file and returns its root.
+func seedMetadata(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	m := &Metadata{
+		Name:       "oom-project",
+		ProjectDir: root,
+		CreatedAt:  time.Now(),
+		LastUsed:   time.Now(),
+		Shell:      ShellBash,
+	}
+	if err := SaveMetadata(m, root); err != nil {
+		t.Fatalf("SaveMetadata failed: %v", err)
+	}
+	return root
+}
+
+func TestRecordOOMPersistsTheObservation(t *testing.T) {
+	root := seedMetadata(t)
+	at := time.Now().Truncate(time.Second)
+
+	if err := RecordOOM(root, 2, false, at); err != nil {
+		t.Fatalf("RecordOOM failed: %v", err)
+	}
+
+	loaded, err := LoadMetadata(root)
+	if err != nil {
+		t.Fatalf("LoadMetadata failed: %v", err)
+	}
+	if loaded.LastOOM == nil {
+		t.Fatal("LastOOM is nil, want the recorded observation")
+	}
+	if loaded.LastOOM.Kills != 2 || loaded.LastOOM.Fatal {
+		t.Errorf("LastOOM = %+v, want 2 non-fatal kills", *loaded.LastOOM)
+	}
+	if !loaded.LastOOM.At.Equal(at) {
+		t.Errorf("LastOOM.At = %v, want %v", loaded.LastOOM.At, at)
+	}
+}
+
+// The live observation of a fatal kill and the post-exit classification of the
+// same kill are two writes. Whichever order they land in, the sandbox must not
+// end up marked as having merely lost a child process.
+func TestRecordOOMKeepsAFatalRecordFatal(t *testing.T) {
+	root := seedMetadata(t)
+
+	if err := RecordOOM(root, 1, true, time.Now()); err != nil {
+		t.Fatalf("RecordOOM failed: %v", err)
+	}
+	if err := RecordOOM(root, 1, false, time.Now()); err != nil {
+		t.Fatalf("RecordOOM failed: %v", err)
+	}
+
+	loaded, err := LoadMetadata(root)
+	if err != nil {
+		t.Fatalf("LoadMetadata failed: %v", err)
+	}
+	if loaded.LastOOM == nil || !loaded.LastOOM.Fatal {
+		t.Errorf("LastOOM = %+v, want the fatal flag preserved", loaded.LastOOM)
+	}
+}
+
+func TestRecordOOMReportsAMissingSandbox(t *testing.T) {
+	if err := RecordOOM(t.TempDir(), 1, true, time.Now()); err == nil {
+		t.Fatal("RecordOOM() = nil error, want a failure for a sandbox with no metadata")
+	}
+}
+
+func TestOOMRecordStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		record *OOMRecord
+		want   string
+	}{
+		{name: "no record", record: nil, want: ""},
+		{name: "sandbox killed", record: &OOMRecord{Kills: 1, Fatal: true}, want: "oom-killed"},
+		{name: "processes killed inside", record: &OOMRecord{Kills: 3}, want: "oom-kills(3)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.record.Status(); got != tt.want {
+				t.Errorf("Status() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The mark describes the session being looked at, so starting a new one drops it.
+func TestEnsureSandboxDirsClearsAPreviousOOMRecord(t *testing.T) {
+	base := t.TempDir()
+	cfg := &Config{
+		SandboxRoot: filepath.Join(base, "sandbox"),
+		SandboxHome: filepath.Join(base, "sandbox", "home"),
+		ProjectDir:  base,
+		ProjectName: "oom-project",
+		Shell:       ShellBash,
+	}
+	if err := cfg.EnsureSandboxDirs(); err != nil {
+		t.Fatalf("EnsureSandboxDirs failed: %v", err)
+	}
+	if err := RecordOOM(cfg.SandboxRoot, 4, true, time.Now()); err != nil {
+		t.Fatalf("RecordOOM failed: %v", err)
+	}
+
+	if err := cfg.EnsureSandboxDirs(); err != nil {
+		t.Fatalf("EnsureSandboxDirs failed on the second session: %v", err)
+	}
+
+	loaded, err := LoadMetadata(cfg.SandboxRoot)
+	if err != nil {
+		t.Fatalf("LoadMetadata failed: %v", err)
+	}
+	if loaded.LastOOM != nil {
+		t.Errorf("LastOOM = %+v, want it cleared for the new session", *loaded.LastOOM)
+	}
+}
+
+// A metadata file left half-written is worse than a lost update: LoadMetadata
+// fails, ListSandboxes synthesises a replacement that reports the sandbox as
+// orphaned, and `prune` removes orphaned sandboxes by default.
+func TestSaveMetadataLeavesNoPartialFile(t *testing.T) {
+	root := seedMetadata(t)
+
+	if err := RecordOOM(root, 1, true, time.Now()); err != nil {
+		t.Fatalf("RecordOOM failed: %v", err)
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".tmp" {
+			t.Errorf("SaveMetadata left a temporary file behind: %s", e.Name())
+		}
+	}
+	if _, err := LoadMetadata(root); err != nil {
+		t.Errorf("LoadMetadata after RecordOOM failed: %v", err)
+	}
+}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -117,41 +117,23 @@ func bwrapCmdline(bwrapArgs, shellCmd []string) []string {
 	return args
 }
 
-// execInvocation returns the program to exec and the full argv including
-// argv[0], which syscall.Exec requires the caller to supply. Without limits the
-// program is bwrap and argv[0] is "bwrap", exactly as before.
-func execInvocation(limits cgroups.Limits, bwrapPath string, bwrapArgs, shellCmd []string) (string, []string, error) {
-	prog, args, err := wrapLimits(limits, bwrapPath, bwrapCmdline(bwrapArgs, shellCmd))
-	if err != nil {
-		return "", nil, err
-	}
-	return prog, append([]string{filepath.Base(prog)}, args...), nil
-}
-
 // runInvocation returns the program and the arguments after argv[0], which
 // exec.Command derives from the program path itself.
 func runInvocation(limits cgroups.Limits, bwrapPath string, bwrapArgs, shellCmd []string) (string, []string, error) {
 	return wrapLimits(limits, bwrapPath, bwrapCmdline(bwrapArgs, shellCmd))
 }
 
-func Exec(limits cgroups.Limits, bwrapArgs []string, shellCmd []string) error {
-	bwrapPath, err := embed.BwrapPath()
-	if err != nil {
-		return fmt.Errorf("bwrap not available: %w", err)
-	}
-
-	prog, args, err := execInvocation(limits, bwrapPath, bwrapArgs, shellCmd)
-	if err != nil {
-		return err
-	}
-
-	return syscall.Exec(prog, args, os.Environ())
-}
-
-// ExecRun runs bwrap using exec.Command instead of syscall.Exec.
-// Unlike Exec, this keeps the parent process alive, which is necessary
-// when background goroutines (like ActiveTool proxies) need to keep running.
-func ExecRun(limits cgroups.Limits, bwrapArgs []string, shellCmd []string) error {
+// ExecRun runs bwrap with exec.Command, keeping this process alive as its parent.
+//
+// A parent has to survive the launch for anything host-side to observe the
+// sandbox: background goroutines (ActiveTool proxies) need to keep running, and
+// nothing can watch a sandbox for OOM kills - or report that it was killed - once
+// devsandbox has replaced itself with bwrap.
+//
+// onStart is called with the launched process' PID once it is running and before
+// it is waited on. It may be nil. The PID is the systemd scope wrapper's when
+// limits are configured, which is the process whose cgroup the sandbox runs in.
+func ExecRun(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, onStart func(pid int)) error {
 	bwrapPath, err := embed.BwrapPath()
 	if err != nil {
 		return fmt.Errorf("bwrap not available: %w", err)
@@ -168,7 +150,51 @@ func ExecRun(limits cgroups.Limits, bwrapArgs []string, shellCmd []string) error
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 
-	return cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// Stay out of the way of the sandbox's own signal handling. Go's default
+	// handler would exit devsandbox on the terminal's SIGINT and leave bwrap
+	// running in the foreground with no parent; forwarding instead means a signal
+	// aimed at devsandbox alone still reaches the sandbox, which is what happened
+	// for free while this path replaced the process with bwrap outright.
+	stopForwarding := forwardSignals(cmd.Process)
+	defer stopForwarding()
+
+	if onStart != nil {
+		onStart(cmd.Process.Pid)
+	}
+	return cmd.Wait()
+}
+
+// forwardSignals relays the termination signals a foreground supervisor is
+// expected to pass on to the process it is waiting for. The returned function
+// stops the relay.
+//
+// The sandbox usually receives the terminal's signals directly - it shares this
+// process' group - so the relay matters for the signals aimed at devsandbox
+// alone. Delivering one twice is harmless for all four.
+func forwardSignals(p *os.Process) func() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case sig := <-ch:
+				_ = p.Signal(sig)
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		signal.Stop(ch)
+		close(done)
+	}
 }
 
 // SandboxProcess holds a running sandbox process started by StartWithPasta.
@@ -180,6 +206,18 @@ type SandboxProcess struct {
 // NamespacePath returns the /proc path to the sandbox network namespace.
 func (p *SandboxProcess) NamespacePath() string {
 	return fmt.Sprintf("/proc/%d/ns/net", p.NamespacePID)
+}
+
+// Pid returns the PID of the process devsandbox started: pasta, or the systemd
+// scope wrapper in front of it when limits are configured. That is the process
+// whose cgroup the whole sandbox runs in, which is why it is not NamespacePID -
+// pasta's first child sits in the same cgroup but is not what was launched. It is
+// zero when there is no started process to name.
+func (p *SandboxProcess) Pid() int {
+	if p == nil || p.Cmd == nil || p.Cmd.Process == nil {
+		return 0
+	}
+	return p.Cmd.Process.Pid
 }
 
 // Wait waits for the sandbox process to exit.
