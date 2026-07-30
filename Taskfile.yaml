@@ -23,6 +23,10 @@ vars:
     sh: git describe --tags --exact-match 2>/dev/null || echo "dev"
   BWRAP_REPO: https://github.com/containers/bubblewrap.git
   PASTA_REPO: https://passt.top/passt
+  # passt 2026_07_28 calls close_range()/CLOSE_RANGE_UNSHARE from isolation.c, which
+  # does not include linux_dep.h - upstream's fallback for libcs that lack both (musl
+  # 1.2.5, the Alpine builder). Force the header in; drop this once upstream includes it.
+  PASTA_CFLAGS: -static -include linux_dep.h
 
 tasks:
   default:
@@ -251,7 +255,7 @@ tasks:
         devsandbox-embed-builder:amd64 sh -c '
         git clone --depth 1 --branch {{.PASTA_TAG}} {{.PASTA_REPO}} /tmp/build &&
         cd /tmp/build &&
-        CFLAGS="-static" make pasta pasta.avx2 &&
+        CFLAGS="{{.PASTA_CFLAGS}}" make pasta pasta.avx2 &&
         cp pasta pasta.avx2 /out/ &&
         strip /out/pasta /out/pasta.avx2
         '
@@ -268,7 +272,7 @@ tasks:
         devsandbox-embed-builder:arm64 sh -c '
         git clone --depth 1 --branch {{.PASTA_TAG}} {{.PASTA_REPO}} /tmp/build &&
         cd /tmp/build &&
-        CFLAGS="-static" make pasta &&
+        CFLAGS="{{.PASTA_CFLAGS}}" make pasta &&
         cp pasta /out/pasta &&
         strip /out/pasta
         '
