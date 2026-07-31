@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"devsandbox/internal/fsutil"
 )
 
 // shortCtx bounds a resolution that is expected to give up.
@@ -49,9 +51,17 @@ func pidName(pid int) string {
 	return "pid-" + strconv.Itoa(pid)
 }
 
+// writeProcCgroup replaces the fake cgroup file atomically. A real
+// /proc/<pid>/cgroup read is a kernel-generated snapshot, so a poller never sees
+// it half-written; a plain os.WriteFile truncates first, which lets a concurrent
+// resolution read an empty file and reject the host as cgroup v1.
+// writeProcCgroup replaces the fake cgroup file atomically. A real
+// /proc/<pid>/cgroup read is a kernel-generated snapshot, so a poller never sees
+// it half-written; a plain os.WriteFile truncates first, which lets a concurrent
+// resolution read an empty file and reject the host as cgroup v1.
 func writeProcCgroup(t *testing.T, dir string, pid int, content string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "proc", pidName(pid)), []byte(content), 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(filepath.Join(dir, "proc", pidName(pid)), []byte(content), 0o644); err != nil {
 		t.Fatalf("write fake /proc/%d/cgroup: %v", pid, err)
 	}
 }
