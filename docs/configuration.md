@@ -38,6 +38,18 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 | `[logging]` | `attributes`, `receivers` | [Remote Logging](#remote-logging) |
 | `[[include]]` | `if`, `path` | [Per-Project Configuration](#per-project-configuration) |
 
+## Unrecognized Keys
+
+Keys devsandbox does not know are ignored, so a typo silently disables the setting it was meant to configure. Every config file that is loaded - the global config, each matching include, and a trusted `.devsandbox.toml` - is checked at startup, and unknown keys are reported on stderr:
+
+```
+unknown config key in /home/user/.config/devsandbox/config.toml, ignored: sandbox.docker.keep_containers
+```
+
+The reported name is the full dotted key path. Sections devsandbox has no schema for are never reported: `[tools.<name>]` and `[proxy.credentials.<name>]` are parsed by the tool or credential injector that owns them.
+
+Startup is not blocked - an unknown key stays ignored, exactly as before.
+
 ## Configuration Reference
 
 ### Proxy Settings
@@ -1262,6 +1274,10 @@ Local config found: .devsandbox.toml
 
 Trust this configuration? [y/N]:
 ```
+
+The prompt shows the settings devsandbox recognizes and nothing else. Comments and unknown keys are dropped from the display - they have no effect on the sandbox, and an untrusted file must not be able to pad the prompt with text that looks like configuration. Unknown keys are listed separately as a warning (see [Unrecognized Keys](#unrecognized-keys)).
+
+Trust still covers the whole file: the recorded hash is over its full contents, so any edit - including one that only touches an ignored key - prompts again.
 
 If the file changes, you'll be prompted again.
 

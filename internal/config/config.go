@@ -640,6 +640,7 @@ func LoadFrom(path string) (*Config, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	reportUnknownKeys(path, data)
 
 	// Expand ~ in base path
 	if cfg.Sandbox.BasePath != "" {
@@ -1517,6 +1518,7 @@ func loadIncludeFile(path string) (*Config, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
+	reportUnknownKeys(path, data)
 
 	// Validate included config
 	if err := cfg.Validate(); err != nil {
@@ -1548,8 +1550,22 @@ func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
 		return nil, fmt.Errorf("TrustStore is required to load local config")
 	}
 
+	// The trust prompt must show what devsandbox will actually apply, so it is
+	// rendered from the recognized keys alone - anything else in the file is
+	// dropped from the display and reported separately.
+	tree, unknown, err := pruneUnknownKeys(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse local config: %w", err)
+	}
+	warnUnknownKeys(localPath, unknown)
+
+	display, err := renderTOML(tree)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render local config for approval: %w", err)
+	}
+
 	hash := hashBytes(data)
-	if err := ensureTrusted(projectDir, hash, data, opts); err != nil {
+	if err := ensureTrusted(projectDir, hash, display, opts); err != nil {
 		if errors.Is(err, errConfigNotTrusted) {
 			return nil, nil // Skip untrusted config
 		}
@@ -1574,7 +1590,9 @@ func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
 
 // ensureTrusted verifies trust for a local config, prompting if needed.
 // Returns nil if trusted/approved, error if denied or prompt failed.
-func ensureTrusted(projectDir, hash string, data []byte, opts *LoadOptions) error {
+// display holds the recognized configuration shown for approval; trust is
+// still recorded against the hash of the whole file.
+func ensureTrusted(projectDir, hash, display string, opts *LoadOptions) error {
 	existing := opts.TrustStore.GetTrusted(projectDir)
 	if existing != nil && existing.Hash == hash {
 		return nil // Already trusted
@@ -1586,7 +1604,7 @@ func ensureTrusted(projectDir, hash string, data []byte, opts *LoadOptions) erro
 	}
 
 	changed := existing != nil // Has entry but hash differs
-	approved, err := promptFn(projectDir, string(data), changed)
+	approved, err := promptFn(projectDir, display, changed)
 	if err != nil {
 		return fmt.Errorf("trust prompt failed: %w", err)
 	}
