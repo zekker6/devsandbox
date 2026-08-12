@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 )
@@ -70,18 +71,23 @@ func (m *Mise) Bindings(homeDir, sandboxHome string) []Binding {
 	}
 }
 
+// miseConfig is the [tools.mise] section.
+type miseConfig struct {
+	MountModeConfig
+	// IgnoreGlobalConfig gates whether the host's global mise config is read
+	// in the sandbox. Default false: respect it.
+	IgnoreGlobalConfig bool `toml:"ignore_global_config"`
+}
+
+// ConfigType implements ToolWithConfigType.
+func (m *Mise) ConfigType() reflect.Type { return reflect.TypeFor[miseConfig]() }
+
 // Configure implements ToolWithConfig. It reads the mise-specific settings from
 // the `[tools.mise]` config section.
 func (m *Mise) Configure(_ GlobalConfig, toolCfg map[string]any) {
-	m.ignoreGlobalConfig = false // default: respect the host's global mise config
-	if toolCfg == nil {
-		return
-	}
-	// Validation (config.Validate) guarantees this is a bool when present, so a
-	// bad type never silently degrades to the default here.
-	if v, ok := toolCfg["ignore_global_config"].(bool); ok {
-		m.ignoreGlobalConfig = v
-	}
+	var cfg miseConfig
+	decodeConfig(m.Name(), toolCfg, &cfg)
+	m.ignoreGlobalConfig = cfg.IgnoreGlobalConfig
 }
 
 func (m *Mise) Environment(homeDir, sandboxHome string) []EnvVar {

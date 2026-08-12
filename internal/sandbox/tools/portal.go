@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -49,19 +50,24 @@ func (p *Portal) Available(homeDir string) bool {
 
 // Configure applies portal-specific settings.
 // Default: notifications=true.
+// portalConfig is the [tools.portal] section.
+type portalConfig struct {
+	MountModeConfig
+	Notifications bool `toml:"notifications"`
+}
+
+// ConfigType implements ToolWithConfigType.
+func (p *Portal) ConfigType() reflect.Type { return reflect.TypeFor[portalConfig]() }
+
 func (p *Portal) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
-	p.notifications = true
 	p.xdgRuntime = os.Getenv("XDG_RUNTIME_DIR")
 	if p.xdgRuntime == "" {
 		p.xdgRuntime = fmt.Sprintf("/run/user/%d", os.Getuid())
 	}
 
-	if toolCfg == nil {
-		return
-	}
-	if v, ok := toolCfg["notifications"].(bool); ok {
-		p.notifications = v
-	}
+	cfg := portalConfig{Notifications: true}
+	decodeConfig(p.Name(), toolCfg, &cfg)
+	p.notifications = cfg.Notifications
 }
 
 // SetLogger sets the logger for portal proxy errors.

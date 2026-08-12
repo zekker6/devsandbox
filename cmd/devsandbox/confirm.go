@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"devsandbox/internal/notice"
+	"devsandbox/internal/prompt"
 	"golang.org/x/term"
 )
 
@@ -40,24 +40,38 @@ func confirmWarnings(in io.Reader, out io.Writer, skip, interactive bool) error 
 
 	fmt.Fprintf(out, "\nStart the sandbox anyway? [y/N]: ") //nolint:errcheck
 
-	response, err := bufio.NewReader(in).ReadString('\n')
+	// A closed stdin is not a yes, so EOF falls through to the refusal below
+	// rather than failing the launch with a read error.
+	response, err := prompt.ReadLine(in)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("read confirmation: %w", err)
 	}
-
-	switch strings.ToLower(strings.TrimSpace(response)) {
-	case "y", "yes":
-		return nil
-	default:
+	if !prompt.IsYes(response) {
 		return errLaunchDeclined
 	}
+	return nil
 }
 
 // confirmWarningsStdio is the wrapper runSandbox uses: os.Stdin for the answer,
 // os.Stderr for the prompt, so the summary lands where the warnings themselves
 // were written and stdout stays clean for the workload.
 func confirmWarningsStdio(skip bool) error {
-	return confirmWarnings(os.Stdin, os.Stderr, skip, term.IsTerminal(int(os.Stdin.Fd())))
+	return confirmWarnings(os.Stdin, os.Stderr, skip, promptIsInteractive(os.Stdin, os.Stderr))
+}
+
+// promptIsInteractive reports whether there is a human at both ends of the
+// prompt: one to read the question and one to answer it.
+//
+// Stdin alone is not enough, because the question goes to stderr. With stderr
+// redirected - `devsandbox npm install 2>build.log` from a terminal - a stdin
+// test alone writes the prompt into the log file and then blocks on an answer
+// to a question the user never saw.
+func promptIsInteractive(in, out *os.File) bool {
+	return isTerminal(in) && isTerminal(out)
+}
+
+func isTerminal(f *os.File) bool {
+	return f != nil && term.IsTerminal(int(f.Fd()))
 }
 
 // writeWarningSummary reprints the raised notices as one block. They were each

@@ -12,7 +12,7 @@ func init() {
 
 // Starship provides starship prompt configuration.
 // Creates a modified config with a sandbox indicator.
-type Starship struct{}
+type Starship struct{ Mounting }
 
 func (s *Starship) Name() string {
 	return "starship"

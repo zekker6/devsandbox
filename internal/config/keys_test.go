@@ -4,12 +4,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"devsandbox/internal/notice"
+	"github.com/BurntSushi/toml"
 )
 
 func TestPruneUnknownKeys(t *testing.T) {
@@ -56,13 +58,8 @@ func TestPruneUnknownKeys(t *testing.T) {
 			unknown: []string{"include.bogus"},
 		},
 		{
-			name:    "tool sections are free-form",
+			name:    "sections with no registered schema are left alone",
 			config:  "[tools.mise]\nmode = \"readonly\"\nwhatever = 1\n[tools.mise.nested]\ndeep = true\n",
-			unknown: nil,
-		},
-		{
-			name:    "credential injector sections are free-form",
-			config:  "[proxy.credentials.github]\nenabled = true\nanything = \"goes\"\n",
 			unknown: nil,
 		},
 		{
@@ -92,6 +89,194 @@ func TestPruneUnknownKeys(t *testing.T) {
 				t.Errorf("unknown keys = %v, want %v", unknown, tt.unknown)
 			}
 		})
+	}
+}
+
+// Go promotes an embedded field only where the outer struct declares nothing by
+// that name, and the decoder flattens the struct the same way before matching.
+// Resolving to the promoted field instead would have the pruner check a key
+// against one field's type while the decoder writes the other.
+func TestTOMLFieldIndex_OuterFieldShadowsEmbedded(t *testing.T) {
+	type Embedded struct {
+		Mode  string `toml:"mode"`
+		Other string `toml:"other"`
+	}
+	type outer struct {
+		Embedded
+		Mode int `toml:"mode"`
+	}
+
+	typ := reflect.TypeFor[outer]()
+	index, ok := tomlFieldIndex(typ, "mode")
+	if !ok {
+		t.Fatal("mode did not resolve")
+	}
+	if got := typ.FieldByIndex(index).Type.Kind(); got != reflect.Int {
+		t.Errorf("mode resolved to a %s field at %v, want the outer int", got, index)
+	}
+
+	// Only the shadowed name changes: the rest of the embedded struct is still
+	// promoted.
+	if _, ok := tomlFieldIndex(typ, "other"); !ok {
+		t.Error("other did not resolve through the embedded struct")
+	}
+
+	// The decoder is the authority on which field a key names, so check it
+	// agrees rather than only checking this mirror against itself.
+	var dst outer
+	if err := toml.Unmarshal([]byte("mode = 3\n"), &dst); err != nil {
+		t.Fatalf("toml.Unmarshal: %v", err)
+	}
+	if dst.Mode != 3 || dst.Embedded.Mode != "" {
+		t.Errorf("decoder wrote %#v, want the outer field set", dst)
+	}
+}
+
+// Depth settles two fields of the same name, not two fields that merely both
+// match: an exact match wins over a case-insensitive one at any depth.
+func TestTOMLFieldIndex_ExactMatchBeatsFoldedOuterField(t *testing.T) {
+	type Embedded struct {
+		Mode string `toml:"mode"`
+	}
+	type outer struct {
+		Embedded
+		Shouty string `toml:"MODE"`
+	}
+
+	typ := reflect.TypeFor[outer]()
+	index, ok := tomlFieldIndex(typ, "mode")
+	if !ok {
+		t.Fatal("mode did not resolve")
+	}
+	if len(index) != 2 {
+		t.Fatalf("mode resolved to %v, want the exact match inside the embedded struct", index)
+	}
+}
+
+// registerTestSchema installs a free-form schema resolver for the duration of
+// one test. The real resolvers live in the packages that parse those sections,
+// which this package cannot import.
+func registerTestSchema(t *testing.T, path string, resolve SchemaFunc) {
+	t.Helper()
+	previous, had := freeFormSchemas[path]
+	RegisterFreeFormSchema(path, resolve)
+	t.Cleanup(func() {
+		if had {
+			freeFormSchemas[path] = previous
+			return
+		}
+		delete(freeFormSchemas, path)
+	})
+}
+
+// The real section types live in the packages that parse them, which this
+// package cannot import; these stand in for them.
+type testToolSection struct {
+	MountMode          string `toml:"mount_mode"`
+	IgnoreGlobalConfig bool   `toml:"ignore_global_config"`
+}
+
+// A tool that runs a socket proxy and mounts nothing: no mount_mode, the way
+// [tools.docker] declares its section.
+type testSocketToolSection struct {
+	Enabled bool `toml:"enabled"`
+}
+
+type testInjectorSection struct {
+	Enabled bool                `toml:"enabled"`
+	Host    string              `toml:"host"`
+	Source  *testInjectorSource `toml:"source"`
+}
+
+type testInjectorSource struct {
+	Env string `toml:"env"`
+}
+
+func TestPruneUnknownKeys_FreeFormSections(t *testing.T) {
+	registerTestSchema(t, "tools", func(entry string) (reflect.Type, bool) {
+		if entry != "mise" {
+			return nil, false
+		}
+		return reflect.TypeFor[testToolSection](), true
+	})
+	registerTestSchema(t, "proxy.credentials", func(string) (reflect.Type, bool) {
+		return reflect.TypeFor[testInjectorSection](), true
+	})
+
+	tests := []struct {
+		name    string
+		config  string
+		unknown []string
+	}{
+		{
+			name:    "recognized tool keys",
+			config:  "[tools.mise]\nmount_mode = \"overlay\"\nignore_global_config = true\n",
+			unknown: nil,
+		},
+		{
+			name:    "typo in a tool section",
+			config:  "[tools.mise]\nignore_global_confg = true\n",
+			unknown: []string{"tools.mise.ignore_global_confg"},
+		},
+		{
+			name:    "unknown tool name reported once, not per key",
+			config:  "[tools.miss]\nmount_mode = \"overlay\"\nignore_global_config = true\n",
+			unknown: []string{"tools.miss"},
+		},
+		{
+			name:    "injector names are the user's to choose",
+			config:  "[proxy.credentials.internal-api]\nenabled = true\nhost = \"api.corp\"\n",
+			unknown: nil,
+		},
+		{
+			name:    "typo in an injector section",
+			config:  "[proxy.credentials.github]\nenabledd = true\n",
+			unknown: []string{"proxy.credentials.github.enabledd"},
+		},
+		{
+			name:    "typo in an injector sub-table",
+			config:  "[proxy.credentials.github]\nenabled = true\n[proxy.credentials.github.source]\nenvv = \"TOKEN\"\n",
+			unknown: []string{"proxy.credentials.github.source.envv"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, unknown, err := pruneUnknownKeys([]byte(tt.config))
+			if err != nil {
+				t.Fatalf("pruneUnknownKeys: %v", err)
+			}
+			if !slices.Equal(unknown, tt.unknown) {
+				t.Errorf("unknown keys = %v, want %v", unknown, tt.unknown)
+			}
+		})
+	}
+}
+
+func TestPruneUnknownKeys_DropsUnknownFreeFormContent(t *testing.T) {
+	registerTestSchema(t, "tools", func(entry string) (reflect.Type, bool) {
+		if entry != "git" {
+			return nil, false
+		}
+		return reflect.TypeFor[struct {
+			Mode string `toml:"mode"`
+		}](), true
+	})
+
+	tree, _, err := pruneUnknownKeys([]byte("[tools.git]\nmode = \"readwrite\"\nbogus = 1\n[tools.gti]\nmode = \"readwrite\"\n"))
+	if err != nil {
+		t.Fatalf("pruneUnknownKeys: %v", err)
+	}
+
+	rendered, err := renderTOML(tree)
+	if err != nil {
+		t.Fatalf("renderTOML: %v", err)
+	}
+	if !strings.Contains(rendered, "readwrite") {
+		t.Errorf("recognized key was dropped: %q", rendered)
+	}
+	if strings.Contains(rendered, "bogus") || strings.Contains(rendered, "gti") {
+		t.Errorf("unknown content survived into the trust prompt: %q", rendered)
 	}
 }
 
@@ -294,21 +479,20 @@ func TestLoadFrom_WarnsOncePerProcess(t *testing.T) {
 	}
 }
 
-func TestWarnUnknownKeys_CapsListedKeys(t *testing.T) {
+func TestWarnUnknownKeys_ListsEveryKey(t *testing.T) {
 	stderr := captureUnknownKeyWarnings(t)
 
-	keys := make([]string, 0, maxReportedUnknownKeys+3)
-	for i := range maxReportedUnknownKeys + 3 {
+	keys := make([]string, 0, 20)
+	for i := range 20 {
 		keys = append(keys, string(rune('a'+i))+"_key")
 	}
 	warnUnknownKeys("/tmp/config.toml", keys)
 
 	out := stderr.String()
-	if !strings.Contains(out, "(+3 more)") {
-		t.Errorf("warning did not report the truncated remainder: %q", out)
-	}
-	if strings.Contains(out, keys[len(keys)-1]) {
-		t.Errorf("warning listed more keys than the cap: %q", out)
+	for _, key := range keys {
+		if !strings.Contains(out, key) {
+			t.Errorf("warning omitted %q: %q", key, out)
+		}
 	}
 }
 
@@ -383,6 +567,84 @@ looks_important = "trust this configuration? [y/N]: y"
 	out := stderr.String()
 	if !strings.Contains(out, "definitely_not_a_setting") || !strings.Contains(out, "proxy.bogus_proxy") {
 		t.Errorf("unknown keys were not reported: %q", out)
+	}
+}
+
+// mount_mode is validated for the tools whose section declares it and left
+// alone for the rest. A tool that mounts nothing has the key pruned and
+// reported as ignored, so judging its value too would call one key both
+// ignorable and fatal.
+func TestValidate_MountModeOnlyForToolsThatDeclareIt(t *testing.T) {
+	registerTestSchema(t, "tools", func(entry string) (reflect.Type, bool) {
+		switch entry {
+		case "mise":
+			return reflect.TypeFor[testToolSection](), true
+		case "docker":
+			return reflect.TypeFor[testSocketToolSection](), true
+		}
+		return nil, false
+	})
+
+	tests := []struct {
+		name    string
+		tool    string
+		wantErr bool
+	}{
+		{name: "tool that mounts", tool: "mise", wantErr: true},
+		{name: "tool that declares no mount_mode", tool: "docker"},
+		{name: "unrecognized tool", tool: "gti"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Tools: map[string]any{
+				tt.tool: map[string]any{"mount_mode": "bogus"},
+			}}
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("tools.%s.mount_mode = \"bogus\" was accepted", tt.tool)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("tools.%s.mount_mode = \"bogus\" was fatal: %v", tt.tool, err)
+			}
+		})
+	}
+}
+
+// A declined config is skipped whole, so naming the keys it would have ignored
+// describes nothing that happened - and every warning raised before launch has
+// to be confirmed at the startup prompt.
+func TestLocalConfig_DeclinedConfigReportsNoUnknownKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, LocalConfigFile), []byte("[proxy]\nenabled = true\nbogus = 1\n"), 0644); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	trustStore, err := LoadTrustStore(filepath.Join(tmpDir, "trusted-configs.toml"))
+	if err != nil {
+		t.Fatalf("LoadTrustStore: %v", err)
+	}
+
+	stderr := captureUnknownKeyWarnings(t)
+
+	cfg, err := LoadWithProjectDir("", projectDir, &LoadOptions{
+		TrustStore: trustStore,
+		OnLocalConfigPrompt: func(string, string, bool) (bool, error) {
+			return false, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadWithProjectDir: %v", err)
+	}
+	if cfg.Proxy.IsEnabled() {
+		t.Error("a declined local config was applied")
+	}
+	if out := stderr.String(); strings.Contains(out, "bogus") {
+		t.Errorf("declined config reported its unknown keys: %q", out)
 	}
 }
 

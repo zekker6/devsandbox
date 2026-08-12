@@ -4,6 +4,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -71,6 +73,26 @@ func TestConfirmWarnings_DeclinedAnswers(t *testing.T) {
 	}
 }
 
+// The workload inherits this stdin right after the prompt, so whatever the user
+// typed ahead has to still be there for it to read.
+func TestConfirmWarnings_LeavesTypeAheadForTheWorkload(t *testing.T) {
+	raiseNotices(t, "unknown config key")
+
+	in := strings.NewReader("y\nthe workload's first input\n")
+	var out bytes.Buffer
+	if err := confirmWarnings(in, &out, false, true); err != nil {
+		t.Fatalf("confirmWarnings() = %v, want nil", err)
+	}
+
+	rest, err := io.ReadAll(in)
+	if err != nil {
+		t.Fatalf("read rest of stdin: %v", err)
+	}
+	if string(rest) != "the workload's first input\n" {
+		t.Errorf("stdin left %q, want the line after the answer untouched", rest)
+	}
+}
+
 func TestConfirmWarnings_SkipBypassesPrompt(t *testing.T) {
 	raiseNotices(t, "unknown config key")
 
@@ -100,6 +122,45 @@ func TestConfirmWarnings_NonInteractiveProceeds(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q; got %q", want, out.String())
 		}
+	}
+}
+
+// The question is written to stderr and answered on stdin, so a terminal on
+// only one of them is not a human who can answer. `devsandbox npm install
+// 2>build.log` is the case that matters: stdin is still a terminal, and testing
+// it alone puts the prompt in the log file and then blocks on it.
+func TestPromptIsInteractive_RequiresBothEnds(t *testing.T) {
+	tty, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("no pty available: %v", err)
+	}
+	defer tty.Close() //nolint:errcheck
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close() //nolint:errcheck
+	defer w.Close() //nolint:errcheck
+
+	tests := []struct {
+		name string
+		in   *os.File
+		out  *os.File
+		want bool
+	}{
+		{name: "terminal on both", in: tty, out: tty, want: true},
+		{name: "stderr redirected", in: tty, out: w},
+		{name: "stdin redirected", in: r, out: tty},
+		{name: "neither", in: r, out: w},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := promptIsInteractive(tt.in, tt.out); got != tt.want {
+				t.Errorf("promptIsInteractive() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

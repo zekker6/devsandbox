@@ -14,17 +14,58 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// maxReportedUnknownKeys bounds how many key names a single warning lists.
-// The remainder is counted rather than dropped silently.
-const maxReportedUnknownKeys = 10
+// SchemaFunc reports the struct type one entry of a free-form table decodes
+// into. [tools.<name>] and [proxy.credentials.<name>] are map[string]any in
+// Config because the tool or injector that owns the section parses it, so the
+// owning package names the type instead and the same reflection that checks the
+// rest of the file applies to them too.
+//
+// Returning false means the entry name itself is unrecognized - a misspelled
+// tool name, say - and the whole entry is reported.
+type SchemaFunc func(entry string) (reflect.Type, bool)
+
+// freeFormSchemas resolves the entries of free-form tables, keyed by the dotted
+// path of the table itself ("tools", "proxy.credentials"). Written from package
+// init functions, read afterwards.
+var freeFormSchemas = map[string]SchemaFunc{}
+
+// RegisterFreeFormSchema installs the schema resolver for the free-form table
+// at path. The package that parses the section registers it from init, so a
+// path with no resolver means that package is not linked into this binary: the
+// section is then left unchecked rather than reported wholesale.
+func RegisterFreeFormSchema(path string, resolve SchemaFunc) {
+	freeFormSchemas[path] = resolve
+}
+
+// toolsPath is the dotted path of the free-form [tools.<name>] table.
+const toolsPath = "tools"
+
+// toolDeclaresKey reports whether the [tools.<name>] section describes key.
+//
+// It exists so a value check can be skipped for a key that section does not
+// have: such a key is pruned and reported as ignored, and judging its value on
+// top of that tells the user the same key both does nothing and is fatal. An
+// unrecognized tool name answers false for the same reason - the whole entry
+// was already reported.
+func toolDeclaresKey(name, key string) bool {
+	resolve, ok := freeFormSchemas[toolsPath]
+	if !ok {
+		return true // nothing to judge sections against, so nothing pruned them either
+	}
+	schema, known := resolve(name)
+	if !known {
+		return false
+	}
+	if deref(schema).Kind() != reflect.Struct {
+		return false
+	}
+	_, declared := tomlFieldIndex(deref(schema), key)
+	return declared
+}
 
 // pruneUnknownKeys decodes data into a generic tree and removes every key that
 // does not resolve to a field of Config, returning the surviving tree and the
 // removed key paths.
-//
-// Free-form sections are kept as-is: [tools.<name>] and
-// [proxy.credentials.<name>] decode into map[string]any, so each tool and
-// credential injector parses its own schema and this package cannot judge it.
 func pruneUnknownKeys(data []byte) (map[string]any, []string, error) {
 	var tree map[string]any
 	if err := toml.Unmarshal(data, &tree); err != nil {
@@ -78,14 +119,7 @@ func warnUnknownKeys(path string, unknown []string) {
 		label += "s"
 	}
 
-	listed := unknown
-	suffix := ""
-	if len(listed) > maxReportedUnknownKeys {
-		listed = listed[:maxReportedUnknownKeys]
-		suffix = fmt.Sprintf(" (+%d more)", len(unknown)-maxReportedUnknownKeys)
-	}
-
-	msg := fmt.Sprintf("%s in %s, ignored: %s%s", label, path, strings.Join(listed, ", "), suffix)
+	msg := fmt.Sprintf("%s in %s, ignored: %s", label, path, strings.Join(unknown, ", "))
 	if _, seen := unknownKeysWarned.LoadOrStore(msg, struct{}{}); seen {
 		return
 	}
@@ -101,7 +135,14 @@ func pruneTable(table map[string]any, dst reflect.Type, path string, unknown *[]
 	switch dst.Kind() {
 	case reflect.Interface:
 		return // free-form subtree, every key belongs to someone else's schema
-	case reflect.Map, reflect.Struct:
+	case reflect.Map:
+		// A map takes any key, so only the package that owns the section can
+		// say which entries and keys are real.
+		if resolve, ok := freeFormSchemas[path]; ok {
+			pruneFreeForm(table, resolve, path, unknown)
+			return
+		}
+	case reflect.Struct:
 	default:
 		// A scalar destination cannot hold a table. The keys are not unknown,
 		// the value shape is wrong, and the decode into Config reports that.
@@ -139,6 +180,21 @@ func pruneChild(val any, dst reflect.Type, path string, unknown *[]string) {
 	}
 }
 
+// pruneFreeForm checks a free-form table - one whose entries the user names,
+// such as [tools.<name>] - against the type its owning package declares for
+// them.
+func pruneFreeForm(table map[string]any, resolve SchemaFunc, path string, unknown *[]string) {
+	for name, val := range table {
+		schema, ok := resolve(name)
+		if !ok {
+			delete(table, name)
+			*unknown = append(*unknown, joinKey(path, name))
+			continue
+		}
+		pruneChild(val, schema, joinKey(path, name), unknown)
+	}
+}
+
 // childType returns the type a key inside dst decodes into.
 func childType(dst reflect.Type, key string) (reflect.Type, bool) {
 	if dst.Kind() == reflect.Map {
@@ -147,12 +203,40 @@ func childType(dst reflect.Type, key string) (reflect.Type, bool) {
 	return tomlField(dst, key)
 }
 
-// tomlField resolves a TOML key to a struct field, mirroring the decoder's
-// matching: the toml tag when set and the field name otherwise, exact match
-// first and case-insensitive second.
+// tomlField resolves a TOML key to the type of the struct field it decodes
+// into.
 func tomlField(t reflect.Type, key string) (reflect.Type, bool) {
-	var fallback reflect.Type
-	var haveFallback bool
+	index, ok := tomlFieldIndex(t, key)
+	if !ok {
+		return nil, false
+	}
+	return t.FieldByIndex(index).Type, true
+}
+
+// tomlFieldIndex resolves a TOML key to a struct field, mirroring the decoder's
+// matching: the toml tag when set and the field name otherwise, exact match
+// first and case-insensitive second. The result indexes t the way
+// reflect.Value.FieldByIndex expects, so it reaches fields promoted from an
+// embedded struct.
+func tomlFieldIndex(t reflect.Type, key string) ([]int, bool) {
+	exact, fold := lookupTOMLField(t, key)
+	if exact != nil {
+		return exact, true
+	}
+	return fold, fold != nil
+}
+
+// lookupTOMLField returns the shallowest exact and case-insensitive matches for
+// key in t.
+//
+// Depth is what settles two fields of the same name: the decoder flattens the
+// struct before it matches anything, and a field of t itself shadows one
+// promoted from an embedded struct. Returning the first match found while
+// walking would invert that for an embedded field declared before the outer one
+// - the pruner would then check the key against one field's type while the
+// decoder wrote the other.
+func lookupTOMLField(t reflect.Type, key string) (exact, fold []int) {
+	var embeds []reflect.StructField
 
 	for f := range t.Fields() {
 		if f.PkgPath != "" && !f.Anonymous {
@@ -164,11 +248,10 @@ func tomlField(t reflect.Type, key string) (reflect.Type, bool) {
 			continue
 		}
 		if f.Anonymous && tag == "" {
-			// Embedded struct: the decoder promotes its fields.
-			if embedded := deref(f.Type); embedded.Kind() == reflect.Struct {
-				if child, ok := tomlField(embedded, key); ok {
-					return child, true
-				}
+			// Embedded struct: the decoder promotes its fields, but only
+			// where t declares nothing of its own by that name.
+			if deref(f.Type).Kind() == reflect.Struct {
+				embeds = append(embeds, f)
 			}
 			continue
 		}
@@ -178,14 +261,33 @@ func tomlField(t reflect.Type, key string) (reflect.Type, bool) {
 			name = f.Name
 		}
 		if name == key {
-			return f.Type, true
+			if exact == nil {
+				exact = f.Index
+			}
+			continue
 		}
-		if !haveFallback && strings.EqualFold(name, key) {
-			fallback, haveFallback = f.Type, true
+		if fold == nil && strings.EqualFold(name, key) {
+			fold = f.Index
 		}
 	}
 
-	return fallback, haveFallback
+	// An exact match on t's own fields settles it; a case-insensitive one does
+	// not, since the decoder prefers an exact match at any depth over a folded
+	// one.
+	if exact != nil {
+		return exact, fold
+	}
+
+	for _, f := range embeds {
+		childExact, childFold := lookupTOMLField(deref(f.Type), key)
+		if exact == nil && childExact != nil {
+			exact = append([]int{f.Index[0]}, childExact...)
+		}
+		if fold == nil && childFold != nil {
+			fold = append([]int{f.Index[0]}, childFold...)
+		}
+	}
+	return exact, fold
 }
 
 func deref(t reflect.Type) reflect.Type {

@@ -12,7 +12,7 @@ func init() {
 
 // Tmux provides tmux terminal multiplexer configuration.
 // Can display sandbox indicator in status bar.
-type Tmux struct{}
+type Tmux struct{ Mounting }
 
 func (t *Tmux) Name() string {
 	return "tmux"

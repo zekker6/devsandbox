@@ -2,13 +2,13 @@
 package config
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"devsandbox/internal/notice"
+	"devsandbox/internal/prompt"
 	"golang.org/x/term"
 )
 
@@ -46,16 +46,14 @@ func promptTrust(input io.Reader, output io.Writer, projectDir, configContent st
 		_, _ = fmt.Fprintf(output, "Trust this configuration? [y/N]: ")
 	}
 
-	// Read response
-	reader := bufio.NewReader(input)
-	response, err := reader.ReadString('\n')
+	// Read response. The sandbox workload inherits this stdin, so the answer is
+	// read a byte at a time - see prompt.ReadLine.
+	response, err := prompt.ReadLine(input)
 	if err != nil {
 		return false, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	response = strings.TrimSpace(strings.ToLower(response))
-
-	return response == "y" || response == "yes", nil
+	return prompt.IsYes(response), nil
 }
 
 // PromptTrustStdio is a convenience wrapper that uses os.Stdin/os.Stderr.

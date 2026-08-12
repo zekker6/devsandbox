@@ -17,7 +17,7 @@ func init() {
 // the kitty argv patterns, the herdr launch-script shape, and a dependency on
 // the shared temp directory so the launcher's sentinel and output files can
 // cross the host↔sandbox boundary.
-type Revdiff struct{}
+type Revdiff struct{ Mounting }
 
 func (r *Revdiff) Name() string { return "revdiff" }
 func (r *Revdiff) Description() string {

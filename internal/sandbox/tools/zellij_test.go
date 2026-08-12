@@ -190,7 +190,10 @@ func TestZellij_Configure(t *testing.T) {
 		}
 	})
 
-	t.Run("non-bool enabled is ignored", func(t *testing.T) {
+	// The loader rejects this section before a tool sees it; reaching
+	// Configure with it must leave the tool at its default rather than
+	// enabling a socket forward the config never asked for.
+	t.Run("non-bool enabled leaves the default", func(t *testing.T) {
 		z := &Zellij{}
 		z.Configure(GlobalConfig{}, map[string]any{"enabled": "yes"})
 		if z.enabled {

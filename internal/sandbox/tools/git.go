@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -72,27 +73,29 @@ func (g *Git) Available(homeDir string) bool {
 	return err == nil
 }
 
+// gitConfig is the [tools.git] section.
+type gitConfig struct {
+	MountModeConfig
+	Mode string `toml:"mode"`
+}
+
+// ConfigType implements ToolWithConfigType.
+func (g *Git) ConfigType() reflect.Type { return reflect.TypeFor[gitConfig]() }
+
 // Configure implements ToolWithConfig.
 func (g *Git) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	g.mode = GitModeReadOnly // default
 	g.projectDir = globalCfg.ProjectDir
 	g.gitRepoRoot = globalCfg.GitRepoRoot
 
-	if toolCfg == nil {
-		return
-	}
+	var cfg gitConfig
+	decodeConfig(g.Name(), toolCfg, &cfg)
 
-	if modeVal, ok := toolCfg["mode"]; ok {
-		if modeStr, ok := modeVal.(string); ok {
-			switch strings.ToLower(modeStr) {
-			case "readwrite", "read-write", "rw":
-				g.mode = GitModeReadWrite
-			case "disabled", "none", "off":
-				g.mode = GitModeDisabled
-			default:
-				g.mode = GitModeReadOnly
-			}
-		}
+	switch strings.ToLower(cfg.Mode) {
+	case "readwrite", "read-write", "rw":
+		g.mode = GitModeReadWrite
+	case "disabled", "none", "off":
+		g.mode = GitModeDisabled
 	}
 }
 

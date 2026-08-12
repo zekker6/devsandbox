@@ -35,6 +35,10 @@ func (g *Go) Bindings(homeDir, sandboxHome string) []Binding {
 	return nil
 }
 
+// Go deliberately does not embed Mounting: it mounts nothing for
+// mount_mode to apply to - its cache volumes come from CacheMounts, which no
+// per-tool mode gates - so [tools.go] takes no settings at all.
+
 func (g *Go) Environment(homeDir, sandboxHome string) []EnvVar {
 	return []EnvVar{
 		// Isolated Go workspace (per-project)

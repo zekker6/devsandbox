@@ -12,7 +12,7 @@ func init() {
 }
 
 // Fish provides fish shell configuration.
-type Fish struct{}
+type Fish struct{ Mounting }
 
 func (f *Fish) Name() string {
 	return "shell-fish"
@@ -73,7 +73,7 @@ func (f *Fish) Check(homeDir string) CheckResult {
 }
 
 // Zsh provides zsh shell configuration.
-type Zsh struct{}
+type Zsh struct{ Mounting }
 
 func (z *Zsh) Name() string {
 	return "shell-zsh"
@@ -139,7 +139,7 @@ func (z *Zsh) Check(homeDir string) CheckResult {
 }
 
 // Bash provides bash shell configuration.
-type Bash struct{}
+type Bash struct{ Mounting }
 
 func (b *Bash) Name() string {
 	return "shell-bash"

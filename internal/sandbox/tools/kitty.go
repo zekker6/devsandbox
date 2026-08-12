@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"devsandbox/internal/kittyproxy"
@@ -56,31 +57,34 @@ func kittyHostSocket() string {
 }
 
 // Configure implements ToolWithConfig.
+// kittyConfig is the [tools.kitty] section.
+type kittyConfig struct {
+	MountModeConfig
+	Mode              string   `toml:"mode"`
+	ExtraCapabilities []string `toml:"extra_capabilities"`
+}
+
+// ConfigType implements ToolWithConfigType.
+func (k *Kitty) ConfigType() reflect.Type { return reflect.TypeFor[kittyConfig]() }
+
 func (k *Kitty) Configure(_ GlobalConfig, toolCfg map[string]any) {
 	k.mode = kittyModeAuto
 	k.extraCapabilities = nil
-	if toolCfg == nil {
-		return
+
+	var cfg kittyConfig
+	decodeConfig(k.Name(), toolCfg, &cfg)
+
+	switch cfg.Mode {
+	case kittyModeAuto, kittyModeDisabled, kittyModeEnforce:
+		k.mode = cfg.Mode
 	}
-	if v, ok := toolCfg["mode"].(string); ok {
-		switch v {
-		case kittyModeAuto, kittyModeDisabled, kittyModeEnforce:
-			k.mode = v
+	for _, name := range cfg.ExtraCapabilities {
+		capability := kittyproxy.Capability(name)
+		if kittyproxy.IsLaunch(capability) {
+			notice.Warn("kitty: ignoring extra_capabilities entry %q (launch_* may only come from a tool with declared launch patterns)", name)
+			continue
 		}
-	}
-	if list, ok := toolCfg["extra_capabilities"].([]any); ok {
-		for _, item := range list {
-			s, ok := item.(string)
-			if !ok {
-				continue
-			}
-			cap := kittyproxy.Capability(s)
-			if kittyproxy.IsLaunch(cap) {
-				notice.Warn("kitty: ignoring extra_capabilities entry %q (launch_* may only come from a tool with declared launch patterns)", s)
-				continue
-			}
-			k.extraCapabilities = append(k.extraCapabilities, cap)
-		}
+		k.extraCapabilities = append(k.extraCapabilities, capability)
 	}
 }
 
@@ -216,7 +220,7 @@ func (k *Kitty) Start(ctx context.Context, _, sandboxHome string) error {
 		k.proxy = nil
 		return fmt.Errorf("kitty: start proxy: %w", err)
 	}
-	notice.Warn("kitty proxy active. Capabilities: %v", caps)
+	notice.Info("kitty proxy active. Capabilities: %v", caps)
 	return nil
 }
 

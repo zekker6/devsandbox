@@ -12,7 +12,7 @@ func init() {
 
 // OhMyPosh provides oh-my-posh prompt configuration.
 // Creates a modified config with a sandbox indicator segment.
-type OhMyPosh struct{}
+type OhMyPosh struct{ Mounting }
 
 func (o *OhMyPosh) Name() string {
 	return "oh-my-posh"

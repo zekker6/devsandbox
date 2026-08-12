@@ -11,7 +11,7 @@ func init() {
 
 // Powerlevel10k provides powerlevel10k zsh theme configuration.
 // The theme can display sandbox indicator using DEVSANDBOX env var.
-type Powerlevel10k struct{}
+type Powerlevel10k struct{ Mounting }
 
 func (p *Powerlevel10k) Name() string {
 	return "powerlevel10k"

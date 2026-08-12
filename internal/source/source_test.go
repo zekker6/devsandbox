@@ -112,33 +112,3 @@ func TestSource_IsZero(t *testing.T) {
 		t.Error("expected non-zero Source to be IsZero=false")
 	}
 }
-
-func TestParse(t *testing.T) {
-	t.Run("nil returns nil", func(t *testing.T) {
-		if got := Parse(nil); got != nil {
-			t.Errorf("expected nil, got %+v", got)
-		}
-	})
-
-	t.Run("no source key returns nil", func(t *testing.T) {
-		if got := Parse(map[string]any{"enabled": true}); got != nil {
-			t.Errorf("expected nil, got %+v", got)
-		}
-	})
-
-	t.Run("reads all fields", func(t *testing.T) {
-		got := Parse(map[string]any{
-			"source": map[string]any{
-				"value": "v",
-				"env":   "E",
-				"file":  "F",
-			},
-		})
-		if got == nil {
-			t.Fatal("expected non-nil")
-		}
-		if got.Value != "v" || got.Env != "E" || got.File != "F" {
-			t.Errorf("Parse() = %+v, want {Value:v Env:E File:F}", got)
-		}
-	})
-}

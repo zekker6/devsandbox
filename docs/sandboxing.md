@@ -336,14 +336,15 @@ Start the sandbox anyway? [y/N]:
 
 Answering anything other than `y`/`yes` aborts with a non-zero exit status. The default is no.
 
-A warning means something you configured is not in effect - a key that was ignored, a cleanup that did not run, a proxy
-control narrowed by `--no-mitm`. Each one is already printed when it happens, but sandbox setup emits enough output that
-the first is usually off-screen by the time the last arrives, and the workload's own output covers the rest a second
-later.
+A warning means something you configured is not in effect: a config key that was ignored, a cleanup that did not run,
+or - as in the second line above - request filtering that reaches only plain HTTP because `--no-mitm` turned off HTTPS
+interception. Each one is already printed when it happens, but sandbox setup emits enough output that the first is
+usually off-screen by the time the last arrives, and the workload's own output covers the rest a second later.
 
 - `--yes` starts without the prompt. Warnings are still printed as they happen.
-- Without a terminal on stdin there is nobody to answer, so the summary is printed and the sandbox starts. A scripted
-  launch never fails on a warning alone.
+- Without a terminal on both stdin and stderr there is nobody to answer, so the summary is printed and the sandbox
+  starts. A scripted launch never fails on a warning alone, and neither does one that redirects stderr - the question is
+  written there, so a prompt nobody can see is never waited on.
 - Warnings raised *after* this point - mount-plan problems, OOM kills - are reported as they happen instead. They cannot
   be confirmed, because the sandbox is already running.
 

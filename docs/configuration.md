@@ -40,15 +40,27 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 
 ## Unrecognized Keys
 
-Keys devsandbox does not know are ignored, so a typo silently disables the setting it was meant to configure. Every config file that is loaded - the global config, each matching include, and a trusted `.devsandbox.toml` - is checked at startup, and unknown keys are reported on stderr:
+A key devsandbox does not recognize is ignored by the decoder, so `keep_containers` instead of `keep_container` leaves the setting at its default. Every config file that is loaded - the global config, each matching include, and a trusted `.devsandbox.toml` - is checked at startup, and every unrecognized key is reported on stderr under its full dotted path:
 
 ```
-unknown config key in /home/user/.config/devsandbox/config.toml, ignored: sandbox.docker.keep_containers
+unknown config keys in /home/user/.config/devsandbox/config.toml, ignored: sandbox.docker.keep_containers, tools.git.mod
 ```
 
-The reported name is the full dotted key path. Sections devsandbox has no schema for are never reported: `[tools.<name>]` and `[proxy.credentials.<name>]` are parsed by the tool or credential injector that owns them.
+`[tools.<name>]` and `[proxy.credentials.<name>]` are checked too, against the settings the tool or the credential injector reads - plus [`mount_mode`](#per-tool-mount-mode-override) for a tool that mounts anything. Injector names are yours to choose, so any name under `[proxy.credentials]` is accepted; a tool section naming no built-in tool, such as `[tools.gti]`, is reported as one unknown key rather than key by key.
 
 The key stays ignored, so nothing else changes about how the sandbox is built. The launch does pause: warnings raised before the workload starts are shown again as a block and confirmed, so an ignored key cannot scroll past unread. See [Startup Warnings](sandboxing.md#startup-warnings) for the prompt and the `--yes` flag that skips it.
+
+## Values of the Wrong Type
+
+A key devsandbox recognizes but whose value does not fit is an error, and the launch stops:
+
+```
+failed to load config: invalid configuration: [tools.mise]: ignore_global_config: expected a boolean, got a string
+```
+
+This is deliberately stricter than the unknown-key warning. An unknown key was never going to configure anything, but `ignore_global_config = "true"` reads as a setting that is in force when it is not: accepting the file and falling back to the default would apply something you did not write. Fix the value or remove the key.
+
+The whole section is rejected, not just the offending key, so a partly applied section can never reach the sandbox. `devsandbox doctor` reports the same error in its `config` row.
 
 ## Configuration Reference
 
@@ -748,7 +760,7 @@ either way.
 
 #### Per-Tool Mount Mode Override
 
-Each tool supports a `mount_mode` field that overrides the global `[overlay] default` for that tool's bindings:
+Every tool that mounts something supports a `mount_mode` field, which overrides the global `[overlay] default` for that tool's bindings:
 
 ```toml
 [tools.git]
@@ -760,7 +772,9 @@ mount_mode = "disabled"   # Don't mount any claude config into the sandbox
 
 Valid per-tool values: `split`, `overlay`, `tmpoverlay`, `readonly`, `readwrite`, `disabled`.
 
-The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely - the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox.
+The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely - the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox. It does not stop a tool that also runs a background process: `[tools.docker]` has its own `enabled` flag for that.
+
+A tool that mounts nothing does not accept `mount_mode` and reports it as an unknown key, so a section copied from another tool cannot look applied when it does nothing. `[tools.docker]` and `[tools.go]` are the two: docker's proxy socket lives in the sandbox home, which is already mounted, and Go's caches come from a shared volume that no per-tool mode gates.
 
 #### Migrating Overlay Data to Host
 
@@ -1274,10 +1288,6 @@ Local config found: .devsandbox.toml
 
 Trust this configuration? [y/N]:
 ```
-
-The prompt shows the settings devsandbox recognizes and nothing else. Comments and unknown keys are dropped from the display - they have no effect on the sandbox, and an untrusted file must not be able to pad the prompt with text that looks like configuration. Unknown keys are listed separately as a warning (see [Unrecognized Keys](#unrecognized-keys)).
-
-Trust still covers the whole file: the recorded hash is over its full contents, so any edit - including one that only touches an ignored key - prompts again.
 
 If the file changes, you'll be prompted again.
 

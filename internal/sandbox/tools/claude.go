@@ -14,7 +14,7 @@ func init() {
 // Claude provides Claude AI tool integration.
 // Mounts Claude config directory with tmpoverlay (protects settings/credentials)
 // and projects subdirectory with persistent overlay (preserves session history and memory).
-type Claude struct{}
+type Claude struct{ Mounting }
 
 func (c *Claude) Name() string {
 	return "claude"

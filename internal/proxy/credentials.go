@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/source"
 
@@ -27,8 +29,12 @@ type Preset struct {
 // (typically from init() functions).
 var presetRegistry = map[string]Preset{}
 
-// init registers built-in credential injector presets.
+// init registers built-in credential injector presets, and what a
+// [proxy.credentials.<name>] section holds, so a typo there is reported and a
+// value of the wrong type is rejected instead of both being ignored.
 func init() {
+	config.RegisterFreeFormSchema("proxy.credentials", credentialSchema)
+
 	RegisterPreset("github", Preset{
 		Host:          "api.github.com",
 		Header:        "Authorization",
@@ -38,6 +44,34 @@ func init() {
 		// BuildCredentialInjectors, gated on preset name == "github" and
 		// the user not setting an explicit [...source] sub-table.
 	})
+}
+
+// credentialConfig is a [proxy.credentials.<name>] section. Every field is
+// optional: what a preset supplies, the user need not repeat.
+type credentialConfig struct {
+	// Preset names the preset to build on. Defaults to the section name when
+	// that names a registered preset.
+	Preset string `toml:"preset"`
+	// Host is the request host to match, exact or a doublestar glob.
+	Host string `toml:"host"`
+	// Header is the header to write on a match.
+	Header string `toml:"header"`
+	// ValueFormat renders the header value, with `{token}` standing for the
+	// resolved credential. Defaults to the token alone.
+	ValueFormat string `toml:"value_format"`
+	// Overwrite replaces a header the request already carries.
+	Overwrite bool `toml:"overwrite"`
+	// Enabled turns the injector on. Injectors are off by default.
+	Enabled bool `toml:"enabled"`
+	// Source resolves the credential. Left unset, a preset's default applies.
+	Source *source.Source `toml:"source"`
+}
+
+// credentialSchema reports what a [proxy.credentials.<name>] section holds. The
+// section name is the injector's name and is the user's to choose, so every
+// name is accepted.
+func credentialSchema(string) (reflect.Type, bool) {
+	return reflect.TypeFor[credentialConfig](), true
 }
 
 // RegisterPreset registers a credential injector preset under the given name.
@@ -215,15 +249,15 @@ func BuildCredentialInjectors(credentials map[string]any) ([]CredentialInjector,
 // buildOne resolves preset + user overlay for a single injector entry and
 // returns either the constructed injector, nil (disabled silently), or an
 // error.
-func buildOne(name string, cfg map[string]any) (*GenericInjector, error) {
+func buildOne(name string, raw map[string]any) (*GenericInjector, error) {
+	var cfg credentialConfig
+	if err := config.DecodeSection(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("credential injector %q: %w", name, err)
+	}
+
 	// Step 1: resolve preset name. Explicit `preset = "X"` wins; otherwise
 	// the section name itself may match a registered preset.
-	presetName := ""
-	if cfg != nil {
-		if v, ok := cfg["preset"].(string); ok && v != "" {
-			presetName = v
-		}
-	}
+	presetName := cfg.Preset
 	if presetName == "" {
 		// Inferred from section name — only if a preset with that name exists.
 		if _, ok := lookupPreset(name); ok {
@@ -249,34 +283,23 @@ func buildOne(name string, cfg map[string]any) (*GenericInjector, error) {
 	host := preset.Host
 	header := preset.Header
 	valueFormat := preset.ValueFormat
-	overwrite := false
+	overwrite := cfg.Overwrite
 
-	if cfg != nil {
-		if v, ok := cfg["host"].(string); ok && v != "" {
-			host = v
-		}
-		if v, ok := cfg["header"].(string); ok && v != "" {
-			header = v
-		}
-		if v, ok := cfg["value_format"].(string); ok && v != "" {
-			valueFormat = v
-		}
-		if v, ok := cfg["overwrite"].(bool); ok {
-			overwrite = v
-		}
+	if cfg.Host != "" {
+		host = cfg.Host
+	}
+	if cfg.Header != "" {
+		header = cfg.Header
+	}
+	if cfg.ValueFormat != "" {
+		valueFormat = cfg.ValueFormat
 	}
 	if valueFormat == "" {
 		valueFormat = "{token}"
 	}
 
 	// Step 3: enabled flag. enabled=false is a silent skip (excluded slice).
-	enabled := false
-	if cfg != nil {
-		if v, ok := cfg["enabled"].(bool); ok {
-			enabled = v
-		}
-	}
-	if !enabled {
+	if !cfg.Enabled {
 		return nil, nil
 	}
 
@@ -289,10 +312,10 @@ func buildOne(name string, cfg map[string]any) (*GenericInjector, error) {
 	}
 
 	// Step 5: resolve [...source]. User source wins; otherwise preset
-	// default; otherwise nil. An empty [...source] sub-table parses to a
+	// default; otherwise nil. An empty [...source] sub-table decodes to a
 	// non-nil but zero-valued *Source — treat that as "no source set" so it
 	// doesn't shadow a preset's DefaultSource.
-	userSrc := source.Parse(cfg)
+	userSrc := cfg.Source
 	userSetSource := !userSrc.IsZero()
 	var src *source.Source
 	if userSetSource {
