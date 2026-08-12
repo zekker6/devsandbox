@@ -164,7 +164,7 @@ devsandbox completion fish > ~/.config/fish/completions/devsandbox.fish
 
 ## Useful Aliases
 
-For the supported agents (`claude`, `pi`, `codex`, `opencode`, `copilot`), prefer `devsandbox agent-wrappers activate` over a hand-written alias: it passes arguments through untouched, provides `<agent>-no-ds` and `command <agent>` escape hatches, and does not recurse inside the sandbox. For `claude`, `pi`, and `codex` it is also what herdr's session restore hooks into. See [Tools: Shell wrappers](tools.md#shell-wrappers---run-agents-sandboxed-by-default). The aliases below remain useful for flag presets such as `--proxy`.
+For the supported agents (`claude`, `pi`, `codex`, `opencode`, `copilot`), prefer `devsandbox agent-wrappers activate` over a hand-written alias: it passes arguments through untouched, provides `<agent>-no-ds` and `command <agent>` escape hatches, and does not recurse inside the sandbox. For `claude`, `pi`, and `codex` it is also what herdr's session restore hooks into. See [Tools: Shell wrappers](tools.md#shell-wrappers-run-agents-sandboxed-by-default). The aliases below remain useful for flag presets such as `--proxy`.
 
 Add these to your shell configuration:
 
@@ -438,4 +438,4 @@ See the dedicated troubleshooting sections:
 - [Tools](tools.md) - tool-specific configuration (git, mise, editors, AI assistants)
 - [Configuration](configuration.md) - full config reference, per-project settings
 
-[Back to docs index](index.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](https://github.com/zekker6/devsandbox/blob/main/README.md)

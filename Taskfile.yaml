@@ -326,9 +326,28 @@ tasks:
     cmds:
       - mise install
 
+  site:snippets:
+    desc: Regenerate docs/.include/ (README + CHANGELOG with site-relative links)
+    cmds:
+      # README.md and CHANGELOG.md are snippet-included into docs/index.md and
+      # docs/about/changelog.md. Their links are written relative to the repo
+      # root (`docs/proxy.md`) so they resolve when the files are browsed on
+      # GitHub, but a snippet's links are resolved against the *including* page,
+      # not the file they came from - on the site those same links would point
+      # at /docs/docs/proxy/ and /docs/about/docs/proxy/. Rebase them onto each
+      # including page instead of duplicating the two files by hand.
+      # `task site:check` is the backstop for any link shape this misses.
+      - mkdir -p docs/.include
+      - |
+        sed -E 's,\]\(docs/,](,g' README.md > docs/.include/README.md
+      - |
+        sed -E 's,\]\(docs/,](../,g' CHANGELOG.md > docs/.include/CHANGELOG.md
+
   site:dev:
     desc: Run docs + landing dev servers locally (loopback only)
-    deps: [site:install]
+    # site:snippets output is static: `zensical serve` reloads on docs/ changes,
+    # but an edit to README.md or CHANGELOG.md needs this task run again.
+    deps: [site:install, site:snippets]
     cmds:
       # bash -c so we can use named-signal trap (sh/dash rejects INT/TERM)
       - |
@@ -345,13 +364,16 @@ tasks:
 
   site:build:
     desc: Build the documentation site to ./public/
-    deps: [site:install]
+    deps: [site:install, site:snippets]
     cmds:
       # Wipe both output and Zensical's snippet cache.
       # `zensical build --clean` does not invalidate snippet-included content
       # (e.g., updates to README.md don't propagate without removing .cache).
       - rm -rf public/ .cache/
-      - mise exec -- zensical build --clean
+      # --strict turns Zensical's own unresolvable-link warnings into a build
+      # failure. It only sees links it can resolve from the Markdown source;
+      # `task site:check` covers the rendered output, snippets included.
+      - mise exec -- zensical build --clean --strict
       # Strip internal-only dirs that Zensical may have rendered if they exist locally.
       # CI checkouts don't have these, so this is a local-dev safety net.
       - rm -rf public/docs/plans public/docs/summaries public/docs/superpowers
@@ -360,11 +382,11 @@ tasks:
       - 'echo "Built: public/index.html (landing) + public/docs/ (zensical)"'
 
   site:check:
-    desc: "Verify internal links (deferred for v1 — see plan Post-Completion)"
+    desc: Verify every internal link and anchor in ./public, which site:build must have produced (external links are not fetched)
     cmds:
-      - 'echo "site:check is a no-op for v1. See docs/plans/ entry for the 4 cross-link follow-ups before --strict can be enabled."'
+      - mise exec -- python3 site/linkcheck.py
 
   site:clean:
-    desc: Remove built site and Zensical caches
+    desc: Remove built site, generated snippets and Zensical caches
     cmds:
-      - rm -rf public/ .cache/
+      - rm -rf public/ .cache/ docs/.include/

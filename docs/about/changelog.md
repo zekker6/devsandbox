@@ -1,3 +1,3 @@
 # Changelog
 
---8<-- "CHANGELOG.md"
+--8<-- "docs/.include/CHANGELOG.md"

@@ -132,6 +132,14 @@ Split such a package three ways: an untagged file holding the types and any pure
 
 `github.com/elazarl/goproxy` is held at **v1.8.4**. v1.8.5 wraps the client connection in a `bufio.Writer` that is only flushed after `resp.Write` returns, so on the MITM path response headers and small SSE events stay buffered until the whole body is consumed - streaming responses arrive all at once. `renovate.json` caps the version, but that does not stop a manual `go get -u`; if `internal/proxy`'s two streaming regression tests start failing, check whether goproxy moved. Lift the cap only once upstream ships a fix, and re-run those tests to confirm.
 
+## Documentation site
+
+`README.md` and `CHANGELOG.md` are the source of the site's home and changelog pages, pulled in with `--8<--`. **A snippet's links are resolved against the including page, not the file they came from.** Both files link as `docs/proxy.md` so they work when browsed on GitHub, which on the site meant `/docs/docs/proxy/` and `/docs/about/docs/proxy/` - 61 of the 66 links that were once broken there, and the reason `task site:snippets` rebases them into the git-ignored `docs/.include/`. Edit the two root files; never `docs/.include/`, and never point the snippet directives back at the originals.
+
+**Two checks guard this, and neither subsumes the other.** `zensical build --strict` reads the Markdown source, so it catches a bad relative link in `docs/*.md` and is blind to everything inside a snippet. `task site:check` (`site/linkcheck.py`) reads the rendered HTML, so it sees the snippet bodies and the resolved anchors; it checks whatever `site:build` last produced, which is why both workflows spell the pair out as `task site:build site:check`. Both run in `pages.yml` and in `lint.yml`, the latter being what fails a pull request rather than a deploy. Neither fetches external links - that would put third-party uptime in the build's path.
+
+**A heading whose two slug flavors disagree cannot be linked from both places.** GitHub renders `### Shell wrappers - run agents sandboxed by default` as `#shell-wrappers---run-agents-sandboxed-by-default` and Python-Markdown as `#shell-wrappers-run-agents-sandboxed-by-default`, so any link to it is broken in one renderer or the other. Fix it at the heading - `:` in place of ` - ` collapses both to the same slug - rather than picking a spelling and breaking the other side.
+
 ## Changelog
 
 `CHANGELOG.md` follows the Keep a Changelog format with an `[Unreleased]` section at the top.

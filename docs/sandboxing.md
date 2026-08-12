@@ -939,4 +939,4 @@ Container creation, deletion, and image manipulation are blocked by the proxy fi
 - [Configuration](configuration.md) - config file reference, custom mounts, overlay settings
 - [Use Cases](use-cases.md) - workflows and shell setup
 
-[Back to docs index](index.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](https://github.com/zekker6/devsandbox/blob/main/README.md)

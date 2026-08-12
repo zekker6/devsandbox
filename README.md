@@ -81,7 +81,7 @@ devsandbox --info
 
 devsandbox sandboxes the current working directory - `cd` into your project first, then run `devsandbox`. Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts - safe inside the sandbox because devsandbox provides the security boundary.
 
-**Works with:** Claude Code, Codex CLI, GitHub Copilot, Pi, OpenCode, aider, and any other CLI-based development tool. The first five also get [shell wrappers](docs/tools.md#shell-wrappers---run-agents-sandboxed-by-default) and session persistence across sandbox restarts.
+**Works with:** Claude Code, Codex CLI, GitHub Copilot, Pi, OpenCode, aider, and any other CLI-based development tool. The first five also get [shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default) and session persistence across sandbox restarts.
 
 That's it. No config files needed. On Linux the default sandbox needs no system packages - bwrap and pasta are embedded. Proxy mode (`--proxy`) is the one exception: it needs `iproute2` and `nft` or `iptables` on the host for its egress lockdown, and aborts rather than starting with open egress. On macOS, a Docker runtime is required (see [Installation Details](#installation-details)).
 
@@ -167,7 +167,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine ([coverage](docs/proxy.md#redaction-coverage))
 - **Resource limits** - optional memory, CPU and process caps that apply to every backend ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited
-- **Agent shell wrappers** - opt-in shell functions so `claude` means `devsandbox claude`, with `claude-no-ds` and `command claude` as escape hatches ([details](docs/tools.md#shell-wrappers---run-agents-sandboxed-by-default))
+- **Agent shell wrappers** - opt-in shell functions so `claude` means `devsandbox claude`, with `claude-no-ds` and `command claude` as escape hatches ([details](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default))
 - **herdr agent session restore** - a sandboxed agent reports its native session through the filtered herdr proxy, and a restored pane resumes it back inside the sandbox ([details](docs/tools.md#agent-session-capture-and-restore))
 - **Agent sessions survive the sandbox** - `claude`, `codex`, `copilot`, `pi` and `opencode` keep their native session stores on the host, so `--resume` / `--continue` finds conversations started in an earlier run ([details](docs/tools.md#ai-coding-assistants))
 - **Dev tool integrations** - `rtk` keeps its filters and tracking database ([details](docs/tools.md#rtk-cli-proxy)), `revdiff` opens review overlays in kitty or herdr, and the Docker socket is proxied read-only
@@ -347,11 +347,16 @@ task site:dev
 # Production-style assembly into ./public/
 task site:build
 
+# Verify every internal link and anchor in the build above
+task site:check
+
 # Clean build artifacts
 task site:clean
 ```
 
-`zensical.toml` at the repo root configures the docs site; landing source lives under `site/landing/`. The CI workflow `.github/workflows/pages.yml` runs the same `task site:build` and uploads `./public/` to GitHub Pages.
+`zensical.toml` at the repo root configures the docs site; landing source lives under `site/landing/`. The CI workflow `.github/workflows/pages.yml` runs `task site:build site:check` and uploads `./public/` to GitHub Pages; the same pair runs on every pull request via `.github/workflows/lint.yml`.
+
+`README.md` and `CHANGELOG.md` are rendered into the site as the docs home and changelog pages. Their links are written relative to the repo root (`docs/proxy.md`) so they resolve when browsing on GitHub; `task site:snippets` rebases them onto the including page and writes the result to the generated, git-ignored `docs/.include/`. Edit the two root files, never `docs/.include/`. Because that output is static, `task site:dev` does not pick up a README or CHANGELOG edit until the task is run again.
 
 One-time setup (must be done in the GitHub UI, cannot be done from the workflow): **Repository → Settings → Pages → Source = "GitHub Actions"**. After the first successful workflow run, the site is reachable at `https://zekker6.github.io/devsandbox/`.
 
