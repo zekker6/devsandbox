@@ -462,7 +462,7 @@ Three things happen when a kill is observed:
   is the common one under a memory limit, and it is the one that used to look like
   an agent quietly disappearing.
 - A `sandbox.oom` audit event, with the kill count and whether it was fatal. It
-  goes wherever your [logging](#logging) destinations point.
+  goes wherever your [logging](#remote-logging) destinations point.
 - A record in the sandbox's metadata, which `devsandbox sandboxes list` shows in
   its `STATUS` column as `oom-killed` (the sandbox died) or `oom-kills(N)` (it
   survived). This is what outlives the killed process; it is cleared when the next
@@ -1323,4 +1323,4 @@ devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbo
 - [Tools](tools.md) - tool-specific behavior (git modes, mise, Docker socket proxy)
 - [Use Cases](use-cases.md) - practical workflows using these configuration options
 
-[Back to docs index](index.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](https://github.com/zekker6/devsandbox/blob/main/README.md)

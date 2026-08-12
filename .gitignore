@@ -11,6 +11,7 @@ docs/summaries/
 bin/devsandbox-shim
 /public/
 /.cache/
+docs/.include/
 __pycache__/
 *.pyc
 

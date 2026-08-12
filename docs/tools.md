@@ -304,7 +304,7 @@ For other editors, mount their config directories manually or use the sandbox ho
 
 AI coding assistants execute arbitrary code - installing packages, running builds, making network requests. Running them inside devsandbox ensures they can do their job without accessing your credentials, keys, or secrets.
 
-### Shell wrappers - run agents sandboxed by default
+### Shell wrappers: run agents sandboxed by default
 
 Remembering to type `devsandbox` first is the weak point. `devsandbox agent-wrappers activate` prints shell functions that send supported agents through the sandbox automatically. Nothing is written to disk: you evaluate the output from your own startup file, the way `mise activate` works.
 
@@ -451,7 +451,7 @@ herdr can resume it (`codex resume <id>`) after a restart. See
 
 Two products share the name, and devsandbox mounts both:
 
-- The **standalone Copilot CLI** (`npm install -g @github/copilot`, invoked as `copilot`) keeps its config, MCP servers, sessions and auth under `~/.copilot`. That directory is mounted read-write and **persistent**, so a sandboxed `copilot` runs authenticated and `copilot --resume` / `--continue` finds sessions from an earlier run. It is one of the agents the [shell wrappers](#shell-wrappers---run-agents-sandboxed-by-default) wrap.
+- The **standalone Copilot CLI** (`npm install -g @github/copilot`, invoked as `copilot`) keeps its config, MCP servers, sessions and auth under `~/.copilot`. That directory is mounted read-write and **persistent**, so a sandboxed `copilot` runs authenticated and `copilot --resume` / `--continue` finds sessions from an earlier run. It is one of the agents the [shell wrappers](#shell-wrappers-run-agents-sandboxed-by-default) wrap.
 - The older **`gh copilot` extension** uses `~/.config/github-copilot` and `~/.cache/github-copilot`, mounted as config and cache. It also works inside editors (Neovim, VS Code) running in the sandbox.
 
 ### Other AI Tools
@@ -875,7 +875,7 @@ herdr can remember which agent a pane was running and, after the server restarts
 
 **Activation.** `agent_reporting` is enabled only for a **direct** `devsandbox <agent>` launch inside a herdr pane - both anchors have to exist. Running `devsandbox` to get a shell and then typing `claude` inside it leaves the launched agent unknown, so the capability is never enabled and the in-sandbox integration's report is denied. `devsandbox tools check herdr` reports whether agent reporting is active and, when it is not, which anchor is missing.
 
-**Setting up restore.** Capture alone is not enough: herdr's resume command is compiled into its binary as a bare `claude --resume <id>`, which would run the host agent against a different, host-side session store. herdr delivers that command as typed input to the pane's shell, so the [shell wrappers](#shell-wrappers---run-agents-sandboxed-by-default) intercept it and re-enter the sandbox.
+**Setting up restore.** Capture alone is not enough: herdr's resume command is compiled into its binary as a bare `claude --resume <id>`, which would run the host agent against a different, host-side session store. herdr delivers that command as typed input to the pane's shell, so the [shell wrappers](#shell-wrappers-run-agents-sandboxed-by-default) intercept it and re-enter the sandbox.
 
 1. Add the activation line to the startup file of **the shell herdr starts panes with**, which is not necessarily your login shell - herdr uses `[terminal] default_shell`, falling back to `$SHELL`. `devsandbox agent-wrappers activate <shell>` prints the definitions for any supported shell, and the line to add is in `devsandbox agent-wrappers --help`.
 2. Restart the herdr server so new panes pick up the wrappers.
@@ -1039,4 +1039,4 @@ To make additional tools available:
 - [Use Cases: AI Coding Assistants](use-cases.md#ai-coding-assistants) - workflows for Claude Code and Copilot
 - [Use Cases: Development Workflows](use-cases.md#development-workflows) - language-specific examples
 
-[Back to docs index](index.md) | [Back to README](../README.md)
+[Back to docs index](index.md) | [Back to README](https://github.com/zekker6/devsandbox/blob/main/README.md)
