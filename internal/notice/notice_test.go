@@ -3,6 +3,7 @@ package notice
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,8 @@ func resetForTest(t *testing.T) {
 		state.buffer = nil
 		state.sink = nil
 		state.droppedCount = 0
+		state.raised = nil
+		state.raisedLost = 0
 		state.mu.Unlock()
 	})
 }
@@ -334,5 +337,122 @@ func TestAlertWritesDuringRunningPhase(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "loud") {
 		t.Fatalf("Alert missing from log file; got %q", data)
+	}
+}
+
+// TestRaisedRecordsWarnAndErrorOnly pins what the launch confirmation gate sees:
+// every warning path including Alert, and nothing informational.
+func TestRaisedRecordsWarnAndErrorOnly(t *testing.T) {
+	resetForTest(t)
+	var buf bytes.Buffer
+	if err := Setup("", false, &buf); err != nil {
+		t.Fatal(err)
+	}
+
+	Info("info-msg")
+	Warn("warn-msg")
+	Alert("alert-msg")
+	Error("error-msg")
+
+	entries, lost := Raised()
+	if lost != 0 {
+		t.Fatalf("lost = %d, want 0", lost)
+	}
+	want := []Entry{
+		{Level: LevelWarn, Msg: "warn-msg"},
+		{Level: LevelWarn, Msg: "alert-msg"},
+		{Level: LevelError, Msg: "error-msg"},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("got %d entries (%v), want %d", len(entries), entries, len(want))
+	}
+	for i, w := range want {
+		if entries[i] != w {
+			t.Errorf("entry %d = %+v, want %+v", i, entries[i], w)
+		}
+	}
+}
+
+// TestRaisedRecordsDuringRunningPhase covers a warning diverted to the log file
+// rather than stderr: it is exactly the kind the user never sees, so it must
+// still be retained.
+func TestRaisedRecordsDuringRunningPhase(t *testing.T) {
+	resetForTest(t)
+	var buf bytes.Buffer
+	if err := Setup(filepath.Join(t.TempDir(), "w.log"), false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	SetRunning()
+
+	Warn("quiet-warn")
+
+	entries, _ := Raised()
+	if len(entries) != 1 || entries[0].Msg != "quiet-warn" {
+		t.Fatalf("Raised() = %+v, want the diverted warning", entries)
+	}
+}
+
+func TestRaisedDropsOldestPastCap(t *testing.T) {
+	resetForTest(t)
+	var buf bytes.Buffer
+	if err := Setup("", false, &buf); err != nil {
+		t.Fatal(err)
+	}
+
+	const overflow = 5
+	for i := range maxRaised + overflow {
+		Warn("warn-%d", i)
+	}
+
+	entries, lost := Raised()
+	if len(entries) != maxRaised {
+		t.Fatalf("len(entries) = %d, want %d", len(entries), maxRaised)
+	}
+	if lost != overflow {
+		t.Fatalf("lost = %d, want %d", lost, overflow)
+	}
+	if got, want := entries[0].Msg, fmt.Sprintf("warn-%d", overflow); got != want {
+		t.Fatalf("oldest retained = %q, want %q", got, want)
+	}
+}
+
+// TestSetupClearsRaised guards against one session's warnings gating the next
+// in a process that re-initializes notice.
+func TestSetupClearsRaised(t *testing.T) {
+	resetForTest(t)
+	var buf bytes.Buffer
+	if err := Setup("", false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	Warn("stale")
+
+	if err := Setup("", false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if entries, lost := Raised(); len(entries) != 0 || lost != 0 {
+		t.Fatalf("Raised() = %+v (lost %d) after re-Setup, want empty", entries, lost)
+	}
+}
+
+// TestRaisedSnapshotIsIndependent ensures a caller holding the slice cannot see
+// it mutate under them, nor write into the retained entries.
+func TestRaisedSnapshotIsIndependent(t *testing.T) {
+	resetForTest(t)
+	var buf bytes.Buffer
+	if err := Setup("", false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	Warn("first")
+
+	snapshot, _ := Raised()
+	snapshot[0].Msg = "mutated"
+	Warn("second")
+
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot grew to %d entries", len(snapshot))
+	}
+	entries, _ := Raised()
+	if entries[0].Msg != "first" {
+		t.Fatalf("retained entry = %q, want %q", entries[0].Msg, "first")
 	}
 }

@@ -48,7 +48,7 @@ unknown config key in /home/user/.config/devsandbox/config.toml, ignored: sandbo
 
 The reported name is the full dotted key path. Sections devsandbox has no schema for are never reported: `[tools.<name>]` and `[proxy.credentials.<name>]` are parsed by the tool or credential injector that owns them.
 
-Startup is not blocked - an unknown key stays ignored, exactly as before.
+The key stays ignored, so nothing else changes about how the sandbox is built. The launch does pause: warnings raised before the workload starts are shown again as a block and confirmed, so an ignored key cannot scroll past unread. See [Startup Warnings](sandboxing.md#startup-warnings) for the prompt and the `--yes` flag that skips it.
 
 ## Configuration Reference
 

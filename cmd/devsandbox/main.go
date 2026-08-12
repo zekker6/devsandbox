@@ -67,6 +67,7 @@ func addSandboxFlags(cmd *cobra.Command) {
 
 	cmd.Flags().String("name", "", "Session name for this sandbox (used by 'forward' and 'sessions' commands)")
 	cmd.Flags().Bool("verbose", false, "Print wrapper diagnostic messages to stderr even while the child owns the terminal")
+	cmd.Flags().Bool("yes", false, "Start without confirming warnings raised during setup")
 }
 
 func main() {
@@ -788,6 +789,13 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 				_ = store.Remove(sandboxName)
 			}
 		}()
+	}
+
+	// Last gate before the workload takes the terminal: anything that went
+	// wrong during setup is still on screen here, and unread a second later.
+	skipConfirm, _ := cmd.Flags().GetBool("yes")
+	if err := confirmWarningsStdio(skipConfirm); err != nil {
+		return err
 	}
 
 	notice.SetRunning()

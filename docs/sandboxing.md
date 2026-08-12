@@ -320,6 +320,33 @@ Inside the sandbox, these environment variables are set:
 | `XDG_DATA_HOME`      | `$HOME/.local/share` | XDG data directory                      |
 | `XDG_CACHE_HOME`     | `$HOME/.cache`       | XDG cache directory                     |
 
+## Startup Warnings
+
+Anything devsandbox warns about while preparing a sandbox is collected and shown again as one block immediately before
+the workload starts, and the launch waits for confirmation:
+
+```
+2 warnings while preparing the sandbox:
+
+  [warn] unknown config key in /home/user/.config/devsandbox/config.toml, ignored: sandbox.docker.keep_containers
+  [warn] MITM disabled - HTTPS request filtering is limited to host-level matching. Path/header/body matching only works for plain HTTP.
+
+Start the sandbox anyway? [y/N]:
+```
+
+Answering anything other than `y`/`yes` aborts with a non-zero exit status. The default is no.
+
+A warning means something you configured is not in effect - a key that was ignored, a cleanup that did not run, a proxy
+control narrowed by `--no-mitm`. Each one is already printed when it happens, but sandbox setup emits enough output that
+the first is usually off-screen by the time the last arrives, and the workload's own output covers the rest a second
+later.
+
+- `--yes` starts without the prompt. Warnings are still printed as they happen.
+- Without a terminal on stdin there is nobody to answer, so the summary is printed and the sandbox starts. A scripted
+  launch never fails on a warning alone.
+- Warnings raised *after* this point - mount-plan problems, OOM kills - are reported as they happen instead. They cannot
+  be confirmed, because the sandbox is already running.
+
 ## Managing Sandboxes
 
 ### Listing Sandboxes
