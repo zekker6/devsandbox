@@ -21,7 +21,7 @@ func init() {
 // visible while `rtk config --create` cannot rewrite them; the data directory
 // gets a persistent overlay so the tracking database survives across sandbox
 // runs without the sandbox mutating the host copy.
-type RTK struct{}
+type RTK struct{ Mounting }
 
 func (r *RTK) Name() string {
 	return "rtk"

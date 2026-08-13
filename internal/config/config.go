@@ -640,6 +640,7 @@ func LoadFrom(path string) (*Config, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	reportUnknownKeys(path, data)
 
 	// Expand ~ in base path
 	if cfg.Sandbox.BasePath != "" {
@@ -656,6 +657,15 @@ func LoadFrom(path string) (*Config, error) {
 
 // Validate checks configuration values for security and correctness.
 func (c *Config) Validate() error {
+	// Check the sections whose schema lives in another package first, so a
+	// value of the wrong type is reported before anything reads it.
+	if err := validateFreeForm("tools", c.Tools); err != nil {
+		return err
+	}
+	if err := validateFreeForm("proxy.credentials", c.Proxy.Credentials); err != nil {
+		return err
+	}
+
 	// Validate proxy port
 	if c.Proxy.Port != 0 {
 		if c.Proxy.Port < MinPort || c.Proxy.Port > MaxPort {
@@ -741,18 +751,18 @@ func (c *Config) Validate() error {
 		if !ok {
 			continue
 		}
-		if mode, ok := toolCfg["mount_mode"].(string); ok && mode != "" {
-			if !validToolMountModes[mode] {
-				return fmt.Errorf("tools.%s.mount_mode must be 'split', 'overlay', 'tmpoverlay', 'readonly', 'readwrite', or 'disabled', got %q", name, mode)
-			}
+		mode, ok := toolCfg["mount_mode"].(string)
+		if !ok || mode == "" {
+			continue
 		}
-		// mise: ignore_global_config gates whether the host's global mise config is
-		// read in the sandbox. Reject a non-bool so a typo fails loudly rather than
-		// silently degrading to the default.
-		if v, ok := toolCfg["ignore_global_config"]; ok {
-			if _, isBool := v.(bool); !isBool {
-				return fmt.Errorf("tools.%s.ignore_global_config must be a boolean, got %T", name, v)
-			}
+		// A tool that contributes no mounts declares no mount_mode, so the key
+		// is already reported as unknown and ignored. Rejecting its value here
+		// too would call one key ignorable and fatal in the same breath.
+		if !toolDeclaresKey(name, "mount_mode") {
+			continue
+		}
+		if !validToolMountModes[mode] {
+			return fmt.Errorf("tools.%s.mount_mode must be 'split', 'overlay', 'tmpoverlay', 'readonly', 'readwrite', or 'disabled', got %q", name, mode)
 		}
 	}
 
@@ -1517,6 +1527,7 @@ func loadIncludeFile(path string) (*Config, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
+	reportUnknownKeys(path, data)
 
 	// Validate included config
 	if err := cfg.Validate(); err != nil {
@@ -1548,13 +1559,31 @@ func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
 		return nil, fmt.Errorf("TrustStore is required to load local config")
 	}
 
+	// The trust prompt must show what devsandbox will actually apply, so it is
+	// rendered from the recognized keys alone - anything else in the file is
+	// dropped from the display and reported separately.
+	tree, unknown, err := pruneUnknownKeys(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse local config: %w", err)
+	}
+
+	display, err := renderTOML(tree)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render local config for approval: %w", err)
+	}
+
 	hash := hashBytes(data)
-	if err := ensureTrusted(projectDir, hash, data, opts); err != nil {
+	if err := ensureTrusted(projectDir, hash, display, opts); err != nil {
 		if errors.Is(err, errConfigNotTrusted) {
 			return nil, nil // Skip untrusted config
 		}
 		return nil, err
 	}
+
+	// Reported only once the file is applied. A declined config is skipped
+	// whole, so naming the keys it would have ignored describes nothing that
+	// happened - and the warning would still have to be confirmed at launch.
+	warnUnknownKeys(localPath, unknown)
 
 	cfg := &Config{}
 	if err := toml.Unmarshal(data, cfg); err != nil {
@@ -1574,7 +1603,9 @@ func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
 
 // ensureTrusted verifies trust for a local config, prompting if needed.
 // Returns nil if trusted/approved, error if denied or prompt failed.
-func ensureTrusted(projectDir, hash string, data []byte, opts *LoadOptions) error {
+// display holds the recognized configuration shown for approval; trust is
+// still recorded against the hash of the whole file.
+func ensureTrusted(projectDir, hash, display string, opts *LoadOptions) error {
 	existing := opts.TrustStore.GetTrusted(projectDir)
 	if existing != nil && existing.Hash == hash {
 		return nil // Already trusted
@@ -1586,7 +1617,7 @@ func ensureTrusted(projectDir, hash string, data []byte, opts *LoadOptions) erro
 	}
 
 	changed := existing != nil // Has entry but hash differs
-	approved, err := promptFn(projectDir, string(data), changed)
+	approved, err := promptFn(projectDir, display, changed)
 	if err != nil {
 		return fmt.Errorf("trust prompt failed: %w", err)
 	}

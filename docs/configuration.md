@@ -38,6 +38,30 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 | `[logging]` | `attributes`, `receivers` | [Remote Logging](#remote-logging) |
 | `[[include]]` | `if`, `path` | [Per-Project Configuration](#per-project-configuration) |
 
+## Unrecognized Keys
+
+A key devsandbox does not recognize is ignored by the decoder, so `keep_containers` instead of `keep_container` leaves the setting at its default. Every config file that is loaded - the global config, each matching include, and a trusted `.devsandbox.toml` - is checked at startup, and every unrecognized key is reported on stderr under its full dotted path:
+
+```
+unknown config keys in /home/user/.config/devsandbox/config.toml, ignored: sandbox.docker.keep_containers, tools.git.mod
+```
+
+`[tools.<name>]` and `[proxy.credentials.<name>]` are checked too, against the settings the tool or the credential injector reads - plus [`mount_mode`](#per-tool-mount-mode-override) for a tool that mounts anything. Injector names are yours to choose, so any name under `[proxy.credentials]` is accepted; a tool section naming no built-in tool, such as `[tools.gti]`, is reported as one unknown key rather than key by key.
+
+The key stays ignored, so nothing else changes about how the sandbox is built. The launch does pause: warnings raised before the workload starts are shown again as a block and confirmed, so an ignored key cannot scroll past unread. See [Startup Warnings](sandboxing.md#startup-warnings) for the prompt and the `--yes` flag that skips it.
+
+## Values of the Wrong Type
+
+A key devsandbox recognizes but whose value does not fit is an error, and the launch stops:
+
+```
+failed to load config: invalid configuration: [tools.mise]: ignore_global_config: expected a boolean, got a string
+```
+
+This is deliberately stricter than the unknown-key warning. An unknown key was never going to configure anything, but `ignore_global_config = "true"` reads as a setting that is in force when it is not: accepting the file and falling back to the default would apply something you did not write. Fix the value or remove the key.
+
+The whole section is rejected, not just the offending key, so a partly applied section can never reach the sandbox. `devsandbox doctor` reports the same error in its `config` row.
+
 ## Configuration Reference
 
 ### Proxy Settings
@@ -736,7 +760,7 @@ either way.
 
 #### Per-Tool Mount Mode Override
 
-Each tool supports a `mount_mode` field that overrides the global `[overlay] default` for that tool's bindings:
+Every tool that mounts something supports a `mount_mode` field, which overrides the global `[overlay] default` for that tool's bindings:
 
 ```toml
 [tools.git]
@@ -748,7 +772,9 @@ mount_mode = "disabled"   # Don't mount any claude config into the sandbox
 
 Valid per-tool values: `split`, `overlay`, `tmpoverlay`, `readonly`, `readwrite`, `disabled`.
 
-The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely - the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox.
+The `disabled` value prevents the tool's config/cache/data directories from being mounted entirely - the tool won't have access to any host configuration. This is useful for tools you have installed on the host but don't want visible inside the sandbox. It does not stop a tool that also runs a background process: `[tools.docker]` has its own `enabled` flag for that.
+
+A tool that mounts nothing does not accept `mount_mode` and reports it as an unknown key, so a section copied from another tool cannot look applied when it does nothing. `[tools.docker]` and `[tools.go]` are the two: docker's proxy socket lives in the sandbox home, which is already mounted, and Go's caches come from a shared volume that no per-tool mode gates.
 
 #### Migrating Overlay Data to Host
 
@@ -1284,7 +1310,7 @@ devsandbox trust remove
 devsandbox trust remove /path/to/project
 ```
 
-**Non-interactive mode:** When running non-interactively (e.g., via an AI assistant or in CI), untrusted local configs are skipped with a warning. Pre-approve configs with `devsandbox trust add` before running in non-interactive mode.
+**Non-interactive mode:** When running non-interactively (e.g., via an AI assistant or in CI), untrusted local configs are skipped with a warning. Pre-approve configs with `devsandbox trust add` before running in non-interactive mode. The prompt is asked on stderr and answered on stdin, so a launch that redirects either one counts as non-interactive rather than blocking on a question nobody can see.
 
 ### Config Priority
 

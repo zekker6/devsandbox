@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"devsandbox/internal/cmdpattern"
@@ -76,22 +77,30 @@ func (h *Herdr) Available(_ string) bool {
 // Only `mode` is configurable. There is deliberately no `extra_capabilities`
 // escape hatch as kitty has: with so few capabilities it would configure
 // nothing, and every one of them grants host-visible effects.
+// herdrConfig is the [tools.herdr] section.
+type herdrConfig struct {
+	MountModeConfig
+	Mode string `toml:"mode"`
+}
+
+// ConfigType implements ToolWithConfigType.
+func (h *Herdr) ConfigType() reflect.Type { return reflect.TypeFor[herdrConfig]() }
+
 func (h *Herdr) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	h.mode = herdrModeAuto
 	h.projectDir = globalCfg.ProjectDir
 	h.homeDir = globalCfg.HomeDir
 	h.launchedAgent = globalCfg.LaunchedAgent
 
-	if toolCfg == nil {
-		return
-	}
-	if v, ok := toolCfg["mode"].(string); ok {
-		switch v {
-		case herdrModeAuto, herdrModeDisabled, herdrModeEnforce:
-			h.mode = v
-		default:
-			notice.Warn("herdr: ignoring unknown mode %q; using %q", v, herdrModeAuto)
-		}
+	var cfg herdrConfig
+	decodeConfig(h.Name(), toolCfg, &cfg)
+
+	switch cfg.Mode {
+	case "":
+	case herdrModeAuto, herdrModeDisabled, herdrModeEnforce:
+		h.mode = cfg.Mode
+	default:
+		notice.Warn("herdr: ignoring unknown mode %q; using %q", cfg.Mode, herdrModeAuto)
 	}
 }
 
@@ -369,7 +378,7 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		// reaches this check. A stale socket left behind by a dead server must
 		// not turn that into a failed launch.
 		if h.mode == herdrModeAuto {
-			notice.Warn("herdr: host socket %s not reachable (%v); continuing without the proxy", hostSock, err)
+			notice.Info("herdr: host socket %s not reachable (%v); continuing without the proxy", hostSock, err)
 			return nil
 		}
 		return fmt.Errorf("herdr: host socket %s not reachable: %w", hostSock, err)
@@ -412,7 +421,7 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 
 	h.proxy = proxy
 	h.relocator = relocator
-	notice.Warn("herdr proxy active. Capabilities: %v", caps)
+	notice.Info("herdr proxy active. Capabilities: %v", caps)
 	return nil
 }
 

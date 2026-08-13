@@ -19,7 +19,7 @@ func init() {
 // The agent directory defaults to ~/.pi/agent and can be overridden via the
 // PI_CODING_AGENT_DIR environment variable; when set, the host value is
 // passed through to the sandbox so pi resolves the same path inside.
-type Pi struct{}
+type Pi struct{ Mounting }
 
 func (p *Pi) Name() string {
 	return "pi"

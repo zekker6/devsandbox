@@ -53,32 +53,6 @@ func (s *Source) Resolve() (string, error) {
 	return "", nil
 }
 
-// Parse extracts the "source" sub-table from cfg. cfg should be the raw
-// TOML map for a parent config section (e.g. the map for
-// [proxy.credentials.github] or [sandbox.environment.GH_TOKEN]), not the
-// source table itself. Returns nil when the "source" key is absent or
-// not a map[string]any.
-func Parse(cfg map[string]any) *Source {
-	if cfg == nil {
-		return nil
-	}
-	raw, ok := cfg["source"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	src := &Source{}
-	if v, ok := raw["value"].(string); ok {
-		src.Value = v
-	}
-	if v, ok := raw["env"].(string); ok {
-		src.Env = v
-	}
-	if v, ok := raw["file"].(string); ok {
-		src.File = v
-	}
-	return src
-}
-
 // ExpandHome expands a leading ~ to the user's home directory.
 func ExpandHome(path string) string {
 	if path == "" || path[0] != '~' {

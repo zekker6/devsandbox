@@ -2,24 +2,26 @@
 package config
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"devsandbox/internal/notice"
-	"golang.org/x/term"
+	"devsandbox/internal/prompt"
 )
 
-// isInteractive returns true if stdin is a terminal.
+// isInteractive reports whether the trust prompt has a human at both ends. It
+// is asked on stderr and answered on stdin, so a terminal on only one of them
+// is nobody who can answer - see [prompt.IsInteractive].
 func isInteractive() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
+	return prompt.IsInteractive(os.Stdin, os.Stderr)
 }
 
 // promptTrust prompts the user to trust a local config file.
 // Returns true if the user accepts, false otherwise.
 // The changed parameter indicates if this is a hash change (vs new file).
+// configContent holds the recognized settings only - see loadLocalConfig.
 func promptTrust(input io.Reader, output io.Writer, projectDir, configContent string, changed bool) (bool, error) {
 	// Show header
 	if changed {
@@ -29,9 +31,12 @@ func promptTrust(input io.Reader, output io.Writer, projectDir, configContent st
 	}
 
 	// Show config content with indentation
-	lines := strings.Split(strings.TrimSpace(configContent), "\n")
-	for _, line := range lines {
-		_, _ = fmt.Fprintf(output, "  %s\n", line)
+	if content := strings.TrimSpace(configContent); content == "" {
+		_, _ = fmt.Fprintf(output, "  (no recognized settings)\n")
+	} else {
+		for _, line := range strings.Split(content, "\n") {
+			_, _ = fmt.Fprintf(output, "  %s\n", line)
+		}
 	}
 	_, _ = fmt.Fprintln(output)
 
@@ -42,16 +47,14 @@ func promptTrust(input io.Reader, output io.Writer, projectDir, configContent st
 		_, _ = fmt.Fprintf(output, "Trust this configuration? [y/N]: ")
 	}
 
-	// Read response
-	reader := bufio.NewReader(input)
-	response, err := reader.ReadString('\n')
+	// Read response. The sandbox workload inherits this stdin, so the answer is
+	// read a byte at a time - see prompt.ReadLine.
+	response, err := prompt.ReadLine(input)
 	if err != nil {
 		return false, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	response = strings.TrimSpace(strings.ToLower(response))
-
-	return response == "y" || response == "yes", nil
+	return prompt.IsYes(response), nil
 }
 
 // PromptTrustStdio is a convenience wrapper that uses os.Stdin/os.Stderr.

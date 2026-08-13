@@ -20,7 +20,7 @@ func init() {
 //     sandboxed `copilot` would run unauthenticated and lose every session.
 //   - the older `gh copilot` extension, invoked through `gh`, whose config and
 //     cache live under ~/.config/github-copilot and ~/.cache/github-copilot.
-type Copilot struct{}
+type Copilot struct{ Mounting }
 
 func (c *Copilot) Name() string {
 	return "copilot"

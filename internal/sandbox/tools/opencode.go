@@ -17,7 +17,7 @@ func init() {
 // ~/.config/opencode directory (it does not replace it). When set, the host
 // value is passed through to the sandbox and the directory is mounted so
 // opencode finds the same agents/commands/modes/plugins inside.
-type OpenCode struct{}
+type OpenCode struct{ Mounting }
 
 func (o *OpenCode) Name() string {
 	return "opencode"

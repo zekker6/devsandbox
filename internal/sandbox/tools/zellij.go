@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -27,15 +28,20 @@ func (z *Zellij) Name() string              { return "zellij" }
 func (z *Zellij) Description() string       { return "Zellij terminal multiplexer session forwarding" }
 func (z *Zellij) ShellInit(_ string) string { return "" }
 
+// zellijConfig is the [tools.zellij] section.
+type zellijConfig struct {
+	MountModeConfig
+	Enabled bool `toml:"enabled"`
+}
+
+// ConfigType implements ToolWithConfigType.
+func (z *Zellij) ConfigType() reflect.Type { return reflect.TypeFor[zellijConfig]() }
+
 // Configure implements ToolWithConfig.
 func (z *Zellij) Configure(_ GlobalConfig, toolCfg map[string]any) {
-	z.enabled = false
-	if toolCfg == nil {
-		return
-	}
-	if v, ok := toolCfg["enabled"].(bool); ok {
-		z.enabled = v
-	}
+	var cfg zellijConfig
+	decodeConfig(z.Name(), toolCfg, &cfg)
+	z.enabled = cfg.Enabled
 }
 
 // Available returns true when running inside a Zellij session.

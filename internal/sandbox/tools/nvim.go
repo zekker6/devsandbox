@@ -12,7 +12,7 @@ func init() {
 
 // Nvim provides Neovim editor configuration.
 // Mounts config, data, state, and cache directories.
-type Nvim struct{}
+type Nvim struct{ Mounting }
 
 func (n *Nvim) Name() string {
 	return "nvim"

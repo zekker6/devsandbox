@@ -13,6 +13,8 @@ Never bind to all interfaces by default, and do not expose any ports by default.
 
 Errors must always be handled and reported when present. Silent failures are not acceptable.
 
+`notice.Warn` is for something the user has to act on: a setting that was ignored, a control that reaches less than it says, a cleanup that did not run. A tool reporting that it started, or that an optional integration is not attached, is `notice.Info`. The distinction is load-bearing, not cosmetic - every warning raised before the workload starts is collected and blocks the launch on a confirmation prompt, so an announcement emitted at warn level turns every launch into a question and trains the user to answer it without reading. `notice.Alert` is a warning that must reach the terminal even during the running phase.
+
 A limit the user configured must never silently fail to apply. This is stricter than error handling, because the dangerous case is not an error at all - it is a success path that quietly enforces less than promised. systemd, for example, accepts `CPUQuota=` in a user scope and ignores it when the `cpu` controller is not delegated, warning only to the journal. Verify enforceability before launch and abort naming what is missing, rather than degrading to an unlimited run the user believes is capped. Where a value can be accepted but round to nothing (`cpus = "0.004"` becoming `CPUQuota=0%`), reject it at translation time.
 
 ## Terminal socket proxies

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -29,6 +30,17 @@ type SinkFunc func(level Level, msg string, ts time.Time)
 // the caller of AttachSink.
 const maxBuffered = 256
 
+// maxRaised bounds how many warn/error entries are retained for Raised. A
+// session keeps emitting notices for as long as it runs, so the retention needs
+// a ceiling; what fell off is counted rather than forgotten.
+const maxRaised = 64
+
+// Entry is a recorded notice, returned by Raised.
+type Entry struct {
+	Level Level
+	Msg   string
+}
+
 type bufferedEntry struct {
 	level Level
 	msg   string
@@ -45,6 +57,8 @@ type noticeState struct {
 	buffer       []bufferedEntry
 	sink         SinkFunc
 	droppedCount int
+	raised       []Entry
+	raisedLost   int
 }
 
 var state = &noticeState{stderr: os.Stderr}
@@ -71,6 +85,8 @@ func Setup(logPath string, verbose bool, stderrOverride io.Writer) error {
 	state.buffer = nil
 	state.droppedCount = 0
 	state.wrote = false
+	state.raised = nil
+	state.raisedLost = 0
 
 	if logPath != "" {
 		if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
@@ -126,6 +142,9 @@ func writeMessagePhase(level string, always bool, format string, args ...any) {
 	// Audit forwarding: dispatch live if a sink is attached, otherwise buffer
 	// for later drain by AttachSink.
 	lvl := levelFor(level)
+	if lvl == LevelWarn || lvl == LevelError {
+		state.recordRaisedLocked(lvl, msg)
+	}
 	if state.sink != nil {
 		state.sink(lvl, msg, time.Now())
 	} else {
@@ -198,6 +217,26 @@ func levelFor(level string) Level {
 	default:
 		return LevelInfo
 	}
+}
+
+// Raised returns every warn and error notice written so far, oldest first,
+// together with the number that fell off the retention cap. It lets a caller
+// hold an action until the user has acknowledged what went wrong - a warning
+// scrolls past unread once a workload owns the terminal.
+func Raised() ([]Entry, int) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return slices.Clone(state.raised), state.raisedLost
+}
+
+// recordRaisedLocked retains a warn/error entry for Raised, dropping the oldest
+// once the cap is reached. Caller holds state.mu.
+func (s *noticeState) recordRaisedLocked(lvl Level, msg string) {
+	if len(s.raised) >= maxRaised {
+		s.raised = s.raised[1:]
+		s.raisedLost++
+	}
+	s.raised = append(s.raised, Entry{Level: lvl, Msg: msg})
 }
 
 // bufferLocked appends a captured entry to the ring; oldest is dropped on

@@ -11,7 +11,7 @@ func init() {
 
 // Pywal provides pywal (wal) terminal color scheme support.
 // Mounts the color cache read-only for terminal theming.
-type Pywal struct{}
+type Pywal struct{ Mounting }
 
 func (p *Pywal) Name() string {
 	return "pywal"

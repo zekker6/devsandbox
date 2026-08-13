@@ -19,7 +19,7 @@ func init() {
 // The directory defaults to ~/.codex and can be overridden via the CODEX_HOME
 // environment variable; when set, the host value is passed through to the
 // sandbox so codex resolves the same path inside.
-type Codex struct{}
+type Codex struct{ Mounting }
 
 func (c *Codex) Name() string {
 	return "codex"

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -101,27 +102,25 @@ func (d *Docker) socketPath(sandboxHome string) string {
 	return filepath.Join(runDir(sandboxHome), dockerSocketName)
 }
 
+// dockerConfig is the [tools.docker] section. It deliberately does not embed
+// MountModeConfig: the tool mounts nothing - the proxy socket lives under the
+// sandbox home, which is already bound - so mount_mode would have nothing to
+// apply to.
+type dockerConfig struct {
+	Enabled bool   `toml:"enabled"`
+	Socket  string `toml:"socket"`
+}
+
+// ConfigType implements ToolWithConfigType.
+func (d *Docker) ConfigType() reflect.Type { return reflect.TypeFor[dockerConfig]() }
+
 // Configure implements ToolWithConfig.
 func (d *Docker) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
-	d.enabled = false
-	d.hostSocket = ""
+	var cfg dockerConfig
+	decodeConfig(d.Name(), toolCfg, &cfg)
 
-	// Parse user-provided socket first.
-	var userSocket string
-	if toolCfg != nil {
-		if enabled, ok := toolCfg["enabled"]; ok {
-			if b, ok := enabled.(bool); ok {
-				d.enabled = b
-			}
-		}
-		if socket, ok := toolCfg["socket"]; ok {
-			if s, ok := socket.(string); ok && s != "" {
-				userSocket = s
-			}
-		}
-	}
-
-	d.hostSocket = resolveDockerSocket(runtime.GOOS, globalCfg.HomeDir, userSocket)
+	d.enabled = cfg.Enabled
+	d.hostSocket = resolveDockerSocket(runtime.GOOS, globalCfg.HomeDir, cfg.Socket)
 }
 
 func (d *Docker) Bindings(homeDir, sandboxHome string) []Binding {
@@ -153,8 +152,8 @@ func (d *Docker) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		return nil
 	}
 
-	notice.Warn("Docker socket proxy enabled. The sandbox can access ALL existing Docker containers on this host.")
-	notice.Warn("This might allow accessing host resources. Ensure you trust the sandbox content.")
+	notice.Info("Docker socket proxy enabled. The sandbox can access ALL existing Docker containers on this host.")
+	notice.Info("This might allow accessing host resources. Ensure you trust the sandbox content.")
 
 	if _, err := ensureRunDir(sandboxHome); err != nil {
 		return fmt.Errorf("docker: %w", err)

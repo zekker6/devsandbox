@@ -5,6 +5,7 @@ package tools
 
 import (
 	"context"
+	"reflect"
 
 	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/herdrproxy"
@@ -165,6 +166,56 @@ type ToolWithConfig interface {
 	// Called before Bindings() to set up tool state.
 	Configure(globalCfg GlobalConfig, toolCfg map[string]any)
 }
+
+// Config is what a [tools.<name>] section holds before the tool adds anything:
+// nothing. No setting is common to every tool, so a tool that declares no
+// config type gets this and every key in its section is reported.
+type Config struct{}
+
+// MountModeConfig is the section of a tool that contributes mounts. It carries
+// the one setting that is not a tool's own - and only reaches the tools it
+// means something for, so a section copied from another tool cannot look
+// applied when nothing would read it.
+//
+// A tool with settings of its own embeds it in that struct; a tool with none
+// embeds Mounting in the tool struct to take this as its whole section.
+type MountModeConfig struct {
+	Config
+
+	// MountMode overrides the global [overlay] default for this tool's
+	// bindings, and additionally accepts "disabled" to drop them all. It does
+	// not stop a tool that also runs a background process - a socket proxy
+	// has its own enabled flag.
+	MountMode string `toml:"mount_mode"`
+}
+
+// ToolWithConfigType is implemented by tools whose [tools.<name>] section holds
+// anything: settings of their own, mount_mode, or both.
+//
+// The struct it names is the single declaration of that section: the loader
+// derives the recognized key names from it and rejects a value that does not
+// fit the field it names, and Configure decodes into it. A setting added to one
+// and not the other therefore cannot go unnoticed - the key is either
+// unrecognized or unread.
+type ToolWithConfigType interface {
+	Tool
+
+	// ConfigType returns the struct type the section decodes into. It must
+	// embed MountModeConfig if the tool contributes any mount, and must not
+	// otherwise.
+	ConfigType() reflect.Type
+}
+
+// Mounting declares that a tool contributes mounts and reads no settings of its
+// own, making MountModeConfig its whole section. Embed it in the tool struct.
+//
+// Declaring it is opt-in because the alternative defaults the wrong way: a tool
+// that mounts nothing would accept a mount_mode nothing reads, and would keep
+// accepting it until someone noticed.
+type Mounting struct{}
+
+// ConfigType implements ToolWithConfigType.
+func (Mounting) ConfigType() reflect.Type { return reflect.TypeFor[MountModeConfig]() }
 
 // ActiveTool is implemented by tools that run background processes.
 // These tools are started before the sandbox launches and stopped after it exits.

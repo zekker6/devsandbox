@@ -11,7 +11,7 @@ func init() {
 
 // OhMyZsh provides oh-my-zsh framework configuration.
 // Adds a sandbox indicator function that can be used in custom themes.
-type OhMyZsh struct{}
+type OhMyZsh struct{ Mounting }
 
 func (o *OhMyZsh) Name() string {
 	return "oh-my-zsh"

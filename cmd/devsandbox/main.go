@@ -25,6 +25,7 @@ import (
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/portforward"
+	"devsandbox/internal/prompt"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/mounts"
@@ -67,6 +68,7 @@ func addSandboxFlags(cmd *cobra.Command) {
 
 	cmd.Flags().String("name", "", "Session name for this sandbox (used by 'forward' and 'sessions' commands)")
 	cmd.Flags().Bool("verbose", false, "Print wrapper diagnostic messages to stderr even while the child owns the terminal")
+	cmd.Flags().Bool("yes", false, "Start without confirming warnings raised during setup")
 }
 
 func main() {
@@ -790,6 +792,13 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		}()
 	}
 
+	// Last gate before the workload takes the terminal: anything that went
+	// wrong during setup is still on screen here, and unread a second later.
+	skipConfirm, _ := cmd.Flags().GetBool("yes")
+	if err := confirmWarningsStdio(skipConfirm); err != nil {
+		return err
+	}
+
 	notice.SetRunning()
 	defer notice.SetTeardown()
 	return iso.Run(cmd.Context(), runCfg)
@@ -1109,7 +1118,8 @@ func ensureMiseTrust(projectDir string) error {
 		notice.Info("  untrusted: %s", path)
 	}
 
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	// Asked on stderr and answered on stdin, so both ends need a human.
+	if !prompt.IsInteractive(os.Stdin, os.Stderr) {
 		notice.Warn("run 'mise trust' in the project directory to fix this")
 		return nil
 	}
