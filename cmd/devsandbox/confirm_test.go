@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"devsandbox/internal/notice"
+	"golang.org/x/term"
 )
 
 // raiseNotices routes notice output into a throwaway buffer and emits the given
@@ -135,6 +136,14 @@ func TestPromptIsInteractive_RequiresBothEnds(t *testing.T) {
 		t.Skipf("no pty available: %v", err)
 	}
 	defer tty.Close() //nolint:errcheck
+
+	// The pty master is a terminal on Linux but not on the BSD-derived systems
+	// where allocating the slave side takes platform-specific ioctls. The
+	// behavior under test is platform-independent, so skip rather than carry
+	// that.
+	if !term.IsTerminal(int(tty.Fd())) {
+		t.Skip("the pty master is not a terminal on this platform")
+	}
 
 	r, w, err := os.Pipe()
 	if err != nil {
