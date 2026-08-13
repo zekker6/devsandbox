@@ -9,12 +9,13 @@ import (
 
 	"devsandbox/internal/notice"
 	"devsandbox/internal/prompt"
-	"golang.org/x/term"
 )
 
-// isInteractive returns true if stdin is a terminal.
+// isInteractive reports whether the trust prompt has a human at both ends. It
+// is asked on stderr and answered on stdin, so a terminal on only one of them
+// is nobody who can answer - see [prompt.IsInteractive].
 func isInteractive() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
+	return prompt.IsInteractive(os.Stdin, os.Stderr)
 }
 
 // promptTrust prompts the user to trust a local config file.

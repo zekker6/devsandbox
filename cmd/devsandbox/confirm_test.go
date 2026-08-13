@@ -5,12 +5,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"os"
 	"strings"
 	"testing"
 
 	"devsandbox/internal/notice"
-	"golang.org/x/term"
 )
 
 // raiseNotices routes notice output into a throwaway buffer and emits the given
@@ -123,53 +121,6 @@ func TestConfirmWarnings_NonInteractiveProceeds(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q; got %q", want, out.String())
 		}
-	}
-}
-
-// The question is written to stderr and answered on stdin, so a terminal on
-// only one of them is not a human who can answer. `devsandbox npm install
-// 2>build.log` is the case that matters: stdin is still a terminal, and testing
-// it alone puts the prompt in the log file and then blocks on it.
-func TestPromptIsInteractive_RequiresBothEnds(t *testing.T) {
-	tty, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
-	if err != nil {
-		t.Skipf("no pty available: %v", err)
-	}
-	defer tty.Close() //nolint:errcheck
-
-	// The pty master is a terminal on Linux but not on the BSD-derived systems
-	// where allocating the slave side takes platform-specific ioctls. The
-	// behavior under test is platform-independent, so skip rather than carry
-	// that.
-	if !term.IsTerminal(int(tty.Fd())) {
-		t.Skip("the pty master is not a terminal on this platform")
-	}
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	defer r.Close() //nolint:errcheck
-	defer w.Close() //nolint:errcheck
-
-	tests := []struct {
-		name string
-		in   *os.File
-		out  *os.File
-		want bool
-	}{
-		{name: "terminal on both", in: tty, out: tty, want: true},
-		{name: "stderr redirected", in: tty, out: w},
-		{name: "stdin redirected", in: r, out: tty},
-		{name: "neither", in: r, out: w},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := promptIsInteractive(tt.in, tt.out); got != tt.want {
-				t.Errorf("promptIsInteractive() = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }
 

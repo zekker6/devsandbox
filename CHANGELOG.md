@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A launch that redirects stderr no longer hangs on a prompt the user cannot see. Every devsandbox prompt asks on stderr and reads the answer from stdin, but only stdin was checked for a terminal - so `devsandbox claude 2>run.log` wrote the `.devsandbox.toml` trust question, the mise trust question or the new startup warning question into the log file and then waited on it forever. All three now require a terminal on both ends and otherwise take their non-interactive path: the local config is skipped, mise trust is left to `mise trust`, and the warnings are printed before the sandbox starts.
 - Answering an interactive prompt can no longer consume input typed after the answer. The `.devsandbox.toml` trust prompt and the startup warning prompt now read one line without buffering ahead, so on a terminal a parent process left in raw mode the workload still receives its first input.
 - Fixed a plain bwrap launch logging `session.start` with no matching `session.end`, which left every such session looking unfinished in the audit trail. Exit status and signal propagation are unchanged. See [Resource Limits](docs/sandboxing.md#resource-limits).
 

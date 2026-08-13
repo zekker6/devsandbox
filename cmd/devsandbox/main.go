@@ -25,6 +25,7 @@ import (
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/portforward"
+	"devsandbox/internal/prompt"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/mounts"
@@ -1117,7 +1118,8 @@ func ensureMiseTrust(projectDir string) error {
 		notice.Info("  untrusted: %s", path)
 	}
 
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	// Asked on stderr and answered on stdin, so both ends need a human.
+	if !prompt.IsInteractive(os.Stdin, os.Stderr) {
 		notice.Warn("run 'mise trust' in the project directory to fix this")
 		return nil
 	}

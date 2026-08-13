@@ -1310,7 +1310,7 @@ devsandbox trust remove
 devsandbox trust remove /path/to/project
 ```
 
-**Non-interactive mode:** When running non-interactively (e.g., via an AI assistant or in CI), untrusted local configs are skipped with a warning. Pre-approve configs with `devsandbox trust add` before running in non-interactive mode.
+**Non-interactive mode:** When running non-interactively (e.g., via an AI assistant or in CI), untrusted local configs are skipped with a warning. Pre-approve configs with `devsandbox trust add` before running in non-interactive mode. The prompt is asked on stderr and answered on stdin, so a launch that redirects either one counts as non-interactive rather than blocking on a question nobody can see.
 
 ### Config Priority
 
