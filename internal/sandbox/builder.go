@@ -485,7 +485,7 @@ func (b *Builder) AddTools() *Builder {
 	// panic.
 	sharedTmpApplied := false
 	for _, tool := range tools.Available(home) {
-		toolMountMode := b.getToolMountMode(tool.Name())
+		toolMountMode := config.ToolMountMode(b.cfg.ToolsConfig, tool.Name())
 		if toolMountMode == "disabled" {
 			continue // Skip all bindings for this tool
 		}
@@ -516,32 +516,7 @@ func (b *Builder) configureTool(tool tools.ToolWithConfig, toolName string) {
 		LaunchedAgent:    b.cfg.LaunchedAgent,
 	}
 
-	// Get tool's config section from ToolsConfig
-	var toolCfg map[string]any
-	if b.cfg.ToolsConfig != nil {
-		if section, ok := b.cfg.ToolsConfig[toolName]; ok {
-			toolCfg, _ = section.(map[string]any)
-		}
-	}
-
-	tool.Configure(globalCfg, toolCfg)
-}
-
-// getToolMountMode extracts mount_mode from the tool's config section.
-func (b *Builder) getToolMountMode(toolName string) string {
-	if b.cfg.ToolsConfig == nil {
-		return ""
-	}
-	section, ok := b.cfg.ToolsConfig[toolName]
-	if !ok {
-		return ""
-	}
-	toolCfg, ok := section.(map[string]any)
-	if !ok {
-		return ""
-	}
-	mode, _ := toolCfg["mount_mode"].(string)
-	return mode
+	tool.Configure(globalCfg, config.ToolSection(b.cfg.ToolsConfig, toolName))
 }
 
 // applyBinding applies a single binding based on its type.

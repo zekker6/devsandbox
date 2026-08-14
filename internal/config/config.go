@@ -453,21 +453,37 @@ func (o OverlayConfig) GetDefault() string {
 	return o.Default
 }
 
-// GetToolConfig returns the configuration map for a specific tool.
-// Returns nil if the tool has no configuration.
-func (c *Config) GetToolConfig(toolName string) map[string]any {
-	if c.Tools == nil {
-		return nil
-	}
-	toolCfg, ok := c.Tools[toolName]
+// ToolSection returns the `[tools.<name>]` section of an untyped tools map, or
+// nil when the tool has no section or the section is not a table.
+//
+// It takes the map rather than a *Config receiver because both isolation
+// backends carry the tools map as a bare field. One definition means a change
+// to how a tool section resolves cannot reach one backend and miss the other,
+// which would give the same config file different mount behavior per backend.
+func ToolSection(toolsConfig map[string]any, toolName string) map[string]any {
+	section, ok := toolsConfig[toolName]
 	if !ok {
 		return nil
 	}
-	m, ok := toolCfg.(map[string]any)
+	m, ok := section.(map[string]any)
 	if !ok {
 		return nil
 	}
 	return m
+}
+
+// ToolMountMode returns the tool's mount_mode, or "" when the section is
+// absent or the key is unset or not a string. An empty result falls through to
+// the global default at ResolveBindingType.
+func ToolMountMode(toolsConfig map[string]any, toolName string) string {
+	mode, _ := ToolSection(toolsConfig, toolName)["mount_mode"].(string)
+	return mode
+}
+
+// GetToolConfig returns the configuration map for a specific tool.
+// Returns nil if the tool has no configuration.
+func (c *Config) GetToolConfig(toolName string) map[string]any {
+	return ToolSection(c.Tools, toolName)
 }
 
 // LoggingConfig contains remote logging configuration.

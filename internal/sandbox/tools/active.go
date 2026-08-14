@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+
+	"devsandbox/internal/config"
 )
 
 // ActiveToolsConfig contains configuration for running active tools.
@@ -78,13 +80,7 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 				GitRepoRoot:      r.cfg.GitRepoRoot,
 				LaunchedAgent:    r.cfg.LaunchedAgent,
 			}
-			var toolCfg map[string]any
-			if r.cfg.ToolsConfig != nil {
-				if section, ok := r.cfg.ToolsConfig[tool.Name()]; ok {
-					toolCfg, _ = section.(map[string]any)
-				}
-			}
-			configurable.Configure(globalCfg, toolCfg)
+			configurable.Configure(globalCfg, config.ToolSection(r.cfg.ToolsConfig, tool.Name()))
 		}
 
 		// Set logger if tool supports it

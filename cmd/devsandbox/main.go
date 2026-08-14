@@ -891,13 +891,7 @@ func printToolMounts(cfg *sandbox.Config) {
 	}
 	for _, tool := range tools.Available(homeDir) {
 		if configurable, ok := tool.(tools.ToolWithConfig); ok {
-			var toolCfg map[string]any
-			if cfg.ToolsConfig != nil {
-				if section, ok := cfg.ToolsConfig[tool.Name()]; ok {
-					toolCfg, _ = section.(map[string]any)
-				}
-			}
-			configurable.Configure(globalCfg, toolCfg)
+			configurable.Configure(globalCfg, config.ToolSection(cfg.ToolsConfig, tool.Name()))
 		}
 	}
 

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/egress"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
@@ -1586,7 +1587,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 	for _, tool := range tools.Available(cfg.HomeDir) {
 		// Configure tool if it supports configuration
 		if configurable, ok := tool.(tools.ToolWithConfig); ok {
-			toolCfg := getToolConfig(cfg.ToolsConfig, tool.Name())
+			toolCfg := config.ToolSection(cfg.ToolsConfig, tool.Name())
 			configurable.Configure(globalCfg, toolCfg)
 		}
 
@@ -1598,7 +1599,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		}
 
 		// Skip disabled tools
-		toolMountMode := getToolMountMode(cfg.ToolsConfig, tool.Name())
+		toolMountMode := config.ToolMountMode(cfg.ToolsConfig, tool.Name())
 		if toolMountMode == "disabled" {
 			continue
 		}
@@ -1707,29 +1708,6 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 	}
 
 	return mounts, envVars, manifest
-}
-
-// getToolConfig extracts tool-specific config from the tools map.
-func getToolConfig(toolsConfig map[string]any, toolName string) map[string]any {
-	if toolsConfig == nil {
-		return nil
-	}
-	if cfg, ok := toolsConfig[toolName]; ok {
-		if m, ok := cfg.(map[string]any); ok {
-			return m
-		}
-	}
-	return nil
-}
-
-// getToolMountMode extracts mount_mode from the tool's config section.
-func getToolMountMode(toolsConfig map[string]any, toolName string) string {
-	cfg := getToolConfig(toolsConfig, toolName)
-	if cfg == nil {
-		return ""
-	}
-	mode, _ := cfg["mount_mode"].(string)
-	return mode
 }
 
 // containerName generates a Docker container name for the sandbox.
