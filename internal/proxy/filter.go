@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -73,11 +74,23 @@ func compileRule(rule FilterRule) (compiledRule, error) {
 // compileScopedPattern compiles a pattern for the given scope. Host-scoped
 // exact and glob patterns are canonicalized the same way NormalizeHost
 // canonicalizes the request host, so both sides of the comparison agree and a
-// rule written "BLOCKED.Example.com." still matches. Regex patterns are left
-// verbatim - case sensitivity there is the author's to express with (?i).
+// rule written "BLOCKED.Example.com." still matches.
+//
+// A host-scoped regex cannot be rewritten that way - lowercasing a pattern would
+// corrupt its metacharacters - so it is compiled case-insensitively instead.
+// Leaving it verbatim is what a rule author would expect only if the match
+// target were verbatim too, and it is not: NormalizeHost lowercases every host
+// before matching, so `^API\.example\.com$` could never match again once
+// canonicalization landed, silently retiring an existing block rule on upgrade.
+// Case-insensitive is also what DNS means, and an author who genuinely wants
+// case sensitivity can still say so with an inner (?-i).
 func compileScopedPattern(pattern string, t PatternType, scope FilterScope) (func(string) bool, error) {
-	if scope == FilterScopeHost && t != PatternTypeRegex {
-		pattern = canonicalizeHost(pattern)
+	if scope == FilterScopeHost {
+		if t == PatternTypeRegex {
+			pattern = "(?i)" + pattern
+		} else {
+			pattern = canonicalizeHost(pattern)
+		}
 	}
 	return compilePattern(pattern, t)
 }
@@ -225,11 +238,42 @@ func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) stri
 		return req.URL.Path
 
 	case FilterScopeURL:
-		return req.URL.String()
+		return canonicalizeURL(req.URL)
 
 	default:
 		return NormalizeHost(req.Host)
 	}
+}
+
+// canonicalizeURL renders a URL with its authority canonicalized the way
+// NormalizeHost canonicalizes a host, and its path left exactly as sent.
+//
+// url.Parse does not touch the authority's case, so a url-scoped rule matching
+// the raw string was evaded by asking for the same resource as
+// "https://API.EXAMPLE.COM/x" or "https://api.example.com./x". The path is the
+// case-sensitive half of a URL; the host half is not, and treating the whole
+// string as case-sensitive let the host half inherit the wrong rule.
+func canonicalizeURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	host := u.Hostname()
+	canon := canonicalizeHost(host)
+	if canon == host {
+		return u.String()
+	}
+
+	c := *u
+	switch port := u.Port(); {
+	case port != "":
+		c.Host = net.JoinHostPort(canon, port)
+	case strings.Contains(canon, ":"):
+		// Bare IPv6 literal: Hostname() dropped the brackets the authority needs.
+		c.Host = "[" + canon + "]"
+	default:
+		c.Host = canon
+	}
+	return c.String()
 }
 
 // NormalizeHost extracts the hostname without port, handling IPv6 addresses

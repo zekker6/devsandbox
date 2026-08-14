@@ -71,12 +71,15 @@ func (p *Proxy) handle(_ context.Context, conn net.Conn) {
 		return
 	}
 	d := p.filter.Decide(payload)
+	// %q on the command name: it comes off the socket, so a denial for an
+	// unsupported command would otherwise write the sandbox's own newlines and
+	// escape sequences into the log file and on to remote receivers.
 	if !d.Allow {
-		p.logInf("deny cmd=%s reason=%s", d.Cmd, d.Reason)
+		p.logInf("deny cmd=%q reason=%s", d.Cmd, d.Reason)
 		_ = WriteFrame(conn, denyResponse(d.Reason))
 		return
 	}
-	p.logInf("allow cmd=%s reason=%s", d.Cmd, d.Reason)
+	p.logInf("allow cmd=%q reason=%s", d.Cmd, d.Reason)
 	p.forward(conn, payload, d)
 }
 
@@ -113,10 +116,16 @@ func (p *Proxy) forward(client net.Conn, payload []byte, d Decision) {
 func (p *Proxy) postProcessResponse(d Decision, resp []byte) []byte {
 	switch d.Cmd {
 	case "launch":
-		if id, err := ExtractLaunchedWindowID(resp); err == nil {
-			p.owned.Add(id)
-			p.logInf("track owned id=%d", id)
+		id, err := ExtractLaunchedWindowID(resp)
+		if err != nil {
+			// Not fatal - the window exists either way - but it never enters
+			// OwnedSet, so every later owned command on it is denied. Silence
+			// here left that with no record to explain it.
+			p.logErr("track launched window: %v", err)
+			return resp
 		}
+		p.owned.Add(id)
+		p.logInf("track owned id=%d", id)
 	case "ls":
 		// Fail closed: the unfiltered body is every OS window, tab, title, cwd,
 		// foreground cmdline and per-window env on the host.

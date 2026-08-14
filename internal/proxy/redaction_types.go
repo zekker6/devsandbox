@@ -3,6 +3,8 @@ package proxy
 import (
 	"fmt"
 	"regexp"
+
+	"devsandbox/internal/config"
 )
 
 // RedactionAction represents the action to take when a secret is detected.
@@ -25,6 +27,9 @@ type RedactionConfig struct {
 	DefaultAction RedactionAction `toml:"default_action"`
 	// Rules is the list of redaction rules.
 	Rules []RedactionRule `toml:"rules"`
+	// MaxScanBytes bounds the request body the scan buffers before deciding.
+	// 0 → config.DefaultMaxRedactionScanBytes. Read through GetMaxScanBytes.
+	MaxScanBytes int `toml:"max_scan_bytes"`
 }
 
 // IsEnabled returns true if redaction scanning is enabled.
@@ -33,6 +38,15 @@ func (c *RedactionConfig) IsEnabled() bool {
 		return false
 	}
 	return *c.Enabled
+}
+
+// GetMaxScanBytes returns the body scan limit, defaulting to
+// config.DefaultMaxRedactionScanBytes when unset or non-positive.
+func (c *RedactionConfig) GetMaxScanBytes() int {
+	if c == nil || c.MaxScanBytes <= 0 {
+		return config.DefaultMaxRedactionScanBytes
+	}
+	return c.MaxScanBytes
 }
 
 // GetDefaultAction returns the default action, defaulting to block.

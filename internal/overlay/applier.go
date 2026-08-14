@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // ErrUnsafeDestination is returned when an operation's destination cannot be
@@ -41,16 +40,23 @@ func applyOne(op Operation) error {
 		if err := os.MkdirAll(filepath.Dir(op.HostPath), 0o755); err != nil {
 			return err
 		}
-		if err := reconcileDestination(op); err != nil {
-			return err
-		}
 		if op.IsSymlink {
+			if err := reconcileDestination(op); err != nil {
+				return err
+			}
 			return os.Symlink(op.LinkTarget, op.HostPath)
 		}
 		if op.IsDir {
-			return os.MkdirAll(op.HostPath, op.Mode)
+			if err := reconcileDestination(op); err != nil {
+				return err
+			}
+			// Perm() only, for the same reason copyFile strips them: the upper
+			// is sandbox-writable, so setgid/setuid/sticky there are bits the
+			// sandbox chose for a directory the host is about to own.
+			return os.MkdirAll(op.HostPath, op.Mode.Perm())
 		}
-		return copyFile(op.Source, op.HostPath, op.Mode, op.ModTime)
+		// The file arm reconciles inside copyFile, once the source is staged.
+		return copyFile(op)
 	}
 	return fmt.Errorf("unknown op kind: %v", op.Kind)
 }
@@ -151,10 +157,21 @@ func splitRoot(op Operation) (root, rel string, err error) {
 	return root, rel, nil
 }
 
-func copyFile(src, dst string, mode os.FileMode, mtime time.Time) (retErr error) {
-	// O_NOFOLLOW: the planner classified src with Lstat, so a symlink here
-	// means the upper changed between planning and application.
-	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+// copyFile stages op's source into a temporary file beside the destination and
+// only then puts it in place.
+//
+// The ordering is load-bearing. reconcileDestination removes a host *directory*
+// standing where this file has to go, and that removal is recursive and
+// irreversible — so it must not run until the replacement is known to exist. The
+// source is an upper the sandbox can rewrite between planning and application:
+// a file it chmods to 000 fails EACCES here, one it swaps for a symlink fails
+// ELOOP under O_NOFOLLOW, and a full or failing disk fails the copy. Reconciling
+// first turned every one of those into a deleted host directory with nothing
+// put back, on the first run and on each identical retry after it.
+func copyFile(op Operation) (retErr error) {
+	// O_NOFOLLOW: the planner classified the source with Lstat, so a symlink
+	// here means the upper changed between planning and application.
+	in, err := os.OpenFile(op.Source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
@@ -164,10 +181,10 @@ func copyFile(src, dst string, mode os.FileMode, mtime time.Time) (retErr error)
 		}
 	}()
 
-	// Write a fresh entry beside the destination and rename over it. dst is
-	// never opened, so a symlink sitting there is replaced rather than
-	// truncated and written through, and no reader sees a half-copied file.
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".devsandbox-migrate-*")
+	// Write a fresh entry beside the destination and rename over it. The
+	// destination is never opened, so a symlink sitting there is replaced rather
+	// than truncated and written through, and no reader sees a half-copied file.
+	tmp, err := os.CreateTemp(filepath.Dir(op.HostPath), ".devsandbox-migrate-*")
 	if err != nil {
 		return err
 	}
@@ -185,11 +202,19 @@ func copyFile(src, dst string, mode os.FileMode, mtime time.Time) (retErr error)
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmpName, mode); err != nil {
+	// Perm() only: the upper is sandbox-writable, so setuid/setgid/sticky there
+	// are bits the sandbox chose for a file the host is about to own.
+	if err := os.Chmod(tmpName, op.Mode.Perm()); err != nil {
 		return err
 	}
-	if err := os.Chtimes(tmpName, mtime, mtime); err != nil {
+	if err := os.Chtimes(tmpName, op.ModTime, op.ModTime); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, dst)
+
+	// Fully staged: now it is safe to clear a destination whose type rename
+	// cannot replace on its own.
+	if err := reconcileDestination(op); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, op.HostPath)
 }

@@ -2,11 +2,15 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
@@ -17,6 +21,12 @@ import (
 type RedactionEngine struct {
 	config        *RedactionConfig
 	compiledRules []compiledRedactionRule
+
+	// maxScanBytes and scanTimeout bound the body ReadScanBody buffers. Both
+	// are fields rather than constants so tests can drive the limits without
+	// moving megabytes or waiting out the real deadline.
+	maxScanBytes int
+	scanTimeout  time.Duration
 }
 
 type compiledRedactionRule struct {
@@ -38,7 +48,11 @@ func NewRedactionEngine(cfg *RedactionConfig, projectDir string) (*RedactionEngi
 		return nil, fmt.Errorf("invalid redaction config: %w", err)
 	}
 
-	engine := &RedactionEngine{config: cfg}
+	engine := &RedactionEngine{
+		config:       cfg,
+		maxScanBytes: cfg.GetMaxScanBytes(),
+		scanTimeout:  defaultRedactionScanTimeout,
+	}
 
 	// Pre-resolve env file values if any rule uses env_file_key
 	envFileValues := resolveEnvFileValues(cfg.Rules, projectDir)
@@ -83,6 +97,73 @@ func (e *RedactionEngine) IsEnabled() bool {
 	return e.config.IsEnabled() && len(e.compiledRules) > 0
 }
 
+// defaultRedactionScanTimeout bounds how long the redaction scan waits for a
+// request body. Unlike the log capture's deadline, passing this one cannot
+// release the request: the scan has no decision without the whole body, so the
+// request is blocked instead. The client is inside the sandbox and reaches the
+// proxy over loopback, so the only thing this refuses is a body the sandbox
+// itself is withholding.
+const defaultRedactionScanTimeout = 30 * time.Second
+
+// ErrRedactionBodyTooLarge reports a request body past the redaction scan
+// limit. It is a denial, not a degradation: forwarding on a prefix scan would
+// let a secret past the limit through a proxy the user configured to stop it.
+var ErrRedactionBodyTooLarge = errors.New("request body exceeds the redaction scan limit")
+
+// ErrRedactionBodyTimeout reports a request body that stopped arriving before
+// the scan could complete.
+var ErrRedactionBodyTimeout = errors.New("timed out reading the request body for the redaction scan")
+
+// ReadScanBody buffers the request body the scan needs, bounded in both bytes
+// and time, and leaves req.Body replaying what it read so the request stays
+// forwardable.
+//
+// It replaces an io.ReadAll: that read is unbounded, and the body it reads is
+// the request logger's replay reader, which waits on the capture before
+// yielding anything. A sandboxed client could hold a handler goroutine
+// indefinitely or grow host memory by the size of a body it chose - and the
+// proxy runs outside the sandbox's resource limits, so nothing else caps it.
+func (e *RedactionEngine) ReadScanBody(req *http.Request) ([]byte, error) {
+	if req.Body == nil {
+		return nil, nil
+	}
+
+	limit := e.maxScanBytes
+	type result struct {
+		body []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		// limit+1 tells a body that exactly fills the limit from one that
+		// exceeds it.
+		body, err := io.ReadAll(io.LimitReader(req.Body, int64(limit)+1))
+		done <- result{body: body, err: err}
+	}()
+
+	timer := time.NewTimer(e.scanTimeout)
+	defer timer.Stop()
+
+	// Leaving early abandons the read goroutine but does not leak it: net/http
+	// closes the request body once the handler returns the denial, which ends
+	// the read.
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, r.err
+		}
+		if len(r.body) > limit {
+			return nil, fmt.Errorf("%w of %d bytes", ErrRedactionBodyTooLarge, limit)
+		}
+		req.Body = io.NopCloser(bytes.NewReader(r.body))
+		return r.body, nil
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	case <-timer.C:
+		return nil, fmt.Errorf("%w after %s", ErrRedactionBodyTimeout, e.scanTimeout)
+	}
+}
+
 // MatchesValue checks if any compiled redaction rule would match the given value.
 // For source-based rules: checks if the value contains the rule's resolved secret,
 // which means the redaction rule's matchTarget would fire on this value in a request.
@@ -106,6 +187,18 @@ func (e *RedactionEngine) MatchesValue(value string) []string {
 		}
 	}
 	return names
+}
+
+// redactionReadBlockReason names why the scan refused a request, so the sandbox
+// sees which bound it hit - and, for the size bound, the key that raises it.
+func redactionReadBlockReason(err error) string {
+	switch {
+	case errors.Is(err, ErrRedactionBodyTooLarge):
+		return fmt.Sprintf("request blocked: %v; raise proxy.redaction.max_scan_bytes to scan bodies this large", err)
+	case errors.Is(err, ErrRedactionBodyTimeout):
+		return fmt.Sprintf("request blocked: %v", err)
+	}
+	return "failed to read request body for redaction scan"
 }
 
 // Scan checks a request for secrets and returns the result.

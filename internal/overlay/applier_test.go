@@ -570,3 +570,68 @@ func TestApply_CreatesDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestApply_UnreadableSourceLeavesHostDirectoryIntact pins the ordering inside
+// copyFile. reconcileDestination removes a host *directory* standing where a
+// file has to go, and that removal is recursive and irreversible - so it must
+// not run until the replacement exists. The upper is sandbox-writable and can
+// change between planning and application, and running the removal first turned
+// every such failure into a host directory deleted with nothing put back, on
+// the first run and identically on every retry.
+func TestApply_UnreadableSourceLeavesHostDirectoryIntact(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the mode bits this test relies on")
+	}
+
+	tmp := t.TempDir()
+	upper := filepath.Join(tmp, "upper")
+	host := filepath.Join(tmp, "host")
+
+	// The upper holds a regular file the planner classified as migratable, but
+	// which cannot be opened.
+	writeFile(t, filepath.Join(upper, "d"), "replacement")
+	if err := os.Chmod(filepath.Join(upper, "d"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// The host holds a directory with contents at the same name.
+	writeFile(t, filepath.Join(host, "d", "precious.txt"), "host data")
+
+	plan, err := BuildPlan([]UpperSource{{Kind: UpperPrimary, Path: upper, SandboxID: "s1"}}, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(plan); err == nil {
+		t.Fatal("Apply succeeded on an unreadable source, want error")
+	}
+
+	if _, err := os.Stat(filepath.Join(host, "d", "precious.txt")); err != nil {
+		t.Fatalf("host directory was destroyed before the source proved readable: %v", err)
+	}
+}
+
+// TestApply_FileOverHostDirectoryStillReplaces is the same shape with a
+// readable source, so the guard above cannot pass by disabling the replacement.
+func TestApply_FileOverHostDirectoryStillReplaces(t *testing.T) {
+	tmp := t.TempDir()
+	upper := filepath.Join(tmp, "upper")
+	host := filepath.Join(tmp, "host")
+
+	writeFile(t, filepath.Join(upper, "d"), "replacement")
+	writeFile(t, filepath.Join(host, "d", "old.txt"), "host data")
+
+	plan, err := BuildPlan([]UpperSource{{Kind: UpperPrimary, Path: upper, SandboxID: "s1"}}, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(host, "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "replacement" {
+		t.Errorf("host file = %q, want %q", got, "replacement")
+	}
+}

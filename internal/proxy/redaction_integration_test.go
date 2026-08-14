@@ -324,3 +324,73 @@ func TestRedactionIntegration_RedactSecretInHeader(t *testing.T) {
 		t.Errorf("upstream header missing redaction placeholder, got: %s", receivedHeader)
 	}
 }
+
+// TestRedactionIntegration_OversizedBodyBlocked drives the scan bound through
+// the whole proxy: a body the scan cannot take whole is refused with a reason
+// naming the key that raises the limit, and never reaches the upstream.
+func TestRedactionIntegration_OversizedBodyBlocked(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream was reached; the oversized body should have been blocked")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	env := setupRedactionTest(t, &RedactionConfig{
+		Enabled:       boolPtr(true),
+		DefaultAction: RedactionActionBlock,
+		Rules: []RedactionRule{
+			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},
+		},
+		MaxScanBytes: 1024,
+	})
+
+	resp, err := env.client.Post(upstream.URL+"/post", "application/octet-stream",
+		bytes.NewReader(bytes.Repeat([]byte("a"), 4096)))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("max_scan_bytes")) {
+		t.Errorf("response body = %q, want it to name proxy.redaction.max_scan_bytes", body)
+	}
+}
+
+// TestRedactionIntegration_BodyAtScanLimitForwarded is its counterweight: a
+// body inside the bound still reaches the upstream byte-for-byte.
+func TestRedactionIntegration_BodyAtScanLimitForwarded(t *testing.T) {
+	payload := bytes.Repeat([]byte("b"), 1024)
+
+	var received []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	env := setupRedactionTest(t, &RedactionConfig{
+		Enabled:       boolPtr(true),
+		DefaultAction: RedactionActionBlock,
+		Rules: []RedactionRule{
+			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},
+		},
+		MaxScanBytes: 1024,
+	})
+
+	resp, err := env.client.Post(upstream.URL+"/post", "application/octet-stream", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if !bytes.Equal(received, payload) {
+		t.Errorf("upstream received %d bytes, want %d", len(received), len(payload))
+	}
+}

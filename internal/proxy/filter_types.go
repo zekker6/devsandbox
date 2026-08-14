@@ -113,6 +113,25 @@ func (c *FilterConfig) GetAskTimeout() int {
 	return c.AskTimeout
 }
 
+// usesAskAction reports whether any decision this config can produce is "ask" -
+// the default action, or one carried by a single rule. Both need the ask
+// queue, and a rule-level ask without it is worse than no ask at all: the
+// request is allowed silently and logged as though it had been approved.
+func (c *FilterConfig) usesAskAction() bool {
+	if c == nil {
+		return false
+	}
+	if c.DefaultAction == FilterActionAsk {
+		return true
+	}
+	for _, rule := range c.Rules {
+		if rule.Action == FilterActionAsk {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate checks the filter configuration for errors.
 func (c *FilterConfig) Validate() error {
 	// Validate default action

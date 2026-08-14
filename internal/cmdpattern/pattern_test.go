@@ -1,6 +1,7 @@
 package cmdpattern
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -99,26 +100,29 @@ func TestMatchShellExec_RejectsShellMetacharacters(t *testing.T) {
 // TestMatchShellExecSentinel_AcceptsRevdiffLauncherShape exercises the exact
 // form revdiff's kitty launcher produces: single-quoted argv followed by
 // "; touch '<sentinel-path>'".
+// Each case carries the ResolvedBin the inner pattern would hold in production,
+// because argv[0] is matched exactly: an absolute path is accepted only when it
+// is the pinned one, and the bare spelling only when nothing is pinned.
 func TestMatchShellExecSentinel_AcceptsRevdiffLauncherShape(t *testing.T) {
-	inner := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
-	m := MatchShellExecSentinel(inner)
-
-	cases := []string{
-		`'/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc' '--staged'; touch '/tmp/revdiff-done-xyz'`,
-		`'revdiff' '--staged'; touch '/tmp/revdiff-done-1'`,
-		`'/home/user/.local/bin/revdiff' '--output=/tmp/out' 'HEAD~1'; touch '/home/user/.cache/devsandbox/tmp/revdiff-done-2'`,
+	cases := []struct{ bin, script string }{
+		{"/usr/local/bin/revdiff", `'/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc' '--staged'; touch '/tmp/revdiff-done-xyz'`},
+		{"", `'revdiff' '--staged'; touch '/tmp/revdiff-done-1'`},
+		{"/home/user/.local/bin/revdiff", `'/home/user/.local/bin/revdiff' '--output=/tmp/out' 'HEAD~1'; touch '/home/user/.cache/devsandbox/tmp/revdiff-done-2'`},
 	}
-	for _, script := range cases {
-		t.Run(script, func(t *testing.T) {
-			if !m([]string{"-c", script}) {
-				t.Errorf("expected accept for %q", script)
+	for _, tc := range cases {
+		t.Run(tc.script, func(t *testing.T) {
+			m := MatchShellExecSentinel(CommandPattern{Program: "revdiff", ResolvedBin: tc.bin, ArgsMatcher: MatchAny()})
+			if !m([]string{"-c", tc.script}) {
+				t.Errorf("expected accept for %q", tc.script)
 			}
 		})
 	}
 }
 
 func TestMatchShellExecSentinel_RejectsAttacks(t *testing.T) {
-	inner := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
+	// Pinned to the path the cases below use, so each rejection is decided by
+	// the script grammar rather than incidentally by the program pin.
+	inner := CommandPattern{Program: "revdiff", ResolvedBin: "/bin/revdiff", ArgsMatcher: MatchAny()}
 	m := MatchShellExecSentinel(inner)
 
 	rejects := []string{
@@ -162,27 +166,25 @@ func TestMatchShellExecSentinel_RejectsAttacks(t *testing.T) {
 // set on the caller's shell, the launcher prepends `/usr/bin/env KEY=VAL ...`
 // so the kitty-spawned overlay inherits the intended editor.
 func TestMatchShellExecEnvSentinel_AcceptsEnvWrappedRevdiffLauncherShape(t *testing.T) {
-	inner := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
-	m := MatchShellExecEnvSentinel(inner)
-
-	cases := []string{
-		`'/usr/bin/env' 'EDITOR=nvim' 'VISUAL=nvim' '/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc'; touch '/tmp/revdiff-done-xyz'`,
-		`'/usr/bin/env' 'EDITOR=nvim' 'revdiff' '--staged'; touch '/tmp/revdiff-done-1'`,
+	cases := []struct{ bin, script string }{
+		{"/usr/local/bin/revdiff", `'/usr/bin/env' 'EDITOR=nvim' 'VISUAL=nvim' '/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc'; touch '/tmp/revdiff-done-xyz'`},
+		{"", `'/usr/bin/env' 'EDITOR=nvim' 'revdiff' '--staged'; touch '/tmp/revdiff-done-1'`},
 		// env prefix with no KEY=VAL pairs is still accepted — the revdiff
 		// launcher always uses `env` when ENV_PREFIX is non-empty, but a future
 		// version could collapse to `env revdiff ...`. Accepting this costs
 		// nothing and keeps the matcher robust.
-		`'/usr/bin/env' 'revdiff' '--staged'; touch '/tmp/revdiff-done-3'`,
+		{"", `'/usr/bin/env' 'revdiff' '--staged'; touch '/tmp/revdiff-done-3'`},
 		// Actual launcher output (v0.8.0+): `/usr/bin/env` is left unquoted
 		// while every subsequent token is single-quoted. Must match.
-		`/usr/bin/env 'EDITOR=nvim' 'VISUAL=nvim' '/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc'; touch '/tmp/revdiff-done-xyz'`,
-		`/usr/bin/env 'EDITOR=nvim' 'revdiff' '--staged'; touch '/tmp/revdiff-done-4'`,
-		`/usr/bin/env 'revdiff' '--staged'; touch '/tmp/revdiff-done-5'`,
+		{"/usr/local/bin/revdiff", `/usr/bin/env 'EDITOR=nvim' 'VISUAL=nvim' '/usr/local/bin/revdiff' '--output=/tmp/revdiff-output-abc'; touch '/tmp/revdiff-done-xyz'`},
+		{"", `/usr/bin/env 'EDITOR=nvim' 'revdiff' '--staged'; touch '/tmp/revdiff-done-4'`},
+		{"", `/usr/bin/env 'revdiff' '--staged'; touch '/tmp/revdiff-done-5'`},
 	}
-	for _, script := range cases {
-		t.Run(script, func(t *testing.T) {
-			if !m([]string{"-c", script}) {
-				t.Errorf("expected accept for %q", script)
+	for _, tc := range cases {
+		t.Run(tc.script, func(t *testing.T) {
+			m := MatchShellExecEnvSentinel(CommandPattern{Program: "revdiff", ResolvedBin: tc.bin, ArgsMatcher: MatchAny()})
+			if !m([]string{"-c", tc.script}) {
+				t.Errorf("expected accept for %q", tc.script)
 			}
 		})
 	}
@@ -285,13 +287,16 @@ func TestMatchShellExecEnvSentinel_RejectsEnvValues(t *testing.T) {
 }
 
 // TestMatchShellExecEnvSentinel_AcceptsHostResolvedEditorPath is the
-// counterweight: an absolute EDITOR that resolves to the very file the host's
-// own PATH lookup yields is the legitimate case and must survive.
+// counterweight: an absolute EDITOR naming a path the host's own PATH lookup
+// yields is the legitimate case and must survive. The host's own setting is
+// what makes an editor outside the built-in list acceptable, so it stands in
+// for one here - no particular editor is installed on every test machine.
 func TestMatchShellExecEnvSentinel_AcceptsHostResolvedEditorPath(t *testing.T) {
 	bin, err := ResolveProgram("sh")
 	if err != nil {
 		t.Skipf("sh not resolvable on this host: %v", err)
 	}
+	t.Setenv("EDITOR", bin)
 	inner := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
 	m := MatchShellExecEnvSentinel(inner)
 
@@ -306,6 +311,51 @@ func TestMatchShellExecEnvSentinel_AcceptsHostResolvedEditorPath(t *testing.T) {
 		if !m([]string{"-c", script}) {
 			t.Errorf("expected accept for %q", script)
 		}
+	}
+}
+
+// TestMatchShellExecEnvSentinel_RejectsInterpreterEditor covers the gap the
+// PATH resolution alone leaves: the host runs `$EDITOR <file>` on a file in the
+// project tree, which is bind-mounted read-write, so an interpreter turns that
+// file into the program. Resolving the name only decides which host binary
+// opens the sandbox's file, not whether it executes it.
+func TestMatchShellExecEnvSentinel_RejectsInterpreterEditor(t *testing.T) {
+	// A host EDITOR of its own must not widen the check for other names.
+	t.Setenv("EDITOR", "nvim")
+	t.Setenv("VISUAL", "")
+	inner := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
+	m := MatchShellExecEnvSentinel(inner)
+
+	for _, value := range []string{"sh", "bash", "python3", "perl", "awk", "node", "env", "xargs"} {
+		script := `/usr/bin/env 'EDITOR=` + value + `' 'revdiff' '--staged'; touch '/tmp/revdiff-done-x'`
+		if m([]string{"-c", script}) {
+			t.Errorf("expected reject for EDITOR=%s", value)
+		}
+	}
+}
+
+// TestMatchShellExecEnvSentinel_RejectsSymlinkedEditorPath pins the swap
+// window: resolving the sandbox's own path first accepts a symlink pointed at
+// the real editor, and the sandbox repoints it before the host execs. Both
+// accepted paths are derived on the host, so a path under a directory the
+// sandbox writes through is refused whatever it currently points at.
+func TestMatchShellExecEnvSentinel_RejectsSymlinkedEditorPath(t *testing.T) {
+	bin, err := ResolveProgram("sh")
+	if err != nil {
+		t.Skipf("sh not resolvable on this host: %v", err)
+	}
+	t.Setenv("EDITOR", bin)
+
+	planted := filepath.Join(t.TempDir(), filepath.Base(bin))
+	if err := os.Symlink(bin, planted); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	inner := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
+	m := MatchShellExecEnvSentinel(inner)
+	script := `/usr/bin/env 'EDITOR=` + planted + `' 'revdiff' '--staged'; touch '/tmp/revdiff-done-x'`
+	if m([]string{"-c", script}) {
+		t.Errorf("accepted a sandbox-writable symlink to the real editor: %s", planted)
 	}
 }
 
@@ -335,8 +385,8 @@ func TestPatternMatchesArgv(t *testing.T) {
 	if !p.MatchesArgv([]string{"revdiff", "a", "b"}) {
 		t.Error("expected program-only match")
 	}
-	if !p.MatchesArgv([]string{"/usr/local/bin/revdiff", "a"}) {
-		t.Error("expected path-resolves-to-basename match")
+	if p.MatchesArgv([]string{"/usr/local/bin/revdiff", "a"}) {
+		t.Error("a path whose basename matches Program must not match")
 	}
 	if p.MatchesArgv([]string{"revdiffx", "a"}) {
 		t.Error("unrelated program should not match")
@@ -390,8 +440,11 @@ func TestCommandPatternRejectBeatsEverything(t *testing.T) {
 }
 
 func TestCommandPatternRejectPrefixIsSegmentAware(t *testing.T) {
+	// ResolvedBin points into the sibling tree, so the only thing separating
+	// the accept case from the reject cases is how Reject compares segments.
 	p := CommandPattern{
 		Program:     "revdiff",
+		ResolvedBin: "/a/bc/revdiff",
 		Reject:      []string{"/a/b"},
 		ArgsMatcher: MatchAny(),
 	}
@@ -408,19 +461,50 @@ func TestCommandPatternRejectPrefixIsSegmentAware(t *testing.T) {
 	}
 }
 
-// TestCommandPatternLegacyBasenameUnchanged pins the pre-existing behavior for
-// patterns that set no ResolvedBin, so extracting this package does not
-// silently change the meaning of any existing caller.
-func TestCommandPatternLegacyBasenameUnchanged(t *testing.T) {
+// TestCommandPatternNoBasenameFallback pins the absence of basename matching.
+// It used to be the behavior for any pattern with no ResolvedBin, and it let a
+// sandbox satisfy the pattern with its own binary: the shared temp directory
+// and the revdiff IPC directory are bind-mounted read-write at an *identical*
+// path on host and sandbox, so `<shared tmp>/sh` is a path the sandbox writes
+// and the host then executes. argv[0] now has to be a spelling the host itself
+// resolves.
+func TestCommandPatternNoBasenameFallback(t *testing.T) {
 	p := CommandPattern{Program: "revdiff", ArgsMatcher: MatchAny()}
 
-	for _, arg0 := range []string{"revdiff", "/usr/bin/revdiff", "/anywhere/at/all/revdiff"} {
-		if !p.MatchesArgv([]string{arg0}) {
-			t.Errorf("MatchesArgv(%q) = false, want true (legacy basename mode)", arg0)
+	if !p.MatchesArgv([]string{"revdiff"}) {
+		t.Error(`MatchesArgv("revdiff") = false, want true (exact Program match)`)
+	}
+	for _, arg0 := range []string{
+		"/usr/bin/revdiff",
+		"/anywhere/at/all/revdiff",
+		"/home/u/.cache/devsandbox/tmp/a1b2c3d4e5f6/revdiff",
+		"./revdiff",
+		"/usr/bin/other",
+	} {
+		if p.MatchesArgv([]string{arg0}) {
+			t.Errorf("MatchesArgv(%q) = true, want false", arg0)
 		}
 	}
-	if p.MatchesArgv([]string{"/usr/bin/other"}) {
-		t.Error("MatchesArgv(/usr/bin/other) = true, want false")
+}
+
+// TestCommandPatternShellSpellings covers how the revdiff kitty patterns pin
+// the wrapping shell: by spelling, since a shell has no single resolved path
+// worth pinning. Only what the host resolves itself is accepted.
+func TestCommandPatternShellSpellings(t *testing.T) {
+	for _, spelling := range []string{"sh", "/bin/sh"} {
+		p := CommandPattern{Program: spelling, ArgsMatcher: MatchAny()}
+		if !p.MatchesArgv([]string{spelling, "-c", "true"}) {
+			t.Errorf("MatchesArgv(%q) = false, want true", spelling)
+		}
+		for _, planted := range []string{
+			"/home/u/.cache/devsandbox/tmp/a1b2c3d4e5f6/sh",
+			"/tmp/evil/sh",
+			"./sh",
+		} {
+			if p.MatchesArgv([]string{planted, "-c", "true"}) {
+				t.Errorf("pattern %q accepted sandbox-plantable %q, want rejected", spelling, planted)
+			}
+		}
 	}
 }
 

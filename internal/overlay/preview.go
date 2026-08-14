@@ -43,6 +43,11 @@ func FormatPreview(w io.Writer, plan Plan, applied bool) error {
 			if op.Kind != OpDelete {
 				sizeStr = fmt.Sprintf("  [%s]", formatBytes(op.Bytes))
 			}
+			// A `~` line otherwise reads as a file being rewritten, while the
+			// apply removes a host directory and everything under it.
+			if op.ReplacesHostDir {
+				extra += "  ← replaces a host directory: its contents are deleted"
+			}
 			if _, err := fmt.Fprintf(w, "  %s %s%s%s\n", mark, op.HostPath, sizeStr, extra); err != nil {
 				return err
 			}
@@ -55,6 +60,17 @@ func FormatPreview(w io.Writer, plan Plan, applied bool) error {
 	c, o, d, bytes := plan.Totals()
 	if _, err := fmt.Fprintf(w, "Summary: %d create, %d overwrite, %d delete, %s total.\n", c, o, d, formatBytes(bytes)); err != nil {
 		return err
+	}
+	if n := plan.DirReplacements(); n > 0 {
+		verb := "deletes"
+		if n > 1 {
+			verb = "delete"
+		}
+		if _, err := fmt.Fprintf(w,
+			"Warning: %d of those %s a host directory recursively to put a file or symlink in its place.\n",
+			n, verb); err != nil {
+			return err
+		}
 	}
 	if !applied {
 		if _, err := fmt.Fprintln(w, "Re-run with --apply to execute."); err != nil {

@@ -564,3 +564,103 @@ func TestRotatingFileWriter_CompressionOnRotation(t *testing.T) {
 		}
 	}
 }
+
+// TestRotatingFileWriter_ConcurrentWritersDoNotShareAFile covers two sessions
+// for one project: the proxy log directory is derived from the sandbox root, so
+// both writers land in it. Appending to one file made each count only its own
+// bytes toward MaxSize, and the first to rotate handed the shared file to the
+// compressor, which unlinked it while the other kept writing to the dead inode.
+func TestRotatingFileWriter_ConcurrentWritersDoNotShareAFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := RotatingFileWriterConfig{
+		Dir:           dir,
+		Prefix:        "requests",
+		Suffix:        ".jsonl",
+		ArchiveSuffix: ".jsonl.gz",
+		MaxSize:       1 << 20,
+		MaxFiles:      10,
+	}
+
+	first, err := NewRotatingFileWriter(cfg)
+	if err != nil {
+		t.Fatalf("first writer: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	if _, err := first.Write([]byte("first-session\n")); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+
+	second, err := NewRotatingFileWriter(cfg)
+	if err != nil {
+		t.Fatalf("second writer: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+	if _, err := second.Write([]byte("second-session\n")); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+
+	if first.CurrentPath() == second.CurrentPath() {
+		t.Fatalf("both writers took %s", first.CurrentPath())
+	}
+
+	// Rotating the first must not disturb the file the second still holds.
+	first.mu.Lock()
+	rotateErr := first.rotate()
+	first.mu.Unlock()
+	if rotateErr != nil {
+		t.Fatalf("rotate: %v", rotateErr)
+	}
+	first.compressWG.Wait()
+
+	held := second.CurrentPath()
+	if _, err := os.Stat(held); err != nil {
+		t.Fatalf("live writer's file was removed by the other's rotation: %v", err)
+	}
+	if _, err := second.Write([]byte("still-here\n")); err != nil {
+		t.Fatalf("second write after the other rotated: %v", err)
+	}
+	got, err := os.ReadFile(held)
+	if err != nil {
+		t.Fatalf("read live writer's file: %v", err)
+	}
+	for _, want := range []string{"second-session", "still-here"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("live writer's file lost %q, holds %q", want, got)
+		}
+	}
+}
+
+// A writer that exited leaves nothing holding its file, so the next session
+// reuses it rather than starting a new index on every launch.
+func TestRotatingFileWriter_ReusesTheFileOfAnExitedWriter(t *testing.T) {
+	dir := t.TempDir()
+	cfg := RotatingFileWriterConfig{
+		Dir:      dir,
+		Prefix:   "requests",
+		Suffix:   ".jsonl",
+		MaxSize:  1 << 20,
+		MaxFiles: 10,
+	}
+
+	first, err := NewRotatingFileWriter(cfg)
+	if err != nil {
+		t.Fatalf("first writer: %v", err)
+	}
+	if _, err := first.Write([]byte("before-exit\n")); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	path := first.CurrentPath()
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first writer: %v", err)
+	}
+
+	second, err := NewRotatingFileWriter(cfg)
+	if err != nil {
+		t.Fatalf("second writer: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	if second.CurrentPath() != path {
+		t.Errorf("second writer took %s, want the exited writer's %s", second.CurrentPath(), path)
+	}
+}

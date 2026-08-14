@@ -31,6 +31,19 @@ const (
 	// DefaultMaxLogBodyBytes is how much of a request or response body the
 	// proxy records in a log entry when proxy.max_log_body_bytes is unset.
 	DefaultMaxLogBodyBytes = 256 * 1024
+	// MaxLogBodyBytesLimit caps proxy.max_log_body_bytes. An entry carries a
+	// base64 request body and a response body on one line, and `devsandbox logs
+	// proxy` reads those lines with a fixed 8 MiB bound - so a limit set past
+	// this leaves the reader refusing records the writer produced, dropping the
+	// remainder of the file it meets one in. Two thirds of the reader's bound
+	// leaves room for base64 expansion and the entry's own fields.
+	MaxLogBodyBytesLimit = 2 * 1024 * 1024
+	// DefaultMaxRedactionScanBytes bounds the request body the redaction scan
+	// buffers when proxy.redaction.max_scan_bytes is unset. The scan needs the
+	// whole body before it can decide, so this is host memory a single request
+	// can hold - and the proxy runs outside the sandbox's resource limits. A
+	// body past the limit is blocked rather than forwarded on a partial scan.
+	DefaultMaxRedactionScanBytes = 10 * 1024 * 1024
 )
 
 // Config represents the devsandbox configuration file.
@@ -203,6 +216,21 @@ type ProxyRedactionConfig struct {
 
 	// Rules is the list of redaction rules.
 	Rules []ProxyRedactionRule `toml:"rules"`
+
+	// MaxScanBytes bounds how much of a request body the redaction scan
+	// buffers before deciding. A body past this is blocked, since a partial
+	// scan cannot prove the rest carries no secret.
+	// 0 → DefaultMaxRedactionScanBytes. Read through GetMaxScanBytes.
+	MaxScanBytes int `toml:"max_scan_bytes"`
+}
+
+// GetMaxScanBytes returns the redaction scan limit, defaulting to
+// DefaultMaxRedactionScanBytes when unset.
+func (c ProxyRedactionConfig) GetMaxScanBytes() int {
+	if c.MaxScanBytes <= 0 {
+		return DefaultMaxRedactionScanBytes
+	}
+	return c.MaxScanBytes
 }
 
 // ProxyRedactionRule defines a single redaction rule.
@@ -748,8 +776,14 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate log body capture limit (0 is a valid opt-out, negative is not)
-	if c.Proxy.MaxLogBodyBytes != nil && *c.Proxy.MaxLogBodyBytes < 0 {
-		return fmt.Errorf("proxy.max_log_body_bytes cannot be negative, got %d", *c.Proxy.MaxLogBodyBytes)
+	if c.Proxy.MaxLogBodyBytes != nil {
+		if *c.Proxy.MaxLogBodyBytes < 0 {
+			return fmt.Errorf("proxy.max_log_body_bytes cannot be negative, got %d", *c.Proxy.MaxLogBodyBytes)
+		}
+		if *c.Proxy.MaxLogBodyBytes > MaxLogBodyBytesLimit {
+			return fmt.Errorf("proxy.max_log_body_bytes cannot exceed %d bytes, got %d",
+				MaxLogBodyBytesLimit, *c.Proxy.MaxLogBodyBytes)
+		}
 	}
 
 	// Validate base path (no path traversal)
@@ -989,6 +1023,10 @@ func (c *Config) validateRedaction() error {
 	validActions := map[string]bool{"block": true, "redact": true, "log": true, "": true}
 	if !validActions[r.DefaultAction] {
 		return fmt.Errorf("proxy.redaction: invalid default_action %q (must be block, redact, or log)", r.DefaultAction)
+	}
+
+	if r.MaxScanBytes < 0 {
+		return fmt.Errorf("proxy.redaction.max_scan_bytes must be >= 0, got %d", r.MaxScanBytes)
 	}
 
 	for i, rule := range r.Rules {

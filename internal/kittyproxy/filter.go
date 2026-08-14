@@ -143,18 +143,23 @@ func (f *Filter) decideLaunch(c command) Decision {
 	if len(p.Args) == 0 {
 		return Decision{Cmd: c.Cmd, Reason: "launch with no args (would open default shell) is denied"}
 	}
+	// %q throughout: Reason reaches logging.ErrorLogger, whose records are plain
+	// newline-terminated text, and every one of these values is sandbox-chosen
+	// argv. A newline in argv[0] would otherwise forge whole log lines - including
+	// counterfeit `allow cmd=…` records - in the audit trail of the component
+	// deciding what the host runs.
 	for _, pat := range f.patterns {
 		if pat.MatchesArgv(p.Args) {
 			return Decision{
 				Allow:   true,
 				Cmd:     c.Cmd,
 				Program: p.Args[0],
-				Reason:  fmt.Sprintf("launch %s program=%s", p.Type, p.Args[0]),
+				Reason:  fmt.Sprintf("launch %q program=%q", p.Type, p.Args[0]),
 			}
 		}
 	}
 	return Decision{Cmd: c.Cmd, Program: p.Args[0],
-		Reason: fmt.Sprintf("no launch pattern matched program=%s args=%v", p.Args[0], p.Args[1:])}
+		Reason: fmt.Sprintf("no launch pattern matched program=%q args=%q", p.Args[0], p.Args[1:])}
 }
 
 // decideLs gates `ls` on the capability and on the response staying filterable:
@@ -170,6 +175,14 @@ func (f *Filter) decideLs(c command) Decision {
 	}
 	if p.OutputFormat != "" && p.OutputFormat != "json" {
 		return Decision{Cmd: c.Cmd, Reason: fmt.Sprintf("ls output_format=%q forbidden (response would not be filterable)", p.OutputFormat)}
+	}
+	// FilterLsResponse narrows *which* windows come back; it does not narrow
+	// what each surviving window discloses. `kitty @ ls --all-env-vars` makes
+	// even an owned window report the environment kitty launched it with, which
+	// is the host user's - the environment devsandbox goes out of its way not to
+	// pass in. Declaring the field and never reading it is what let it through.
+	if p.AllEnvVars {
+		return Decision{Cmd: c.Cmd, Reason: "ls all_env_vars forbidden (would disclose the host environment of an owned window)"}
 	}
 	return Decision{Allow: true, Cmd: c.Cmd, Reason: "ls (response will be filtered to owned ids)"}
 }

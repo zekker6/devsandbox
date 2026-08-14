@@ -1,12 +1,18 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // newTestInjector constructs a *GenericInjector for redaction conflict tests.
@@ -739,5 +745,142 @@ func TestValidateCredentialRedactionConflicts_DisabledInjectorSkipped(t *testing
 	err = validateCredentialRedactionConflicts([]CredentialInjector{injector}, engine)
 	if err != nil {
 		t.Errorf("expected no error for disabled injector, got: %v", err)
+	}
+}
+
+// newScanEngine builds an enabled engine with the scan bounds a test needs.
+func newScanEngine(t *testing.T, limit int, timeout time.Duration) *RedactionEngine {
+	t.Helper()
+	engine, err := NewRedactionEngine(&RedactionConfig{
+		Enabled:       boolPtr(true),
+		DefaultAction: RedactionActionBlock,
+		Rules: []RedactionRule{
+			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},
+		},
+		MaxScanBytes: limit,
+	}, "")
+	if err != nil {
+		t.Fatalf("NewRedactionEngine: %v", err)
+	}
+	engine.scanTimeout = timeout
+	return engine
+}
+
+func TestReadScanBody_BoundsAndReplays(t *testing.T) {
+	engine := newScanEngine(t, 16, time.Second)
+
+	body := strings.Repeat("a", 16)
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", strings.NewReader(body))
+	got, err := engine.ReadScanBody(req)
+	if err != nil {
+		t.Fatalf("ReadScanBody: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("scanned %q, want %q", got, body)
+	}
+	forwarded, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read replayed body: %v", err)
+	}
+	if string(forwarded) != body {
+		t.Errorf("forwarded %q, want %q", forwarded, body)
+	}
+}
+
+// TestReadScanBody_RefusesBodyPastLimit pins the fail-closed half: a body the
+// scan cannot take whole is denied, not forwarded on a prefix scan.
+func TestReadScanBody_RefusesBodyPastLimit(t *testing.T) {
+	engine := newScanEngine(t, 16, time.Second)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", strings.NewReader(strings.Repeat("a", 17)))
+	if _, err := engine.ReadScanBody(req); !errors.Is(err, ErrRedactionBodyTooLarge) {
+		t.Fatalf("ReadScanBody error = %v, want ErrRedactionBodyTooLarge", err)
+	}
+}
+
+// stalledBody yields nothing until it is closed - a client that sent headers
+// and then went quiet without disconnecting.
+type stalledBody struct {
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *stalledBody) Read([]byte) (int, error) {
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *stalledBody) Close() error {
+	b.once.Do(func() { close(b.release) })
+	return nil
+}
+
+// TestReadScanBody_StalledBodyHitsDeadline covers the other half: an unbounded
+// io.ReadAll here held the handler goroutine for as long as the sandbox liked.
+func TestReadScanBody_StalledBodyHitsDeadline(t *testing.T) {
+	engine := newScanEngine(t, 1024, 50*time.Millisecond)
+
+	body := &stalledBody{release: make(chan struct{})}
+	t.Cleanup(func() { _ = body.Close() })
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", body)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := engine.ReadScanBody(req)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRedactionBodyTimeout) {
+			t.Fatalf("ReadScanBody error = %v, want ErrRedactionBodyTimeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadScanBody did not return: the stalled body still holds the handler")
+	}
+}
+
+// TestReadScanBody_CanceledRequestReleases covers the client that goes away
+// mid-body: the scan must not wait out its full deadline for a dead connection.
+func TestReadScanBody_CanceledRequestReleases(t *testing.T) {
+	engine := newScanEngine(t, 1024, time.Minute)
+
+	body := &stalledBody{release: make(chan struct{})}
+	t.Cleanup(func() { _ = body.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", body).WithContext(ctx)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := engine.ReadScanBody(req)
+		done <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReadScanBody error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadScanBody did not return after the request was canceled")
+	}
+}
+
+// TestReadScanBody_ScansPastLogCapture is the counterweight to the bound: the
+// scan still sees the whole body, not the bounded prefix the request logger
+// captured, so a secret past that prefix is still caught.
+func TestReadScanBody_ScansPastLogCapture(t *testing.T) {
+	engine := newScanEngine(t, 1<<20, time.Second)
+
+	body := strings.Repeat("x", 300*1024) + "super-secret-value-123"
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", strings.NewReader(body))
+	scanned, err := engine.ReadScanBody(req)
+	if err != nil {
+		t.Fatalf("ReadScanBody: %v", err)
+	}
+	result := engine.Scan(req, scanned)
+	if !result.Matched {
+		t.Fatal("secret past the log-capture prefix was not detected")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -127,6 +128,17 @@ func (w *RotatingFileWriter) openOrRotate() error {
 			return w.rotate()
 		}
 
+		// Concurrent sessions for one project share this directory, so the
+		// newest file may belong to a writer that is still running. Appending
+		// alongside it means each writer counts only its own bytes toward
+		// MaxSize, and the first to rotate hands the shared file to the
+		// compressor, which unlinks it while the other keeps writing to the
+		// dead inode - its entries are lost and every Write still succeeds.
+		if !claimFile(file) {
+			_ = file.Close()
+			return w.rotate()
+		}
+
 		w.file = file
 		w.bufWriter = bufio.NewWriter(file)
 		w.written = lastSize
@@ -135,6 +147,31 @@ func (w *RotatingFileWriter) openOrRotate() error {
 	}
 
 	return w.rotate()
+}
+
+// claimFile takes the writer's exclusive hold on an active log file, reporting
+// false when another writer holds it. The lock lives on the open file and is
+// released when it is closed - on rotation, on Close, or by the kernel if the
+// process dies, so a crashed session's file is reusable immediately.
+func claimFile(f *os.File) bool {
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil
+}
+
+// claimedByAnotherWriter reports whether a live writer holds path. Used to keep
+// pruning off a file that is still being appended to; an unopenable path is
+// treated as free, since it is not a file anyone is writing.
+func claimedByAnotherWriter(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return true
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
 }
 
 func (w *RotatingFileWriter) rotate() error {
@@ -177,6 +214,22 @@ func (w *RotatingFileWriter) rotate() error {
 
 		f, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
+			// O_EXCL proves this writer created the file, not that it still
+			// holds it: between the create and the flock another session's
+			// openOrRotate can glob the new empty file, open it O_APPEND and win
+			// the claim. Losing that race means moving to the next index, not
+			// carrying on unclaimed - two writers on one file each count only
+			// their own bytes toward MaxSize, and the first to rotate hands it
+			// to startCompression, which unlinks it while the other writes to
+			// the dead inode with every Write still returning success.
+			//
+			// The file is left in place: it belongs to the writer that claimed
+			// it, and that writer is about to fill it.
+			if !claimFile(f) {
+				_ = f.Close()
+				index++
+				continue
+			}
 			file = f
 			break
 		}
@@ -373,8 +426,10 @@ func (w *RotatingFileWriter) pruneOldFiles() {
 		// skipping ahead, so pruning only ever drops the oldest run of files -
 		// taking a newer one while keeping this would leave a hole in the log.
 		// The rest goes on a later pass, or on the one Close runs once
-		// compression has finished.
-		if w.compressionOwns(matches[i]) {
+		// compression has finished. A file another session's writer still holds
+		// is left for the same reason: unlinking it would silently discard
+		// whatever that session logs from then on.
+		if w.compressionOwns(matches[i]) || claimedByAnotherWriter(matches[i]) {
 			break
 		}
 		_ = os.Remove(matches[i])

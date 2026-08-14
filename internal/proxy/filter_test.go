@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -738,4 +739,99 @@ func TestFilterEngine_ConcurrentReaders(t *testing.T) {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// TestHostRegexIsCaseInsensitive pins the fix for a rule silently retired by
+// host canonicalization. NormalizeHost lowercases every match target, so a
+// host-scoped regex written with any uppercase - which matched before
+// canonicalization landed - could never match again, turning an existing block
+// rule into a no-op on upgrade with no error and no log line.
+func TestHostRegexIsCaseInsensitive(t *testing.T) {
+	engine, err := NewFilterEngine(&FilterConfig{
+		DefaultAction: FilterActionAllow,
+		Rules: []FilterRule{
+			{Pattern: `^API\.Example\.com$`, Type: PatternTypeRegex, Scope: FilterScopeHost, Action: FilterActionBlock},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, host := range []string{"api.example.com", "API.EXAMPLE.COM:443", "Api.Example.Com.", "api.example.com:8080"} {
+		if got := engine.MatchHost(host).Action; got != FilterActionBlock {
+			t.Errorf("MatchHost(%q) = %q, want block", host, got)
+		}
+	}
+	if got := engine.MatchHost("other.example.com").Action; got != FilterActionAllow {
+		t.Errorf("MatchHost(other.example.com) = %q, want allow", got)
+	}
+}
+
+// TestURLScopeCanonicalizesAuthority pins the other half: url.Parse leaves the
+// authority's case alone, so a url-scoped rule matched against the raw string
+// was evaded by asking for the same resource in a different host spelling. The
+// path stays case-sensitive, which is the half of a URL that actually is.
+func TestURLScopeCanonicalizesAuthority(t *testing.T) {
+	engine, err := NewFilterEngine(&FilterConfig{
+		DefaultAction: FilterActionAllow,
+		Rules: []FilterRule{
+			{Pattern: "https://api.example.com/**", Type: PatternTypeGlob, Scope: FilterScopeURL, Action: FilterActionBlock},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, raw := range []string{
+		"https://api.example.com/secret",
+		"https://API.EXAMPLE.COM/secret",
+		"https://Api.Example.Com/secret",
+		"https://api.example.com./secret",
+	} {
+		req := httptest.NewRequest(http.MethodGet, raw, nil)
+		if got := engine.Match(req).Action; got != FilterActionBlock {
+			t.Errorf("Match(%q) = %q, want block", raw, got)
+		}
+	}
+
+	// A different host is still unaffected, and the path half stays literal.
+	req := httptest.NewRequest(http.MethodGet, "https://other.example.com/secret", nil)
+	if got := engine.Match(req).Action; got != FilterActionAllow {
+		t.Errorf("Match(other host) = %q, want allow", got)
+	}
+}
+
+// TestUsesAskAction pins what decides whether the ask queue gets built. Keying
+// it on the default action alone left `action = "ask"` on a rule with nothing to
+// ask: the request was allowed through unprompted while its log entry recorded
+// FilterAction="ask", so the audit trail asserted an approval nobody gave.
+func TestUsesAskAction(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *FilterConfig
+		want bool
+	}{
+		{"nil config", nil, false},
+		{"allow default, no rules", &FilterConfig{DefaultAction: FilterActionAllow}, false},
+		{"ask default", &FilterConfig{DefaultAction: FilterActionAsk}, true},
+		{"allow default, ask rule", &FilterConfig{
+			DefaultAction: FilterActionAllow,
+			Rules:         []FilterRule{{Pattern: "*.example.com", Action: FilterActionAsk}},
+		}, true},
+		{"block default, ask rule", &FilterConfig{
+			DefaultAction: FilterActionBlock,
+			Rules:         []FilterRule{{Pattern: "*.example.com", Action: FilterActionAsk}},
+		}, true},
+		{"block default, no ask rule", &FilterConfig{
+			DefaultAction: FilterActionBlock,
+			Rules:         []FilterRule{{Pattern: "*.example.com", Action: FilterActionAllow}},
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.usesAskAction(); got != tt.want {
+				t.Errorf("usesAskAction() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

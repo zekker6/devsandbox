@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -388,10 +389,17 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 	for i := len(files) - 1; i >= 0; i-- {
 		file := files[i]
 
-		fileEntries, err := readProxyLogFileWithLimit(file, last)
+		// Both readers return the entries they got alongside the error, so a
+		// file that stops short still contributes what it held rather than
+		// being dropped whole.
+		fileEntries, oversized, err := readProxyLogFileWithLimit(file, last)
+		if oversized > 0 {
+			notice.Warn("%s: %d record(s) past the %d MiB line limit were skipped",
+				filepath.Base(file), oversized, proxyLogMaxLineBytes>>20)
+		}
 		if err != nil {
-			notice.Warn("failed to read %s: %v", filepath.Base(file), err)
-			continue
+			notice.Warn("%s was read only up to the first unreadable record: %v",
+				filepath.Base(file), err)
 		}
 
 		// Prepend entries (since we're reading newest first)
@@ -492,7 +500,11 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, showBody
 	// Show last 10 entries first (like tail -f)
 	currentFile := findCurrentFile()
 	if currentFile != "" {
-		entries, err := readUncompressedProxyLogFile(currentFile, 10)
+		entries, oversized, err := readUncompressedProxyLogFile(currentFile, 10)
+		if oversized > 0 {
+			notice.Warn("%d recent record(s) past the %d MiB line limit were skipped",
+				oversized, proxyLogMaxLineBytes>>20)
+		}
 		if err != nil {
 			notice.Warn("failed to read recent entries: %v", err)
 		}
@@ -612,7 +624,7 @@ func tailProxyLogFile(path string, offset int64) ([]proxy.RequestLog, int64, err
 	return entries, offset + bytesConsumed, nil
 }
 
-func readProxyLogFileWithLimit(path string, limit int) ([]proxy.RequestLog, error) {
+func readProxyLogFileWithLimit(path string, limit int) ([]proxy.RequestLog, int, error) {
 	// Check if file is compressed
 	isCompressed := strings.HasSuffix(path, ".gz")
 
@@ -624,50 +636,87 @@ func readProxyLogFileWithLimit(path string, limit int) ([]proxy.RequestLog, erro
 
 // proxyLogMaxLineBytes bounds a single log line. An entry carries captured
 // request and response bodies, which the proxy bounds at max_log_body_bytes
-// (256KiB each by default), so bufio.Scanner's 64KiB default token size would
-// end the scan at the first ordinary large record.
+// (256KiB each by default, config.MaxLogBodyBytesLimit at most), so a smaller
+// bound would refuse ordinary large records.
 const proxyLogMaxLineBytes = 8 << 20
 
 // scanProxyLogEntries appends the newline-delimited entries read from r,
 // skipping any line that does not parse and keeping only the newest `limit`
-// entries when one is set.
+// entries when one is set. The second return is the number of records skipped
+// for being past proxyLogMaxLineBytes.
 //
 // It is deliberately line-based rather than json.Decoder-based: Decode latches
 // a *json.SyntaxError permanently and returns it without consuming input, so a
 // loop that skips-and-continues on decode errors never advances past corrupt
-// bytes. Here a corrupt record costs only itself.
-func scanProxyLogEntries(r io.Reader, limit int, entries []proxy.RequestLog) ([]proxy.RequestLog, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(nil, proxyLogMaxLineBytes)
+// bytes. Here a corrupt record costs only itself - and so does an oversized
+// one, which under bufio.Scanner ended the scan and took every later entry in
+// the file with it.
+func scanProxyLogEntries(r io.Reader, limit int, entries []proxy.RequestLog) ([]proxy.RequestLog, int, error) {
+	reader := bufio.NewReaderSize(r, 64<<10)
+	oversized := 0
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry proxy.RequestLog
-		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
-		}
-		entries = append(entries, entry)
+	for {
+		line, tooLong, err := readBoundedLine(reader, proxyLogMaxLineBytes)
+		if tooLong {
+			oversized++
+		} else if len(line) > 0 {
+			var entry proxy.RequestLog
+			if jsonErr := json.Unmarshal(line, &entry); jsonErr == nil {
+				entries = append(entries, entry)
 
-		// If limit is set, keep only the last N entries (sliding window)
-		if limit > 0 && len(entries) > limit*2 {
-			entries = entries[len(entries)-limit:]
+				// If limit is set, keep only the last N entries (sliding window)
+				if limit > 0 && len(entries) > limit*2 {
+					entries = entries[len(entries)-limit:]
+				}
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return entries, oversized, nil
+			}
+			return entries, oversized, err
 		}
 	}
-
-	return entries, scanner.Err()
 }
 
-func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, error) {
+// readBoundedLine reads one newline-terminated line, holding at most max bytes.
+// A longer line is consumed to its end and reported as oversized with no
+// content, so the reader resumes at the next record rather than at whatever
+// byte a fixed-size buffer stopped on.
+func readBoundedLine(r *bufio.Reader, max int) (line []byte, oversized bool, err error) {
+	for {
+		chunk, readErr := r.ReadSlice('\n')
+		if !oversized && len(line)+len(chunk) > max {
+			oversized = true
+			line = nil
+		}
+		if !oversized {
+			line = append(line, chunk...)
+		}
+		if readErr == nil {
+			return trimLineEnd(line), oversized, nil
+		}
+		if errors.Is(readErr, bufio.ErrBufferFull) {
+			continue
+		}
+		// io.EOF or a read error: what came before it is the final line.
+		return trimLineEnd(line), oversized, readErr
+	}
+}
+
+func trimLineEnd(line []byte) []byte {
+	line = bytes.TrimSuffix(line, []byte("\n"))
+	return bytes.TrimSuffix(line, []byte("\r"))
+}
+
+func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = f.Close() }()
 
-	entries, scanErr := scanProxyLogEntries(f, limit, nil)
+	entries, oversized, scanErr := scanProxyLogEntries(f, limit, nil)
 
 	// Final trim if limit is set
 	if limit > 0 && len(entries) > limit {
@@ -676,17 +725,32 @@ func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, e
 
 	// The entries read before the failure are still returned: the follow path
 	// prints them after warning.
-	return entries, scanErr
+	return entries, oversized, scanErr
 }
 
-func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, error) {
+// isBenignArchiveEnd reports whether err is the normal way a rotated archive
+// stops rather than a loss of records. A writer killed mid-rotation leaves its
+// last member without a trailer, and everything it flushed has already been
+// read by the time the reader notices.
+func isBenignArchiveEnd(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, gzip.ErrChecksum) ||
+		errors.Is(err, gzip.ErrHeader)
+}
+
+func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = f.Close() }()
 
-	var entries []proxy.RequestLog
+	var (
+		entries   []proxy.RequestLog
+		oversized int
+		readErr   error
+	)
 
 	// Handle concatenated gzip streams
 	for {
@@ -695,17 +759,31 @@ func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, err
 			break
 		}
 		if err != nil {
-			// Truncated or corrupted gzip stream - stop reading
+			// Truncated or corrupted gzip stream - stop reading.
+			if !isBenignArchiveEnd(err) {
+				readErr = fmt.Errorf("gzip stream: %w", err)
+			}
 			break
 		}
 
-		var scanErr error
-		entries, scanErr = scanProxyLogEntries(gz, limit, entries)
+		var (
+			scanErr     error
+			memberSkips int
+		)
+		entries, memberSkips, scanErr = scanProxyLogEntries(gz, limit, entries)
+		oversized += memberSkips
 		_ = gz.Close()
 
 		// A truncated or corrupt member ends the archive: the reader is already
 		// buffered past whatever follows, so there is no next member to find.
+		// An oversized record is not that - it is stepped over, counted and
+		// reported, and the rest of the member still reaches the caller.
 		if scanErr != nil {
+			// The error travels with the entries read so far rather than being
+			// dropped.
+			if !isBenignArchiveEnd(scanErr) {
+				readErr = scanErr
+			}
 			break
 		}
 	}
@@ -715,7 +793,7 @@ func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, err
 		entries = entries[len(entries)-limit:]
 	}
 
-	return entries, nil
+	return entries, oversized, readErr
 }
 
 func printProxyLogsJSON(entries []proxy.RequestLog, showBody bool) error {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -187,15 +188,20 @@ func (a helperAddr) Network() string { return "ns-dialer" }
 func (a helperAddr) String() string  { return a.label }
 
 // cappedBuffer is an io.Writer that retains up to max bytes and silently
-// drops the rest. Safe for concurrent Write (guarded by the subprocess
-// machinery writing serially).
+// drops the rest. os/exec writes into it from its own stderr-copying
+// goroutine while stderrError reads it on the caller's Read path, so the
+// mutex is load-bearing rather than defensive.
 type cappedBuffer struct {
+	mu   sync.Mutex
 	max  int
 	buf  []byte
 	full bool
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if b.full {
 		return len(p), nil
 	}
@@ -214,6 +220,9 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	return string(b.buf)
 }
 

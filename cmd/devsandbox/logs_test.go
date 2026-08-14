@@ -50,7 +50,7 @@ func readArchiveWithDeadline(t *testing.T, path string, limit int) []proxy.Reque
 	}
 	done := make(chan result, 1)
 	go func() {
-		entries, err := readCompressedProxyLogFile(path, limit)
+		entries, _, err := readCompressedProxyLogFile(path, limit)
 		done <- result{entries: entries, err: err}
 	}()
 
@@ -215,4 +215,127 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// oversizedEntry builds a JSON log line longer than proxyLogMaxLineBytes, which
+// is what a proxy.max_log_body_bytes near the reader's own bound produces.
+func oversizedEntry(t *testing.T) string {
+	t.Helper()
+	return `{"ts":"2026-08-14T10:00:02Z","method":"POST","request_body":"` +
+		strings.Repeat("A", proxyLogMaxLineBytes) + `"}`
+}
+
+// TestReadCompressedProxyLogFile_SkipsOversizedLine pins what an oversized
+// record costs: itself, and nothing else. Response headers are attacker-chosen
+// - the sandbox picks the upstream - so one such record used to end the scan
+// and drop every later entry in the archive.
+func TestReadCompressedProxyLogFile_SkipsOversizedLine(t *testing.T) {
+	path := writeArchive(t, writeGzipLines(t,
+		`{"ts":"2026-08-14T10:00:00Z","method":"GET"}`,
+		oversizedEntry(t),
+		`{"ts":"2026-08-14T10:00:03Z","method":"PUT"}`,
+	))
+
+	entries, oversized, err := readCompressedProxyLogFile(path, 0)
+	if err != nil {
+		t.Fatalf("readCompressedProxyLogFile: %v", err)
+	}
+	if oversized != 1 {
+		t.Errorf("oversized = %d, want 1 - the skip must be reported, not silent", oversized)
+	}
+	if got, want := methodsOf(entries), []string{"GET", "PUT"}; !equalStrings(got, want) {
+		t.Errorf("entries = %v, want %v - entries after an oversized record were dropped", got, want)
+	}
+}
+
+// The uncompressed reader is the other half of the same contract.
+func TestReadUncompressedProxyLogFile_SkipsOversizedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy-requests_0001.jsonl")
+	content := `{"ts":"2026-08-14T10:00:00Z","method":"GET"}` + "\n" +
+		oversizedEntry(t) + "\n" +
+		`{"ts":"2026-08-14T10:00:03Z","method":"PUT"}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	entries, oversized, err := readUncompressedProxyLogFile(path, 0)
+	if err != nil {
+		t.Fatalf("readUncompressedProxyLogFile: %v", err)
+	}
+	if oversized != 1 {
+		t.Errorf("oversized = %d, want 1", oversized)
+	}
+	if got, want := methodsOf(entries), []string{"GET", "PUT"}; !equalStrings(got, want) {
+		t.Errorf("entries = %v, want %v", got, want)
+	}
+}
+
+// A record longer than the reader's buffer but inside the line bound must come
+// back whole: readBoundedLine reassembles it across ReadSlice calls.
+func TestReadUncompressedProxyLogFile_LongEntryReassembled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy-requests_0001.jsonl")
+	url := "https://example.com/" + strings.Repeat("a", 300*1024)
+	content := `{"ts":"2026-08-14T10:00:00Z","method":"GET","url":"` + url + `"}` + "\n" +
+		`{"ts":"2026-08-14T10:00:01Z","method":"POST"}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	entries, oversized, err := readUncompressedProxyLogFile(path, 0)
+	if err != nil {
+		t.Fatalf("readUncompressedProxyLogFile: %v", err)
+	}
+	if oversized != 0 {
+		t.Errorf("oversized = %d, want 0", oversized)
+	}
+	if got, want := methodsOf(entries), []string{"GET", "POST"}; !equalStrings(got, want) {
+		t.Fatalf("entries = %v, want %v", got, want)
+	}
+	if entries[0].URL != url {
+		t.Errorf("URL was not reassembled: got %d bytes, want %d", len(entries[0].URL), len(url))
+	}
+}
+
+// Consecutive oversized records must each cost only themselves, including one
+// that ends the file without a trailing newline.
+func TestReadUncompressedProxyLogFile_ConsecutiveOversizedLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy-requests_0001.jsonl")
+	content := oversizedEntry(t) + "\n" +
+		oversizedEntry(t) + "\n" +
+		`{"ts":"2026-08-14T10:00:03Z","method":"PUT"}` + "\n" +
+		oversizedEntry(t)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	entries, oversized, err := readUncompressedProxyLogFile(path, 0)
+	if err != nil {
+		t.Fatalf("readUncompressedProxyLogFile: %v", err)
+	}
+	if oversized != 3 {
+		t.Errorf("oversized = %d, want 3", oversized)
+	}
+	if got, want := methodsOf(entries), []string{"PUT"}; !equalStrings(got, want) {
+		t.Errorf("entries = %v, want %v", got, want)
+	}
+}
+
+// A well-formed file must still read clean through the shared scanner.
+func TestReadUncompressedProxyLogFile_ReadsAllEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy-requests_0001.jsonl")
+	content := `{"ts":"2026-08-14T10:00:00Z","method":"GET"}` + "\n" +
+		`not json at all` + "\n" +
+		`{"ts":"2026-08-14T10:00:01Z","method":"POST"}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	entries, _, err := readUncompressedProxyLogFile(path, 0)
+	if err != nil {
+		t.Fatalf("readUncompressedProxyLogFile: %v", err)
+	}
+	// A corrupt record costs only itself.
+	if got, want := methodsOf(entries), []string{"GET", "POST"}; !equalStrings(got, want) {
+		t.Errorf("entries = %v, want %v", got, want)
+	}
 }

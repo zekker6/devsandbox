@@ -36,6 +36,14 @@ type launchPayload struct {
 	// the launched process unfiltered control of kitty, hold_after_ssh runs a
 	// local shell, and os_panel/source_window/next_to/add_to_session all
 	// reposition the launch against host state the sandbox chose.
+	//
+	// marker and logo are here for the same reason as watcher, not for the
+	// cosmetic reason their names suggest: a `function <path>` marker spec has
+	// kitty runpy.run_path the file (kitty/marks.py), and both resolve their
+	// path argument through resolve_custom_file, which takes an absolute path
+	// verbatim. The shared temp directory is bind-mounted read-write at an
+	// identical path on host and sandbox, so a path the sandbox writes is a path
+	// the host reads and executes.
 	Env                   []string        `json:"env"`
 	CopyEnv               json.RawMessage `json:"copy_env"`
 	CopyCmdline           bool            `json:"copy_cmdline"`
@@ -48,6 +56,8 @@ type launchPayload struct {
 	SourceWindow          string          `json:"source_window"`
 	NextTo                string          `json:"next_to"`
 	AddToSession          string          `json:"add_to_session"`
+	Marker                string          `json:"marker"`
+	Logo                  string          `json:"logo"`
 
 	// Anchored to host-derived values rather than trusted as sent.
 	Cwd   string `json:"cwd"`
@@ -66,8 +76,6 @@ type launchPayload struct {
 	Location                string   `json:"location"`
 	Hold                    bool     `json:"hold"`
 	Var                     []string `json:"var"`
-	Marker                  string   `json:"marker"`
-	Logo                    string   `json:"logo"`
 	LogoPosition            string   `json:"logo_position"`
 	LogoAlpha               float64  `json:"logo_alpha"`
 	Color                   []string `json:"color"`
@@ -121,6 +129,10 @@ func (p *launchPayload) vet(hostWindowID string) string {
 		return fmt.Sprintf("launch next_to=%q is not permitted", p.NextTo)
 	case p.AddToSession != "":
 		return fmt.Sprintf("launch add_to_session=%q is not permitted", p.AddToSession)
+	case p.Marker != "":
+		return "launch marker= is not permitted (a function spec loads host code into kitty)"
+	case p.Logo != "":
+		return "launch logo= is not permitted (reads a host file the sandbox names)"
 	}
 	if _, ok := hostResolvedCwds[p.Cwd]; !ok {
 		return fmt.Sprintf("launch cwd=%q is not permitted (only kitty's host-resolved keywords are)", p.Cwd)

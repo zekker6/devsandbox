@@ -53,3 +53,51 @@ func TestFormatPreview_AppliedLabel(t *testing.T) {
 		t.Errorf("expected 'Applied changes:' label, got:\n%s", buf.String())
 	}
 }
+
+// TestFormatPreview_NamesHostDirReplacement pins the consent surface: a `~`
+// line that hides a recursive host-directory delete reads exactly like an
+// ordinary file overwrite, and --dry-run is what the user decides on.
+func TestFormatPreview_NamesHostDirReplacement(t *testing.T) {
+	op := Operation{
+		Kind: OpOverwrite, RelPath: "conf", HostPath: "/home/zekker/.config/conf",
+		Bytes: 12, SourceLabel: "s1:primary", ReplacesHostDir: true,
+	}
+	plan := Plan{
+		HostPath:   "/home/zekker/.config",
+		Operations: []Operation{op},
+		BySandbox:  map[string][]Operation{"s1": {op}},
+	}
+
+	var buf bytes.Buffer
+	if err := FormatPreview(&buf, plan, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "replaces a host directory") {
+		t.Errorf("the overwrite line does not say the host directory is deleted:\n%s", out)
+	}
+	if !strings.Contains(out, "1 of those deletes a host directory recursively") {
+		t.Errorf("the summary does not count the recursive delete:\n%s", out)
+	}
+}
+
+// An ordinary plan must not grow the warning.
+func TestFormatPreview_NoDirReplacementWarning(t *testing.T) {
+	op := Operation{
+		Kind: OpOverwrite, RelPath: "m.md", HostPath: "/home/zekker/.config/m.md",
+		Bytes: 12, SourceLabel: "s1:primary",
+	}
+	plan := Plan{
+		HostPath:   "/home/zekker/.config",
+		Operations: []Operation{op},
+		BySandbox:  map[string][]Operation{"s1": {op}},
+	}
+
+	var buf bytes.Buffer
+	if err := FormatPreview(&buf, plan, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "host directory") {
+		t.Errorf("unexpected recursive-delete warning:\n%s", buf.String())
+	}
+}

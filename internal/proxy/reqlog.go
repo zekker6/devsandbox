@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,22 +30,24 @@ const (
 // whole body - see RequestLogger.maxBodyBytes. The matching Truncated flag
 // distinguishes a body that was cut from one that was short.
 type RequestLog struct {
-	Timestamp             time.Time           `json:"ts"`
-	Method                string              `json:"method"`
-	URL                   string              `json:"url"`
-	RequestHeaders        map[string][]string `json:"req_headers,omitempty"`
-	RequestBody           []byte              `json:"req_body,omitempty"`
-	RequestBodyTruncated  bool                `json:"req_body_truncated,omitempty"`
-	StatusCode            int                 `json:"status,omitempty"`
-	ResponseHeaders       map[string][]string `json:"resp_headers,omitempty"`
-	ResponseBody          []byte              `json:"resp_body,omitempty"`
-	ResponseBodyTruncated bool                `json:"resp_body_truncated,omitempty"`
-	Duration              time.Duration       `json:"duration_ns,omitempty"`
-	Error                 string              `json:"error,omitempty"`
-	FilterAction          string              `json:"filter_action,omitempty"`
-	FilterReason          string              `json:"filter_reason,omitempty"`
-	RedactionAction       string              `json:"redaction_action,omitempty"`
-	RedactionMatches      []string            `json:"redaction_matches,omitempty"`
+	Timestamp                time.Time           `json:"ts"`
+	Method                   string              `json:"method"`
+	URL                      string              `json:"url"`
+	RequestHeaders           map[string][]string `json:"req_headers,omitempty"`
+	RequestHeadersTruncated  bool                `json:"req_headers_truncated,omitempty"`
+	RequestBody              []byte              `json:"req_body,omitempty"`
+	RequestBodyTruncated     bool                `json:"req_body_truncated,omitempty"`
+	StatusCode               int                 `json:"status,omitempty"`
+	ResponseHeaders          map[string][]string `json:"resp_headers,omitempty"`
+	ResponseHeadersTruncated bool                `json:"resp_headers_truncated,omitempty"`
+	ResponseBody             []byte              `json:"resp_body,omitempty"`
+	ResponseBodyTruncated    bool                `json:"resp_body_truncated,omitempty"`
+	Duration                 time.Duration       `json:"duration_ns,omitempty"`
+	Error                    string              `json:"error,omitempty"`
+	FilterAction             string              `json:"filter_action,omitempty"`
+	FilterReason             string              `json:"filter_reason,omitempty"`
+	RedactionAction          string              `json:"redaction_action,omitempty"`
+	RedactionMatches         []string            `json:"redaction_matches,omitempty"`
 }
 
 // RequestLogger writes HTTP request/response logs to rotating gzip-compressed files
@@ -207,11 +211,11 @@ func (rl *RequestLogger) LogRequest(req *http.Request) (*RequestLog, []byte) {
 		urlStr = req.RequestURI
 	}
 	entry := &RequestLog{
-		Timestamp:      time.Now(),
-		Method:         req.Method,
-		URL:            urlStr,
-		RequestHeaders: redactHeaders(cloneHeaders(req.Header)),
+		Timestamp: time.Now(),
+		Method:    req.Method,
+		URL:       urlStr,
 	}
+	entry.RequestHeaders, entry.RequestHeadersTruncated = captureHeaders(req.Header)
 
 	// Capture a bounded prefix of the request body rather than buffering it
 	// whole. LogRequest runs before any filter decision, so an unbounded
@@ -339,7 +343,7 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 	}
 
 	entry.StatusCode = resp.StatusCode
-	entry.ResponseHeaders = redactHeaders(cloneHeaders(resp.Header))
+	entry.ResponseHeaders, entry.ResponseHeadersTruncated = captureHeaders(resp.Header)
 
 	// HEAD responses must preserve their upstream Content-Length verbatim
 	// (RFC 9110 §9.3.2). Replacing resp.Body — even with an empty reader —
@@ -408,7 +412,7 @@ func (rl *RequestLogger) LogResponseStreaming(entry *RequestLog, resp *http.Resp
 	}
 
 	entry.StatusCode = resp.StatusCode
-	entry.ResponseHeaders = redactHeaders(cloneHeaders(resp.Header))
+	entry.ResponseHeaders, entry.ResponseHeadersTruncated = captureHeaders(resp.Header)
 
 	isHead := resp.Request != nil && resp.Request.Method == http.MethodHead
 	if isHead || resp.StatusCode < http.StatusOK || resp.Body == nil || resp.Body == http.NoBody {
@@ -501,6 +505,8 @@ func isStreamingResponse(resp *http.Response) bool {
 	return streamingContentTypes[strings.ToLower(strings.TrimSpace(ct))]
 }
 
+const redactedHeaderValue = "[REDACTED]"
+
 var sensitiveHeaders = map[string]bool{
 	"Authorization":       true,
 	"Cookie":              true,
@@ -510,28 +516,48 @@ var sensitiveHeaders = map[string]bool{
 	"Proxy-Authorization": true,
 }
 
-func redactHeaders(headers map[string][]string) map[string][]string {
-	if headers == nil {
-		return nil
-	}
-	redacted := make(map[string][]string, len(headers))
-	for k, v := range headers {
-		if sensitiveHeaders[http.CanonicalHeaderKey(k)] {
-			redacted[k] = []string{"[REDACTED]"}
-		} else {
-			redacted[k] = v
-		}
-	}
-	return redacted
-}
+// maxLogHeaderBytes bounds what one log entry records of a single header set.
+//
+// The bodies are already bounded, and config.MaxLogBodyBytesLimit is set so
+// that two of them plus the entry's own fields stay under the 8 MiB line the
+// reader accepts. Headers were the hole left in that arithmetic: the sandbox
+// chooses which host a request reaches, so an upstream it controls can answer
+// with megabytes of response headers, and Go's transport accepts up to 10 MiB
+// of them. That produced a record the reader refuses and, before the reader
+// learned to step over one, cost every later entry in the same file. It is
+// also a log-flooding lever: a handful of such responses fills the whole
+// rotation and pushes real entries out.
+const maxLogHeaderBytes = 64 * 1024
 
-func cloneHeaders(h http.Header) map[string][]string {
+// captureHeaders clones, redacts and bounds a header set for a log entry,
+// reporting whether anything was dropped.
+//
+// Keys are taken in sorted order and one that does not fit is skipped rather
+// than ending the walk, so a single oversized header costs only itself and the
+// recorded subset is the same on every run - map iteration order would make it
+// arbitrary.
+func captureHeaders(h map[string][]string) (map[string][]string, bool) {
 	if h == nil {
-		return nil
+		return nil, false
 	}
-	clone := make(map[string][]string, len(h))
-	for k, v := range h {
-		clone[k] = append([]string(nil), v...)
+	out := make(map[string][]string, len(h))
+	used := 0
+	truncated := false
+	for _, k := range slices.Sorted(maps.Keys(h)) {
+		vals := h[k]
+		if sensitiveHeaders[http.CanonicalHeaderKey(k)] {
+			vals = []string{redactedHeaderValue}
+		}
+		size := len(k)
+		for _, v := range vals {
+			size += len(v)
+		}
+		if used+size > maxLogHeaderBytes {
+			truncated = true
+			continue
+		}
+		used += size
+		out[k] = slices.Clone(vals)
 	}
-	return clone
+	return out, truncated
 }

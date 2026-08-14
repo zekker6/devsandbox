@@ -148,3 +148,23 @@ func TestFilter_LsAlwaysAllowedWhenCapPresent(t *testing.T) {
 		t.Errorf("expected allow for ls with cap")
 	}
 }
+
+// TestDecideLs_DeniesAllEnvVars pins the field that was declared on lsPayload
+// and never read. `kitty @ ls --all-env-vars` makes even a window the sandbox
+// owns report the environment kitty launched it with - the host user's, which
+// devsandbox deliberately does not pass in. FilterLsResponse narrows which
+// windows come back, not what each one discloses, so nothing downstream would
+// have caught it.
+func TestDecideLs_DeniesAllEnvVars(t *testing.T) {
+	f := mkFilter([]Capability{CapListOwned}, nil, NewOwnedSet())
+
+	d := f.Decide(mkCmd(t, "ls", map[string]any{"all_env_vars": true}))
+	if d.Allow {
+		t.Fatalf("ls all_env_vars was allowed: %+v", d)
+	}
+
+	// The ordinary form still works, so the denial is scoped to the flag.
+	if d := f.Decide(mkCmd(t, "ls", map[string]any{"all_env_vars": false})); !d.Allow {
+		t.Fatalf("plain ls was denied: %+v", d)
+	}
+}

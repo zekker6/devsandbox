@@ -69,7 +69,11 @@ tasks:
 
   test:
     cmds:
-      - go test ./internal/... ./cmd/devsandbox/... ./cmd/devsandbox-shim/...
+      # -race is not optional here: several tests exist only to be read by the
+      # race detector (the filter engine's lock-free readers, the port-forward
+      # stderr buffer). Their non-race assertions pass either way, so without
+      # this flag removing the synchronization they pin ships green.
+      - go test -race ./internal/... ./cmd/devsandbox/... ./cmd/devsandbox-shim/...
       # Compile-only check for the KVM-gated krun integration tests. They live
       # behind the integration_krun build tag and only run on a /dev/kvm host, so
       # routine tasks never compile them - a helper signature drift would go

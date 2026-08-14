@@ -66,12 +66,14 @@ func TestScriptPatternAcceptsLauncherBodies(t *testing.T) {
 
 // TestScriptPatternAcceptsHostResolvedEditor is the counterweight to the
 // rejected editor values below: an absolute EDITOR naming the file the host's
-// own PATH lookup yields is the case the env prefix exists for.
+// own PATH lookup yields is the case the env prefix exists for. The host's own
+// setting stands in for an installed editor - none is present on every machine.
 func TestScriptPatternAcceptsHostResolvedEditor(t *testing.T) {
 	bin, err := ResolveProgram("sh")
 	if err != nil {
 		t.Skipf("sh not resolvable on this host: %v", err)
 	}
+	t.Setenv("EDITOR", bin)
 	p := revdiffScriptPattern()
 
 	for _, assign := range []string{"EDITOR=" + bin, "EDITOR=nvim", "EDITOR="} {

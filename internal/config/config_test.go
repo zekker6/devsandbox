@@ -2066,3 +2066,103 @@ pids = 2048
 		t.Errorf("unexpected deprecation warning: %q", stderr.String())
 	}
 }
+
+// TestValidate_MaxLogBodyBytesUpperBound pins the limit against the reader:
+// `devsandbox logs proxy` bounds a log line at 8 MiB, so a capture limit set
+// past that produces records it refuses - and it drops the remainder of any
+// file holding one.
+func TestValidate_MaxLogBodyBytesUpperBound(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{"at the limit", MaxLogBodyBytesLimit, false},
+		{"past the limit", MaxLogBodyBytesLimit + 1, true},
+		{"far past the limit", 64 * 1024 * 1024, true},
+		{"opt-out", 0, false},
+		{"default", DefaultMaxLogBodyBytes, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := tt.value
+			c := &Config{}
+			c.Proxy.MaxLogBodyBytes = &v
+			err := c.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("max_log_body_bytes = %d was accepted", tt.value)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("max_log_body_bytes = %d was rejected: %v", tt.value, err)
+			}
+		})
+	}
+}
+
+// TestValidate_MaxRedactionScanBytes covers the one value the key cannot take:
+// a negative limit would otherwise reach the proxy and refuse every body.
+func TestValidate_MaxRedactionScanBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{"unset", 0, false},
+		{"explicit", 4 * 1024 * 1024, false},
+		{"negative", -1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Config{}
+			c.Proxy.Redaction.MaxScanBytes = tt.value
+			err := c.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("max_scan_bytes = %d was accepted", tt.value)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("max_scan_bytes = %d was rejected: %v", tt.value, err)
+			}
+		})
+	}
+}
+
+// TestGetMaxScanBytes pins the default for an unset key.
+func TestGetMaxScanBytes(t *testing.T) {
+	if got := (ProxyRedactionConfig{}).GetMaxScanBytes(); got != DefaultMaxRedactionScanBytes {
+		t.Errorf("unset GetMaxScanBytes() = %d, want %d", got, DefaultMaxRedactionScanBytes)
+	}
+	if got := (ProxyRedactionConfig{MaxScanBytes: 42}).GetMaxScanBytes(); got != 42 {
+		t.Errorf("explicit GetMaxScanBytes() = %d, want 42", got)
+	}
+}
+
+// TestMergeConfigs_RedactionScanLimitOnlyTightens covers the direction the
+// overlay may move the limit. The project file is writable from inside the
+// sandbox, so a larger value there would be the sandbox choosing how much host
+// memory one request may hold.
+func TestMergeConfigs_RedactionScanLimitOnlyTightens(t *testing.T) {
+	tests := []struct {
+		name          string
+		base, overlay int
+		want          int
+	}{
+		{"overlay tightens", 4096, 1024, 1024},
+		{"overlay widens", 1024, 4096, 1024},
+		{"overlay widens past default", 0, DefaultMaxRedactionScanBytes * 2, 0},
+		{"overlay tightens from default", 0, 1024, 1024},
+		{"overlay unset", 2048, 0, 2048},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &Config{}
+			base.Proxy.Redaction.MaxScanBytes = tt.base
+			overlay := &Config{}
+			overlay.Proxy.Redaction.MaxScanBytes = tt.overlay
+
+			got := mergeConfigs(base, overlay).Proxy.Redaction.MaxScanBytes
+			if got != tt.want {
+				t.Errorf("merged max_scan_bytes = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

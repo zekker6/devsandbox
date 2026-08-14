@@ -3,11 +3,14 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -393,6 +396,30 @@ func TestLogResponseStreaming_StreamsAndLogsOnClose(t *testing.T) {
 	if contents := readActiveLogFile(t, dir); !strings.Contains(contents, "codex/responses") {
 		t.Errorf("expected response logged on close, got %q", contents)
 	}
+
+	// Exactly once. Reading to EOF finalizes, and the Close above finalizes
+	// again; without the logOnce guard both write an entry, which doubles every
+	// streamed request in `devsandbox logs proxy` and double-counts
+	// RequestCount() into the session.end audit field.
+	if n := countLogLines(t, dir); n != 1 {
+		t.Errorf("log holds %d entries for one streamed response, want 1", n)
+	}
+	if got := rl.RequestCount(); got != 1 {
+		t.Errorf("RequestCount() = %d for one streamed response, want 1", got)
+	}
+}
+
+// countLogLines returns the number of non-empty lines in the active log file.
+func countLogLines(t *testing.T, dir string) int {
+	t.Helper()
+
+	n := 0
+	for line := range strings.SplitSeq(readActiveLogFile(t, dir), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // TestLogResponseStreaming_CapsCapturedBody verifies large bodies stream in full
@@ -460,10 +487,13 @@ func TestLogResponseStreaming_HeadNotWrapped(t *testing.T) {
 	}
 }
 
-func TestRedactHeaders_Nil(t *testing.T) {
-	result := redactHeaders(nil)
+func TestCaptureHeaders_Nil(t *testing.T) {
+	result, truncated := captureHeaders(nil)
 	if result != nil {
-		t.Error("redactHeaders(nil) should return nil")
+		t.Error("captureHeaders(nil) should return nil")
+	}
+	if truncated {
+		t.Error("captureHeaders(nil) should not report truncation")
 	}
 }
 
@@ -917,5 +947,110 @@ func TestRequestLogger_Log_NilSkipEngineAlwaysLogs(t *testing.T) {
 	}
 	if n := rec.count.Load(); n != 1 {
 		t.Errorf("nil skip engine: expected 1 dispatcher write, got %d", n)
+	}
+}
+
+// TestCaptureHeaders_BoundsOversizedSet covers the log-line budget's remaining
+// hole: the bodies are capped, but a sandbox-chosen upstream can answer with
+// megabytes of headers, and Go's transport accepts up to 10 MiB of them.
+func TestCaptureHeaders_BoundsOversizedSet(t *testing.T) {
+	h := http.Header{
+		"Content-Type":  []string{"application/json"},
+		"X-Flood":       []string{strings.Repeat("z", maxLogHeaderBytes+1)},
+		"X-Small":       []string{"kept"},
+		"Authorization": []string{"Bearer secret"},
+	}
+
+	got, truncated := captureHeaders(h)
+	if !truncated {
+		t.Error("truncated = false, want true for a header set past the budget")
+	}
+	if _, ok := got["X-Flood"]; ok {
+		t.Error("the oversized header was recorded")
+	}
+	if v := got["X-Small"]; len(v) != 1 || v[0] != "kept" {
+		t.Errorf("X-Small = %v, want it kept: one oversized header must cost only itself", v)
+	}
+	if v := got["Content-Type"]; len(v) != 1 || v[0] != "application/json" {
+		t.Errorf("Content-Type = %v, want it kept", v)
+	}
+	if v := got["Authorization"]; len(v) != 1 || v[0] != redactedHeaderValue {
+		t.Errorf("Authorization = %v, want %q", v, redactedHeaderValue)
+	}
+
+	total := 0
+	for k, vals := range got {
+		total += len(k)
+		for _, v := range vals {
+			total += len(v)
+		}
+	}
+	if total > maxLogHeaderBytes {
+		t.Errorf("recorded %d bytes of headers, want <= %d", total, maxLogHeaderBytes)
+	}
+}
+
+// TestCaptureHeaders_TruncationIsDeterministic pins the sorted-key walk: map
+// iteration order would make the surviving subset differ per run.
+func TestCaptureHeaders_TruncationIsDeterministic(t *testing.T) {
+	h := http.Header{}
+	for i := range 40 {
+		h[fmt.Sprintf("X-Header-%02d", i)] = []string{strings.Repeat("v", 4096)}
+	}
+
+	first, _ := captureHeaders(h)
+	for range 20 {
+		got, _ := captureHeaders(h)
+		if !maps.EqualFunc(first, got, slices.Equal) {
+			t.Fatal("captureHeaders recorded a different subset on a repeat call")
+		}
+	}
+}
+
+// TestCaptureHeaders_OrdinarySetUntouched is the counterweight: normal headers
+// must survive whole, since the bound is for the pathological case only.
+func TestCaptureHeaders_OrdinarySetUntouched(t *testing.T) {
+	h := http.Header{
+		"Content-Type": []string{"application/json"},
+		"Accept":       []string{"application/json", "text/plain"},
+		"Cookie":       []string{"session=abc"},
+	}
+
+	got, truncated := captureHeaders(h)
+	if truncated {
+		t.Error("truncated = true for an ordinary header set")
+	}
+	if len(got) != len(h) {
+		t.Errorf("recorded %d headers, want %d", len(got), len(h))
+	}
+	if v := got["Accept"]; !slices.Equal(v, []string{"application/json", "text/plain"}) {
+		t.Errorf("Accept = %v, want both values", v)
+	}
+	if v := got["Cookie"]; len(v) != 1 || v[0] != redactedHeaderValue {
+		t.Errorf("Cookie = %v, want %q", v, redactedHeaderValue)
+	}
+	if got, want := len(h["Cookie"]), 1; got != want || h["Cookie"][0] != "session=abc" {
+		t.Error("captureHeaders mutated the caller's header set")
+	}
+}
+
+// TestLogResponse_BoundsHeaders drives the bound through the entry a response
+// produces, which is the direction a sandbox-chosen upstream controls.
+func TestLogResponse_BoundsHeaders(t *testing.T) {
+	rl := &RequestLogger{maxBodyBytes: 1024}
+
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"X-Flood": []string{strings.Repeat("z", maxLogHeaderBytes+1)}},
+		Body:       io.NopCloser(strings.NewReader("ok")),
+	}
+	entry := &RequestLog{}
+	rl.LogResponse(entry, resp, time.Now())
+
+	if !entry.ResponseHeadersTruncated {
+		t.Error("resp_headers_truncated = false, want true")
+	}
+	if _, ok := entry.ResponseHeaders["X-Flood"]; ok {
+		t.Error("the oversized response header was recorded")
 	}
 }

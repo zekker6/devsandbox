@@ -373,7 +373,7 @@ devsandbox logs proxy
 devsandbox logs proxy --last 50
 
 # Follow/tail logs in real-time
-devsandbox logs proxy -f
+devsandbox logs proxy --follow   # -f
 ```
 
 ### Filtering Logs
@@ -517,7 +517,22 @@ stalls mid-send is cut loose after 5 seconds for the same reason.
 An entry whose body was cut carries `"req_body_truncated": true` or
 `"resp_body_truncated": true`, so a short body and a truncated one are not
 confusable. Change the bound with `proxy.max_log_body_bytes`; `0` records no
-bodies at all. See [Configuration: Proxy Settings](configuration.md#proxy-settings).
+bodies at all, and the ceiling is 2 MiB so a record stays within what
+`devsandbox logs proxy` will read back. See
+[Configuration: Proxy Settings](configuration.md#proxy-settings).
+
+Headers are bounded the same way, at 64 KiB per entry for the request set and
+64 KiB for the response set. The sandbox chooses which host a request reaches,
+so an upstream it controls can answer with megabytes of headers - enough to
+push a record past what the log reader accepts and to fill the whole rotation
+with one response. Headers are recorded in name order until the budget is
+spent, and one oversized header costs only itself; an entry that dropped any
+carries `"req_headers_truncated": true` or `"resp_headers_truncated": true`.
+
+The bound covers logging. [Content redaction](#content-redaction) is a separate
+path with its own limit: scanning a body for secrets means holding all of it,
+so with `[proxy.redaction] enabled = true` an allowed request's body is read
+into host memory whole, up to `proxy.redaction.max_scan_bytes`.
 
 ## Internal Logs
 
@@ -693,7 +708,7 @@ Default is `host`.
 With `mitm = false` only the `host` scope can be evaluated for HTTPS, and a `path`- or `url`-scoped rule aborts the
 launch instead of silently applying to plain HTTP alone - see [Filtering without MITM](#filtering-without-mitm).
 
-#### Host matching is case-insensitive except for regex
+#### Host matching is case-insensitive
 
 DNS names are case-insensitive and a trailing dot spells the same name, so `BLOCKED.Example.com.`
 and `blocked.example.com` reach the same server. Host-scoped requests and host-scoped `exact` and
@@ -701,13 +716,15 @@ and `blocked.example.com` reach the same server. Host-scoped requests and host-s
 applies to every spelling of the name it covers. The same canonicalization keys the ask-mode
 decision cache, so approving a host once covers its other spellings.
 
-`regex` patterns are used exactly as written - a regex is a program, and rewriting it would change
-what character classes and anchors mean. Write `(?i)` yourself when a host regex should match
-case-insensitively, and account for the canonicalized target: the string a host-scoped regex is
-tested against is already lowercase with no trailing dot.
+Host-scoped `regex` patterns are compiled case-insensitively rather than rewritten - a regex is a
+program, and lowercasing one would change what its character classes and anchors mean. Write
+`(?-i)` inside the pattern if you genuinely want a case-sensitive host regex. Note that the string a
+host-scoped regex is tested against is already lowercase with no trailing dot, so a pattern ending
+in `\.$` matches nothing.
 
-This applies to the `host` scope only. `path` and `url` patterns are matched verbatim, because URL
-paths are case-sensitive.
+The `url` scope canonicalizes the host half of the URL the same way and leaves the path exactly as
+sent, because a URL's path is case-sensitive and its authority is not. The `path` scope is matched
+verbatim.
 
 ### Ask Mode
 
@@ -776,6 +793,9 @@ devsandbox proxy filter generate
 
 # Generate from specific log directory
 devsandbox proxy filter generate --from-logs ~/.local/share/devsandbox/myproject/logs/proxy/
+
+# Generate from another sandbox's logs, by sandbox name
+devsandbox proxy filter generate --project myproject
 
 # Generate blacklist rules (allow unmatched)
 devsandbox proxy filter generate --default-action allow
@@ -971,6 +991,10 @@ can read it. Three things bound that:
   when redaction is enabled with MITM off.
 - **Only requests, only the configured rules.** Responses are not scanned, and a secret that matches no rule passes
   through untouched.
+- **The body has to fit the scan.** A decision needs the whole body, so the scan buffers it - bounded by
+  `proxy.redaction.max_scan_bytes` (10 MiB by default) and by a 30 second deadline. A request past either bound is
+  **blocked** with a reason naming the limit, never forwarded on a partial scan: a prefix that holds no secret says
+  nothing about the rest. Raise the key if a workflow legitimately uploads more than that through the proxy.
 
 Treat redaction as a strong guard against accidental leaks, not as a barrier against code deliberately trying to
 exfiltrate a secret. For that, use an enforced backend - `bwrap` or `krun` - with MITM enabled.
@@ -1079,7 +1103,7 @@ type = "exact"
 ```
 
 Scopes and pattern types are the same as the filter's, including
-[host matching being case-insensitive except for regex](#host-matching-is-case-insensitive-except-for-regex).
+[host matching being case-insensitive](#host-matching-is-case-insensitive).
 
 ### Interaction With Other Features
 

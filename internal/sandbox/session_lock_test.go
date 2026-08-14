@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestAcquireSession_ConcurrentLaunchesElectOnePrimary is the reproducer for
@@ -75,6 +76,112 @@ func TestAcquireSession_SecondHolderIsNotPrimary(t *testing.T) {
 	// The shared lock every session takes is what other commands observe.
 	if !IsSessionActive(root) {
 		t.Error("IsSessionActive is false while two sessions hold the sandbox")
+	}
+}
+
+// TestAcquireSession_NotPrimaryWhileAnEarlierConcurrentSessionIsLive pins the
+// invariant CleanupStaleSessionDirs and the persistent overlay both rely on:
+// primary means nobody else is here, not merely that the primary slot is free.
+// The slot reopens when the primary exits first, and a launch taking it on that
+// alone wipes the live session's overlay dirs and writes the upper that session
+// has mounted as a read-only lower layer.
+func TestAcquireSession_NotPrimaryWhileAnEarlierConcurrentSessionIsLive(t *testing.T) {
+	root := t.TempDir()
+
+	first, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("first AcquireSession failed: %v", err)
+	}
+	if !first.IsPrimary() {
+		t.Fatal("first session is not primary")
+	}
+
+	concurrent, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("concurrent AcquireSession failed: %v", err)
+	}
+	defer func() { _ = concurrent.Release() }()
+	if concurrent.IsPrimary() {
+		t.Fatal("second session claimed the primary designation")
+	}
+
+	// The primary exits while the concurrent session keeps running.
+	if err := first.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+
+	third, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("third AcquireSession failed: %v", err)
+	}
+	defer func() { _ = third.Release() }()
+
+	if third.IsPrimary() {
+		t.Error("a launch became primary while another session was still live")
+	}
+	if !IsSessionActive(root) {
+		t.Error("IsSessionActive is false while two sessions hold the sandbox")
+	}
+}
+
+// Once every session has exited the designation must be available again -
+// otherwise the confirmation above would leave every later launch concurrent
+// and the sandbox would never write its persistent overlay again.
+func TestAcquireSession_PrimaryIsRegrantedAfterAllSessionsExit(t *testing.T) {
+	root := t.TempDir()
+
+	first, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("first AcquireSession failed: %v", err)
+	}
+	concurrent, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("concurrent AcquireSession failed: %v", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatalf("first Release failed: %v", err)
+	}
+	if err := concurrent.Release(); err != nil {
+		t.Fatalf("concurrent Release failed: %v", err)
+	}
+
+	next, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("AcquireSession after all releases failed: %v", err)
+	}
+	defer func() { _ = next.Release() }()
+	if !next.IsPrimary() {
+		t.Error("no launch is primary after every session exited")
+	}
+}
+
+// A launch racing a --rm teardown waits for it instead of aborting: the
+// teardown holds the lock exclusively across a chmod walk and a recursive
+// removal, which `devsandbox --rm ...` followed by an immediate relaunch hits.
+func TestAcquireSession_WaitsOutAnExclusiveHolder(t *testing.T) {
+	root := t.TempDir()
+
+	held, err := acquireExclusiveLock(filepath.Join(root, LockFileName))
+	if err != nil {
+		t.Fatalf("seed exclusive lock: %v", err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = held.Close()
+		close(released)
+	}()
+
+	handle, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("AcquireSession did not wait out the exclusive holder: %v", err)
+	}
+	defer func() { _ = handle.Release() }()
+
+	<-released
+	if !handle.IsPrimary() {
+		t.Error("launch that waited out the teardown is not primary")
 	}
 }
 

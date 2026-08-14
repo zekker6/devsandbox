@@ -1,6 +1,8 @@
 package cmdpattern
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -129,37 +131,94 @@ func envAssignmentAllowed(name, value string, quoted bool) bool {
 	return false
 }
 
+// knownEditors is the set of program names accepted as EDITOR/VISUAL when the
+// host's own setting does not name them.
+//
+// The list exists because the host runs `$EDITOR <file>` on a file inside the
+// project tree, which is bind-mounted read-write: `EDITOR=sh` (or python, perl,
+// awk, node) makes that file the *program*, so the sandbox writes what the host
+// executes. Resolving the name against the host's PATH does not bound that — it
+// only decides which host binary opens the sandbox's file. Enumerating the
+// interpreters instead of the editors is the losing side of the list, the same
+// argument hostExecEnv makes for names.
+var knownEditors = map[string]struct{}{
+	"amp": {}, "code": {}, "code-insiders": {}, "codium": {}, "cursor": {},
+	"emacs": {}, "emacsclient": {}, "geany": {}, "gedit": {}, "helix": {},
+	"hx": {}, "jed": {}, "joe": {}, "kak": {}, "kakoune": {}, "kate": {},
+	"kwrite": {}, "lapce": {}, "mate": {}, "mg": {}, "micro": {},
+	"mousepad": {}, "ne": {}, "nano": {}, "nvim": {}, "pico": {}, "pluma": {},
+	"subl": {}, "sublime_text": {}, "vi": {}, "view": {}, "vim": {},
+	"vimdiff": {}, "vscodium": {}, "windsurf": {}, "xed": {}, "zed": {},
+	"zeditor": {},
+}
+
+// editorNameAllowed reports whether name may be the program EDITOR or VISUAL
+// resolves to. The host's own setting wins over the built-in list: it is
+// host-derived, which is the anchor a validator is supposed to have, and it is
+// what lets an editor the list does not carry keep working.
+func editorNameAllowed(name string) bool {
+	for _, host := range []string{os.Getenv("EDITOR"), os.Getenv("VISUAL")} {
+		if host != "" && filepath.Base(host) == name {
+			return true
+		}
+	}
+	_, ok := knownEditors[name]
+	return ok
+}
+
 // envProgramValueAllowed reports whether value may name the program the host
 // executes for EDITOR or VISUAL.
 //
 // A bare name is accepted because the host resolves it against its own PATH;
 // the sandbox supplies the name, not the location. A value carrying a path is
-// accepted only when it is absolute and resolves to the very file the host's
-// own lookup of that basename yields, which is what keeps a planted
-// `<shared-tmp>/nvim` out: the shared temp directory is bind-mounted
-// read-write at an identical path on both sides, so a path the sandbox writes
-// there is a path the host would execute. A relative path is refused outright —
-// it would resolve against the overlay's working directory, which is the
-// project directory the sandbox can write.
+// accepted only when it is absolute and is *lexically* one of the paths the
+// host's own lookup of that basename yields, which is what keeps a planted
+// `<shared-tmp>/nvim` out: the shared temp directory is bind-mounted read-write
+// at an identical path on both sides, so a path the sandbox writes there is a
+// path the host would execute. A relative path is refused outright — it would
+// resolve against the overlay's working directory, which is the project
+// directory the sandbox can write.
+//
+// The comparison is lexical because resolving the sandbox's own path first
+// leaves a swap window: `<shared-tmp>/nvim` pointed at the real nvim passes an
+// EvalSymlinks check, and the sandbox repoints the symlink before the host
+// execs it. Both candidates are derived on the host instead — the PATH lookup
+// and that result with its own symlinks resolved — so nothing the sandbox
+// controls is followed.
 func envProgramValueAllowed(value string) bool {
 	if !envProgramValueRe.MatchString(value) {
 		return false
 	}
 	if !strings.ContainsRune(value, '/') {
-		return true
+		return editorNameAllowed(value)
 	}
 	if !filepath.IsAbs(value) {
 		return false
 	}
-	wantBin, err := ResolveProgram(filepath.Base(value))
-	if err != nil {
+	clean := filepath.Clean(value)
+	if !editorNameAllowed(filepath.Base(clean)) {
 		return false
 	}
-	gotBin, err := filepath.EvalSymlinks(value)
+	return slices.Contains(hostProgramPaths(filepath.Base(clean)), clean)
+}
+
+// hostProgramPaths returns the absolute paths the host itself accepts as name:
+// what its PATH lookup yields, and that path with symlinks resolved. Empty when
+// the host cannot resolve the name at all, which denies rather than widens.
+func hostProgramPaths(name string) []string {
+	found, err := exec.LookPath(name)
 	if err != nil {
-		return false
+		return nil
 	}
-	return gotBin == wantBin
+	abs, err := filepath.Abs(found)
+	if err != nil {
+		return nil
+	}
+	paths := []string{abs}
+	if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
+		paths = append(paths, real)
+	}
+	return paths
 }
 
 // envBins returns the absolute paths accepted as the `env` program, resolved

@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"devsandbox/internal/socketproxy"
 )
 
 // maxLineBytes caps a single protocol line, bounding memory use from a
@@ -117,9 +119,20 @@ func WriteLine(w io.Writer, payload []byte) error {
 }
 
 // parseRequest decodes one request line.
+//
+// StrictUnmarshal, not json.Unmarshal, and the envelope needs it more than the
+// params do: an allow forwards the bytes as received, so anything the filter and
+// herdr read differently is decided by herdr. encoding/json matches field names
+// case-insensitively and lets the last match win, while herdr's serde keeps the
+// spellings distinct and reads the one it names — so
+// {"method":"pane.send_input","params":{…},"METHOD":"ping","PARAMS":{}} filtered
+// as an unconditionally-allowed `ping` and executed as `pane.send_input` with
+// the caller's params, past every validator. DisallowUnknownFields alone does
+// not catch it, because it uses the same relaxed matching; StrictUnmarshal scans
+// the raw keys and refuses an unknown, case-variant or repeated one.
 func parseRequest(raw []byte) (request, error) {
 	var req request
-	if err := json.Unmarshal(raw, &req); err != nil {
+	if err := socketproxy.StrictUnmarshal(raw, &req); err != nil {
 		return request{}, fmt.Errorf("parse request: %w", err)
 	}
 	if req.Method == "" {

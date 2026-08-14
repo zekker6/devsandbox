@@ -63,20 +63,40 @@ func (r *Revdiff) KittyLaunchPatterns() []kittyproxy.CommandPattern {
 		ResolvedBin: resolved,
 		ArgsMatcher: kittyproxy.MatchAny(),
 	}
-	return []kittyproxy.CommandPattern{
-		// Direct revdiff invocation (no wrapping shell).
-		innerRevdiff,
+
+	// The wrapping shell is pinned by spelling rather than by resolved path:
+	// these two are the ones the host resolves itself, out of directories the
+	// sandbox cannot write. Anything else — notably an absolute path into a
+	// write-through bind such as the shared temp directory, where the sandbox
+	// can plant its own `sh` at a path the host reads back — is denied, which is
+	// what CommandPattern's exact Program matching enforces. Same two spellings
+	// the herdr script parser accepts, for the same reason.
+	shellArgv0 := []string{"sh", "/bin/sh"}
+	shellForms := []func([]string) bool{
 		// `sh -c 'revdiff ...'` (simple wrapper, no sentinel).
-		{Program: "sh", ArgsMatcher: kittyproxy.MatchShellExec(innerRevdiff)},
+		kittyproxy.MatchShellExec(innerRevdiff),
 		// `sh -c "'revdiff' '...'; touch '<sentinel>'"` — the exact form
 		// produced by the upstream revdiff kitty launcher to signal completion
 		// back to the sandbox via a sentinel file.
-		{Program: "sh", ArgsMatcher: kittyproxy.MatchShellExecSentinel(innerRevdiff)},
+		kittyproxy.MatchShellExecSentinel(innerRevdiff),
 		// Same sentinel form but with a leading `/usr/bin/env KEY=VAL ...`
 		// prefix; emitted by the launcher (v0.8.0+) when EDITOR/VISUAL are
 		// set on the caller's shell so the overlay inherits them.
-		{Program: "sh", ArgsMatcher: kittyproxy.MatchShellExecEnvSentinel(innerRevdiff)},
+		kittyproxy.MatchShellExecEnvSentinel(innerRevdiff),
 	}
+
+	// Direct revdiff invocation (no wrapping shell), then every accepted shell
+	// spelling crossed with every accepted wrapper form.
+	patterns := []kittyproxy.CommandPattern{innerRevdiff}
+	for _, argv0 := range shellArgv0 {
+		for _, match := range shellForms {
+			patterns = append(patterns, kittyproxy.CommandPattern{
+				Program:     argv0,
+				ArgsMatcher: match,
+			})
+		}
+	}
+	return patterns
 }
 
 func (r *Revdiff) HerdrCapabilities() []herdrproxy.Capability {

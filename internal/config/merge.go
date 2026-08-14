@@ -79,6 +79,13 @@ func mergeConfigs(base, overlay *Config) *Config {
 			overlay.Proxy.Redaction.DefaultAction,
 		)
 	}
+	// The scan limit only tightens: the project file is writable from inside the
+	// sandbox, so a larger value there would be the sandbox deciding how much
+	// host memory one request may hold.
+	if overlay.Proxy.Redaction.MaxScanBytes > 0 &&
+		overlay.Proxy.Redaction.MaxScanBytes < result.Proxy.Redaction.GetMaxScanBytes() {
+		result.Proxy.Redaction.MaxScanBytes = overlay.Proxy.Redaction.MaxScanBytes
+	}
 	// Rules are always additive (overlay prepends for higher priority)
 	if len(overlay.Proxy.Redaction.Rules) > 0 {
 		result.Proxy.Redaction.Rules = append(

@@ -37,6 +37,12 @@ func TestFilter_LaunchPayload_RejectsUnvettedOptions(t *testing.T) {
 		"next_to":                 {"next_to": "title:secrets"},
 		"add_to_session":          {"add_to_session": "."},
 		"foreign match":           {"match": "title:secrets"},
+		// A `function` marker spec has kitty runpy.run_path the file, and both
+		// marker and logo resolve an absolute path verbatim - into the shared
+		// temp directory the sandbox writes at the host's own path.
+		"marker function": {"marker": "function /home/user/.cache/devsandbox/tmp/x.py"},
+		"marker text":     {"marker": "text 1 foo"},
+		"logo":            {"logo": "/home/user/.cache/devsandbox/tmp/l.png"},
 	}
 	f := launchFilter(t)
 	for name, extra := range cases {
@@ -74,9 +80,9 @@ func TestFilter_LaunchPayload_AllowsInertOptions(t *testing.T) {
 		"hold":              {"hold": true},
 		"keep_focus":        {"keep_focus": true},
 		"colors":            {"color": []string{"background=white"}},
-		"logo":              {"logo": "l.png", "logo_alpha": -1.0},
+		"logo_alpha":        {"logo_alpha": -1.0},
 		"stdin_source none": {"stdin_source": "none"},
-		"null strings":      {"marker": nil, "tab_title": nil},
+		"null strings":      {"marker": nil, "logo": nil, "tab_title": nil},
 	}
 	f := launchFilter(t)
 	for name, extra := range cases {

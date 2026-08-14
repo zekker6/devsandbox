@@ -191,11 +191,11 @@ func TestBuildPlan_DeterministicOperationOrder(t *testing.T) {
 
 func TestLayerMerge_WhiteoutPrunesDescendants(t *testing.T) {
 	m := newLayerMerge()
-	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: "d", isDir: true})
 	m.add(layerEntry{rel: filepath.Join("d", "file")})
 	m.add(layerEntry{rel: filepath.Join("d", "sub", "deep")})
-	m.add(layerEntry{rel: "d-sibling"})
-	m.add(layerEntry{rel: "other"})
+	m.add(layerEntry{rel: "d-sibling", isDir: true})
+	m.add(layerEntry{rel: "other", isDir: true})
 
 	m.add(layerEntry{rel: "d", isWhiteout: true})
 
@@ -210,7 +210,7 @@ func TestLayerMerge_WhiteoutPrunesDescendants(t *testing.T) {
 
 func TestLayerMerge_OpaqueDirPrunesDescendants(t *testing.T) {
 	m := newLayerMerge()
-	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: "d", isDir: true})
 	m.add(layerEntry{rel: filepath.Join("d", "old.txt")})
 
 	// A later upper recreates d, opaque, with its own child.
@@ -225,16 +225,86 @@ func TestLayerMerge_OpaqueDirPrunesDescendants(t *testing.T) {
 
 func TestLayerMerge_PlainDirDoesNotPrune(t *testing.T) {
 	m := newLayerMerge()
-	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: "d", isDir: true})
 	m.add(layerEntry{rel: filepath.Join("d", "old.txt")})
 
 	// A non-opaque directory in a later upper merges with the lower ones.
-	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: "d", isDir: true})
 	m.add(layerEntry{rel: filepath.Join("d", "new.txt")})
 
 	want := []string{"d", filepath.Join("d", "new.txt"), filepath.Join("d", "old.txt")}
 	if got := m.rels(); !slices.Equal(got, want) {
 		t.Fatalf("plain directory pruned lower entries: got %v, want %v", got, want)
+	}
+}
+
+// TestLayerMerge_NonDirShadowingPrunes covers the third way a higher upper
+// hides a lower subtree, the one that carries no marker: `rm -rf d && echo x >
+// d` leaves `d` a regular file with its whiteout replaced, and overlayfs stops
+// merging the path because only one side is a directory. Keeping `d/old.txt`
+// here emitted a plan that wrote `d` as a file and then tried to create a child
+// under it, dying at `mkdir d: not a directory` on the first run and on every
+// retry after it.
+func TestLayerMerge_NonDirShadowingPrunes(t *testing.T) {
+	m := newLayerMerge()
+	m.add(layerEntry{rel: "d", isDir: true})
+	m.add(layerEntry{rel: filepath.Join("d", "old.txt")})
+
+	m.add(layerEntry{rel: "d"})
+
+	want := []string{"d"}
+	if got := m.rels(); !slices.Equal(got, want) {
+		t.Fatalf("non-directory over a directory: got %v, want %v", got, want)
+	}
+}
+
+// TestBuildPlan_NonDirInLaterUpperHidesEarlierDir is the same case end to end,
+// and it is the one that mattered: the plan used to carry both `d` (a file) and
+// `d/old.txt`, so Apply created the file and then failed ENOTDIR creating a
+// child under it - aborting with earlier operations committed and failing
+// identically on every retry, against the resumability Apply documents.
+func TestBuildPlan_NonDirInLaterUpperHidesEarlierDir(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		place func(t *testing.T, path string)
+	}{
+		{"regular file", func(t *testing.T, path string) { writeFile(t, path, "shadow") }},
+		{"symlink", func(t *testing.T, path string) {
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/etc/hostname", path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			upperA := filepath.Join(tmp, "upperA")
+			upperB := filepath.Join(tmp, "upperB")
+			host := filepath.Join(tmp, "host")
+			if err := os.MkdirAll(host, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(upperA, "d", "old.txt"), "A")
+			tc.place(t, filepath.Join(upperB, "d"))
+
+			plan, err := BuildPlan([]UpperSource{
+				{Kind: UpperPrimary, Path: upperA, SandboxID: "s1"},
+				{Kind: UpperSession, Path: upperB, SandboxID: "s1", SessionID: "b"},
+			}, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := relPaths(plan.Operations)
+			if slices.Contains(got, filepath.Join("d", "old.txt")) {
+				t.Errorf("entry hidden by a non-directory in a later upper was planned; ops=%v", got)
+			}
+			if err := Apply(plan); err != nil {
+				t.Fatalf("Apply on a plan with a shadowed directory: %v", err)
+			}
+		})
 	}
 }
 
@@ -404,5 +474,106 @@ func TestBuildPlan_GroupedBySandbox(t *testing.T) {
 	}
 	if s1Files != 1 || s2Files != 1 {
 		t.Fatalf("grouping wrong: s1Files=%d s2Files=%d BySandbox=%+v", s1Files, s2Files, plan.BySandbox)
+	}
+}
+
+// TestBuildPlan_SkipsNonRegularEntries pins the entries the applier cannot
+// promote. A FIFO makes copyFile's O_RDONLY open block forever, and a socket
+// fails ENXIO partway through Apply and dies at the same operation on every
+// retry - both reachable because the upper is sandbox-writable.
+func TestBuildPlan_SkipsNonRegularEntries(t *testing.T) {
+	upper := t.TempDir()
+	host := t.TempDir()
+
+	fifo := filepath.Join(upper, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(upper, "real.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("seed regular file: %v", err)
+	}
+
+	plan, err := BuildPlan([]UpperSource{{Path: upper, SandboxID: "s"}}, host)
+	if err != nil {
+		t.Fatalf("BuildPlan failed: %v", err)
+	}
+
+	for _, op := range plan.Operations {
+		if op.RelPath == "pipe" {
+			t.Errorf("planned an operation for a FIFO: %+v", op)
+		}
+	}
+	if len(plan.Operations) != 1 || plan.Operations[0].RelPath != "real.txt" {
+		t.Fatalf("regular file was not planned alongside the skip: %+v", plan.Operations)
+	}
+
+	// The plan must also apply cleanly - a FIFO reaching copyFile would hang
+	// here rather than fail.
+	if err := Apply(plan); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(host, "real.txt")); err != nil || string(got) != "keep" {
+		t.Fatalf("regular file not migrated: %q %v", got, err)
+	}
+}
+
+// TestBuildPlan_MarksHostDirReplacement covers what the dry-run preview has to
+// say out loud: applying a file or a symlink over a host directory removes that
+// directory recursively, including entries no operation in the plan puts back.
+func TestBuildPlan_MarksHostDirReplacement(t *testing.T) {
+	tmp := t.TempDir()
+	upper := filepath.Join(tmp, "upper")
+	host := filepath.Join(tmp, "host")
+
+	// file over host directory
+	writeFile(t, filepath.Join(upper, "conf"), "now a file")
+	writeFile(t, filepath.Join(host, "conf", "keep.txt"), "host-only data")
+
+	// symlink over host directory
+	if err := os.MkdirAll(filepath.Join(upper, "link"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(upper, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/elsewhere", filepath.Join(upper, "link")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(host, "link", "keep.txt"), "host-only data")
+
+	// file over host file, and directory over host directory: neither replaces
+	writeFile(t, filepath.Join(upper, "plain.txt"), "new")
+	writeFile(t, filepath.Join(host, "plain.txt"), "old")
+	writeFile(t, filepath.Join(upper, "d", "x.txt"), "new")
+	writeFile(t, filepath.Join(host, "d", "y.txt"), "old")
+
+	plan, err := BuildPlan([]UpperSource{{Kind: UpperPrimary, Path: upper, SandboxID: "s1"}}, host)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	want := map[string]bool{
+		"conf":      true,
+		"link":      true,
+		"plain.txt": false,
+		"d":         false,
+		"d/x.txt":   false,
+	}
+	for _, op := range plan.Operations {
+		expected, known := want[op.RelPath]
+		if !known {
+			continue
+		}
+		if op.ReplacesHostDir != expected {
+			t.Errorf("%s: ReplacesHostDir = %v, want %v", op.RelPath, op.ReplacesHostDir, expected)
+		}
+		delete(want, op.RelPath)
+	}
+	for rel := range want {
+		t.Errorf("no operation emitted for %q", rel)
+	}
+
+	if got := plan.DirReplacements(); got != 2 {
+		t.Errorf("DirReplacements() = %d, want 2", got)
 	}
 }

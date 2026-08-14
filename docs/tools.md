@@ -58,6 +58,9 @@ devsandbox tools info mise
 # Show details for all tools
 devsandbox tools info --all
 
+# Print absolute paths instead of ~ notation
+devsandbox tools info mise --resolve
+
 # JSON output
 devsandbox tools info mise --json
 ```
@@ -780,17 +783,25 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 
 Command patterns also pin the program to its **resolved absolute path** (`exec.LookPath` plus symlink resolution), not just its basename. Basename matching accepted any path ending in the allowed program name, including one inside a directory the sandbox can write - and the [shared temp directory](#shared-temp-directory) is a write-through bind shared with the host at an identical path, so sandboxed code could plant its own `revdiff` there and have kitty run it on the host. If the binary cannot be resolved, every launch is denied rather than falling back.
 
+There is **no basename fallback left for any pattern.** A pattern that pins no resolved path now requires `argv[0]` to be that exact spelling, which is how the wrapping shell in `sh -c '<tool> ...'` is constrained: a shell has no single resolved path worth pinning, so only `sh` and `/bin/sh` are accepted and the host resolves them itself. The same planted-binary path applied there - `<shared temp>/sh` ends in `sh` and was accepted as the wrapper.
+
 ### The environment prefix
 
 A launch command may carry a `KEY=VAL` prefix ahead of the program, either as `/usr/bin/env 'KEY=VAL' …` or as a leading shell assignment. The revdiff launcher emits one so the overlay inherits the editor from the caller's shell, whose exports the terminal's own process never saw. The same rules apply to the kitty patterns and to the [herdr launch script](#launch-scripts-are-validated-and-relocated), which share one validator.
 
 | Variable | Accepted value |
 |---|---|
-| `EDITOR`, `VISUAL` | A bare program name, or an absolute path that resolves to the same file the host's own `PATH` lookup of that name yields. Empty is accepted. |
+| `EDITOR`, `VISUAL` | A known editor, named either bare or by an absolute path the host's own `PATH` lookup of that name yields. Empty is accepted. |
 | `REVDIFF_EXIT_CODE_ON_ANNOTATIONS` | A short scalar with no path separator. |
 | Anything else | Denied. |
 
-The value matters as much as the name: revdiff spawns whatever `EDITOR` names when the user opens a file in the overlay, so an unconstrained value is host code execution regardless of how narrow the key set is. A value naming a path is therefore checked against the host's own resolution of that program - which is what keeps a binary planted in the [shared temp directory](#shared-temp-directory) out, since a path the sandbox writes there is a path the host would execute. Relative paths, values carrying arguments or shell-significant characters, and names outside the table are refused rather than interpreted. The `env` program itself is pinned to `/usr/bin/env` or the host's own resolution of `env`, never to a path that merely ends in `/env`.
+The value matters as much as the name: revdiff spawns whatever `EDITOR` names when the user opens a file in the overlay, so an unconstrained value is host code execution regardless of how narrow the key set is.
+
+Two things bound it. The **program has to be an editor** - one devsandbox recognizes, or whatever your own `EDITOR`/`VISUAL` is set to on the host, which is how an editor the built-in list does not carry keeps working. Resolving the name against the host's `PATH` is not enough on its own: the file the editor opens sits in the project tree, which is bind-mounted read-write, so `EDITOR=sh` would make the sandbox's own file the program. And the **path is compared literally** against what the host's lookup yields, never resolved from the value itself - resolving the sandbox's path first would accept a symlink into the [shared temp directory](#shared-temp-directory) pointed at the real editor and repointed before the host runs it.
+
+Relative paths, values carrying arguments or shell-significant characters, and names outside the table are refused rather than interpreted. The `env` program itself is pinned to `/usr/bin/env` or the host's own resolution of `env`, never to a path that merely ends in `/env`.
+
+If a launch is denied and your editor is an unusual one, export `EDITOR` on the host before starting devsandbox - the deny line in `devsandbox logs` carries the rejected command line, including the assignment.
 
 ### Request options
 
@@ -806,9 +817,10 @@ The command line is not the only thing a kitty request carries. `kitty @ launch`
 | `--cwd` | Only kitty's host-resolved keywords (`current`, `oldest`, `last_reported`, `root`). An explicit path is the one cwd value the sandbox chooses, and it decides which tree the launched program reads. |
 | `--match` | Only the host window devsandbox itself runs in (`window_id:$KITTY_WINDOW_ID`, read on the host side). Otherwise the sandbox picks which host tab its window lands in. |
 | `--source-window`, `--next-to`, `--add-to-session`, `--os-panel`, `--hold-after-ssh` | Denied. |
-| Titles, colors, logo, placement, `--hold`, `--keep-focus` | Allowed - none of them changes what runs or what it can read. |
+| `--marker`, `--logo` | Denied. A `function` marker spec has kitty run the named Python file (`runpy.run_path`), and both resolve an absolute path verbatim - including one in the temp directory shared read-write with the host. |
+| Titles, colors, placement, `--hold`, `--keep-focus` | Allowed - none of them changes what runs or what it can read. |
 
-The owned-scoped commands are decoded the same way. `send-text --all` and `send-text --match-tab` reach past the matched window to every window of the host tab (or every window kitty has), so both are denied even when the `match` selector names an owned id; `ls --output-format session` is denied because its response is not in the shape the owned-id response filter can rewrite. If an `ls` response nevertheless comes back in a shape that filter cannot parse, the sandbox gets a denial rather than the raw reply - the unfiltered body is every OS window, tab, title, working directory, foreground command line and per-window environment on the host.
+The owned-scoped commands are decoded the same way. `send-text --all` and `send-text --match-tab` reach past the matched window to every window of the host tab (or every window kitty has), so both are denied even when the `match` selector names an owned id; `send-text --session-id` is denied for the same reason, since a broadcast session is not scoped to owned windows; `ls --output-format session` is denied because its response is not in the shape the owned-id response filter can rewrite; and `ls --all-env-vars` is denied because that filter narrows *which* windows come back, not what each one discloses - an owned window still reports the environment kitty launched it with, which is the host user's. If an `ls` response nevertheless comes back in a shape that filter cannot parse, the sandbox gets a denial rather than the raw reply - the unfiltered body is every OS window, tab, title, working directory, foreground command line and per-window environment on the host.
 
 Two envelope fields are refused before any of that: an **encrypted** request (kitty runs the command inside `encrypted` and ignores the outer name, so the proxy would be approving a command it cannot see) and a **password-authenticated** one.
 

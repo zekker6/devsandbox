@@ -440,8 +440,17 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		notice.Info("Another session is active. Running in concurrent mode (overlay changes will be discarded on exit).")
 	}
 
-	// Primary session: clean up stale session overlay dirs from crashed concurrent sessions.
-	if !cfg.IsConcurrent {
+	// Primary session: clean up stale session overlay dirs from crashed
+	// concurrent sessions.
+	//
+	// Gated on the designation, not on IsConcurrent. DesignateSession only
+	// reroutes bwrap launches, so a docker or krun launch is IsConcurrent=false
+	// even when it lost the designation to a live bwrap session - and the
+	// sandbox home is derived from the project name, so both launches share one.
+	// Reading that as "primary" sent CleanupStaleSessionDirs, which removes every
+	// directory under overlay/sessions/ unconditionally, through the live
+	// session's own upper and work dirs.
+	if sessionHandle.IsPrimary() {
 		if removed, err := sandbox.CleanupStaleSessionDirs(cfg.SandboxHome); err != nil {
 			notice.Warn("failed to clean stale session dirs: %v", err)
 		} else if removed > 0 {
@@ -1034,6 +1043,7 @@ func buildRedactionConfig(cfg *config.ProxyRedactionConfig) *proxy.RedactionConf
 	redCfg := &proxy.RedactionConfig{
 		Enabled:       cfg.Enabled,
 		DefaultAction: proxy.RedactionAction(cfg.DefaultAction),
+		MaxScanBytes:  cfg.MaxScanBytes,
 	}
 	for _, r := range cfg.Rules {
 		rule := proxy.RedactionRule{

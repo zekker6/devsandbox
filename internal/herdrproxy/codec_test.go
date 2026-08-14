@@ -212,3 +212,39 @@ func TestResponseID(t *testing.T) {
 		})
 	}
 }
+
+// TestParseRequest_RejectsCaseVariantEnvelopeKeys pins the parser differential
+// on the envelope itself. An allowed request is forwarded as the bytes that
+// arrived, so any key the filter and herdr read differently is decided by
+// herdr: encoding/json matches field names case-insensitively and lets the last
+// match win, while herdr's serde keeps the spellings distinct and reads the one
+// it names. A plain json.Unmarshal here therefore filtered the payload below as
+// an unconditionally-allowed `ping` and had herdr run `pane.send_input` with
+// the caller's params, past every validator.
+func TestParseRequest_RejectsCaseVariantEnvelopeKeys(t *testing.T) {
+	for _, raw := range []string{
+		`{"id":"x","method":"pane.send_input","params":{"text":"whoami"},"METHOD":"ping","PARAMS":{}}`,
+		`{"id":"x","METHOD":"ping","method":"pane.send_input","params":{}}`,
+		// Repeated spelling of the same key: last-wins in Go, first-wins or an
+		// error elsewhere.
+		`{"id":"x","method":"ping","method":"pane.send_input","params":{}}`,
+		// Unknown field.
+		`{"id":"x","method":"ping","params":{},"encrypted":{"cmd":"pane.send_input"}}`,
+		// Trailing data after the value.
+		`{"id":"x","method":"ping","params":{}}{"id":"y","method":"pane.send_input"}`,
+	} {
+		if _, err := parseRequest([]byte(raw)); err == nil {
+			t.Errorf("parseRequest accepted %s, want error", raw)
+		}
+	}
+
+	// A well-formed request still decodes, so the strictness has not closed the
+	// ordinary path.
+	req, err := parseRequest([]byte(`{"id":"x","method":"pane.list","params":{}}`))
+	if err != nil {
+		t.Fatalf("parseRequest rejected a well-formed request: %v", err)
+	}
+	if req.Method != "pane.list" {
+		t.Errorf("method = %q, want pane.list", req.Method)
+	}
+}

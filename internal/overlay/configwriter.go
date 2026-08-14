@@ -3,11 +3,77 @@ package overlay
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 )
+
+// ErrNotRegularFile reports a config path that is not a plain file - a symlink,
+// a directory, a device. SetToolMode refuses to read or rewrite one.
+var ErrNotRegularFile = errors.New("not a regular file")
+
+// readRegularFile reads path, refusing to follow a symlink sitting there.
+//
+// `overlay migrate --set-mode` runs on the host and rewrites a path inside the
+// project directory, which is bind-mounted read-write into the sandbox. A
+// project with no .devsandbox.toml at launch time does not get the protective
+// /dev/null bind, so the sandbox can create that name as a symlink to any host
+// file - and a later --set-mode would then read that file, rewrite it as TOML
+// and hand it back, skipping the confirmation prompt entirely when only one
+// config is affected. Same construct copyFile closes on the migration path.
+func readRegularFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%q: %w", path, ErrNotRegularFile)
+		}
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%q: %w", path, ErrNotRegularFile)
+	}
+	return io.ReadAll(f)
+}
+
+// writeRegularFile replaces path atomically via a temporary file in the same
+// directory, so the write lands on the name itself rather than through whatever
+// a symlink at that name points to, and a failure part-way leaves the original
+// intact rather than truncated.
+func writeRegularFile(path string, content []byte) (retErr error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".devsandbox-config-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if retErr != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
 
 var validToolModes = map[string]bool{
 	"split":      true,
@@ -26,7 +92,7 @@ func SetToolMode(configPath, tool, mode string) error {
 		return fmt.Errorf("invalid mount_mode %q (want one of split/overlay/tmpoverlay/readonly/readwrite/disabled)", mode)
 	}
 
-	raw, err := os.ReadFile(configPath)
+	raw, err := readRegularFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -36,7 +102,7 @@ func SetToolMode(configPath, tool, mode string) error {
 
 	if len(raw) == 0 {
 		content := header + "\n" + mountLine + "\n"
-		return os.WriteFile(configPath, []byte(content), 0o644)
+		return writeRegularFile(configPath, []byte(content))
 	}
 
 	sc := bufio.NewScanner(bytes.NewReader(raw))
@@ -79,7 +145,7 @@ func SetToolMode(configPath, tool, mode string) error {
 			lines = append(lines, "")
 		}
 		lines = append(lines, header, mountLine)
-		return os.WriteFile(configPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+		return writeRegularFile(configPath, []byte(strings.Join(lines, "\n")+"\n"))
 	}
 
 	// Section exists — look for existing mount_mode line
@@ -99,5 +165,5 @@ func SetToolMode(configPath, tool, mode string) error {
 		newLines = append(newLines, lines[sectionStart:]...)
 		lines = newLines
 	}
-	return os.WriteFile(configPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	return writeRegularFile(configPath, []byte(strings.Join(lines, "\n")+"\n"))
 }

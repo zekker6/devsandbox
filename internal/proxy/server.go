@@ -214,10 +214,16 @@ func NewServer(cfg *Config) (*Server, error) {
 		return nil, fmt.Errorf("credential/redaction conflict: %w", err)
 	}
 
-	// Set up ask mode if configured (default_action = ask)
+	// Set up ask mode if anything can reach it - the default action, or any
+	// single rule.
+	//
+	// Keying this on the default action alone left `action = "ask"` on a rule
+	// with any other default with no queue to ask: the request was allowed
+	// through unprompted while its log entry recorded FilterAction="ask",
+	// so the audit trail asserted a user had approved a request nobody saw.
 	var askServer *AskServer
 	var askQueue *AskQueue
-	if cfg.Filter != nil && cfg.Filter.DefaultAction == FilterActionAsk {
+	if cfg.Filter != nil && cfg.Filter.usesAskAction() {
 		askServer, err = NewAskServer(cfg.SandboxBase)
 		if err != nil {
 			_ = proxyLogger.Close()
@@ -436,14 +442,16 @@ func (s *Server) setupLogging() {
 		}
 
 		// Redaction scan (after filter allows the request)
-		// Re-read body from req in case credential injection modified it.
-		// This ensures redaction scans the actual outgoing body, not a stale copy.
+		// Re-read the body from req: what LogRequest captured is a bounded
+		// prefix, and credential injection runs in between. The read is bounded
+		// in bytes and time, and a body it cannot take whole is blocked - a scan
+		// of part of a body proves nothing about the rest of it.
 		if s.redactionEngine != nil && s.redactionEngine.IsEnabled() {
 			scanBody := reqBody
 			if req.Body != nil {
-				freshBody, err := io.ReadAll(req.Body)
+				freshBody, err := s.redactionEngine.ReadScanBody(req)
 				if err != nil {
-					resp := BlockResponse(req, "failed to read request body for redaction scan")
+					resp := BlockResponse(req, redactionReadBlockReason(err))
 					if entry != nil {
 						entry.RedactionAction = "block"
 						entry.Error = "redaction body read error: " + err.Error()
@@ -453,7 +461,6 @@ func (s *Server) setupLogging() {
 					return nil, resp
 				}
 				scanBody = freshBody
-				req.Body = io.NopCloser(bytes.NewReader(freshBody))
 			}
 
 			result := s.redactionEngine.Scan(req, scanBody)
@@ -483,7 +490,7 @@ func (s *Server) setupLogging() {
 							entry.URL = result.URL
 						}
 						if result.Headers != nil {
-							entry.RequestHeaders = result.Headers
+							entry.RequestHeaders, entry.RequestHeadersTruncated = captureHeaders(result.Headers)
 						}
 						s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 						_ = s.reqLogger.Log(entry)
@@ -512,7 +519,7 @@ func (s *Server) setupLogging() {
 								entry.URL = result.URL
 							}
 							if result.Headers != nil {
-								entry.RequestHeaders = result.Headers
+								entry.RequestHeaders, entry.RequestHeadersTruncated = captureHeaders(result.Headers)
 							}
 							s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 							_ = s.reqLogger.Log(entry)
@@ -535,7 +542,7 @@ func (s *Server) setupLogging() {
 							entry.URL = result.URL
 						}
 						if result.Headers != nil {
-							entry.RequestHeaders = result.Headers
+							entry.RequestHeaders, entry.RequestHeadersTruncated = captureHeaders(result.Headers)
 						}
 					}
 

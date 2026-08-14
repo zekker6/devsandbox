@@ -18,11 +18,11 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 
 | Section | Key Fields | Details |
 |---|---|---|
-| `[proxy]` | `enabled`, `port`, `mitm`, `extra_env`, `extra_ca_env` | [Proxy Settings](#proxy-settings) |
+| `[proxy]` | `enabled`, `port`, `mitm`, `max_log_body_bytes`, `extra_env`, `extra_ca_env` | [Proxy Settings](#proxy-settings) |
 | `[proxy.credentials.<name>]` | `enabled`, `source.env/file/value` | [Proxy Credentials](#proxy-credentials) |
-| `[proxy.redaction]` | `enabled`, `default_action`, `rules` | [Content Redaction](#content-redaction) |
+| `[proxy.redaction]` | `enabled`, `default_action`, `max_scan_bytes`, `rules` | [Content Redaction](#content-redaction) |
 | `[proxy.filter]` | `default_action`, `ask_timeout`, `cache_decisions`, `rules` | [Proxy Mode docs](proxy.md#http-filtering) |
-| `[sandbox]` | `isolation`, `base_path`, `use_embedded`, `config_visibility` | [Sandbox Settings](#sandbox-settings) |
+| `[sandbox]` | `isolation`, `base_path`, `use_embedded`, `hide_env_files`, `config_visibility` | [Sandbox Settings](#sandbox-settings) |
 | `[sandbox.docker]` | `dockerfile`, `keep_container`, `resources` (deprecated) | [Isolation Backend](#isolation-backend) |
 | `[sandbox.resources]` | `memory`, `cpus`, `pids` | [Resource Limits](#resource-limits) |
 | `[sandbox.mounts.rules]` | `pattern`, `mode` | [Custom Mounts](#custom-mounts) |
@@ -202,7 +202,14 @@ Scan outgoing requests for secrets and block or replace them. Only requests that
 [proxy.redaction]
 enabled = true
 default_action = "block"  # "block", "redact", or "log"
+max_scan_bytes = 10485760 # Largest request body the scan will buffer (default 10 MiB)
 ```
+
+`max_scan_bytes` bounds the body held in host memory while the scan runs. A
+decision needs the whole body, so a request past the limit - or one whose body
+stops arriving for 30 seconds - is **blocked** rather than forwarded on a
+partial scan. Raise it if a workflow legitimately uploads more than that through
+the proxy. A project `.devsandbox.toml` may only lower it.
 
 #### Rule Types
 
@@ -536,6 +543,11 @@ as a shell does.
 # When false, only system-installed binaries are used.
 # use_embedded = true
 
+# Hide .env files from the sandbox (default: true)
+# When true, matching files are overlaid with /dev/null.
+# Set to false if sandboxed tools need to read .env files directly.
+# hide_env_files = true
+
 # Pass host environment variables into the sandbox.
 # Listed variables are copied from the host; unset variables are silently skipped.
 # env_passthrough = ["MY_API_KEY", "CUSTOM_TOOL_CONFIG"]
@@ -546,6 +558,16 @@ as a shell does.
 # - "readwrite": config file is visible and writable
 config_visibility = "hidden"
 ```
+
+**`hide_env_files`** (default `true`) is the setting behind the [`.env` row of the Security
+Model](sandboxing.md#security-model): files matching `.env` and `.env.*` in the project are overlaid
+with `/dev/null` so sandboxed code cannot read them. Which files are in scope - and which are not -
+is described under [Environment Files](sandboxing.md#whats-not-available-by-default).
+
+Set it to `false`, or pass `--no-hide-env` for a single run, when a tool inside the sandbox has to
+read `.env` itself. Both expose every matching file to sandboxed code, so prefer
+[`[sandbox.environment]`](#sandbox-environment-variables) or
+[proxy credential injection](#proxy-credentials) when only a secret's *value* is needed.
 
 ### Sandbox Environment Variables
 

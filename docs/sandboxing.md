@@ -66,7 +66,7 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 | Resource                          | Access                              |
 |-----------------------------------|-------------------------------------|
 | Project directory                 | Read/Write                          |
-| `.env` files                      | Hidden (overlaid with /dev/null), within the scan scope below |
+| `.env` files                      | Hidden (overlaid with /dev/null), within the scan scope below (configurable) |
 | `~/.ssh`                          | Not mounted (configurable)          |
 | `~/.gitconfig`                    | Sanitized copy (configurable)       |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted                         |
@@ -91,6 +91,8 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 - `~/.config/gcloud` (Google Cloud config)
 
 **Environment Files** - Files matching `.env` and `.env.*` patterns (e.g., `.env`, `.env.local`, `.env.production`) in your project are overlaid with `/dev/null`, preventing secrets from being read by sandboxed code. Files like `config.env` that don't start with `.env` are not hidden. The scan descends up to 3 directory levels below the project root and skips `node_modules`, `.git`, `vendor`, and `.venv`, so matching files deeper than that or inside a skipped directory stay readable.
+
+Hiding is on by default and can be turned off: [`hide_env_files = false`](configuration.md#sandbox-settings) in the `[sandbox]` section, or `--no-hide-env` for a single run. Either one makes every matching file readable inside the sandbox, so check a shared config before assuming a run has the default. When a tool only needs a secret's *value*, pass it through [`[sandbox.environment]`](configuration.md#sandbox-environment-variables) or have the proxy inject it instead of exposing the file.
 
 **Git Credentials** - By default, `~/.gitconfig` is replaced with a sanitized copy containing only user.name and email.
 Use `git.mode = "readwrite"` for full git access.
@@ -383,9 +385,19 @@ devsandbox sandboxes prune --older-than 30d
 # Remove all sandboxes
 devsandbox sandboxes prune --all
 
+# Restrict any of the above to orphaned sandboxes only
+devsandbox sandboxes prune --keep 5 --orphaned
+
+# Also remove the Docker volumes belonging to the pruned sandboxes
+devsandbox sandboxes prune --all --volumes
+
 # Preview what would be removed
 devsandbox sandboxes prune --dry-run
 ```
+
+A sandbox with a live session is never pruned. `--orphaned` narrows the candidate set rather than
+selecting on its own, so it combines with `--keep`, `--older-than` and `--all`; bare `prune` already
+removes only orphaned sandboxes.
 
 ## Port Forwarding
 
@@ -477,7 +489,19 @@ This verifies:
 ```bash
 # Show bwrap arguments
 DEVSANDBOX_DEBUG=1 devsandbox
+
+# Keep wrapper diagnostics on stderr while the child owns the terminal
+devsandbox --verbose claude
 ```
+
+Wrapper diagnostics (port-forward notices, proxy setup info, container progress) always go to
+`$XDG_STATE_HOME/devsandbox/wrapper.log` (`~/.local/state/devsandbox/wrapper.log` when that variable
+is unset). They also reach stderr during startup and teardown, but
+not while the child process owns the terminal - there they would corrupt a full-screen TUI, so a
+one-line banner on exit points at the log instead. `--verbose` writes them to stderr in every phase,
+so you can watch a running sandbox without tailing the log. `DEVSANDBOX_DEBUG=1` implies it and adds
+the bwrap arguments and a
+[per-request proxy trace](proxy.md#debugging-the-requestresponse-lifecycle).
 
 ### Common Issues
 
@@ -645,7 +669,9 @@ devsandbox overlay migrate --sandbox my-project --tool claude --apply --set-mode
 - **Dry-run by default.** Nothing is written without `--apply`. The preview lists every create / overwrite / delete the apply phase would perform.
 - **Stopped-sandbox check.** The command refuses to run if any targeted sandbox has an active session (`--force` bypasses).
 - **Last-write-wins across stacked uppers.** The primary persistent upper comes first, followed by per-session uppers in mtime order. The most recent upper's version of any file wins.
-- **Whiteouts honored.** Files the sandbox deleted (overlayfs char-device whiteouts) become host-file deletions on apply. Deleting a directory also hides whatever an earlier session had written inside it, so those entries are neither listed nor migrated - the same holds for a directory the sandbox deleted and recreated, whose old contents stay hidden while the new ones are promoted.
+- **Whiteouts honored.** Files the sandbox deleted (overlayfs char-device whiteouts) become host-file deletions on apply. Deleting a directory also hides whatever an earlier session had written inside it, so those entries are neither listed nor migrated - the same holds for a directory the sandbox deleted and recreated, whose old contents from earlier sessions stay hidden while the new ones are promoted, and for one it replaced with a file or a symlink, which hides the earlier contents with no marker at all. Files the *host* already had in such a directory are a separate case: they are left in place and merged with what is promoted, so a directory the sandbox emptied and refilled comes out holding both. Remove them yourself if you want the host to match what the sandbox showed.
+- **Type changes replace the destination.** When an entry's type differs between the sandbox and the host, the host entry is replaced rather than merged: a sandbox file or symlink at a path the host holds as a *directory* removes that directory and everything under it. The preview marks each such line `← replaces a host directory: its contents are deleted` and counts them in its summary, so a recursive delete is visible in the dry run rather than reading as an ordinary file overwrite. A destination the sandbox also has as a directory keeps its existing host contents.
+- **Runtime entries are skipped.** Sockets, FIFOs and device nodes in an upper are neither listed nor migrated. They carry no meaning on the host and reading one would stall or abort the apply partway through.
 - **Deterministic plan.** The same uppers always yield the same operations in the same order, with each directory created before anything inside it, so the preview is what apply performs.
 - **Confined to the target path.** The apply phase writes only at the paths the preview listed. A symlink at one of those paths is replaced by the migrated entry rather than written through, so the file it pointed at is left alone. A symlink among the directories *below* the target path aborts the migration naming that component - following it would put the write somewhere the preview never showed.
 - **No automatic host backup.** If you want one, make it yourself before passing `--apply`.
@@ -792,11 +818,24 @@ This works for both backends:
 - **Docker**: don't keep container after exit (fresh container each run)
 - **bwrap**: remove sandbox home directory after exit
 
-Sandbox state is removed only when no other session is still using it. A second
-launch for the same project runs on a throwaway overlay stacked on that state, so
-deleting it would take the running session's lower layers with it; the removal is
-skipped and reported instead. A `--worktree` run still removes its own worktree
-either way.
+**Concurrent sessions.** The first bwrap launch for a project owns its persistent
+overlay. A second launch started while that one is running cannot share those
+directories, so it runs in *concurrent mode*: it reports
+`Another session is active` at startup, gets its own session-scoped upper layer
+stacked on the first session's state as a read-only lower, and discards that
+upper when it exits. Reads see everything the first session has written; writes
+do not survive. The designation runs under a lock held across the whole decision
+- checking whether anyone else is here and registering as present are one
+indivisible step - so exactly one of two launches started together owns the
+persistent overlay, whichever wins the tie. A launch only owns it while no other
+session holds the sandbox at all, including one that outlived the session that
+started before it.
+
+Sandbox state is removed only when no other session is still using it. Because a
+concurrent session's lower layers are that state, deleting it would take the
+running session with it; the removal is skipped and reported instead. A primary
+`--rm --worktree` run still removes its worktree even when the state removal is
+skipped; a concurrent one removes neither.
 
 **Managing Containers:**
 

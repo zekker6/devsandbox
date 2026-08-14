@@ -5,6 +5,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -54,6 +55,40 @@ func TestNamespaceDialer_HelperFailureSurfacesStderr(t *testing.T) {
 		return
 	}
 	// We just want to prove we don't hang; any error return is fine.
+}
+
+// TestCappedBuffer_ConcurrentWriteAndString reproduces the race the full
+// -race suite caught: os/exec copies the helper's stderr into the buffer on
+// its own goroutine while stderrError reads it from the caller's Read path.
+// Without the mutex this fails under -race regardless of scheduling.
+func TestCappedBuffer_ConcurrentWriteAndString(t *testing.T) {
+	b := &cappedBuffer{max: 64}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		// More than max in total, so the truncating branch runs too.
+		for range 200 {
+			if _, err := b.Write([]byte("dial: connection refused\n")); err != nil {
+				t.Errorf("Write: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			_ = b.String()
+		}
+	}()
+
+	wg.Wait()
+
+	if got := len(b.String()); got != 64 {
+		t.Errorf("buffer retained %d bytes, want the 64-byte cap", got)
+	}
 }
 
 // Ensure helperConn satisfies net.Conn.

@@ -19,22 +19,24 @@ import (
 // A pattern accepts an argv if the program matches argv[0] and ArgsMatcher
 // returns true for argv[1:].
 //
-// Program matching has two modes:
+// Program matching has two modes, and neither one ever matches on basename:
 //
 //   - ResolvedBin set (preferred): argv[0] must equal ResolvedBin exactly after
 //     cleaning, pinning the pattern to one binary at one path.
-//   - ResolvedBin empty (legacy): argv[0] matches on basename, so any path
-//     ending in Program is accepted.
+//   - ResolvedBin empty: argv[0] must equal Program byte for byte, so only a
+//     literal spelling the host itself resolves is accepted.
 //
-// The basename-only mode is unsafe wherever the sandbox can create a file at a
+// Matching on basename is unsafe wherever the sandbox can create a file at a
 // path the host sees. Most of the sandbox home is an overlay whose writes never
 // reach the host, but a few directories are write-through bind mounts shared at
-// an identical path on both sides — the revdiff IPC directory is one. A sandbox
-// can drop an executable named `revdiff` there and emit a command naming it;
-// basename matching accepts it and the host runs it as the host user. Setting
-// ResolvedBin closes that, because the real resolved path lives on an overlay
-// the sandbox cannot alter from the host's point of view. Reject is defense in
-// depth for the write-through paths.
+// an identical path on both sides — the shared temp directory and the revdiff
+// IPC directory are two. A sandbox can drop an executable named `revdiff`, or
+// `sh`, there and emit a command naming it by absolute path; basename matching
+// accepted it and the host ran it as the host user. Setting ResolvedBin closes
+// that, because the real resolved path lives on an overlay the sandbox cannot
+// alter from the host's point of view, and exact Program matching closes it for
+// the wrapping shell, which has no single resolved path worth pinning. Reject is
+// defense in depth for the write-through paths.
 type CommandPattern struct {
 	Program     string
 	ArgsMatcher func(args []string) bool
@@ -79,10 +81,7 @@ func (p CommandPattern) programMatches(got string) bool {
 		return clean == filepath.Clean(p.ResolvedBin)
 	}
 
-	if p.Program == got {
-		return true
-	}
-	return filepath.Base(clean) == p.Program
+	return p.Program != "" && p.Program == got
 }
 
 // isUnder reports whether path is dir itself or lies beneath it. It compares

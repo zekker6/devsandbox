@@ -31,6 +31,10 @@ Two invariants matter, both because they have already been violated:
 
 Scope mutations to resources the sandbox created, taking their ids from the server's response and never from the client. Deny by default: a method with no explicit validator is refused, not passed through.
 
+**Deny by default at the field level, not only at the method.** Vetting the fields you understand and forwarding the original bytes leaves every other field unchecked - `kitty @ launch` carries around forty options, and reading `type` and the argv while passing `env`, `cwd`, `copy_cmdline` and `stdin_source` through meant the argv allowlist decided nothing. Decode every request with `socketproxy.StrictUnmarshal` into a struct that enumerates *every* field the upstream CLI emits, and pin or vet each security-relevant one. Three things make this specific: the CLI serializes its **full option set**, not just the non-defaults, so `DisallowUnknownFields` over a partial struct rejects legitimate requests - which is why the field list is pinned to a version recorded beside it (`kittyproxy.KittyPayloadVersion`) and a newer option denies the request naming itself. The envelope needs the same treatment as the command it carries: kitty executes an `encrypted` field and ignores the outer `cmd`, so a filter checking only the name it can see approves a command it cannot. And **"declared" has to mean byte-exact, because both proxies forward the received bytes** - `encoding/json` matches field names case-insensitively and lets the last match win, while Python's `json.loads` and serde keep the spellings distinct and read the one they name, so `{"args":[…],"ARGS":[…]}` validated the second list and shipped the first, with `DisallowUnknownFields` raising no objection because it uses the same relaxed matching. `StrictUnmarshal` scans the raw keys itself and denies an unknown, case-variant, or repeated key, plus trailing data. Anything that decodes a sandbox-supplied payload goes through it; a plain `json.Unmarshal` on the request side is the bug.
+
+**A response the filter cannot parse is a denial, not a passthrough.** The one fail-open path in `internal/kittyproxy` was `postProcessResponse` logging a `FilterLsResponse` error and returning the upstream body - which is every host window, tab, title, cwd and per-window env, the exact set `list_owned` exists to narrow. A filter that inverts to "send everything" on a parse failure is worse than no filter, because the capability's name still promises the narrowing.
+
 Two more invariants come from the herdr agent-reporting work:
 
 - **Anchor every validator to something derived on the host.** A request is checked against what devsandbox already knows - the pane id herdr gave this process, the agent devsandbox was asked to launch, the session directory that tool's own bindings produce - never against a value the request supplies. Where a bound is a filesystem path, take it from the same function that produces the bind mount so the two cannot drift apart.
@@ -121,6 +125,61 @@ Three things about exit code 78 in the rendered prologue:
   not at `os.MkdirTemp("", …)`: that resolves against `$TMPDIR`, which the invoking user may have pointed at a directory
   bound read-write into the sandbox - and a workload that can delete the marker makes its own exit 78 read as an abort,
   destroying the signal. Same reasoning as `internal/herdrstate`; see *State the host trusts* above.
+
+## Proxy filter scopes
+
+`internal/proxy`'s filter has exactly three scopes - `host`, `path`, `url` (`filter_types.go`) - and an unset scope
+falls through to host. Three things are load-bearing:
+
+- **Refuse a scope the request shape cannot carry, rather than enforcing less than it says.** With MITM off, an HTTPS
+  connection reaches the proxy as `CONNECT host:port` and nothing more, so host scope is enforceable there and `path`
+  and `url` are not. `NewServer` aborts naming the offending rule instead of starting a server on which those rules
+  read as covering everything and cover plain HTTP only. Same rule as the resource limits in *Coding practices* - a
+  success path that quietly enforces less than promised is worse than an error.
+- **goproxy routes `CONNECT` past the request hooks.** `ServeHTTP` hands it to `handleHttps`, which runs only the
+  httpsHandlers and then hijacks the connection and copies bytes, so the `OnRequest().DoFunc` the logging path installs
+  never sees a tunnel. Filtering, ask mode, the decision cache and the per-CONNECT log entry all have to be driven from
+  the `HandleConnectFunc` in `setupMITM`'s transparent branch; adding them to the request hook silently does nothing.
+- **Canonicalize the host on both sides, and key the cache on the canonical form.** `BLOCKED.EXAMPLE.COM` and
+  `blocked.example.com.` reach the same server as `blocked.example.com`, so `NormalizeHost` lowercases and strips one
+  trailing dot, and rule compilation does the same to host-scoped `exact` and `glob` patterns. Regex patterns are left
+  as the author wrote them, which is documented rather than fixed. Anything else that compares or map-keys a host -
+  `log_skip` rules, the credential injector's `host` matcher, the ask-mode decision cache, `Server.bypassedHosts` -
+  goes through the same helper or drifts from it.
+
+## Session designation
+
+`internal/sandbox/lock.go` decides which bwrap launch owns a project's persistent overlay. Three lock files, and the
+reason there are three is that each answers a different question:
+
+- `.lock` - held **shared** by every session for its lifetime, taken **exclusively** by `IsSessionActive` and
+  `RemoveSandboxIfIdle`. This is the sandbox's public "is anyone here" signal.
+- `.primary.lock` - the designation **gate**, held **exclusively** across the designation only and released before the
+  workload starts. It does not record who won; it only makes the decision one launch at a time.
+- `.sessions.lock` - held **shared** by every session for its lifetime, probed **exclusively** only by the designation
+  itself while it holds the gate. Being alone here *is* being primary.
+
+**Probe and registration must be one indivisible step, and the gate is what makes them one.** Every launch waits for the
+gate, probes `.sessions.lock`, registers in it, then releases the gate - so another launch either sees a full
+registration or has not started looking. Holding the gate for the primary's *lifetime* instead is the bug this replaced,
+and it broke in both directions: a launch that lost the gate registered itself outside it, so the winner's probe saw that
+registration and stood down, electing **no** primary at all (reproducible about half the time under two concurrent
+launches, with neither session writing the persistent overlay); and in the mirror case a launch could win the gate while
+a concurrent session that had not yet registered was already starting up.
+
+**Being alone is required, not just a free gate.** The gate frees when its holder finishes designating, which says
+nothing about who is still running - and a launch treating that as "sole occupant" wipes a live session's overlay dirs on
+startup (`CleanupStaleSessionDirs` is written for a sandbox with no other occupant) and writes the upper that session has
+mounted as a read-only lower. That is why the probe exists, and why the probe cannot use `.lock`: a `sandboxes list`
+sampling liveness or a `--rm` teardown mid-removal holds `.lock` exclusively too, and reading either as a live session
+silently demotes the launch to concurrent, whose writes are discarded at exit. Taking the shared lock is retried rather
+than failed outright for the same teardown.
+
+**Consume the designation through `SessionHandle.IsPrimary()`, never through `Config.IsConcurrent`.** They are not
+complements: `DesignateSession` only reroutes bwrap launches, so a docker or krun launch is `IsConcurrent == false` even
+when it lost the designation. The sandbox home is derived from the project name, so such a launch shares one with a live
+bwrap session - and gating `CleanupStaleSessionDirs` on `!IsConcurrent` sent it straight through that session's upper and
+work dirs.
 
 ## Platform-specific packages
 

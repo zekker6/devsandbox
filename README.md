@@ -144,7 +144,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 | Resource | Default Access |
 |---|---|
 | Project directory | Read/Write |
-| `.env` / `.env.*` files | Hidden (masked with `/dev/null`); scanned up to 3 directory levels below the project root, skipping `node_modules`, `.git`, `vendor`, `.venv` |
+| `.env` / `.env.*` files | Hidden (masked with `/dev/null`); scanned up to 3 directory levels below the project root, skipping `node_modules`, `.git`, `vendor`, `.venv`. Configurable - [`hide_env_files`](docs/configuration.md#sandbox-settings) / `--no-hide-env` expose them |
 | `~/.ssh` | Not mounted |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted |
 | `~/.gitconfig` | Sanitized (user.name/email only) |
@@ -212,7 +212,8 @@ devsandbox --proxy --filter-default=block \
 # Choose isolation backend explicitly
 devsandbox --isolation=docker npm install
 
-# Ephemeral sandbox (removed after exit)
+# Ephemeral sandbox (state removed after exit, unless another session for the
+# same project is still using it - see docs/sandboxing.md#container-persistence)
 devsandbox --rm
 
 # Make supported agents sandboxed by default: `claude` becomes `devsandbox claude`.
