@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,10 @@ import (
 const (
 	defaultMaxFileSize = 50 * 1024 * 1024 // 50MB
 	defaultMaxFiles    = 5
+
+	// maxRotateAttempts bounds the search for a free index when a candidate is
+	// taken - by a file already on disk, or by a compression still holding it.
+	maxRotateAttempts = 100
 )
 
 // RotatingFileWriterConfig configures a RotatingFileWriter
@@ -39,6 +44,14 @@ type RotatingFileWriter struct {
 	written     int64
 	fileIndex   int
 	currentPath string // path to current active file
+
+	// compressMu guards compressing, the set of paths an in-flight compression
+	// owns: its source file, which it removes when done, and its archive, which
+	// it truncates. Rotation must never hand the writer one of those paths.
+	// Held independently of mu - a compression goroutine takes neither.
+	compressMu  sync.Mutex
+	compressing map[string]struct{}
+	compressWG  sync.WaitGroup
 }
 
 func NewRotatingFileWriter(cfg RotatingFileWriterConfig) (*RotatingFileWriter, error) {
@@ -139,23 +152,41 @@ func (w *RotatingFileWriter) rotate() error {
 
 	// Compress the old file if configured and it exists
 	if oldPath != "" && w.cfg.ArchiveSuffix != "" {
-		go w.compressFile(oldPath)
+		w.startCompression(oldPath)
 	}
 
-	w.fileIndex = w.findNextIndex()
+	index := w.findNextIndex()
 
-	filename := filepath.Join(w.cfg.Dir, fmt.Sprintf("%s_%s_%04d%s",
-		w.cfg.Prefix,
-		time.Now().Format("20060102"),
-		w.fileIndex,
-		w.cfg.Suffix,
-	))
+	// O_EXCL rather than O_APPEND: rotation always wants a file of its own, so a
+	// name that is taken - by a leftover, or by another writer on the same
+	// directory - moves to the next index instead of being written into.
+	var (
+		file     *os.File
+		filename string
+	)
+	for attempt := 0; ; attempt++ {
+		if attempt >= maxRotateAttempts {
+			return fmt.Errorf("failed to create log file: no free index at or above %d in %s", index-attempt, w.cfg.Dir)
+		}
 
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return fmt.Errorf("failed to create log file: %w", err)
+		filename = w.filePath(index)
+		if w.compressionOwns(filename) || w.compressionOwns(w.archivePath(filename)) {
+			index++
+			continue
+		}
+
+		f, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			file = f
+			break
+		}
+		if !os.IsExist(err) {
+			return fmt.Errorf("failed to create log file: %w", err)
+		}
+		index++
 	}
 
+	w.fileIndex = index
 	w.file = file
 	w.bufWriter = bufio.NewWriter(file)
 	w.written = 0
@@ -166,10 +197,60 @@ func (w *RotatingFileWriter) rotate() error {
 	return nil
 }
 
+// filePath returns the active file name for an index on today's date.
+func (w *RotatingFileWriter) filePath(index int) string {
+	return filepath.Join(w.cfg.Dir, fmt.Sprintf("%s_%s_%04d%s",
+		w.cfg.Prefix,
+		time.Now().Format("20060102"),
+		index,
+		w.cfg.Suffix,
+	))
+}
+
+// archivePath returns the compressed name for an active file path.
+func (w *RotatingFileWriter) archivePath(srcPath string) string {
+	return strings.TrimSuffix(srcPath, w.cfg.Suffix) + w.cfg.ArchiveSuffix
+}
+
+// startCompression compresses srcPath in the background, claiming both the
+// source and the archive path for the duration so rotation cannot reopen a file
+// the compressor is about to read, truncate or unlink.
+func (w *RotatingFileWriter) startCompression(srcPath string) {
+	archivePath := w.archivePath(srcPath)
+
+	w.compressMu.Lock()
+	if w.compressing == nil {
+		w.compressing = make(map[string]struct{})
+	}
+	w.compressing[srcPath] = struct{}{}
+	w.compressing[archivePath] = struct{}{}
+	w.compressMu.Unlock()
+
+	w.compressWG.Add(1)
+	go func() {
+		defer func() {
+			w.compressMu.Lock()
+			delete(w.compressing, srcPath)
+			delete(w.compressing, archivePath)
+			w.compressMu.Unlock()
+			w.compressWG.Done()
+		}()
+
+		w.compressFile(srcPath)
+	}()
+}
+
+// compressionOwns reports whether an in-flight compression holds path.
+func (w *RotatingFileWriter) compressionOwns(path string) bool {
+	w.compressMu.Lock()
+	defer w.compressMu.Unlock()
+	_, ok := w.compressing[path]
+	return ok
+}
+
 // compressFile compresses a file with gzip and removes the original
 func (w *RotatingFileWriter) compressFile(srcPath string) {
-	// Build archive path by replacing suffix
-	archivePath := strings.TrimSuffix(srcPath, w.cfg.Suffix) + w.cfg.ArchiveSuffix
+	archivePath := w.archivePath(srcPath)
 
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -205,12 +286,47 @@ func (w *RotatingFileWriter) compressFile(srcPath string) {
 	_ = os.Remove(srcPath)
 }
 
+// findNextIndex returns one past the highest index present for today, counting
+// both active (.jsonl) and archived (.jsonl.gz) files. Deriving it from the file
+// count instead pins it at MaxFiles once pruning caps the directory, which hands
+// rotation the index of the file it is archiving away.
 func (w *RotatingFileWriter) findNextIndex() int {
 	today := time.Now().Format("20060102")
-	// Count both active (.jsonl) and archived (.jsonl.gz) files
-	pattern := filepath.Join(w.cfg.Dir, fmt.Sprintf("%s_%s_*", w.cfg.Prefix, today))
+	namePrefix := fmt.Sprintf("%s_%s_", w.cfg.Prefix, today)
+	pattern := filepath.Join(w.cfg.Dir, namePrefix+"*")
 	matches, _ := filepath.Glob(pattern)
-	return len(matches)
+
+	next := 0
+	for _, match := range matches {
+		index, ok := parseFileIndex(filepath.Base(match), namePrefix)
+		if ok && index >= next {
+			next = index + 1
+		}
+	}
+	return next
+}
+
+// parseFileIndex reads the numeric index out of a rotated file name of the form
+// <prefix><index><suffix>.
+func parseFileIndex(name, namePrefix string) (int, bool) {
+	rest, ok := strings.CutPrefix(name, namePrefix)
+	if !ok {
+		return 0, false
+	}
+
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+
+	index, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return 0, false
+	}
+	return index, true
 }
 
 // findLastFile returns the most recent uncompressed file for today and its size
@@ -243,30 +359,45 @@ func (w *RotatingFileWriter) pruneOldFiles() {
 		return
 	}
 
-	type fileInfo struct {
-		path    string
-		modTime time.Time
-	}
-	files := make([]fileInfo, 0, len(matches))
-	for _, path := range matches {
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		files = append(files, fileInfo{path: path, modTime: info.ModTime()})
-	}
+	// Oldest first by name, which is rotation order: the date and the zero-padded
+	// index sort chronologically. Modification time does not - an archive written
+	// well after the rotation that produced it carries a newer mtime than the
+	// files that came after it, and would outrank them here.
+	sort.Strings(matches)
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.Before(files[j].modTime)
-	})
-
-	toRemove := len(files) - w.cfg.MaxFiles
+	toRemove := len(matches) - w.cfg.MaxFiles
 	for i := range toRemove {
-		_ = os.Remove(files[i].path)
+		// A file an in-flight compression owns is left alone: unlinking the source
+		// it is reading does not stop it, so the archive would be written after
+		// the prune and put those entries back. Removal stops there rather than
+		// skipping ahead, so pruning only ever drops the oldest run of files -
+		// taking a newer one while keeping this would leave a hole in the log.
+		// The rest goes on a later pass, or on the one Close runs once
+		// compression has finished.
+		if w.compressionOwns(matches[i]) {
+			break
+		}
+		_ = os.Remove(matches[i])
 	}
 }
 
 func (w *RotatingFileWriter) Close() error {
+	firstErr := w.closeFile()
+
+	// Let the rotations still compressing finish, so shutdown does not leave a
+	// truncated archive behind or an unlinked file the caller is about to read.
+	w.compressWG.Wait()
+
+	// Those archives were skipped by pruning while they were being written, so
+	// the file cap is enforced once more now that nothing holds them.
+	w.mu.Lock()
+	w.pruneOldFiles()
+	w.mu.Unlock()
+
+	return firstErr
+}
+
+func (w *RotatingFileWriter) closeFile() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

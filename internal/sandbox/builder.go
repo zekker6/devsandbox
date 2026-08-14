@@ -10,6 +10,7 @@ import (
 
 	"devsandbox/internal/config"
 	"devsandbox/internal/notice"
+	"devsandbox/internal/proxyenv"
 	"devsandbox/internal/sandbox/mounts"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -1161,57 +1162,34 @@ func (b *Builder) SuppressSSHAgent() *Builder {
 	return b
 }
 
+// bwrapCACertPath is where the bwrap backend mounts the proxy CA certificate.
+// /tmp rather than /etc/ssl/certs, because /etc/ssl is bind-mounted read-only
+// from the host here. AddProxyCACertificate mounts it at the same path.
+const bwrapCACertPath = "/tmp/devsandbox-ca.crt"
+
+// AddProxyEnvironment exports the shared proxy environment (proxyenv.Vars) plus,
+// under MITM, the CA bundle variables pointed at this backend's certificate path.
+// The variable set itself lives in internal/proxyenv so the docker/krun backend
+// renders the same one.
 func (b *Builder) AddProxyEnvironment() *Builder {
 	proxyURL := fmt.Sprintf("http://%s:%d", b.cfg.GatewayIP, b.cfg.ProxyPort)
 
-	// Standard proxy env vars (both cases for broad compatibility)
-	b.SetEnv("HTTP_PROXY", proxyURL)
-	b.SetEnv("HTTPS_PROXY", proxyURL)
-	b.SetEnv("http_proxy", proxyURL)
-	b.SetEnv("https_proxy", proxyURL)
-	b.SetEnv("NO_PROXY", "localhost,127.0.0.1")
-	b.SetEnv("no_proxy", "localhost,127.0.0.1")
-
-	// Tool-specific proxy env vars
-	b.SetEnv("YARN_HTTP_PROXY", proxyURL)
-	b.SetEnv("YARN_HTTPS_PROXY", proxyURL)
-
-	// Node.js >=24: opt-in for built-in fetch (undici) to honor HTTP(S)_PROXY env vars.
-	// Without this, npx-based tools like mcp-remote bypass the proxy and fail with ENETUNREACH.
-	b.SetEnv("NODE_USE_ENV_PROXY", "1")
-
-	// mise's remote version-list lookups (one per `@latest`-style tool spec in a
-	// mise config) default to a 20s timeout each. In an egress-locked sandbox a
-	// lookup that escapes the proxy path hangs to the full timeout, and a config
-	// with several such specs stalls every `mise ls`/install for minutes. Bound
-	// the lookups tightly: through the local proxy a working fetch answers well
-	// under this, and a blocked one falls back to installed versions 3s in. A
-	// default so a user who configured this var (env passthrough, applied above)
-	// keeps their value.
-	b.SetEnvDefault("MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", "3s")
-
-	// User-defined extra proxy env vars from config
-	for _, name := range b.cfg.ProxyExtraEnv {
-		b.SetEnv(name, proxyURL)
-	}
+	vars := proxyenv.Vars(proxyURL, b.cfg.ProxyExtraEnv)
 
 	// CA certificate path for various tools (only when MITM is enabled)
 	if b.cfg.ProxyMITM {
-		// We use /tmp because /etc/ssl is mounted read-only from host
-		caCertPath := "/tmp/devsandbox-ca.crt"
-		b.SetEnv("REQUESTS_CA_BUNDLE", caCertPath)
-		b.SetEnv("NODE_EXTRA_CA_CERTS", caCertPath)
-		b.SetEnv("CURL_CA_BUNDLE", caCertPath)
-		b.SetEnv("GIT_SSL_CAINFO", caCertPath)
-		b.SetEnv("SSL_CERT_FILE", caCertPath)
-
-		// User-defined extra CA bundle env vars from config
-		for _, name := range b.cfg.ProxyExtraCAEnv {
-			b.SetEnv(name, caCertPath)
-		}
+		vars = append(vars, proxyenv.CAVars(bwrapCACertPath, b.cfg.ProxyExtraCAEnv)...)
 	}
 
-	b.SetEnv("DEVSANDBOX_PROXY", "1")
+	for _, v := range vars {
+		// A Default must not clobber a value applied earlier (env passthrough and
+		// config.sandbox.environment both run before this).
+		if v.Default {
+			b.SetEnvDefault(v.Name, v.Value)
+			continue
+		}
+		b.SetEnv(v.Name, v.Value)
+	}
 
 	return b
 }
@@ -1223,8 +1201,7 @@ func (b *Builder) AddProxyCACertificate() *Builder {
 
 	// Mount CA certificate to /tmp (which is a fresh tmpfs)
 	// We can't mount to /etc/ssl/certs because it's bind-mounted read-only from host
-	caCertDest := "/tmp/devsandbox-ca.crt"
-	b.ROBindIfExists(b.cfg.ProxyCAPath, caCertDest)
+	b.ROBindIfExists(b.cfg.ProxyCAPath, bwrapCACertPath)
 
 	return b
 }

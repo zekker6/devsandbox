@@ -120,6 +120,10 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+func intPtr(i int) *int {
+	return &i
+}
+
 // emptyTrustStore returns an empty trust store for tests that don't involve local configs.
 func emptyTrustStore() *TrustStore {
 	return &TrustStore{}
@@ -494,6 +498,21 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "ask_timeout cannot exceed",
+		},
+		{
+			name: "negative max log body bytes",
+			cfg: &Config{
+				Proxy: ProxyConfig{MaxLogBodyBytes: intPtr(-1)},
+			},
+			wantErr: true,
+			errMsg:  "max_log_body_bytes cannot be negative",
+		},
+		{
+			name: "zero max log body bytes",
+			cfg: &Config{
+				Proxy: ProxyConfig{MaxLogBodyBytes: intPtr(0)},
+			},
+			wantErr: false, // explicit opt-out of body capture
 		},
 		{
 			name: "path traversal in base path",

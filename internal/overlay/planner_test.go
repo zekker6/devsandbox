@@ -3,6 +3,9 @@ package overlay
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -14,6 +17,224 @@ func writeFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// mkWhiteout creates an overlayfs whiteout marker - a character device with
+// rdev 0 - at path. mknod of a device node needs CAP_MKNOD over the filesystem,
+// which an ordinary CI user does not hold, so the test skips rather than fails
+// when the kernel refuses. The layerMerge tests below cover the same pruning
+// without any privilege.
+func mkWhiteout(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mknod(path, syscall.S_IFCHR|0o600, 0); err != nil {
+		t.Skipf("cannot create whiteout device at %s (needs CAP_MKNOD): %v", path, err)
+	}
+}
+
+// relPaths lists a plan's operations in emission order.
+func relPaths(ops []Operation) []string {
+	out := make([]string, 0, len(ops))
+	for _, op := range ops {
+		out = append(out, op.RelPath)
+	}
+	return out
+}
+
+func TestBuildPlan_WhiteoutPrunesEarlierDescendants(t *testing.T) {
+	tmp := t.TempDir()
+	upperA := filepath.Join(tmp, "upperA")
+	upperB := filepath.Join(tmp, "upperB")
+	host := filepath.Join(tmp, "host")
+	writeFile(t, filepath.Join(host, "d", "file"), "host")
+	writeFile(t, filepath.Join(upperA, "d", "file"), "A")
+	writeFile(t, filepath.Join(upperA, "d", "sub", "deep"), "A")
+	writeFile(t, filepath.Join(upperA, "keep.txt"), "A")
+	mkWhiteout(t, filepath.Join(upperB, "d"))
+
+	sources := []UpperSource{
+		{Kind: UpperPrimary, Path: upperA, SandboxID: "s1", SourceLabel: "s1:primary"},
+		{Kind: UpperSession, Path: upperB, SandboxID: "s1", SessionID: "abc", SourceLabel: "s1:session/abc"},
+	}
+	plan, err := BuildPlan(sources, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prefix := "d" + string(filepath.Separator)
+	for _, op := range plan.Operations {
+		if strings.HasPrefix(op.RelPath, prefix) {
+			t.Errorf("stale descendant of whiteouted directory: %+v", op)
+		}
+	}
+	for id, ops := range plan.BySandbox {
+		for _, op := range ops {
+			if strings.HasPrefix(op.RelPath, prefix) {
+				t.Errorf("stale descendant in BySandbox[%s]: %+v", id, op)
+			}
+		}
+	}
+
+	var sawDelete, sawKeep bool
+	for _, op := range plan.Operations {
+		switch op.RelPath {
+		case "d":
+			if op.Kind != OpDelete {
+				t.Errorf("want OpDelete for d, got %v", op.Kind)
+			}
+			sawDelete = true
+		case "keep.txt":
+			sawKeep = true
+		}
+	}
+	if !sawDelete {
+		t.Errorf("no delete for whiteouted d; ops=%v", relPaths(plan.Operations))
+	}
+	if !sawKeep {
+		t.Errorf("unrelated entry dropped; ops=%v", relPaths(plan.Operations))
+	}
+}
+
+func TestBuildPlan_WhiteoutThenRecreatedByLaterUpper(t *testing.T) {
+	tmp := t.TempDir()
+	upperA := filepath.Join(tmp, "upperA")
+	upperB := filepath.Join(tmp, "upperB")
+	upperC := filepath.Join(tmp, "upperC")
+	host := filepath.Join(tmp, "host")
+	if err := os.MkdirAll(host, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(upperA, "d", "old.txt"), "A")
+	mkWhiteout(t, filepath.Join(upperB, "d"))
+	writeFile(t, filepath.Join(upperC, "d", "new.txt"), "C")
+
+	sources := []UpperSource{
+		{Kind: UpperPrimary, Path: upperA, SandboxID: "s1"},
+		{Kind: UpperSession, Path: upperB, SandboxID: "s1", SessionID: "b"},
+		{Kind: UpperSession, Path: upperC, SandboxID: "s1", SessionID: "c"},
+	}
+	plan, err := BuildPlan(sources, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(plan.Operations)
+	if slices.Contains(got, filepath.Join("d", "old.txt")) {
+		t.Errorf("entry hidden by an intermediate whiteout was planned; ops=%v", got)
+	}
+	if !slices.Contains(got, filepath.Join("d", "new.txt")) {
+		t.Errorf("entry from the recreating upper missing; ops=%v", got)
+	}
+	for _, op := range plan.Operations {
+		if op.RelPath == "d" && op.Kind == OpDelete {
+			t.Errorf("directory recreated by a later upper must not be deleted: %+v", op)
+		}
+	}
+}
+
+func TestBuildPlan_DeterministicOperationOrder(t *testing.T) {
+	tmp := t.TempDir()
+	upper := filepath.Join(tmp, "upper")
+	host := filepath.Join(tmp, "host")
+	if err := os.MkdirAll(host, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{
+		"a.txt", "b.txt",
+		"c/1.txt", "c/2.txt", "c/d/3.txt", "c/d/e/4.txt",
+		"f/g.txt", "h.txt",
+		"i/j/k.txt", "i/j/l.txt",
+		"m.txt", "n/o.txt",
+	} {
+		writeFile(t, filepath.Join(upper, filepath.FromSlash(rel)), rel)
+	}
+
+	sources := []UpperSource{{Kind: UpperPrimary, Path: upper, SandboxID: "s1"}}
+	var first []string
+	for i := range 5 {
+		plan, err := BuildPlan(sources, host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := relPaths(plan.Operations)
+		if i == 0 {
+			first = got
+			continue
+		}
+		if !slices.Equal(first, got) {
+			t.Fatalf("operation order not deterministic:\nrun 0: %v\nrun %d: %v", first, i, got)
+		}
+	}
+
+	index := make(map[string]int, len(first))
+	for i, rel := range first {
+		index[rel] = i
+	}
+	for rel, idx := range index {
+		parent := filepath.Dir(rel)
+		if parent == "." {
+			continue
+		}
+		pIdx, ok := index[parent]
+		if !ok {
+			t.Errorf("no operation for parent %q of %q", parent, rel)
+			continue
+		}
+		if pIdx > idx {
+			t.Errorf("parent %q (index %d) emitted after child %q (index %d)", parent, pIdx, rel, idx)
+		}
+	}
+}
+
+func TestLayerMerge_WhiteoutPrunesDescendants(t *testing.T) {
+	m := newLayerMerge()
+	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: filepath.Join("d", "file")})
+	m.add(layerEntry{rel: filepath.Join("d", "sub", "deep")})
+	m.add(layerEntry{rel: "d-sibling"})
+	m.add(layerEntry{rel: "other"})
+
+	m.add(layerEntry{rel: "d", isWhiteout: true})
+
+	want := []string{"d", "d-sibling", "other"}
+	if got := m.rels(); !slices.Equal(got, want) {
+		t.Fatalf("after whiteout of d: got %v, want %v", got, want)
+	}
+	if e := m.byRel["d"]; !e.isWhiteout {
+		t.Errorf("whiteout entry did not win for d: %+v", e)
+	}
+}
+
+func TestLayerMerge_OpaqueDirPrunesDescendants(t *testing.T) {
+	m := newLayerMerge()
+	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: filepath.Join("d", "old.txt")})
+
+	// A later upper recreates d, opaque, with its own child.
+	m.add(layerEntry{rel: "d", isOpaque: true})
+	m.add(layerEntry{rel: filepath.Join("d", "new.txt")})
+
+	want := []string{"d", filepath.Join("d", "new.txt")}
+	if got := m.rels(); !slices.Equal(got, want) {
+		t.Fatalf("after opaque d: got %v, want %v", got, want)
+	}
+}
+
+func TestLayerMerge_PlainDirDoesNotPrune(t *testing.T) {
+	m := newLayerMerge()
+	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: filepath.Join("d", "old.txt")})
+
+	// A non-opaque directory in a later upper merges with the lower ones.
+	m.add(layerEntry{rel: "d"})
+	m.add(layerEntry{rel: filepath.Join("d", "new.txt")})
+
+	want := []string{"d", filepath.Join("d", "new.txt"), filepath.Join("d", "old.txt")}
+	if got := m.rels(); !slices.Equal(got, want) {
+		t.Fatalf("plain directory pruned lower entries: got %v, want %v", got, want)
 	}
 }
 

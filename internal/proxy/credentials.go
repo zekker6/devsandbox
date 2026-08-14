@@ -343,8 +343,7 @@ func buildOne(name string, raw map[string]any) (*GenericInjector, error) {
 		return nil, nil
 	}
 
-	// Step 9: compile matcher. Glob (host contains *, ?, or [) goes
-	// through doublestar; otherwise exact ==.
+	// Step 9: compile matcher (see compileHostMatcher).
 	g := &GenericInjector{
 		name:        name,
 		host:        host,
@@ -354,21 +353,30 @@ func buildOne(name string, raw map[string]any) (*GenericInjector, error) {
 		token:       token,
 		enabled:     true,
 	}
-	if strings.ContainsAny(host, "*?[") {
-		if !doublestar.ValidatePattern(host) {
-			return nil, fmt.Errorf("credential injector %q: invalid glob pattern %q", name, host)
-		}
-		pattern := host
-		g.matcher = func(s string) bool {
-			matched, _ := doublestar.Match(pattern, s)
-			return matched
-		}
-		g.isExact = false
-	} else {
-		exact := host
-		g.matcher = func(s string) bool { return s == exact }
-		g.isExact = true
+	matcher, isExact, err := compileHostMatcher(host)
+	if err != nil {
+		return nil, fmt.Errorf("credential injector %q: %w", name, err)
 	}
+	g.matcher = matcher
+	g.isExact = isExact
 
 	return g, nil
+}
+
+// compileHostMatcher compiles a credential injector's host pattern. The pattern
+// is canonicalized like the request host Match feeds it (NormalizeHost), so a
+// host written with uppercase or a trailing dot still matches. Glob (pattern
+// contains *, ?, or [) goes through doublestar; otherwise exact ==.
+func compileHostMatcher(host string) (matcher func(string) bool, isExact bool, err error) {
+	pattern := canonicalizeHost(host)
+	if strings.ContainsAny(pattern, "*?[") {
+		if !doublestar.ValidatePattern(pattern) {
+			return nil, false, fmt.Errorf("invalid glob pattern %q", host)
+		}
+		return func(s string) bool {
+			matched, _ := doublestar.Match(pattern, s)
+			return matched
+		}, false, nil
+	}
+	return func(s string) bool { return s == pattern }, true, nil
 }

@@ -226,6 +226,32 @@ func TestLogSkipEngine_ShouldSkip(t *testing.T) {
 			url:  "https://api.example.com/",
 			want: false,
 		},
+		// host scope × aliased DNS spellings: case and a trailing dot name the
+		// same server, so a skip rule the user configured must still apply.
+		{
+			name: "host exact match, uppercase request host",
+			cfg:  &LogSkipConfig{Rules: []LogSkipRule{{Pattern: "telemetry.example.com", Type: PatternTypeExact}}},
+			url:  "https://TELEMETRY.EXAMPLE.COM/v1/traces",
+			want: true,
+		},
+		{
+			name: "host exact match, trailing dot request host",
+			cfg:  &LogSkipConfig{Rules: []LogSkipRule{{Pattern: "telemetry.example.com", Type: PatternTypeExact}}},
+			url:  "https://telemetry.example.com./v1/traces",
+			want: true,
+		},
+		{
+			name: "host exact match, uppercase pattern",
+			cfg:  &LogSkipConfig{Rules: []LogSkipRule{{Pattern: "TELEMETRY.example.com", Type: PatternTypeExact}}},
+			url:  "https://telemetry.example.com/v1/traces",
+			want: true,
+		},
+		{
+			name: "host glob match, uppercase request host",
+			cfg:  &LogSkipConfig{Rules: []LogSkipRule{{Pattern: "*.telemetry.example.com"}}},
+			url:  "https://OTLP.TELEMETRY.EXAMPLE.COM/v1/metrics",
+			want: true,
+		},
 		{
 			name: "host regex match",
 			cfg:  &LogSkipConfig{Rules: []LogSkipRule{{Pattern: `^(otlp|telemetry)\.example\.com$`, Type: PatternTypeRegex}}},

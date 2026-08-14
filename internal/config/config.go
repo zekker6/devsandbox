@@ -28,6 +28,9 @@ const (
 	MaxPort = 65535
 	// MaxAskTimeout is the maximum ask timeout in seconds (10 minutes).
 	MaxAskTimeout = 600
+	// DefaultMaxLogBodyBytes is how much of a request or response body the
+	// proxy records in a log entry when proxy.max_log_body_bytes is unset.
+	DefaultMaxLogBodyBytes = 256 * 1024
 )
 
 // Config represents the devsandbox configuration file.
@@ -81,11 +84,15 @@ type ProxyConfig struct {
 	// ExtraEnv is a list of additional environment variable names that will be
 	// set to the proxy URL when proxy mode is enabled.
 	// Useful for tools with non-standard proxy configuration (e.g., YARN_HTTP_PROXY).
+	// The built-in set these are appended to lives in internal/proxyenv, shared by
+	// every backend.
 	ExtraEnv []string `toml:"extra_env"`
 
 	// ExtraCAEnv is a list of additional environment variable names that will be
 	// set to the CA certificate path when proxy mode is enabled.
 	// Useful for tools with non-standard CA bundle configuration.
+	// The built-in set these are appended to lives in internal/proxyenv, shared by
+	// every backend.
 	ExtraCAEnv []string `toml:"extra_ca_env"`
 
 	// Redaction contains content redaction scanning configuration.
@@ -95,6 +102,13 @@ type ProxyConfig struct {
 	// Matched entries are dropped from both the local jsonl file and remote
 	// log dispatchers (syslog/OTLP). Empty rules → nothing is skipped.
 	LogSkip ProxyLogSkipConfig `toml:"log_skip"`
+
+	// MaxLogBodyBytes bounds how many bytes of a request or response body are
+	// recorded in a log entry. The body itself always reaches its destination
+	// whole; only the recorded copy is bounded, and an entry cut short is
+	// marked with req_body_truncated / resp_body_truncated.
+	// nil → DefaultMaxLogBodyBytes. 0 records no bodies at all.
+	MaxLogBodyBytes *int `toml:"max_log_body_bytes"`
 }
 
 // IsEnabled returns whether proxy is enabled (defaults to false).
@@ -717,6 +731,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("proxy.filter.ask_timeout cannot exceed %d seconds, got %d", MaxAskTimeout, c.Proxy.Filter.AskTimeout)
 	}
 
+	// Validate log body capture limit (0 is a valid opt-out, negative is not)
+	if c.Proxy.MaxLogBodyBytes != nil && *c.Proxy.MaxLogBodyBytes < 0 {
+		return fmt.Errorf("proxy.max_log_body_bytes cannot be negative, got %d", *c.Proxy.MaxLogBodyBytes)
+	}
+
 	// Validate base path (no path traversal)
 	if c.Sandbox.BasePath != "" {
 		if err := validatePath(c.Sandbox.BasePath); err != nil {
@@ -1065,15 +1084,20 @@ port = 8080
 # will not work for HTTPS traffic - only for plain HTTP.
 # mitm = true
 
+# Bytes of each request/response body recorded in the proxy request log
+# (default: 262144). The body itself is always forwarded whole; only the
+# recorded copy is bounded, and a shortened entry is marked truncated.
+# Set to 0 to record no bodies at all.
+# max_log_body_bytes = 262144
+
 # Additional environment variables set to the proxy URL when proxy is active.
-# Built-in vars (always set): HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy,
-# NO_PROXY, no_proxy, YARN_HTTP_PROXY, YARN_HTTPS_PROXY
+# The built-in set is always applied and is the same on every backend - see
+# docs/proxy.md, "Proxy Environment Variables".
 # Add tool-specific proxy vars here:
 # extra_env = ["CUSTOM_HTTP_PROXY", "MY_TOOL_PROXY"]
 
 # Additional environment variables set to the CA certificate path when proxy is active.
-# Built-in vars (always set): SSL_CERT_FILE, NODE_EXTRA_CA_CERTS,
-# REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE, GIT_SSL_CAINFO
+# The built-in set is always applied - see docs/proxy.md, "CA Certificate".
 # Add tool-specific CA bundle vars here:
 # extra_ca_env = ["MY_TOOL_CA_BUNDLE", "CUSTOM_SSL_CERT"]
 

@@ -42,6 +42,9 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Println("[proxy]")
 			fmt.Printf("  enabled = %v\n", cfg.Proxy.Enabled)
 			fmt.Printf("  port = %d\n", cfg.Proxy.Port)
+			if cfg.Proxy.MaxLogBodyBytes != nil {
+				fmt.Printf("  max_log_body_bytes = %d\n", *cfg.Proxy.MaxLogBodyBytes)
+			}
 			fmt.Println()
 
 			// Show filter config if set

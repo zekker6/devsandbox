@@ -780,6 +780,40 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 
 Command patterns also pin the program to its **resolved absolute path** (`exec.LookPath` plus symlink resolution), not just its basename. Basename matching accepted any path ending in the allowed program name, including one inside a directory the sandbox can write - and the [shared temp directory](#shared-temp-directory) is a write-through bind shared with the host at an identical path, so sandboxed code could plant its own `revdiff` there and have kitty run it on the host. If the binary cannot be resolved, every launch is denied rather than falling back.
 
+### The environment prefix
+
+A launch command may carry a `KEY=VAL` prefix ahead of the program, either as `/usr/bin/env 'KEY=VAL' …` or as a leading shell assignment. The revdiff launcher emits one so the overlay inherits the editor from the caller's shell, whose exports the terminal's own process never saw. The same rules apply to the kitty patterns and to the [herdr launch script](#launch-scripts-are-validated-and-relocated), which share one validator.
+
+| Variable | Accepted value |
+|---|---|
+| `EDITOR`, `VISUAL` | A bare program name, or an absolute path that resolves to the same file the host's own `PATH` lookup of that name yields. Empty is accepted. |
+| `REVDIFF_EXIT_CODE_ON_ANNOTATIONS` | A short scalar with no path separator. |
+| Anything else | Denied. |
+
+The value matters as much as the name: revdiff spawns whatever `EDITOR` names when the user opens a file in the overlay, so an unconstrained value is host code execution regardless of how narrow the key set is. A value naming a path is therefore checked against the host's own resolution of that program - which is what keeps a binary planted in the [shared temp directory](#shared-temp-directory) out, since a path the sandbox writes there is a path the host would execute. Relative paths, values carrying arguments or shell-significant characters, and names outside the table are refused rather than interpreted. The `env` program itself is pinned to `/usr/bin/env` or the host's own resolution of `env`, never to a path that merely ends in `/env`.
+
+### Request options
+
+The command line is not the only thing a kitty request carries. `kitty @ launch` accepts around forty further options, and the proxy decodes every one of them: an option it does not model is a **denial**, not a pass-through, because an approved request is forwarded to the host socket byte for byte.
+
+| Option | Treatment |
+|---|---|
+| `--env`, `--copy-env` | Denied. Both set environment variables for a process running on the host, and an agent the sandbox controls picks the program that reads them (`EDITOR`, `LD_PRELOAD`). |
+| `--copy-cmdline` | Denied. It discards the command line the pattern allowlist just vetted and runs the source window's instead. |
+| `--watcher` | Denied. kitty imports the named Python file into its own process. |
+| `--stdin-source` | Denied unless `none`. It pipes another window's screen contents, scrollback or selection into the launched process. |
+| `--allow-remote-control`, `--remote-control-password` | Denied. Either one hands the launched process control of kitty outside this proxy. |
+| `--cwd` | Only kitty's host-resolved keywords (`current`, `oldest`, `last_reported`, `root`). An explicit path is the one cwd value the sandbox chooses, and it decides which tree the launched program reads. |
+| `--match` | Only the host window devsandbox itself runs in (`window_id:$KITTY_WINDOW_ID`, read on the host side). Otherwise the sandbox picks which host tab its window lands in. |
+| `--source-window`, `--next-to`, `--add-to-session`, `--os-panel`, `--hold-after-ssh` | Denied. |
+| Titles, colors, logo, placement, `--hold`, `--keep-focus` | Allowed - none of them changes what runs or what it can read. |
+
+The owned-scoped commands are decoded the same way. `send-text --all` and `send-text --match-tab` reach past the matched window to every window of the host tab (or every window kitty has), so both are denied even when the `match` selector names an owned id; `ls --output-format session` is denied because its response is not in the shape the owned-id response filter can rewrite. If an `ls` response nevertheless comes back in a shape that filter cannot parse, the sandbox gets a denial rather than the raw reply - the unfiltered body is every OS window, tab, title, working directory, foreground command line and per-window environment on the host.
+
+Two envelope fields are refused before any of that: an **encrypted** request (kitty runs the command inside `encrypted` and ignores the outer name, so the proxy would be approving a command it cannot see) and a **password-authenticated** one.
+
+The option lists come from kitty **0.46.2**. A newer kitty that adds an option denies the launch naming the unknown field, rather than forwarding it unchecked.
+
 ### What Gets Mounted
 
 | Resource | Mode | Purpose |
@@ -857,7 +891,7 @@ The proxy therefore reads the script **once**, validates the bytes against the d
 
 One consequence is user-visible: the command shown in the herdr pane names the relocated copy, not the original path. Relocated scripts are removed when the sandbox exits.
 
-The program named inside the script is pinned to its resolved absolute path, for the same reason described in the kitty section.
+The program named inside the script is pinned to its resolved absolute path, for the same reason described in the kitty section, and any `KEY=VAL` prefix ahead of it is held to the same allowlist - see [The environment prefix](#the-environment-prefix).
 
 ### Agent session capture and restore
 

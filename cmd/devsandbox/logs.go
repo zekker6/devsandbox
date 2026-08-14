@@ -622,15 +622,24 @@ func readProxyLogFileWithLimit(path string, limit int) ([]proxy.RequestLog, erro
 	return readUncompressedProxyLogFile(path, limit)
 }
 
-func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
+// proxyLogMaxLineBytes bounds a single log line. An entry carries captured
+// request and response bodies, which the proxy bounds at max_log_body_bytes
+// (256KiB each by default), so bufio.Scanner's 64KiB default token size would
+// end the scan at the first ordinary large record.
+const proxyLogMaxLineBytes = 8 << 20
 
-	var entries []proxy.RequestLog
-	scanner := bufio.NewScanner(f)
+// scanProxyLogEntries appends the newline-delimited entries read from r,
+// skipping any line that does not parse and keeping only the newest `limit`
+// entries when one is set.
+//
+// It is deliberately line-based rather than json.Decoder-based: Decode latches
+// a *json.SyntaxError permanently and returns it without consuming input, so a
+// loop that skips-and-continues on decode errors never advances past corrupt
+// bytes. Here a corrupt record costs only itself.
+func scanProxyLogEntries(r io.Reader, limit int, entries []proxy.RequestLog) ([]proxy.RequestLog, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(nil, proxyLogMaxLineBytes)
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -648,12 +657,26 @@ func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, e
 		}
 	}
 
+	return entries, scanner.Err()
+}
+
+func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	entries, scanErr := scanProxyLogEntries(f, limit, nil)
+
 	// Final trim if limit is set
 	if limit > 0 && len(entries) > limit {
 		entries = entries[len(entries)-limit:]
 	}
 
-	return entries, scanner.Err()
+	// The entries read before the failure are still returned: the follow path
+	// prints them after warning.
+	return entries, scanErr
 }
 
 func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, error) {
@@ -676,28 +699,15 @@ func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, err
 			break
 		}
 
-		decoder := json.NewDecoder(gz)
-		for {
-			var entry proxy.RequestLog
-			if err := decoder.Decode(&entry); err != nil {
-				if err == io.EOF {
-					break
-				}
-				// Handle truncated gzip stream (unexpected EOF in compressed data)
-				if err == io.ErrUnexpectedEOF || strings.Contains(err.Error(), "unexpected EOF") {
-					break
-				}
-				// Skip malformed JSON entries but continue
-				continue
-			}
-			entries = append(entries, entry)
-
-			// If limit is set, keep only the last N entries (sliding window)
-			if limit > 0 && len(entries) > limit*2 {
-				entries = entries[len(entries)-limit:]
-			}
-		}
+		var scanErr error
+		entries, scanErr = scanProxyLogEntries(gz, limit, entries)
 		_ = gz.Close()
+
+		// A truncated or corrupt member ends the archive: the reader is already
+		// buffered past whatever follows, so there is no next member to find.
+		if scanErr != nil {
+			break
+		}
 	}
 
 	// Final trim if limit is set

@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/bmatcuk/doublestar/v4"
 )
 
 func TestPresetRegistry_RegisterAndLookup(t *testing.T) {
@@ -30,8 +28,8 @@ func TestPresetRegistry_RegisterAndLookup(t *testing.T) {
 }
 
 // newGenericInjectorForTest builds a GenericInjector with a host matcher
-// compiled the same way BuildCredentialInjectors will (exact == when no
-// glob metachars; doublestar.Match otherwise). Test-internal helper.
+// compiled through the same helper BuildCredentialInjectors uses, so the two
+// cannot drift. Test-internal helper.
 func newGenericInjectorForTest(t *testing.T, name, host, header, valueFormat, token string, overwrite, enabled bool) *GenericInjector {
 	t.Helper()
 	g := &GenericInjector{
@@ -43,21 +41,12 @@ func newGenericInjectorForTest(t *testing.T, name, host, header, valueFormat, to
 		overwrite:   overwrite,
 		enabled:     enabled,
 	}
-	if strings.ContainsAny(host, "*?[") {
-		if !doublestar.ValidatePattern(host) {
-			t.Fatalf("invalid glob pattern in test setup: %q", host)
-		}
-		pattern := host
-		g.matcher = func(s string) bool {
-			matched, _ := doublestar.Match(pattern, s)
-			return matched
-		}
-		g.isExact = false
-	} else {
-		exact := host
-		g.matcher = func(s string) bool { return s == exact }
-		g.isExact = true
+	matcher, isExact, err := compileHostMatcher(host)
+	if err != nil {
+		t.Fatalf("host pattern in test setup: %v", err)
 	}
+	g.matcher = matcher
+	g.isExact = isExact
 	return g
 }
 
@@ -74,6 +63,12 @@ func TestGenericInjector_Match(t *testing.T) {
 			"*.github.com", "raw.githubusercontent.com", false},
 		{"glob match subdomain", "*.github.com", "api.github.com", true},
 		{"port stripped from req host", "api.github.com", "api.github.com:443", true},
+		// Aliased DNS spellings on either side name the same server.
+		{"uppercase req host", "api.github.com", "API.GITHUB.COM", true},
+		{"trailing dot req host", "api.github.com", "api.github.com.", true},
+		{"uppercase configured host", "API.GitHub.com", "api.github.com", true},
+		{"uppercase glob req host", "*.github.com", "API.GITHUB.COM", true},
+		{"still not a match after canonicalization", "api.github.com", "evil.api.github.com", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

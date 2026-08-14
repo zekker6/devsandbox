@@ -268,6 +268,21 @@ func TestRevdiff_HerdrLaunchScriptRejects(t *testing.T) {
 			body: "#!/bin/sh\n'" + planted + "' '--output=/tmp/o'" + herdrTail(sentinel) + "\n",
 		},
 		{
+			// The env prefix exists so the overlay inherits the caller's
+			// editor, and revdiff spawns whatever EDITOR names — so a value
+			// pointing at the write-through shared temp directory is host
+			// execution by the same mechanism as a planted argv[0].
+			name: "editor planted in the IPC directory",
+			body: "#!/bin/sh\n/usr/bin/env 'EDITOR=" +
+				filepath.Join(SharedTmpPath(os.Getenv("HOME"), "/s/home"), "evil") + "' " +
+				okHead + herdrTail(sentinel) + "\n",
+		},
+		{
+			name: "env binary planted in the IPC directory",
+			body: "#!/bin/sh\n" + filepath.Join(SharedTmpPath(os.Getenv("HOME"), "/s/home"), "env") +
+				" 'EDITOR=nvim' " + okHead + herdrTail(sentinel) + "\n",
+		},
+		{
 			name: "revdiff by basename from /tmp",
 			body: "#!/bin/sh\n'/tmp/revdiff' '--output=/tmp/o'" + herdrTail(sentinel) + "\n",
 		},

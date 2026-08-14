@@ -91,7 +91,41 @@ func validateCredentialRedactionConflicts(injectors []CredentialInjector, engine
 	return nil
 }
 
+// ErrUnenforceableFilterScope reports a filter rule whose scope cannot be
+// evaluated in the configured mode. Callers match on it with errors.Is to tell
+// a refused configuration apart from a runtime failure.
+var ErrUnenforceableFilterScope = errors.New("filter rule scope cannot be enforced")
+
+// validateFilterScopes refuses a configuration whose filter rules the proxy
+// cannot honor. With MITM off, HTTPS never becomes an HTTP request the proxy
+// can inspect: all it sees is CONNECT host:port. Host-scoped rules are
+// enforceable there, path- and url-scoped ones are not. Starting anyway would
+// enforce less than the config file says, so the launch is refused naming the
+// rule instead.
+func validateFilterScopes(cfg *Config) error {
+	if cfg.MITM || cfg.Filter == nil || !cfg.Filter.IsEnabled() {
+		return nil
+	}
+	for i, rule := range cfg.Filter.Rules {
+		scope := rule.GetScope()
+		if scope == FilterScopeHost {
+			continue
+		}
+		return fmt.Errorf(
+			"%w: rule %d (pattern %q, scope %q): an HTTPS CONNECT carries only host:port, "+
+				"so %s-scoped rules cannot be evaluated while MITM is disabled; "+
+				"use scope = \"host\" or enable MITM",
+			ErrUnenforceableFilterScope, i+1, rule.Pattern, scope, scope)
+	}
+	return nil
+}
+
 func NewServer(cfg *Config) (*Server, error) {
+	// Refuse an unenforceable configuration before creating anything.
+	if err := validateFilterScopes(cfg); err != nil {
+		return nil, err
+	}
+
 	var ca *CA
 	if cfg.MITM {
 		var err error
@@ -141,7 +175,8 @@ func NewServer(cfg *Config) (*Server, error) {
 	}
 
 	// Create request logger for persisting full request/response data
-	reqLogger, err := NewRequestLogger(cfg.LogDir, dispatcher, ownsDispatcher, skipEngine)
+	reqLogger, err := NewRequestLogger(cfg.LogDir, dispatcher, ownsDispatcher, skipEngine,
+		WithMaxBodyLogBytes(cfg.GetMaxLogBodyBytes()))
 	if err != nil {
 		_ = proxyLogger.Close()
 		if ownsDispatcher && dispatcher != nil {
@@ -217,14 +252,23 @@ func NewServer(cfg *Config) (*Server, error) {
 
 func (s *Server) setupMITM() {
 	if !s.config.MITM {
-		// Transparent mode: tunnel CONNECT requests without interception
+		// Transparent mode: the tunnel is not intercepted, so this hook is the
+		// only place a filter rule can be applied to HTTPS. goproxy routes
+		// CONNECT to handleHttps, which never reaches the OnRequest DoFunc
+		// installed by setupLogging.
 		s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-			// Dedupe: emit one proxy.mitm.bypass per host per session.
-			// host arrives as "example.com:443"; strip the port for the event.
-			cleanHost := host
-			if idx := strings.LastIndex(host, ":"); idx > 0 {
-				cleanHost = host[:idx]
+			if resp := s.filterConnect(host); resp != nil {
+				// goproxy writes ctx.Resp to the client before closing the
+				// tunnel, so the sandbox sees the 403 and its reason rather
+				// than a bare connection reset.
+				ctx.Resp = resp
+				return goproxy.RejectConnect, host
 			}
+
+			// Dedupe: emit one proxy.mitm.bypass per host per session.
+			// host arrives as "example.com:443"; NormalizeHost strips the port
+			// and canonicalizes the name so aliased spellings share one entry.
+			cleanHost := NormalizeHost(host)
 			if _, loaded := s.bypassedHosts.LoadOrStore(cleanHost, struct{}{}); !loaded {
 				s.emitMITMBypass(cleanHost)
 			}
@@ -257,6 +301,86 @@ func (s *Server) setupMITM() {
 	goproxy.MitmConnect.TLSConfig = func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
 		return tlsConfig(host, ctx)
 	}
+}
+
+// connectRequest builds the request that represents a CONNECT tunnel. It
+// carries everything a CONNECT actually states - the method and host:port -
+// and nothing it does not, so filtering, audit events, ask mode and the
+// request log all describe the tunnel rather than a request invented for them.
+func connectRequest(hostport string) *http.Request {
+	return &http.Request{
+		Method: http.MethodConnect,
+		Host:   hostport,
+		URL:    &url.URL{Scheme: "https", Host: hostport},
+	}
+}
+
+// filterConnect evaluates a CONNECT target against the filter and records one
+// request-log entry for it. It returns the response to send before closing the
+// tunnel when the request is refused, and nil when it may proceed.
+//
+// Every CONNECT is logged, not only refused ones: without an entry here the
+// only trace of an HTTPS tunnel is the proxy.mitm.bypass audit event, which is
+// deduped to one per host per session and so cannot show a per-connection
+// decision.
+func (s *Server) filterConnect(hostport string) *http.Response {
+	req := connectRequest(hostport)
+	entry, _ := s.reqLogger.LogRequest(req)
+
+	var resp *http.Response
+	if s.filterEngine != nil && s.filterEngine.IsEnabled() {
+		resp = s.applyFilterDecision(req, entry, nil, s.filterEngine.MatchHost(hostport))
+	}
+
+	if entry != nil {
+		if resp != nil {
+			s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
+		}
+		_ = s.reqLogger.Log(entry)
+	}
+	return resp
+}
+
+// applyFilterDecision records a filter decision on the log entry and resolves
+// ask mode, returning the response to send when the request must be refused
+// and nil when it may proceed. Shared by the plain-HTTP handler and the
+// transparent-mode CONNECT handler so the two cannot drift in how a decision
+// is applied; they differ only in how the decision is reached.
+func (s *Server) applyFilterDecision(req *http.Request, entry *RequestLog, reqBody []byte, decision FilterDecision) *http.Response {
+	s.emitFilterDecision(req, decision)
+
+	if entry != nil {
+		entry.FilterAction = string(decision.Action)
+		entry.FilterReason = decision.Reason
+	}
+
+	switch decision.Action {
+	case FilterActionBlock:
+		return BlockResponse(req, decision.Reason)
+
+	case FilterActionAsk:
+		if s.askQueue == nil {
+			// No ask queue configured, use default action
+			if s.filterEngine.Config().GetDefaultAction() == FilterActionBlock {
+				return BlockResponse(req, "ask mode not available, using default block")
+			}
+			return nil
+		}
+		if s.handleAskMode(req, entry, reqBody) == FilterActionBlock {
+			if entry != nil {
+				entry.FilterAction = string(FilterActionBlock)
+				entry.FilterReason = "blocked by user decision"
+			}
+			return BlockResponse(req, "blocked by user")
+		}
+		// User allowed - continue with request
+		if entry != nil {
+			entry.FilterAction = string(FilterActionAllow)
+			entry.FilterReason = "allowed by user decision"
+		}
+	}
+
+	return nil
 }
 
 func (s *Server) setupLogging() {
@@ -302,57 +426,12 @@ func (s *Server) setupLogging() {
 
 		// Apply filter rules if configured
 		if s.filterEngine != nil && s.filterEngine.IsEnabled() {
-			decision := s.filterEngine.Match(req)
-			s.emitFilterDecision(req, decision)
-
-			// Log the filter decision
-			if entry != nil {
-				entry.FilterAction = string(decision.Action)
-				entry.FilterReason = decision.Reason
-			}
-
-			switch decision.Action {
-			case FilterActionBlock:
-				// Block the request
-				resp := BlockResponse(req, decision.Reason)
-				// Log as blocked
+			if resp := s.applyFilterDecision(req, entry, reqBody, s.filterEngine.Match(req)); resp != nil {
 				if entry != nil {
 					s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 					_ = s.reqLogger.Log(entry)
 				}
 				return nil, resp
-
-			case FilterActionAsk:
-				// Handle ask mode
-				if s.askQueue != nil {
-					action := s.handleAskMode(req, entry, reqBody)
-					if action == FilterActionBlock {
-						resp := BlockResponse(req, "blocked by user")
-						if entry != nil {
-							entry.FilterAction = string(FilterActionBlock)
-							entry.FilterReason = "blocked by user decision"
-							s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
-							_ = s.reqLogger.Log(entry)
-						}
-						return nil, resp
-					}
-					// User allowed - continue with request
-					if entry != nil {
-						entry.FilterAction = string(FilterActionAllow)
-						entry.FilterReason = "allowed by user decision"
-					}
-				} else {
-					// No ask queue configured, use default action
-					defaultAction := s.filterEngine.Config().GetDefaultAction()
-					if defaultAction == FilterActionBlock {
-						resp := BlockResponse(req, "ask mode not available, using default block")
-						if entry != nil {
-							s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
-							_ = s.reqLogger.Log(entry)
-						}
-						return nil, resp
-					}
-				}
 			}
 		}
 
@@ -398,7 +477,7 @@ func (s *Server) setupLogging() {
 					if entry != nil {
 						// Update entry with redacted values so secrets don't persist in logs
 						if result.Body != nil {
-							entry.RequestBody = result.Body
+							entry.RequestBody, entry.RequestBodyTruncated = s.reqLogger.CaptureBody(result.Body)
 						}
 						if result.URL != "" {
 							entry.URL = result.URL
@@ -427,7 +506,7 @@ func (s *Server) setupLogging() {
 							entry.RedactionAction = string(RedactionActionBlock)
 							// Use redacted values so secrets don't persist in logs
 							if result.Body != nil {
-								entry.RequestBody = result.Body
+								entry.RequestBody, entry.RequestBodyTruncated = s.reqLogger.CaptureBody(result.Body)
 							}
 							if result.URL != "" {
 								entry.URL = result.URL
@@ -450,7 +529,7 @@ func (s *Server) setupLogging() {
 					// Update log entry with redacted values
 					if entry != nil {
 						if result.Body != nil {
-							entry.RequestBody = result.Body
+							entry.RequestBody, entry.RequestBodyTruncated = s.reqLogger.CaptureBody(result.Body)
 						}
 						if result.URL != "" {
 							entry.URL = result.URL

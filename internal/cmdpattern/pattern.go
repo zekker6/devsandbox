@@ -242,12 +242,6 @@ func MatchShellExecSentinel(inner CommandPattern) func([]string) bool {
 	}
 }
 
-// envVarNameRe accepts POSIX-safe env var names: leading letter/underscore,
-// then letters/digits/underscores. Case-sensitive uppercase only — the
-// launcher's ENV_PREFIX block only emits EDITOR/VISUAL, and restricting to
-// upper keeps the attack surface from pattern-abuse narrower.
-var envVarNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-
 // MatchShellExecEnvSentinel accepts the form:
 //
 //	["-c", "'/usr/bin/env' 'KEY=VAL' ... '<prog>' '<arg>'...; touch '<sentinel>'"]
@@ -258,10 +252,11 @@ var envVarNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 // inherits EDITOR/VISUAL from the caller's login shell.
 //
 // Rules:
-//   - argv[0] must basename-match "env".
-//   - Zero or more leading tokens shaped `KEY=VAL` where KEY matches
-//     envVarNameRe. Values can be any bytes parseSingleQuotedArgv allows
-//     (no backslash, quotes, or control characters).
+//   - argv[0] must be `env` at an absolute path the host itself resolves
+//     (isEnvBin), never a path that merely ends in "env".
+//   - Zero or more leading tokens shaped `KEY=VAL`, each of which must be an
+//     assignment hostExecEnv accepts — both the name and the value, since the
+//     value of EDITOR is a program the host will run.
 //   - The remaining tokens (at least one) form the inner argv and must
 //     satisfy inner.
 //   - The sentinel tail rules (path shape, canonicalization, no shell meta)
@@ -283,14 +278,16 @@ func MatchShellExecEnvSentinel(inner CommandPattern) func([]string) bool {
 
 		// The upstream revdiff launcher emits the `env` program unquoted:
 		//   /usr/bin/env 'EDITOR=nvim' '/path/to/revdiff' ...
-		// Strip the literal `/usr/bin/env ` prefix if present so the rest of
-		// the head parses as pure single-quoted argv. Restricting the
-		// unquoted form to this exact absolute path avoids PATH-relative
-		// lookup attacks.
+		// Strip that prefix if present so the rest of the head parses as pure
+		// single-quoted argv. Only an absolute path the host resolves as `env`
+		// is accepted, so a PATH-relative `env` cannot be substituted.
 		envConsumed := false
-		if rest, ok := strings.CutPrefix(head, "/usr/bin/env "); ok {
-			head = rest
-			envConsumed = true
+		for _, bin := range envBins() {
+			if rest, ok := strings.CutPrefix(head, bin+" "); ok {
+				head = rest
+				envConsumed = true
+				break
+			}
 		}
 
 		argv, ok := parseSingleQuotedArgv(head)
@@ -298,27 +295,23 @@ func MatchShellExecEnvSentinel(inner CommandPattern) func([]string) bool {
 			return false
 		}
 		if !envConsumed {
-			if len(argv) == 0 || filepath.Base(argv[0]) != "env" {
+			if len(argv) == 0 || !isEnvBin(argv[0]) {
 				return false
 			}
+			argv = argv[1:]
 		}
 
-		i := 0
-		if !envConsumed {
-			i = 1
+		// Every token here came out of parseSingleQuotedArgv, so all of them
+		// were single-quoted.
+		assigns := make([]scriptToken, len(argv))
+		for i, tok := range argv {
+			assigns[i] = scriptToken{value: tok, quoted: true}
 		}
-		for i < len(argv) {
-			tok := argv[i]
-			eq := strings.IndexByte(tok, '=')
-			if eq <= 0 {
-				break
-			}
-			if !envVarNameRe.MatchString(tok[:eq]) {
-				return false
-			}
-			i++
+		n, ok := consumeEnvAssignments(assigns)
+		if !ok {
+			return false
 		}
-		innerArgv := argv[i:]
+		innerArgv := argv[n:]
 		if len(innerArgv) == 0 {
 			return false
 		}

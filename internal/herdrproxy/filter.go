@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"devsandbox/internal/cmdpattern"
+	"devsandbox/internal/socketproxy"
 )
 
 // maxLabelBytes bounds free-text fields the sandbox can put on screen.
@@ -647,14 +648,10 @@ func isRestrictedByte(c byte) bool {
 
 // strictUnmarshal decodes params and rejects any field the struct does not
 // declare, so a parameter this filter does not understand cannot ride along
-// unchecked.
+// unchecked. The kitty filter needs the same guarantee, so the decode itself
+// lives in socketproxy.
 func strictUnmarshal(raw json.RawMessage, dst any) error {
-	if len(raw) == 0 {
-		raw = json.RawMessage("{}")
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
+	if err := socketproxy.StrictUnmarshal(raw, dst); err != nil {
 		return fmt.Errorf("invalid params: %w", err)
 	}
 	return nil

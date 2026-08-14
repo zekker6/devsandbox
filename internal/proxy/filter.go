@@ -13,10 +13,15 @@ import (
 )
 
 // FilterEngine evaluates HTTP requests against filter rules.
+//
+// config and compiledRules are written only by NewFilterEngine, before the
+// engine is published, and are immutable afterwards - so the readers need no
+// lock. A future config-reload path would have to introduce one and cover
+// every reader of both fields; there is deliberately no mutex here implying
+// that work is already done. cacheMu guards decisionCache, which is mutable.
 type FilterEngine struct {
 	config        *FilterConfig
 	compiledRules []compiledRule
-	mu            sync.RWMutex
 
 	// Decision cache for ask mode (host -> action)
 	decisionCache map[string]FilterAction
@@ -58,11 +63,23 @@ func NewFilterEngine(cfg *FilterConfig) (*FilterEngine, error) {
 
 // compileRule creates a compiled rule with a pre-built matcher function.
 func compileRule(rule FilterRule) (compiledRule, error) {
-	matcher, err := compilePattern(rule.Pattern, rule.DetectPatternType())
+	matcher, err := compileScopedPattern(rule.Pattern, rule.DetectPatternType(), rule.GetScope())
 	if err != nil {
 		return compiledRule{}, err
 	}
 	return compiledRule{rule: rule, matcher: matcher}, nil
+}
+
+// compileScopedPattern compiles a pattern for the given scope. Host-scoped
+// exact and glob patterns are canonicalized the same way NormalizeHost
+// canonicalizes the request host, so both sides of the comparison agree and a
+// rule written "BLOCKED.Example.com." still matches. Regex patterns are left
+// verbatim - case sensitivity there is the author's to express with (?i).
+func compileScopedPattern(pattern string, t PatternType, scope FilterScope) (func(string) bool, error) {
+	if scope == FilterScopeHost && t != PatternTypeRegex {
+		pattern = canonicalizeHost(pattern)
+	}
+	return compilePattern(pattern, t)
 }
 
 // compilePattern returns a matcher function for the given pattern and type.
@@ -101,9 +118,6 @@ func compilePattern(pattern string, t PatternType) (func(string) bool, error) {
 
 // Match evaluates the request against filter rules and returns a decision.
 func (e *FilterEngine) Match(req *http.Request) FilterDecision {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
 	// If filtering is disabled, always allow
 	if !e.config.IsEnabled() {
 		return FilterDecision{
@@ -128,20 +142,71 @@ func (e *FilterEngine) Match(req *http.Request) FilterDecision {
 	for _, compiled := range e.compiledRules {
 		target := e.getMatchTarget(req, compiled.rule.GetScope())
 		if compiled.matcher(target) {
-			reason := compiled.rule.Reason
-			if reason == "" {
-				reason = fmt.Sprintf("matched rule: %s", compiled.rule.Pattern)
-			}
+			return matchedDecision(compiled.rule)
+		}
+	}
+
+	return e.defaultDecision()
+}
+
+// MatchHost evaluates a CONNECT target ("example.com:443") against the
+// host-scoped rules and returns a decision. It exists because a CONNECT
+// carries no path or URL, so Match cannot be used: there is no request to
+// build a path or url match target from.
+//
+// Rules of any other scope are skipped rather than guessed at. That cannot
+// silently enforce less than the configuration promises, because NewServer
+// refuses to start with a path- or url-scoped rule while MITM is off - the
+// only configuration in which this method is reached.
+func (e *FilterEngine) MatchHost(hostport string) FilterDecision {
+	if !e.config.IsEnabled() {
+		return FilterDecision{
+			Action:    FilterActionAllow,
+			IsDefault: true,
+			Reason:    "filtering disabled",
+		}
+	}
+
+	host := NormalizeHost(hostport)
+
+	if e.config.IsCacheEnabled() {
+		if decision := e.getCachedDecision(host); decision != "" {
 			return FilterDecision{
-				Action:    compiled.rule.Action,
-				Rule:      &compiled.rule,
-				Reason:    reason,
+				Action:    decision,
 				IsDefault: false,
+				Reason:    "cached decision",
 			}
 		}
 	}
 
-	// No rule matched, use default action
+	for _, compiled := range e.compiledRules {
+		if compiled.rule.GetScope() != FilterScopeHost {
+			continue
+		}
+		if compiled.matcher(host) {
+			return matchedDecision(compiled.rule)
+		}
+	}
+
+	return e.defaultDecision()
+}
+
+// matchedDecision builds the decision for a rule that matched.
+func matchedDecision(rule FilterRule) FilterDecision {
+	reason := rule.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("matched rule: %s", rule.Pattern)
+	}
+	return FilterDecision{
+		Action:    rule.Action,
+		Rule:      &rule,
+		Reason:    reason,
+		IsDefault: false,
+	}
+}
+
+// defaultDecision builds the decision used when no rule matched.
+func (e *FilterEngine) defaultDecision() FilterDecision {
 	defaultAction := e.config.GetDefaultAction()
 	return FilterDecision{
 		Action:    defaultAction,
@@ -167,16 +232,32 @@ func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) stri
 	}
 }
 
-// NormalizeHost extracts the hostname without port, handling IPv6 addresses correctly.
+// NormalizeHost extracts the hostname without port, handling IPv6 addresses
+// correctly, and canonicalizes it: DNS names are case-insensitive and a single
+// trailing dot is the fully-qualified spelling of the same name, so
+// "BLOCKED.Example.com.:443" and "blocked.example.com" both reduce to
+// "blocked.example.com". Without this, three spellings that reach the same
+// server would each be matched and cached separately.
 func NormalizeHost(hostport string) string {
 	// Use net.SplitHostPort for robust parsing
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
-		// No port present, return as-is (but strip brackets from IPv6 if present)
-		if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
-			return hostport[1 : len(hostport)-1]
+		// No port present, use as-is (but strip brackets from IPv6 if present)
+		host = hostport
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
 		}
-		return hostport
+	}
+	return canonicalizeHost(host)
+}
+
+// canonicalizeHost lowercases a hostname and strips a single trailing dot. The
+// bare root label "." is left alone: reducing it to the empty string would make
+// it collide with a missing host.
+func canonicalizeHost(host string) string {
+	host = strings.ToLower(host)
+	if len(host) > 1 {
+		host = strings.TrimSuffix(host, ".")
 	}
 	return host
 }
@@ -210,15 +291,11 @@ func (e *FilterEngine) ClearCache() {
 
 // IsEnabled returns true if filtering is active.
 func (e *FilterEngine) IsEnabled() bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return e.config.IsEnabled()
 }
 
 // Config returns the filter configuration.
 func (e *FilterEngine) Config() *FilterConfig {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return e.config
 }
 

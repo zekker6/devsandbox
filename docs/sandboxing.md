@@ -329,7 +329,7 @@ the workload starts, and the launch waits for confirmation:
 2 warnings while preparing the sandbox:
 
   [warn] unknown config key in /home/user/.config/devsandbox/config.toml, ignored: sandbox.docker.keep_containers
-  [warn] MITM disabled - HTTPS request filtering is limited to host-level matching. Path/header/body matching only works for plain HTTP.
+  [warn] MITM disabled - HTTPS request bodies and headers cannot be inspected for secrets. Redaction only applies to plain HTTP requests.
 
 Start the sandbox anyway? [y/N]:
 ```
@@ -337,8 +337,10 @@ Start the sandbox anyway? [y/N]:
 Answering anything other than `y`/`yes` aborts with a non-zero exit status. The default is no.
 
 A warning means something you configured is not in effect: a config key that was ignored, a cleanup that did not run,
-or - as in the second line above - request filtering that reaches only plain HTTP because `--no-mitm` turned off HTTPS
-interception. Each one is already printed when it happens, but sandbox setup emits enough output that the first is
+or - as in the second line above - secret scanning that reaches only plain HTTP because `--no-mitm` turned off HTTPS
+interception. Something devsandbox cannot honor at all is an error rather than a warning: a `--no-mitm` run with a
+`path`- or `url`-scoped filter rule aborts instead of enforcing less than the rule says, see
+[Filtering without MITM](proxy.md#filtering-without-mitm). Each one is already printed when it happens, but sandbox setup emits enough output that the first is
 usually off-screen by the time the last arrives, and the workload's own output covers the rest a second later.
 
 - `--yes` starts without the prompt. Warnings are still printed as they happen.
@@ -643,7 +645,9 @@ devsandbox overlay migrate --sandbox my-project --tool claude --apply --set-mode
 - **Dry-run by default.** Nothing is written without `--apply`. The preview lists every create / overwrite / delete the apply phase would perform.
 - **Stopped-sandbox check.** The command refuses to run if any targeted sandbox has an active session (`--force` bypasses).
 - **Last-write-wins across stacked uppers.** The primary persistent upper comes first, followed by per-session uppers in mtime order. The most recent upper's version of any file wins.
-- **Whiteouts honored.** Files the sandbox deleted (overlayfs char-device whiteouts) become host-file deletions on apply.
+- **Whiteouts honored.** Files the sandbox deleted (overlayfs char-device whiteouts) become host-file deletions on apply. Deleting a directory also hides whatever an earlier session had written inside it, so those entries are neither listed nor migrated - the same holds for a directory the sandbox deleted and recreated, whose old contents stay hidden while the new ones are promoted.
+- **Deterministic plan.** The same uppers always yield the same operations in the same order, with each directory created before anything inside it, so the preview is what apply performs.
+- **Confined to the target path.** The apply phase writes only at the paths the preview listed. A symlink at one of those paths is replaced by the migrated entry rather than written through, so the file it pointed at is left alone. A symlink among the directories *below* the target path aborts the migration naming that component - following it would put the write somewhere the preview never showed.
 - **No automatic host backup.** If you want one, make it yourself before passing `--apply`.
 
 ## Custom Mounts
@@ -787,6 +791,12 @@ devsandbox --rm
 This works for both backends:
 - **Docker**: don't keep container after exit (fresh container each run)
 - **bwrap**: remove sandbox home directory after exit
+
+Sandbox state is removed only when no other session is still using it. A second
+launch for the same project runs on a throwaway overlay stacked on that state, so
+deleting it would take the running session's lower layers with it; the removal is
+skipped and reported instead. A `--worktree` run still removes its own worktree
+either way.
 
 **Managing Containers:**
 

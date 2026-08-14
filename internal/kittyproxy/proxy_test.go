@@ -250,6 +250,106 @@ func TestProxy_DeniesAndLogs(t *testing.T) {
 	}
 }
 
+// startLsProxy starts a proxy permitting `ls` in front of a fake upstream whose
+// `ls` reply is lsReply.
+func startLsProxy(t *testing.T, lsReply []byte) (listenPath string, owned *OwnedSet, logger *recordingLogger) {
+	t.Helper()
+	dir := shortSocketDir(t)
+	upstreamPath := filepath.Join(dir, "upstream.sock")
+	listenPath = filepath.Join(dir, "proxy.sock")
+
+	up := newFakeUpstream(t, upstreamPath)
+	t.Cleanup(up.Close)
+	up.Reply("ls", lsReply)
+
+	logger = &recordingLogger{}
+	owned = NewOwnedSet()
+	filter := NewFilter(FilterConfig{Capabilities: []Capability{CapListOwned}, Owned: owned})
+	p := New(upstreamPath, listenPath, filter, owned)
+	p.SetLogger(logger)
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop() })
+	return listenPath, owned, logger
+}
+
+func lsRequest(t *testing.T) []byte {
+	t.Helper()
+	cmd, err := json.Marshal(map[string]any{"cmd": "ls", "payload": map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+// unfilterableLsReply carries kitty's ls envelope with `data` holding the window
+// list directly instead of the JSON-encoded string kitty sends, which is what
+// FilterLsResponse fails on. The title and cwd stand in for the host state a
+// fall-through hands the sandbox.
+const unfilterableLsReply = `{"ok":true,"data":[{"tabs":[{"windows":[{"id":99,"title":"host-secret","cwd":"/home/user/private"}]}]}]}`
+
+func TestProxy_LsResponseUnfilterable_Denies(t *testing.T) {
+	listenPath, _, _ := startLsProxy(t, []byte(unfilterableLsReply))
+
+	resp := roundTrip(t, listenPath, lsRequest(t))
+
+	for _, leaked := range []string{"host-secret", "/home/user/private"} {
+		if contains(string(resp), leaked) {
+			t.Fatalf("unfiltered upstream ls body reached the sandbox: %s", resp)
+		}
+	}
+	var r kittyResponse
+	if err := json.Unmarshal(resp, &r); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if r.OK {
+		t.Errorf("expected ok=false, got %s", resp)
+	}
+	if !contains(r.Error, "could not be filtered") {
+		t.Errorf("error should name the filter failure, got %q", r.Error)
+	}
+}
+
+func TestProxy_LsResponseUnfilterable_LogsError(t *testing.T) {
+	listenPath, _, logger := startLsProxy(t, []byte(unfilterableLsReply))
+
+	_ = roundTrip(t, listenPath, lsRequest(t))
+
+	found := false
+	for _, rec := range logger.all() {
+		if contains(rec, "ERR ") && contains(rec, "filter ls response") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no ls filter error logged: %v", logger.all())
+	}
+}
+
+// The denial must not swallow the responses the filter can parse.
+func TestProxy_LsResponseFilteredToOwned(t *testing.T) {
+	reply := `{"ok":true,"data":"[{\"tabs\":[{\"windows\":[{\"id\":3,\"title\":\"host-secret\"},{\"id\":7,\"title\":\"mine\"}]}]}]"}`
+	listenPath, owned, _ := startLsProxy(t, []byte(reply))
+	owned.Add(7)
+
+	resp := roundTrip(t, listenPath, lsRequest(t))
+
+	var r kittyResponse
+	if err := json.Unmarshal(resp, &r); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !r.OK {
+		t.Fatalf("expected ok=true, got %s", resp)
+	}
+	if contains(string(resp), "host-secret") {
+		t.Errorf("non-owned window leaked: %s", resp)
+	}
+	if !contains(string(resp), `\"id\":7`) {
+		t.Errorf("owned window missing: %s", resp)
+	}
+}
+
 func TestProxy_OwnershipEnablesClose(t *testing.T) {
 	dir := shortSocketDir(t)
 	upstreamPath := filepath.Join(dir, "upstream.sock")

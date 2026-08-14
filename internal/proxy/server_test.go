@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1208,6 +1210,86 @@ func TestServerDebugLogging(t *testing.T) {
 	// Query string carrying a token must never appear in debug logs.
 	if strings.Contains(out, "token=secret") {
 		t.Errorf("debug log leaked query token:\n%s", out)
+	}
+}
+
+// TestServerHTTPProxy_BoundsLoggedRequestBody drives the capture bound through
+// the whole proxy path: upstream must receive the body intact while the log
+// entry records only the configured prefix, marked truncated.
+func TestServerHTTPProxy_BoundsLoggedRequestBody(t *testing.T) {
+	const bodySize = 64 * 1024
+	received := make(chan int, 1)
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("upstream read body: %v", err)
+		}
+		received <- len(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	tmpDir := t.TempDir()
+	cfg := NewConfig(tmpDir, 0)
+	limit := 4096
+	cfg.MaxLogBodyBytes = &limit
+
+	proxyServer, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer func() { _ = proxyServer.Stop() }()
+
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   10 * time.Second,
+	}
+
+	resp, err := client.Post(testServer.URL, "application/octet-stream",
+		strings.NewReader(strings.Repeat("a", bodySize)))
+	if err != nil {
+		t.Fatalf("request through proxy failed: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if got := <-received; got != bodySize {
+		t.Errorf("upstream received %d bytes, want the full %d", got, bodySize)
+	}
+
+	logDir := filepath.Join(tmpDir, LogBaseDirName, ProxyLogDirName)
+	entry := waitForLoggedEntry(t, logDir)
+	if len(entry.RequestBody) != limit {
+		t.Errorf("logged %d body bytes, want cap %d", len(entry.RequestBody), limit)
+	}
+	if !entry.RequestBodyTruncated {
+		t.Error("logged entry does not mark the request body truncated")
+	}
+}
+
+// waitForLoggedEntry returns the first request-log entry to appear in dir. The
+// entry is written when the response body closes, which races the client's
+// return from Post.
+func waitForLoggedEntry(t *testing.T, dir string) *RequestLog {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		line, _, _ := strings.Cut(readActiveLogFile(t, dir), "\n")
+		if line != "" {
+			var entry RequestLog
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatalf("parse log entry %q: %v", line, err)
+			}
+			return &entry
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no request log entry written")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
+	"devsandbox/internal/proxyenv"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -1328,7 +1329,6 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	// Proxy mode
 	if cfg.ProxyEnabled {
 		args = append(args, "-e", "PROXY_MODE=true")
-		args = append(args, "-e", "DEVSANDBOX_PROXY=1")
 		proxyHost := cfg.ProxyHost
 		if proxyHost == "" {
 			proxyHost = d.proxyHost()
@@ -1336,57 +1336,29 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-e", fmt.Sprintf("PROXY_HOST=%s", proxyHost))
 		args = append(args, "-e", fmt.Sprintf("PROXY_PORT=%d", cfg.ProxyPort))
 
-		// Set HTTP_PROXY env vars directly so they're available in all processes
-		// (not just the entrypoint shell). This ensures curl, mise, etc. use the proxy.
+		// Set the proxy env vars directly so they're available in all processes
+		// (not just the entrypoint shell). This ensures curl, mise, etc. use the
+		// proxy. The set itself lives in internal/proxyenv, shared with the bwrap
+		// backend so a variable added there reaches both.
 		proxyURL := fmt.Sprintf("http://%s:%d", proxyHost, cfg.ProxyPort)
-		args = append(args, "-e", fmt.Sprintf("HTTP_PROXY=%s", proxyURL))
-		args = append(args, "-e", fmt.Sprintf("HTTPS_PROXY=%s", proxyURL))
-		args = append(args, "-e", fmt.Sprintf("http_proxy=%s", proxyURL))
-		args = append(args, "-e", fmt.Sprintf("https_proxy=%s", proxyURL))
-		args = append(args, "-e", "no_proxy=localhost,127.0.0.1")
-		args = append(args, "-e", "NO_PROXY=localhost,127.0.0.1")
+		proxyVars := proxyenv.Vars(proxyURL, cfg.ProxyExtraEnv)
 
-		// Tool-specific proxy env vars
-		args = append(args, "-e", fmt.Sprintf("YARN_HTTP_PROXY=%s", proxyURL))
-		args = append(args, "-e", fmt.Sprintf("YARN_HTTPS_PROXY=%s", proxyURL))
-
-		// Node.js >=24: opt-in for built-in fetch (undici) to honor HTTP(S)_PROXY env vars.
-		// Without this, npx-based tools like mcp-remote bypass the proxy and fail with ENETUNREACH.
-		args = append(args, "-e", "NODE_USE_ENV_PROXY=1")
-
-		// mise's remote version-list lookups (one per `@latest`-style tool spec in
-		// a mise config) default to a 20s timeout each. In an egress-locked guest a
-		// lookup that escapes the proxy path hangs to the full timeout, and a config
-		// with several such specs stalls every `mise ls`/install for minutes. Bound
-		// the lookups tightly: through the local proxy a working fetch answers well
-		// under this, and a blocked one falls back to installed versions 3s in.
-		// Only a default: `-e` is last-wins and the user's env is emitted above, so
-		// skip it when the user configured this var themselves (documented override).
-		if !userConfiguredEnv(cfg, "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT") {
-			args = append(args, "-e", "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT=3s")
-		}
-
-		// User-defined extra proxy env vars from config
-		for _, name := range cfg.ProxyExtraEnv {
-			args = append(args, "-e", fmt.Sprintf("%s=%s", name, proxyURL))
-		}
-
-		// Mount CA certificate for HTTPS MITM and set SSL_CERT_FILE
+		// Mount CA certificate for HTTPS MITM. Unlike bwrap, /etc/ssl/certs is
+		// writable here, so the certificate lands where tools already look.
 		if cfg.ProxyCAPath != "" {
 			caDest := "/etc/ssl/certs/devsandbox-ca.crt"
 			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", cfg.ProxyCAPath, caDest))
-			args = append(args, "-e", fmt.Sprintf("SSL_CERT_FILE=%s", caDest))
-			// Also set for Node.js which uses its own env var
-			args = append(args, "-e", fmt.Sprintf("NODE_EXTRA_CA_CERTS=%s", caDest))
-			// Match bwrap backend's proxy env vars for consistency
-			args = append(args, "-e", fmt.Sprintf("REQUESTS_CA_BUNDLE=%s", caDest))
-			args = append(args, "-e", fmt.Sprintf("CURL_CA_BUNDLE=%s", caDest))
-			args = append(args, "-e", fmt.Sprintf("GIT_SSL_CAINFO=%s", caDest))
+			proxyVars = append(proxyVars, proxyenv.CAVars(caDest, cfg.ProxyExtraCAEnv)...)
+		}
 
-			// User-defined extra CA bundle env vars from config
-			for _, name := range cfg.ProxyExtraCAEnv {
-				args = append(args, "-e", fmt.Sprintf("%s=%s", name, caDest))
+		for _, v := range proxyVars {
+			// A Default must not clobber a value the user configured: `-e` is
+			// last-wins and the user's env is emitted above, so skip it entirely
+			// when they set the var themselves (documented override).
+			if v.Default && userConfiguredEnv(cfg, v.Name) {
+				continue
 			}
+			args = append(args, "-e", fmt.Sprintf("%s=%s", v.Name, v.Value))
 		}
 	}
 

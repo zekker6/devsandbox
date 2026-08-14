@@ -201,6 +201,10 @@ func (k *Kitty) Start(ctx context.Context, _, sandboxHome string) error {
 		Capabilities:   caps,
 		LaunchPatterns: patterns,
 		Owned:          owned,
+		// Host-side value: it anchors a launch's window selector to the kitty
+		// window devsandbox runs in. The same value is exported into the
+		// sandbox by Environment, which is what the launcher passes back.
+		HostWindowID: os.Getenv("KITTY_WINDOW_ID"),
 	})
 
 	if _, err := ensureRunDir(sandboxHome); err != nil {

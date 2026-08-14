@@ -1,6 +1,7 @@
 package cmdpattern
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -63,6 +64,26 @@ func TestScriptPatternAcceptsLauncherBodies(t *testing.T) {
 	}
 }
 
+// TestScriptPatternAcceptsHostResolvedEditor is the counterweight to the
+// rejected editor values below: an absolute EDITOR naming the file the host's
+// own PATH lookup yields is the case the env prefix exists for.
+func TestScriptPatternAcceptsHostResolvedEditor(t *testing.T) {
+	bin, err := ResolveProgram("sh")
+	if err != nil {
+		t.Skipf("sh not resolvable on this host: %v", err)
+	}
+	p := revdiffScriptPattern()
+
+	for _, assign := range []string{"EDITOR=" + bin, "EDITOR=nvim", "EDITOR="} {
+		head := "/usr/bin/env '" + assign + "' REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '" +
+			testBin + "' '--output=/tmp/o'"
+		body := "#!/bin/sh\n" + head + tail("/tmp/s") + "\n"
+		if !p.MatchesBody([]byte(body)) {
+			t.Errorf("MatchesBody rejected a legitimate launcher body:\n%s", body)
+		}
+	}
+}
+
 func TestScriptPatternRejects(t *testing.T) {
 	p := revdiffScriptPattern()
 	const sentinel = "/tmp/revdiff-done-xyz"
@@ -119,6 +140,34 @@ func TestScriptPatternRejects(t *testing.T) {
 		{
 			name: "bare env instead of absolute /usr/bin/env",
 			body: "#!/bin/sh\nenv 'EDITOR=nvim' '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "env planted in the shared temp directory",
+			body: "#!/bin/sh\n" + filepath.Dir(sharedTmpEditor) + "/env 'EDITOR=nvim' '" +
+				testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "editor pointing into the shared temp directory",
+			body: "#!/bin/sh\n/usr/bin/env 'EDITOR=" + sharedTmpEditor + "' '" +
+				testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "editor as an unquoted bare assignment",
+			body: "#!/bin/sh\nEDITOR=nvim '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "unallowlisted variable as an unquoted bare assignment",
+			body: "#!/bin/sh\nBASH_ENV=/tmp/x.sh '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "unallowlisted variable in the env prefix",
+			body: "#!/bin/sh\n/usr/bin/env 'PYTHONSTARTUP=/tmp/x.py' '" +
+				testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "inert flag repurposed to carry a path",
+			body: "#!/bin/sh\nREVDIFF_EXIT_CODE_ON_ANNOTATIONS=/tmp/evil '" +
+				testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
 		},
 		{
 			name: "mismatched sentinel paths across the clause",

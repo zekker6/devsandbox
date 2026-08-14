@@ -29,6 +29,9 @@ func mergeConfigs(base, overlay *Config) *Config {
 	if overlay.Proxy.Port != 0 {
 		result.Proxy.Port = overlay.Proxy.Port
 	}
+	if overlay.Proxy.MaxLogBodyBytes != nil {
+		result.Proxy.MaxLogBodyBytes = overlay.Proxy.MaxLogBodyBytes
+	}
 
 	// Proxy extra env vars: prepend overlay (higher priority)
 	if len(overlay.Proxy.ExtraEnv) > 0 {

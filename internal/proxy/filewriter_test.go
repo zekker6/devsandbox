@@ -1,15 +1,88 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 )
+
+// readRotatedEntries returns every line readable from a writer's active and
+// archived files, oldest index first.
+func readRotatedEntries(t *testing.T, dir, prefix string) []string {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(dir, prefix+"_*"))
+	if err != nil {
+		t.Fatalf("glob failed: %v", err)
+	}
+	sort.Strings(matches)
+
+	var entries []string
+	for _, path := range matches {
+		entries = append(entries, readLogFileLines(t, path)...)
+	}
+	return entries
+}
+
+func readLogFileLines(t *testing.T, path string) []string {
+	t.Helper()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var r io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			t.Fatalf("failed to read %s as gzip: %v", path, err)
+		}
+		defer func() { _ = gz.Close() }()
+		r = gz
+	}
+
+	var lines []string
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
+	for sc.Scan() {
+		if line := sc.Text(); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("failed to scan %s: %v", path, err)
+	}
+	return lines
+}
+
+// assertNewestEntriesReadable checks that got is a non-empty contiguous suffix
+// of want: pruning may drop the oldest entries, but nothing written after them
+// may go missing.
+func assertNewestEntriesReadable(t *testing.T, want, got []string) {
+	t.Helper()
+
+	if len(got) == 0 {
+		t.Fatalf("no entries survived rotation, %d were written", len(want))
+	}
+	if len(got) > len(want) {
+		t.Fatalf("read %d entries, only %d were written", len(got), len(want))
+	}
+	if newest := want[len(want)-len(got):]; !slices.Equal(got, newest) {
+		t.Errorf("readable entries are not the newest ones written\ngot:  %v\nwant: %v", got, newest)
+	}
+}
 
 func TestRotatingFileWriter_Basic(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "filewriter-test-*")
@@ -124,22 +197,240 @@ func TestRotatingFileWriter_Pruning(t *testing.T) {
 	}
 
 	// Write multiple times to create several files
-	for i := 0; i < 10; i++ {
-		_, _ = w.Write([]byte("data\n"))
+	var written []string
+	for i := range 10 {
+		entry := fmt.Sprintf("data-%02d", i)
+		if _, err := w.Write([]byte(entry + "\n")); err != nil {
+			t.Fatalf("Write %d failed: %v", i, err)
+		}
+		written = append(written, entry)
 	}
 
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	// Wait for async compression to complete
-	time.Sleep(100 * time.Millisecond)
-
 	// Should have at most 3 files (active + archived)
 	allFiles, _ := filepath.Glob(filepath.Join(tmpDir, "test_*"))
 	if len(allFiles) > 3 {
 		t.Errorf("expected at most 3 files after pruning, got %d", len(allFiles))
 	}
+
+	// Pruning drops the oldest files; everything newer must still be readable.
+	assertNewestEntriesReadable(t, written, readRotatedEntries(t, tmpDir, "test"))
+}
+
+// TestRotatingFileWriter_SaturationKeepsEntriesReadable drives the writer past
+// the point where pruning caps the file count. An index derived from that count
+// is pinned at MaxFiles, so the writer reopens the path it just handed to the
+// compressor and the entries written after saturation are lost.
+func TestRotatingFileWriter_SaturationKeepsEntriesReadable(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	w, err := NewRotatingFileWriter(RotatingFileWriterConfig{
+		Dir:           tmpDir,
+		Prefix:        "test",
+		Suffix:        ".log",
+		ArchiveSuffix: ".log.gz",
+		MaxSize:       32,
+		MaxFiles:      4,
+	})
+	if err != nil {
+		t.Fatalf("NewRotatingFileWriter failed: %v", err)
+	}
+
+	var written []string
+	for i := range 12 {
+		entry := fmt.Sprintf("entry-%02d-%s", i, strings.Repeat("x", 32))
+		if _, err := w.Write([]byte(entry + "\n")); err != nil {
+			t.Fatalf("Write %d failed: %v", i, err)
+		}
+		written = append(written, entry)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	assertNewestEntriesReadable(t, written, readRotatedEntries(t, tmpDir, "test"))
+}
+
+// TestRotatingFileWriter_SaturationKeepsRotating covers the second
+// manifestation: a writer with no ArchiveSuffix compresses nothing and removes
+// nothing, so a pinned index reopens the saturated file O_APPEND with the byte
+// counter reset - rotation silently stops and one file grows without bound.
+func TestRotatingFileWriter_SaturationKeepsRotating(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	const maxSize = 32
+	w, err := NewRotatingFileWriter(RotatingFileWriterConfig{
+		Dir:      tmpDir,
+		Prefix:   "test",
+		Suffix:   ".log",
+		MaxSize:  maxSize,
+		MaxFiles: 3,
+	})
+	if err != nil {
+		t.Fatalf("NewRotatingFileWriter failed: %v", err)
+	}
+
+	var written []string
+	entrySize := 0
+	for i := range 10 {
+		entry := fmt.Sprintf("entry-%02d-%s", i, strings.Repeat("y", 40))
+		if _, err := w.Write([]byte(entry + "\n")); err != nil {
+			t.Fatalf("Write %d failed: %v", i, err)
+		}
+		written = append(written, entry)
+		entrySize = len(entry) + 1
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Each entry on its own exceeds MaxSize, so every file holds exactly one.
+	files, _ := filepath.Glob(filepath.Join(tmpDir, "test_*"))
+	for _, path := range files {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("failed to stat %s: %v", path, err)
+		}
+		if info.Size() > int64(entrySize) {
+			t.Errorf("%s is %d bytes, rotation stopped at MaxSize %d", filepath.Base(path), info.Size(), maxSize)
+		}
+	}
+
+	assertNewestEntriesReadable(t, written, readRotatedEntries(t, tmpDir, "test"))
+}
+
+// TestRotatingFileWriter_RotationDuringCompression pins the ordering hazard
+// directly: rotate spawns the compressor before choosing the next index, so an
+// index that lands back on the file being compressed hands the writer a path
+// the compressor is about to unlink.
+func TestRotatingFileWriter_RotationDuringCompression(t *testing.T) {
+	tmpDir := t.TempDir()
+	day := time.Now().Format("20060102")
+
+	// A directory pruning has already been through: index 0000 is gone, so the
+	// file count (2) equals the index of the active file rotation is about to
+	// compress.
+	writeGzipFile(t, filepath.Join(tmpDir, "test_"+day+"_0001.log.gz"), "archived entry\n")
+	if err := os.WriteFile(filepath.Join(tmpDir, "test_"+day+"_0002.log"), []byte("active entry\n"), 0o600); err != nil {
+		t.Fatalf("failed to seed active file: %v", err)
+	}
+
+	w, err := NewRotatingFileWriter(RotatingFileWriterConfig{
+		Dir:           tmpDir,
+		Prefix:        "test",
+		Suffix:        ".log",
+		ArchiveSuffix: ".log.gz",
+		MaxSize:       2 << 20,
+		MaxFiles:      8,
+	})
+	if err != nil {
+		t.Fatalf("NewRotatingFileWriter failed: %v", err)
+	}
+
+	// Incompressible payload, so the compression started by this rotation is
+	// still running when the writer picks the next index.
+	if _, err := w.Write(append(incompressibleBytes(2<<20), '\n')); err != nil {
+		t.Fatalf("bulk Write failed: %v", err)
+	}
+
+	// Give the compressor time to finish and remove its source path.
+	time.Sleep(500 * time.Millisecond)
+
+	const survivor = "written after the rotation"
+	if _, err := w.Write([]byte(survivor + "\n")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if entries := readRotatedEntries(t, tmpDir, "test"); !slices.Contains(entries, survivor) {
+		t.Errorf("entry written after rotation was lost: the compressor unlinked the reopened file")
+	}
+}
+
+// TestRotatingFileWriter_PrunesByRotationOrder pins which files pruning keeps
+// when an archive was written long after the rotation that produced it: its
+// modification time is then newer than that of the files rotated after it, so
+// ordering by mtime keeps stale data and drops the newest entries.
+func TestRotatingFileWriter_PrunesByRotationOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	day := time.Now().Format("20060102")
+
+	for i := range 5 {
+		writeGzipFile(t, filepath.Join(tmpDir, fmt.Sprintf("test_%s_%04d.log.gz", day, i)), fmt.Sprintf("entry-%d\n", i))
+	}
+	// The oldest archive finished compressing last, so it carries the newest mtime.
+	oldest := filepath.Join(tmpDir, fmt.Sprintf("test_%s_0000.log.gz", day))
+	now := time.Now()
+	if err := os.Chtimes(oldest, now.Add(time.Hour), now.Add(time.Hour)); err != nil {
+		t.Fatalf("failed to set mtime: %v", err)
+	}
+
+	w, err := NewRotatingFileWriter(RotatingFileWriterConfig{
+		Dir:           tmpDir,
+		Prefix:        "test",
+		Suffix:        ".log",
+		ArchiveSuffix: ".log.gz",
+		MaxSize:       1024,
+		MaxFiles:      3,
+	})
+	if err != nil {
+		t.Fatalf("NewRotatingFileWriter failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(tmpDir, "test_*"))
+	sort.Strings(matches)
+	got := make([]string, 0, len(matches))
+	for _, path := range matches {
+		got = append(got, filepath.Base(path))
+	}
+
+	want := []string{
+		fmt.Sprintf("test_%s_0003.log.gz", day),
+		fmt.Sprintf("test_%s_0004.log.gz", day),
+		fmt.Sprintf("test_%s_0005.log", day),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("pruning kept the wrong files\ngot:  %v\nwant: %v", got, want)
+	}
+}
+
+func writeGzipFile(t *testing.T, path, content string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte(content)); err != nil {
+		t.Fatalf("failed to gzip %s: %v", path, err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("failed to close gzip writer for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("failed to write %s: %v", path, err)
+	}
+}
+
+// incompressibleBytes returns n bytes of printable noise that gzip cannot
+// shrink, so compressing them takes measurable time.
+func incompressibleBytes(n int) []byte {
+	rnd := rand.New(rand.NewSource(1)) //nolint:gosec // test fixture, not security material
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alphabet[rnd.Intn(len(alphabet))]
+	}
+	return b
 }
 
 func TestRotatingFileWriter_ReuseExistingFile(t *testing.T) {

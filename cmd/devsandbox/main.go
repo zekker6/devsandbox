@@ -425,14 +425,18 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
-	// Detect concurrent sessions (bwrap only — Docker containers are inherently isolated).
-	if cfg.Isolation == sandbox.IsolationBwrap && sandbox.IsSessionActive(cfg.SandboxRoot) {
-		sessionID, err := sandbox.GenerateSessionID()
-		if err != nil {
-			return err
-		}
-		cfg.SessionID = sessionID
-		cfg.IsConcurrent = true
+	// Take this launch's hold on the sandbox before anything samples whether
+	// another session exists. DesignateSession locks first and reads the answer
+	// off the lock, so two launches started together cannot both be primary and
+	// both write the same persistent overlay dirs (bwrap only - Docker
+	// containers are inherently isolated).
+	sessionHandle, err := cfg.DesignateSession()
+	if err != nil {
+		return fmt.Errorf("failed to acquire session lock: %w", err)
+	}
+	defer func() { _ = sessionHandle.Release() }()
+
+	if cfg.IsConcurrent {
 		notice.Info("Another session is active. Running in concurrent mode (overlay changes will be discarded on exit).")
 	}
 
@@ -460,11 +464,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	// via the defer below. Removing the entire sandbox root would destroy the
 	// primary session's persistent state.
 	if rmFlag && !cfg.IsConcurrent {
-		defer func() {
-			if err := sandbox.RemoveSandbox(cfg.SandboxRoot); err != nil {
-				notice.Warn("failed to remove sandbox: %v", err)
-			}
-		}()
+		defer func() { removeSandboxOnExit(sessionHandle, cfg.SandboxRoot) }()
 		// Registered AFTER the sandbox-removal defer so that LIFO ordering
 		// runs the worktree teardown FIRST, while the directory still exists.
 		if worktreeHandle != nil {
@@ -527,6 +527,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		pCfg.LogReceivers = appCfg.Logging.Receivers
 		pCfg.LogAttributes = appCfg.Logging.Attributes
 		pCfg.LogFilterDecisions = appCfg.Logging.LogFilterDecisions
+		pCfg.MaxLogBodyBytes = appCfg.Proxy.MaxLogBodyBytes
 		pCfg.CredentialInjectors, err = proxy.BuildCredentialInjectors(appCfg.Proxy.Credentials)
 		if err != nil {
 			return fmt.Errorf("build credential injectors: %w", err)
@@ -583,8 +584,12 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 			if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
 				notice.Warn("MITM disabled — HTTPS request bodies and headers cannot be inspected for secrets. Redaction only applies to plain HTTP requests.")
 			}
+			// Info, not Warn: a path- or url-scoped rule refuses the launch in
+			// proxy.NewServer, so every rule that reaches this point is
+			// host-scoped and is enforced in full on the CONNECT path. Nothing
+			// the user configured is being ignored, which is what Warn means.
 			if pCfg.Filter != nil && pCfg.Filter.IsEnabled() {
-				notice.Warn("MITM disabled — HTTPS request filtering is limited to host-level matching. Path/header/body matching only works for plain HTTP.")
+				notice.Info("MITM disabled - HTTPS filter rules match the CONNECT host; path and url scopes apply to plain HTTP only.")
 			}
 		}
 	}
@@ -597,12 +602,8 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
-	// Acquire session lock
-	lockFile, err := sandbox.AcquireSessionLock(cfg.SandboxRoot)
-	if err != nil {
-		return fmt.Errorf("failed to acquire session lock: %w", err)
-	}
-	defer func() { _ = lockFile.Close() }()
+	// The session lock is already held: DesignateSession took it above, before
+	// the concurrent-session designation that reads it.
 
 	// Resolve session name for port forwarding registry
 	if cfg.ProxyEnabled {
@@ -802,6 +803,27 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	notice.SetRunning()
 	defer notice.SetTeardown()
 	return iso.Run(cmd.Context(), runCfg)
+}
+
+// removeSandboxOnExit implements --rm: it drops this launch's hold on the
+// sandbox and removes the state, unless another session is still holding it.
+// A concurrent session that started after this one is still live at exit and
+// its overlay lower layers are exactly the state --rm would delete.
+func removeSandboxOnExit(handle *sandbox.SessionHandle, sandboxRoot string) {
+	// Released here rather than left to the deferred release registered at
+	// acquisition time: that defer runs after this one (LIFO), so the liveness
+	// probe below would otherwise see this launch's own lock.
+	if err := handle.Release(); err != nil {
+		notice.Warn("failed to release session lock: %v", err)
+	}
+
+	removed, err := sandbox.RemoveSandboxIfIdle(sandboxRoot)
+	switch {
+	case err != nil:
+		notice.Warn("failed to remove sandbox: %v", err)
+	case !removed:
+		notice.Warn("another session is still using this sandbox - state kept, --rm skipped")
+	}
 }
 
 func printInfo(cfg *sandbox.Config) {

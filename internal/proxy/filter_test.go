@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -469,6 +470,15 @@ func TestNormalizeHost(t *testing.T) {
 		{"", ""},
 		{"localhost", "localhost"},
 		{"localhost:80", "localhost"},
+
+		// Case and trailing dot: both spell the same DNS name
+		{"EXAMPLE.COM", "example.com"},
+		{"Example.Com:8080", "example.com"},
+		{"example.com.", "example.com"},
+		{"EXAMPLE.COM.:443", "example.com"},
+		{"[2001:DB8::1]:443", "2001:db8::1"},
+		// A bare root label is left alone rather than normalized to empty
+		{".", "."},
 	}
 
 	for _, tt := range tests {
@@ -478,6 +488,145 @@ func TestNormalizeHost(t *testing.T) {
 				t.Errorf("NormalizeHost(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestFilterEngine_HostAliasing_Blacklist covers the DNS spellings that reach
+// the same server: hostnames are case-insensitive and a single trailing dot is
+// the fully-qualified form of the same name. All of them must hit the block
+// rule rather than falling through to the allow default.
+func TestFilterEngine_HostAliasing_Blacklist(t *testing.T) {
+	cfg := &FilterConfig{
+		DefaultAction: FilterActionAllow,
+		Rules: []FilterRule{
+			{Pattern: "blocked.example.com", Action: FilterActionBlock, Scope: FilterScopeHost},
+			{Pattern: "*.tracking.io", Action: FilterActionBlock, Scope: FilterScopeHost},
+		},
+	}
+
+	engine, err := NewFilterEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create filter engine: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		host string
+	}{
+		{"uppercase", "BLOCKED.EXAMPLE.COM"},
+		{"mixed case", "Blocked.Example.Com"},
+		{"trailing dot", "blocked.example.com."},
+		{"mixed case, trailing dot and port", "BLOCKED.example.com.:443"},
+		{"glob uppercase", "METRICS.TRACKING.IO"},
+		{"glob trailing dot", "metrics.tracking.io."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &http.Request{
+				Host: tt.host,
+				URL:  &url.URL{Host: tt.host, Path: "/"},
+			}
+			decision := engine.Match(req)
+			if decision.Action != FilterActionBlock {
+				t.Errorf("host %q: got action %s, want %s", tt.host, decision.Action, FilterActionBlock)
+			}
+		})
+	}
+}
+
+// TestFilterEngine_HostAliasing_NarrowBlockFirst guards the rule-order case:
+// under a whitelist default, a narrow block rule precedes a broader allow glob.
+// An aliased spelling of the blocked host must not skip the block and land on
+// the allow.
+func TestFilterEngine_HostAliasing_NarrowBlockFirst(t *testing.T) {
+	cfg := &FilterConfig{
+		DefaultAction: FilterActionBlock,
+		Rules: []FilterRule{
+			{Pattern: "secrets.example.com", Action: FilterActionBlock, Scope: FilterScopeHost},
+			{Pattern: "*.example.com", Action: FilterActionAllow, Scope: FilterScopeHost},
+		},
+	}
+
+	engine, err := NewFilterEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create filter engine: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		host     string
+		expected FilterAction
+		// wantRule is the pattern of the rule that must have produced the
+		// decision, or "" when the default action is expected. Asserting the
+		// rule matters here: an aliased spelling of the blocked host that the
+		// broad allow glob swallows, and one that falls through to the block
+		// default, differ only in this field.
+		wantRule string
+	}{
+		{"canonical blocked", "secrets.example.com", FilterActionBlock, "secrets.example.com"},
+		{"uppercase blocked", "SECRETS.EXAMPLE.COM", FilterActionBlock, "secrets.example.com"},
+		{"trailing dot blocked", "secrets.example.com.", FilterActionBlock, "secrets.example.com"},
+		// Pre-fix this spelling matched the broad allow glob (doublestar's `*`
+		// swallows "Secrets") while missing the narrow block, inverting the
+		// decision rather than merely losing the rule attribution.
+		{"leading-cap blocked", "Secrets.example.com", FilterActionBlock, "secrets.example.com"},
+		{"uppercase allowed sibling", "API.EXAMPLE.COM", FilterActionAllow, "*.example.com"},
+		{"unlisted host", "other.test", FilterActionBlock, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &http.Request{
+				Host: tt.host,
+				URL:  &url.URL{Host: tt.host, Path: "/"},
+			}
+			decision := engine.Match(req)
+			if decision.Action != tt.expected {
+				t.Errorf("host %q: got action %s, want %s", tt.host, decision.Action, tt.expected)
+			}
+			switch {
+			case tt.wantRule == "":
+				if !decision.IsDefault {
+					t.Errorf("host %q: expected the default action, got rule %+v", tt.host, decision.Rule)
+				}
+			case decision.Rule == nil:
+				t.Errorf("host %q: expected rule %q, got the default action", tt.host, tt.wantRule)
+			case decision.Rule.Pattern != tt.wantRule:
+				t.Errorf("host %q: matched rule %q, want %q", tt.host, decision.Rule.Pattern, tt.wantRule)
+			}
+		})
+	}
+}
+
+// TestFilterEngine_CacheHostAliasing asserts aliased spellings share one
+// ask-mode cache entry rather than each getting their own.
+func TestFilterEngine_CacheHostAliasing(t *testing.T) {
+	cfg := &FilterConfig{
+		DefaultAction:  FilterActionAsk,
+		CacheDecisions: boolPtr(true),
+	}
+
+	engine, err := NewFilterEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create filter engine: %v", err)
+	}
+
+	engine.CacheDecision("EXAMPLE.com", FilterActionAllow)
+
+	for _, host := range []string{"example.com", "example.com.", "EXAMPLE.COM:443", "Example.Com."} {
+		if cached := engine.getCachedDecision(host); cached != FilterActionAllow {
+			t.Errorf("getCachedDecision(%q) = %q, want %q", host, cached, FilterActionAllow)
+		}
+	}
+
+	// The engine's own lookup path must agree with the cache.
+	req := &http.Request{
+		Host: "Example.COM.:443",
+		URL:  &url.URL{Host: "Example.COM.:443", Path: "/"},
+	}
+	if decision := engine.Match(req); decision.Action != FilterActionAllow {
+		t.Errorf("Match on aliased host: got %s, want %s", decision.Action, FilterActionAllow)
 	}
 }
 
@@ -506,6 +655,84 @@ func TestFilterEngine_CacheNormalization(t *testing.T) {
 	cached = engine.getCachedDecision("::1")
 	if cached != FilterActionBlock {
 		t.Errorf("expected cached decision for IPv6, got %s", cached)
+	}
+}
+
+// TestFilterEngine_ConcurrentReaders exercises every reader of the immutable
+// config and rule set alongside the writers of the decision cache, so `-race`
+// reports if the two are ever conflated. Match, MatchHost, IsEnabled and Config
+// read state written only in NewFilterEngine; CacheDecision and ClearCache
+// write the cache, which cacheMu guards.
+func TestFilterEngine_ConcurrentReaders(t *testing.T) {
+	cfg := &FilterConfig{
+		DefaultAction:  FilterActionAllow,
+		CacheDecisions: boolPtr(true),
+		Rules: []FilterRule{
+			{Pattern: "blocked.example.com", Action: FilterActionBlock, Scope: FilterScopeHost},
+			{Pattern: "*.internal", Action: FilterActionBlock, Scope: FilterScopeHost},
+		},
+	}
+
+	engine, err := NewFilterEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create filter engine: %v", err)
+	}
+
+	const (
+		workers    = 16
+		iterations = 200
+	)
+
+	var wg sync.WaitGroup
+	errs := make(chan string, workers*4)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+
+			req := &http.Request{
+				Host: "blocked.example.com",
+				URL:  &url.URL{Host: "blocked.example.com", Path: "/"},
+			}
+
+			for n := 0; n < iterations; n++ {
+				switch worker % 4 {
+				case 0:
+					if decision := engine.Match(req); decision.Action != FilterActionBlock {
+						errs <- "Match: got " + string(decision.Action) + ", want " + string(FilterActionBlock)
+						return
+					}
+				case 1:
+					if decision := engine.MatchHost("blocked.example.com:443"); decision.Action != FilterActionBlock {
+						errs <- "MatchHost: got " + string(decision.Action) + ", want " + string(FilterActionBlock)
+						return
+					}
+				case 2:
+					if !engine.IsEnabled() {
+						errs <- "IsEnabled: got false, want true"
+						return
+					}
+					if engine.Config() == nil {
+						errs <- "Config: got nil"
+						return
+					}
+				case 3:
+					engine.CacheDecision("cached.example.com", FilterActionAllow)
+					engine.getCachedDecision("cached.example.com")
+					if n%50 == 0 {
+						engine.ClearCache()
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for msg := range errs {
+		t.Error(msg)
 	}
 }
 

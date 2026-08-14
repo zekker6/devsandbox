@@ -111,29 +111,30 @@ func (s ScriptPattern) matchesStatement(line string) bool {
 }
 
 // matchesHead validates the leading command: an optional `/usr/bin/env` prefix,
-// then any number of KEY=VAL assignments, then the program and its arguments.
+// then the KEY=VAL assignments hostExecEnv accepts, then the program and its
+// arguments.
 func (s ScriptPattern) matchesHead(head string) bool {
 	head = strings.TrimSpace(head)
-
-	// The launcher emits `/usr/bin/env` unquoted. Only this exact absolute path
-	// is accepted, so a PATH-relative `env` cannot be substituted.
-	if rest, ok := strings.CutPrefix(head, "/usr/bin/env "); ok {
-		head = strings.TrimLeft(rest, " ")
-	}
 
 	toks, ok := tokenizeScriptHead(head)
 	if !ok {
 		return false
 	}
 
-	// Consume leading KEY=VAL assignments, quoted or bare.
-	i := 0
-	for i < len(toks) {
-		eq := strings.IndexByte(toks[i].value, '=')
-		if eq <= 0 || !envVarNameRe.MatchString(toks[i].value[:eq]) {
-			break
-		}
-		i++
+	// The launcher emits `env` unquoted as the command word. Only an absolute
+	// path the host itself resolves is accepted, so neither a PATH-relative
+	// `env` nor a path the sandbox planted ending in `/env` can stand in.
+	if len(toks) > 0 && !toks[0].quoted && isEnvBin(toks[0].value) {
+		toks = toks[1:]
+	}
+
+	// Consume leading KEY=VAL assignments, quoted or bare. Both forms reach the
+	// child's environment identically — `env` parses its own arguments, and a
+	// bare leading token is a shell assignment prefix — so both are held to the
+	// same allowlist.
+	i, ok := consumeEnvAssignments(toks)
+	if !ok {
+		return false
 	}
 
 	argvToks := toks[i:]

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/logging"
 )
 
@@ -20,22 +22,28 @@ const (
 	RequestLogArchiveSuffix = ".jsonl.gz" // Rotated files (compressed)
 )
 
-// RequestLog represents a logged HTTP request/response pair
+// RequestLog represents a logged HTTP request/response pair.
+//
+// The body fields hold a bounded prefix of what was sent, not necessarily the
+// whole body - see RequestLogger.maxBodyBytes. The matching Truncated flag
+// distinguishes a body that was cut from one that was short.
 type RequestLog struct {
-	Timestamp        time.Time           `json:"ts"`
-	Method           string              `json:"method"`
-	URL              string              `json:"url"`
-	RequestHeaders   map[string][]string `json:"req_headers,omitempty"`
-	RequestBody      []byte              `json:"req_body,omitempty"`
-	StatusCode       int                 `json:"status,omitempty"`
-	ResponseHeaders  map[string][]string `json:"resp_headers,omitempty"`
-	ResponseBody     []byte              `json:"resp_body,omitempty"`
-	Duration         time.Duration       `json:"duration_ns,omitempty"`
-	Error            string              `json:"error,omitempty"`
-	FilterAction     string              `json:"filter_action,omitempty"`
-	FilterReason     string              `json:"filter_reason,omitempty"`
-	RedactionAction  string              `json:"redaction_action,omitempty"`
-	RedactionMatches []string            `json:"redaction_matches,omitempty"`
+	Timestamp             time.Time           `json:"ts"`
+	Method                string              `json:"method"`
+	URL                   string              `json:"url"`
+	RequestHeaders        map[string][]string `json:"req_headers,omitempty"`
+	RequestBody           []byte              `json:"req_body,omitempty"`
+	RequestBodyTruncated  bool                `json:"req_body_truncated,omitempty"`
+	StatusCode            int                 `json:"status,omitempty"`
+	ResponseHeaders       map[string][]string `json:"resp_headers,omitempty"`
+	ResponseBody          []byte              `json:"resp_body,omitempty"`
+	ResponseBodyTruncated bool                `json:"resp_body_truncated,omitempty"`
+	Duration              time.Duration       `json:"duration_ns,omitempty"`
+	Error                 string              `json:"error,omitempty"`
+	FilterAction          string              `json:"filter_action,omitempty"`
+	FilterReason          string              `json:"filter_reason,omitempty"`
+	RedactionAction       string              `json:"redaction_action,omitempty"`
+	RedactionMatches      []string            `json:"redaction_matches,omitempty"`
 }
 
 // RequestLogger writes HTTP request/response logs to rotating gzip-compressed files
@@ -47,13 +55,30 @@ type RequestLogger struct {
 	skipEngine     *LogSkipEngine
 	requestCount   atomic.Int64
 	mu             sync.Mutex
+
+	// maxBodyBytes bounds what a log entry records of a body; the body itself
+	// is always forwarded whole. bodyCaptureTimeout bounds how long a request
+	// capture may hold the handler.
+	maxBodyBytes       int
+	bodyCaptureTimeout time.Duration
+}
+
+// RequestLoggerOption configures optional RequestLogger behavior.
+type RequestLoggerOption func(*RequestLogger)
+
+// WithMaxBodyLogBytes bounds how many bytes of a request or response body are
+// recorded in a log entry. The full body always reaches its destination; only
+// the recorded copy is bounded. Zero records no bodies at all; a negative
+// value is treated as zero.
+func WithMaxBodyLogBytes(n int) RequestLoggerOption {
+	return func(rl *RequestLogger) { rl.maxBodyBytes = max(n, 0) }
 }
 
 // NewRequestLogger creates a new request logger.
 // If dispatcher is provided, logs will also be forwarded to remote destinations.
 // If ownsDispatcher is true, the dispatcher will be closed when the logger is closed.
 // If skipEngine is non-nil, entries matching its rules are dropped before any I/O.
-func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher bool, skipEngine *LogSkipEngine) (*RequestLogger, error) {
+func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher bool, skipEngine *LogSkipEngine, opts ...RequestLoggerOption) (*RequestLogger, error) {
 	writer, err := NewRotatingFileWriter(RotatingFileWriterConfig{
 		Dir:           dir,
 		Prefix:        RequestLogPrefix,
@@ -64,12 +89,29 @@ func NewRequestLogger(dir string, dispatcher *logging.Dispatcher, ownsDispatcher
 		return nil, err
 	}
 
-	return &RequestLogger{
-		writer:         writer,
-		dispatcher:     dispatcher,
-		ownsDispatcher: ownsDispatcher,
-		skipEngine:     skipEngine,
-	}, nil
+	rl := &RequestLogger{
+		writer:             writer,
+		dispatcher:         dispatcher,
+		ownsDispatcher:     ownsDispatcher,
+		skipEngine:         skipEngine,
+		maxBodyBytes:       config.DefaultMaxLogBodyBytes,
+		bodyCaptureTimeout: defaultBodyCaptureTimeout,
+	}
+	for _, opt := range opts {
+		opt(rl)
+	}
+	return rl, nil
+}
+
+// CaptureBody bounds a body already held in memory, reporting whether anything
+// was dropped. Every path that fills a body field of a log entry goes through
+// here or through the streaming captures, so the bound holds for all of them -
+// redaction, which replaces a captured body with its rewritten copy, included.
+func (rl *RequestLogger) CaptureBody(body []byte) ([]byte, bool) {
+	if len(body) <= rl.maxBodyBytes {
+		return body, false
+	}
+	return body[:rl.maxBodyBytes], true
 }
 
 // RequestCount returns the count of non-skipped Log calls handled by this
@@ -171,17 +213,121 @@ func (rl *RequestLogger) LogRequest(req *http.Request) (*RequestLog, []byte) {
 		RequestHeaders: redactHeaders(cloneHeaders(req.Header)),
 	}
 
-	// Read and restore request body
+	// Capture a bounded prefix of the request body rather than buffering it
+	// whole. LogRequest runs before any filter decision, so an unbounded
+	// io.ReadAll here lets a sandboxed client exhaust host memory - the proxy
+	// runs outside the sandbox's resource limits - with a body policy would
+	// have refused, and a body that never ends holds the handler forever. What
+	// the capture read is replayed ahead of the unread remainder, so upstream
+	// still receives the body intact.
 	var reqBody []byte
 	if req.Body != nil {
-		reqBody, _ = io.ReadAll(req.Body)
-		_ = req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+		capture := newBodyCapture(req.Body, rl.maxBodyBytes)
+		reqBody, entry.RequestBodyTruncated = capture.wait(req.Context(), rl.bodyCaptureTimeout)
 		entry.RequestBody = reqBody
+		req.Body = capture.body()
 	}
 
 	return entry, reqBody
 }
+
+// defaultBodyCaptureTimeout bounds how long LogRequest waits for a request
+// body's captured prefix. A client that trickles or stalls its body must not
+// hold the handler: past this the entry records what arrived, marked
+// truncated, and the body streams on at whatever pace the client manages.
+const defaultBodyCaptureTimeout = 5 * time.Second
+
+// bodyCapture reads a bounded prefix of a request body in the background, so a
+// slow or stalled client cannot hold the proxy handler. Everything it reads is
+// replayed ahead of the unread remainder, so the body forwarded upstream stays
+// byte-identical to the one the client sent.
+type bodyCapture struct {
+	src   io.ReadCloser
+	limit int
+	done  chan struct{}
+
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newBodyCapture(src io.ReadCloser, limit int) *bodyCapture {
+	c := &bodyCapture{src: src, limit: limit, done: make(chan struct{})}
+	go c.run()
+	return c
+}
+
+// run reads up to limit+1 bytes. The extra byte is what tells a body that
+// exactly fills the limit apart from one that exceeds it, and is why a zero
+// limit can still report truncation rather than an empty body.
+func (c *bodyCapture) run() {
+	defer close(c.done)
+	_, _ = io.Copy(c, io.LimitReader(c.src, int64(c.limit)+1))
+}
+
+// Write accumulates captured bytes. It is the io.Copy destination in run and
+// is locked because wait snapshots the buffer while that copy is in flight.
+func (c *bodyCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+// read returns a copy of everything captured so far.
+func (c *bodyCapture) read() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Clone(c.buf.Bytes())
+}
+
+// wait blocks until the capture completes, the request is canceled, or the
+// timeout elapses, and returns the captured prefix and whether it is short of
+// the body. Returning early abandons nothing: body() replays whatever the
+// capture reads whenever it finishes.
+func (c *bodyCapture) wait(ctx context.Context, timeout time.Duration) ([]byte, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-c.done:
+		captured := c.read()
+		if len(captured) > c.limit {
+			return captured[:c.limit], true
+		}
+		return captured, false
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+
+	// Still reading: whatever it has is a prefix by definition.
+	captured := c.read()
+	if len(captured) > c.limit {
+		captured = captured[:c.limit]
+	}
+	return captured, true
+}
+
+// body returns the request body to forward: everything the capture read,
+// followed by the unread remainder. Reading it waits for a capture still in
+// flight, which is the pace the client itself set - the handler was already
+// released by wait.
+func (c *bodyCapture) body() io.ReadCloser { return &captureReplay{capture: c} }
+
+type captureReplay struct {
+	capture *bodyCapture
+	rest    io.Reader
+}
+
+func (r *captureReplay) Read(p []byte) (int, error) {
+	if r.rest == nil {
+		<-r.capture.done
+		r.rest = io.MultiReader(bytes.NewReader(r.capture.read()), r.capture.src)
+	}
+	return r.rest.Read(p)
+}
+
+// Close closes the original body. Doing so while the capture is mid-read is
+// deliberate: it is what unblocks a capture waiting on a client that went away.
+func (r *captureReplay) Close() error { return r.capture.src.Close() }
 
 // LogResponse completes the log entry with response details
 func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, startTime time.Time) []byte {
@@ -225,16 +371,11 @@ func (rl *RequestLogger) LogResponse(entry *RequestLog, resp *http.Response, sta
 		respBody, _ = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
-		entry.ResponseBody = respBody
+		entry.ResponseBody, entry.ResponseBodyTruncated = rl.CaptureBody(respBody)
 	}
 
 	return respBody
 }
-
-// maxResponseLogBytes caps how much of a response body is captured for logging.
-// The full body always streams to the client; only this leading prefix is
-// recorded in the log entry, bounding memory for large or long-lived streams.
-const maxResponseLogBytes = 256 * 1024
 
 // LogResponseStreaming records response status and headers immediately, then
 // arranges for the body to be captured for logging WITHOUT buffering it first.
@@ -277,7 +418,7 @@ func (rl *RequestLogger) LogResponseStreaming(entry *RequestLog, resp *http.Resp
 
 	resp.Body = &captureBody{
 		src:       resp.Body,
-		remaining: maxResponseLogBytes,
+		remaining: rl.maxBodyBytes,
 		entry:     entry,
 		logger:    rl,
 	}
@@ -292,6 +433,7 @@ type captureBody struct {
 	src       io.ReadCloser
 	buf       bytes.Buffer
 	remaining int
+	truncated bool
 	entry     *RequestLog
 	logger    *RequestLogger
 	logOnce   sync.Once
@@ -299,10 +441,15 @@ type captureBody struct {
 
 func (c *captureBody) Read(p []byte) (int, error) {
 	n, err := c.src.Read(p)
-	if n > 0 && c.remaining > 0 {
+	if n > 0 {
 		take := min(n, c.remaining)
-		c.buf.Write(p[:take])
-		c.remaining -= take
+		if take > 0 {
+			c.buf.Write(p[:take])
+			c.remaining -= take
+		}
+		if take < n {
+			c.truncated = true
+		}
 	}
 	if err == io.EOF {
 		c.finalize()
@@ -319,6 +466,7 @@ func (c *captureBody) Close() error {
 func (c *captureBody) finalize() {
 	c.logOnce.Do(func() {
 		c.entry.ResponseBody = c.buf.Bytes()
+		c.entry.ResponseBodyTruncated = c.truncated
 		_ = c.logger.Log(c.entry)
 	})
 }

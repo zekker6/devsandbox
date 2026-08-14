@@ -247,12 +247,6 @@ func GenerateSessionID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// GetSandboxBase returns the base path for all sandboxes.
-// Deprecated: Use the SandboxBase field directly.
-func (c *Config) GetSandboxBase() string {
-	return c.SandboxBase
-}
-
 // SandboxBasePath returns the base path for all sandboxes given a home directory
 func SandboxBasePath(homeDir string) string {
 	return filepath.Join(homeDir, ".local", "share", SandboxBaseDir)

@@ -119,7 +119,7 @@ func NewLogSkipEngine(cfg *LogSkipConfig) (*LogSkipEngine, error) {
 	}
 	e := &LogSkipEngine{}
 	for i, r := range cfg.Rules {
-		matcher, err := compilePattern(r.Pattern, r.DetectPatternType())
+		matcher, err := compileScopedPattern(r.Pattern, r.DetectPatternType(), r.GetScope())
 		if err != nil {
 			return nil, fmt.Errorf("log_skip rule %d (%q): %w", i+1, r.Pattern, err)
 		}

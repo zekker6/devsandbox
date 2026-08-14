@@ -118,11 +118,14 @@ func (p *Proxy) postProcessResponse(d Decision, resp []byte) []byte {
 			p.logInf("track owned id=%d", id)
 		}
 	case "ls":
-		if filtered, err := FilterLsResponse(resp, p.owned); err == nil {
-			return filtered
-		} else {
+		// Fail closed: the unfiltered body is every OS window, tab, title, cwd,
+		// foreground cmdline and per-window env on the host.
+		filtered, err := FilterLsResponse(resp, p.owned)
+		if err != nil {
 			p.logErr("filter ls response: %v", err)
+			return denyResponse("ls response could not be filtered")
 		}
+		return filtered
 	}
 	return resp
 }

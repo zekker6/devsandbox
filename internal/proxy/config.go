@@ -72,6 +72,21 @@ type Config struct {
 
 	// ProjectDir is the project directory for resolving .env files.
 	ProjectDir string
+
+	// MaxLogBodyBytes bounds how many bytes of a request or response body the
+	// request logger records. nil → config.DefaultMaxLogBodyBytes, 0 → no
+	// bodies. Read through GetMaxLogBodyBytes.
+	MaxLogBodyBytes *int
+}
+
+// GetMaxLogBodyBytes returns the request-log body capture limit, defaulting to
+// config.DefaultMaxLogBodyBytes when unset. An explicit 0 is honored: it means
+// record no bodies, not "fall back to the default".
+func (c *Config) GetMaxLogBodyBytes() int {
+	if c == nil || c.MaxLogBodyBytes == nil {
+		return config.DefaultMaxLogBodyBytes
+	}
+	return max(*c.MaxLogBodyBytes, 0)
 }
 
 func NewConfig(sandboxBase string, port int) *Config {

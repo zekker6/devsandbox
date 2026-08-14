@@ -75,7 +75,16 @@ enabled = false
 # Default proxy server port
 # Can be overridden with --proxy-port flag
 port = 8080
+
+# Bytes of each request/response body recorded in the proxy request log
+# Default: 262144 (256 KiB). 0 records no bodies at all.
+max_log_body_bytes = 262144
 ```
+
+`max_log_body_bytes` bounds only what is **written to the log**: the body itself
+always reaches its destination whole. Entries cut by the bound are marked
+`req_body_truncated` / `resp_body_truncated`, so a short body and a truncated one
+are distinguishable. See [Proxy: Body Capture Limit](proxy.md#body-capture-limit).
 
 **Prerequisite (bwrap and krun).** Proxy mode locks the sandbox's egress down
 deny-by-default, which needs `nft` or `iptables` on the host with the `nf_tables`
@@ -90,8 +99,9 @@ address family to miss. See [Proxy Mode](proxy.md#backend-specific-behavior).
 
 ### Proxy Extra Environment Variables
 
-When proxy mode is active, devsandbox sets standard proxy environment variables
-(`HTTP_PROXY`, `HTTPS_PROXY`, `YARN_HTTP_PROXY`, etc.) automatically. For tools
+When proxy mode is active, devsandbox sets the standard proxy environment
+variables automatically - the same set on every backend, listed in
+[Proxy Environment Variables](proxy.md#proxy-environment-variables). For tools
 with non-standard proxy configuration, add custom variable names:
 
 ```toml
@@ -105,10 +115,10 @@ when proxy mode is active.
 
 ### Proxy Extra CA Environment Variables
 
-When proxy mode is active with HTTPS interception, devsandbox sets standard CA bundle
-environment variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
-`CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`) automatically. For tools with non-standard CA
-bundle configuration, add custom variable names:
+When proxy mode is active with HTTPS interception, devsandbox sets the standard CA
+bundle environment variables automatically - listed in
+[CA Certificate](proxy.md#ca-certificate). For tools with non-standard CA bundle
+configuration, add custom variable names:
 
 ```toml
 [proxy]

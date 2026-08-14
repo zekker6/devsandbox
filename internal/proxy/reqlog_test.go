@@ -1,16 +1,20 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/logging"
 )
 
@@ -401,7 +405,7 @@ func TestLogResponseStreaming_CapsCapturedBody(t *testing.T) {
 	}
 	defer func() { _ = rl.Close() }()
 
-	big := strings.Repeat("x", maxResponseLogBytes+4096)
+	big := strings.Repeat("x", config.DefaultMaxLogBodyBytes+4096)
 	resp := &http.Response{
 		StatusCode: 200,
 		Header:     http.Header{},
@@ -418,8 +422,11 @@ func TestLogResponseStreaming_CapsCapturedBody(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	if len(entry.ResponseBody) != maxResponseLogBytes {
-		t.Errorf("captured %d bytes, want cap %d", len(entry.ResponseBody), maxResponseLogBytes)
+	if len(entry.ResponseBody) != config.DefaultMaxLogBodyBytes {
+		t.Errorf("captured %d bytes, want cap %d", len(entry.ResponseBody), config.DefaultMaxLogBodyBytes)
+	}
+	if !entry.ResponseBodyTruncated {
+		t.Error("resp_body_truncated not set; a reader cannot tell truncation from a short body")
 	}
 }
 
@@ -553,6 +560,334 @@ func TestRequestLogger_Log_KeepsNonMatchingEntries(t *testing.T) {
 	if n := rec.count.Load(); n != 1 {
 		t.Errorf("expected exactly 1 dispatcher write, got %d", n)
 	}
+}
+
+// trickleBody yields one byte per Read forever and never reaches EOF, like a
+// chunked upload a sandboxed client keeps open. Reading it to completion never
+// terminates, which is what the unbounded io.ReadAll capture used to attempt.
+type trickleBody struct {
+	delay  time.Duration
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newTrickleBody(delay time.Duration) *trickleBody {
+	return &trickleBody{delay: delay, closed: make(chan struct{})}
+}
+
+func (b *trickleBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	select {
+	case <-b.closed:
+		return 0, io.EOF
+	case <-time.After(b.delay):
+	}
+	p[0] = 'x'
+	return 1, nil
+}
+
+func (b *trickleBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+// stallingBody delivers a prefix, then blocks until released, then delivers a
+// suffix and ends. It models a client that stops sending mid-body.
+type stallingBody struct {
+	prefix, suffix string
+	release        chan struct{}
+	pos            int
+	stalled        bool
+}
+
+func (b *stallingBody) Read(p []byte) (int, error) {
+	if b.pos < len(b.prefix) {
+		n := copy(p, b.prefix[b.pos:])
+		b.pos += n
+		return n, nil
+	}
+	if !b.stalled {
+		b.stalled = true
+		<-b.release
+	}
+	rest := b.pos - len(b.prefix)
+	if rest >= len(b.suffix) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.suffix[rest:])
+	b.pos += n
+	return n, nil
+}
+
+func (b *stallingBody) Close() error { return nil }
+
+// TestLogRequest_CapsCapturedBody verifies the captured prefix is bounded while
+// the body forwarded upstream stays complete. Before the bound existed,
+// LogRequest buffered the whole body into the log entry.
+func TestLogRequest_CapsCapturedBody(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil, WithMaxBodyLogBytes(1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	body := strings.Repeat("a", 8192)
+	req, err := http.NewRequest("POST", "https://api.example.com/upload", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry, captured := rl.LogRequest(req)
+
+	if len(entry.RequestBody) != 1024 {
+		t.Errorf("captured %d bytes into the log entry, want cap 1024", len(entry.RequestBody))
+	}
+	if len(captured) != 1024 {
+		t.Errorf("returned %d captured bytes, want cap 1024", len(captured))
+	}
+	if !entry.RequestBodyTruncated {
+		t.Error("req_body_truncated not set; a reader cannot tell truncation from a short body")
+	}
+	forwarded, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read forwarded body: %v", err)
+	}
+	if string(forwarded) != body {
+		t.Errorf("forwarded %d bytes, want the full %d - upstream must receive the body intact",
+			len(forwarded), len(body))
+	}
+}
+
+// TestLogRequest_NeverEndingBodyDoesNotBlock verifies a body that never reaches
+// EOF cannot pin the handler. LogRequest runs before filtering, so an unbounded
+// read here is reachable by any sandboxed client.
+func TestLogRequest_NeverEndingBodyDoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil, WithMaxBodyLogBytes(16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	body := newTrickleBody(time.Millisecond)
+	defer func() { _ = body.Close() }()
+
+	req := &http.Request{
+		Method: "POST",
+		URL:    mustParseURL(t, "https://api.example.com/stream"),
+		Header: http.Header{},
+		Body:   body,
+	}
+
+	done := make(chan *RequestLog, 1)
+	go func() {
+		entry, _ := rl.LogRequest(req)
+		done <- entry
+	}()
+
+	select {
+	case entry := <-done:
+		if len(entry.RequestBody) != 16 {
+			t.Errorf("captured %d bytes, want cap 16", len(entry.RequestBody))
+		}
+		if !entry.RequestBodyTruncated {
+			t.Error("req_body_truncated not set for a body that exceeds the cap")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("LogRequest did not return: an endless request body blocks the handler")
+	}
+}
+
+// TestLogRequest_StalledBodyHitsCaptureDeadline verifies a client that stops
+// sending mid-body releases the handler at the capture deadline, and that the
+// bytes it eventually sends still reach upstream in order.
+func TestLogRequest_StalledBodyHitsCaptureDeadline(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil, WithMaxBodyLogBytes(1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+	rl.bodyCaptureTimeout = 50 * time.Millisecond
+
+	body := &stallingBody{prefix: "sent-", suffix: "eventually", release: make(chan struct{})}
+	req := &http.Request{
+		Method: "POST",
+		URL:    mustParseURL(t, "https://api.example.com/slow"),
+		Header: http.Header{},
+		Body:   body,
+	}
+
+	done := make(chan *RequestLog, 1)
+	go func() {
+		entry, _ := rl.LogRequest(req)
+		done <- entry
+	}()
+
+	var entry *RequestLog
+	select {
+	case entry = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("LogRequest did not return: a stalled request body blocks the handler")
+	}
+
+	if !entry.RequestBodyTruncated {
+		t.Error("req_body_truncated not set for a capture cut short by its deadline")
+	}
+
+	// The client resumes: the forwarded body must still be complete and ordered.
+	close(body.release)
+	forwarded, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read forwarded body: %v", err)
+	}
+	if want := body.prefix + body.suffix; string(forwarded) != want {
+		t.Errorf("forwarded %q, want %q", forwarded, want)
+	}
+}
+
+// TestLogRequest_CanceledRequestReleasesCapture verifies a client that goes
+// away releases the capture immediately, without waiting out the deadline.
+func TestLogRequest_CanceledRequestReleasesCapture(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil, WithMaxBodyLogBytes(1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+	rl.bodyCaptureTimeout = time.Hour // only cancellation can end this capture
+
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &stallingBody{prefix: "partial", release: make(chan struct{})}
+	req := (&http.Request{
+		Method: "POST",
+		URL:    mustParseURL(t, "https://api.example.com/gone"),
+		Header: http.Header{},
+		Body:   body,
+	}).WithContext(ctx)
+
+	done := make(chan *RequestLog, 1)
+	go func() {
+		entry, _ := rl.LogRequest(req)
+		done <- entry
+	}()
+
+	// Give the capture a moment to reach the stall, then abandon the request.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case entry := <-done:
+		if !entry.RequestBodyTruncated {
+			t.Error("req_body_truncated not set for a capture cut short by cancellation")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("LogRequest ignored request cancellation")
+	}
+	close(body.release)
+}
+
+// TestLogRequest_SmallBodyCapturedExactly guards the common case: a body under
+// the cap is captured byte-identically, so redaction and log readers see what
+// was actually sent.
+func TestLogRequest_SmallBodyCapturedExactly(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	const body = `{"user":"john","token":"secret"}`
+	req, err := http.NewRequest("POST", "https://api.example.com/users", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry, captured := rl.LogRequest(req)
+
+	if string(entry.RequestBody) != body {
+		t.Errorf("captured %q, want %q", entry.RequestBody, body)
+	}
+	if string(captured) != body {
+		t.Errorf("returned %q, want %q", captured, body)
+	}
+	if entry.RequestBodyTruncated {
+		t.Error("req_body_truncated set for a body under the cap")
+	}
+	forwarded, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read forwarded body: %v", err)
+	}
+	if string(forwarded) != body {
+		t.Errorf("forwarded %q, want %q", forwarded, body)
+	}
+}
+
+// TestLogRequest_ZeroLimitCapturesNothing verifies an explicit
+// max_log_body_bytes = 0 records no body at all and still forwards it whole.
+func TestLogRequest_ZeroLimitCapturesNothing(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil, WithMaxBodyLogBytes(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	const body = "payload"
+	req, err := http.NewRequest("POST", "https://api.example.com/users", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry, captured := rl.LogRequest(req)
+
+	if len(entry.RequestBody) != 0 || len(captured) != 0 {
+		t.Errorf("captured %q with a zero limit, want nothing", entry.RequestBody)
+	}
+	if !entry.RequestBodyTruncated {
+		t.Error("req_body_truncated not set: the entry must not read as an empty body")
+	}
+	forwarded, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read forwarded body: %v", err)
+	}
+	if string(forwarded) != body {
+		t.Errorf("forwarded %q, want %q", forwarded, body)
+	}
+}
+
+// TestCaptureBody_BoundsInMemoryBodies covers the path redaction uses when it
+// replaces an already-captured body with its rewritten copy.
+func TestCaptureBody_BoundsInMemoryBodies(t *testing.T) {
+	dir := t.TempDir()
+	rl, err := NewRequestLogger(dir, nil, false, nil, WithMaxBodyLogBytes(8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rl.Close() }()
+
+	short, truncated := rl.CaptureBody([]byte("abc"))
+	if string(short) != "abc" || truncated {
+		t.Errorf("CaptureBody(short) = %q, %v; want %q, false", short, truncated, "abc")
+	}
+
+	long, truncated := rl.CaptureBody([]byte(strings.Repeat("z", 64)))
+	if len(long) != 8 || !truncated {
+		t.Errorf("CaptureBody(long) = %d bytes, %v; want 8, true", len(long), truncated)
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }
 
 func TestRequestLogger_Log_NilSkipEngineAlwaysLogs(t *testing.T) {

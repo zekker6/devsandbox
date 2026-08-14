@@ -141,17 +141,37 @@ mitm = false
 | HTTPS body/header inspection | Full | None |
 | HTTPS credential injection | Works | Does not work |
 | HTTPS content redaction | Works | Does not work |
-| HTTPS request logging | Full request/response | CONNECT hostname only |
+| HTTPS filtering | Rules of any scope | `host` scope only, see below |
+| HTTPS request logging | Full request/response | One `CONNECT <host>:<port>` entry per tunnel |
 | CA certificate injection | Yes | Skipped |
 | Network isolation | Yes | Yes |
 
-When MITM is disabled, the proxy logs warnings at startup if credential injectors, redaction rules, or filter rules are configured - since these features cannot inspect encrypted HTTPS traffic.
+When MITM is disabled, the proxy logs warnings at startup if credential injectors or redaction rules are configured - those features cannot inspect encrypted HTTPS traffic at all.
+
+### Filtering without MITM
+
+Filter rules still apply to HTTPS with MITM disabled, but only the `host` scope. An HTTPS connection reaches the proxy
+as `CONNECT api.example.com:443` and nothing else: there is no path, no headers and no body to match. Each CONNECT is
+evaluated against the host-scoped rules, refused with `403` when they say block, and written to the request log with
+its decision - so `devsandbox logs proxy` shows which hosts were tunneled, not just that some were. Ask mode works the
+same way, per tunnel rather than per request, and a remembered answer is cached by host as usual.
+
+A `path`- or `url`-scoped rule cannot be evaluated for an HTTPS connection, so devsandbox refuses to start rather than
+enforce less than the config file states:
+
+```
+filter rule scope cannot be enforced: rule 2 (pattern "/admin/*", scope "path"): an HTTPS CONNECT carries only
+host:port, so path-scoped rules cannot be evaluated while MITM is disabled; use scope = "host" or enable MITM
+```
+
+Rewrite the rule at `host` scope, or keep MITM enabled. Plain HTTP is unaffected either way - every scope works there,
+which is why the rule is refused only when `mitm = false`.
 
 **When to disable MITM:**
 
 - Tools with certificate pinning that reject the proxy CA
 - You only need network isolation and HTTP (not HTTPS) logging
-- You don't need credential injection, content redaction, or HTTPS filtering
+- You don't need credential injection, content redaction, or path/body-level HTTPS filtering
 
 If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM enabled - it's required for credential injection and secret scanning.
 
@@ -287,6 +307,30 @@ flowchart TB
     end
     gateway -. "pasta NAT<br/>10.0.2.2 → 127.0.0.1" .-> proxy
 ```
+
+## Proxy Environment Variables
+
+When proxy mode is active, every backend exports the same set, with the proxy URL
+pointing at that backend's gateway (`http://10.0.2.2:8080` for bwrap and krun,
+the Docker host alias for Docker):
+
+| Variable                             | Value             | Purpose                                              |
+|--------------------------------------|-------------------|------------------------------------------------------|
+| `HTTP_PROXY`, `http_proxy`           | proxy URL         | Standard proxy variables, both cases                 |
+| `HTTPS_PROXY`, `https_proxy`         | proxy URL         | Standard proxy variables, both cases                 |
+| `NO_PROXY`, `no_proxy`               | `localhost,127.0.0.1` | Keep loopback traffic off the proxy              |
+| `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`| proxy URL         | Yarn reads its own variables                         |
+| `NODE_USE_ENV_PROXY`                 | `1`               | Node.js >= 24: make built-in `fetch` honor the proxy |
+| `MISE_FETCH_REMOTE_VERSIONS_TIMEOUT` | `3s`              | Bound mise's remote version lookups (see below)      |
+| `DEVSANDBOX_PROXY`                   | `1`               | Marks a proxied sandbox for shell integration        |
+
+`MISE_FETCH_REMOTE_VERSIONS_TIMEOUT` is the only default: a value you configure
+through `[sandbox.environment]`, `env_vars` or env passthrough wins over it. The
+rest are set unconditionally, since they state where the proxy is.
+
+Add tool-specific variable names with
+[`extra_env`](configuration.md#proxy-extra-environment-variables) - each is set
+to the same proxy URL.
 
 ## CA Certificate
 
@@ -427,6 +471,7 @@ Logs are stored as gzip-compressed JSONL files:
 - Files rotate when they reach 50MB
 - Maximum 5 files kept per type
 - Older files are automatically pruned
+- The index in the file name keeps counting up for the rest of the day; a pruned name is not reused
 
 ### Log Entry Format
 
@@ -459,6 +504,20 @@ Each log entry contains:
 ```
 
 Note: Request/response bodies are base64-encoded.
+
+### Body Capture Limit
+
+Only the first 256 KiB of each request and response body is recorded; the body
+itself always reaches its destination whole. The proxy runs on the host, outside
+the sandbox's memory and CPU limits, and a request is logged **before** the
+filter decides on it - so an unbounded capture would let anything in the sandbox
+spend host memory on a request that was going to be refused anyway. A body that
+stalls mid-send is cut loose after 5 seconds for the same reason.
+
+An entry whose body was cut carries `"req_body_truncated": true` or
+`"resp_body_truncated": true`, so a short body and a truncated one are not
+confusable. Change the bound with `proxy.max_log_body_bytes`; `0` records no
+bodies at all. See [Configuration: Proxy Settings](configuration.md#proxy-settings).
 
 ## Internal Logs
 
@@ -631,6 +690,25 @@ Default is `host`.
 | `path` | Request path only | `/api/v1/users` |
 | `url` | Full URL | `https://api.example.com/v1/users` |
 
+With `mitm = false` only the `host` scope can be evaluated for HTTPS, and a `path`- or `url`-scoped rule aborts the
+launch instead of silently applying to plain HTTP alone - see [Filtering without MITM](#filtering-without-mitm).
+
+#### Host matching is case-insensitive except for regex
+
+DNS names are case-insensitive and a trailing dot spells the same name, so `BLOCKED.Example.com.`
+and `blocked.example.com` reach the same server. Host-scoped requests and host-scoped `exact` and
+`glob` patterns are both lowercased and stripped of a single trailing dot before matching, so a rule
+applies to every spelling of the name it covers. The same canonicalization keys the ask-mode
+decision cache, so approving a host once covers its other spellings.
+
+`regex` patterns are used exactly as written - a regex is a program, and rewriting it would change
+what character classes and anchors mean. Write `(?i)` yourself when a host regex should match
+case-insensitively, and account for the canonicalized target: the string a host-scoped regex is
+tested against is already lowercase with no trailing dot.
+
+This applies to the `host` scope only. `path` and `url` patterns are matched verbatim, because URL
+paths are case-sensitive.
+
 ### Ask Mode
 
 In ask mode, unmatched requests require user approval via a separate monitor terminal. This is particularly useful when running AI agents autonomously - you can approve or block each request the agent makes that reaches the proxy, giving you real-time control over that traffic. Like every other proxy feature, this is bounded by how strongly the backend routes traffic through the proxy - see [Backend-Specific Behavior](#backend-specific-behavior).
@@ -772,7 +850,7 @@ Every injector is defined by the same set of fields under `[proxy.credentials.<n
 | Field | Purpose |
 |-------|---------|
 | `enabled` | Master switch. Injector is inert unless `enabled = true`. |
-| `host` | Hostname to match. Exact (`api.github.com`) or glob (`*.example.com`). |
+| `host` | Hostname to match. Exact (`api.github.com`) or glob (`*.example.com`). Matched case-insensitively, ignoring a trailing dot. |
 | `header` | HTTP header to set on matching requests. Canonicalized at load (`authorization` → `Authorization`). |
 | `value_format` | Template for the header value. `{token}` is replaced with the resolved source value. Defaults to `"{token}"`. |
 | `overwrite` | When `true`, replaces any existing value for the configured header. Default `false`. |
@@ -999,6 +1077,9 @@ pattern = "/v1/metrics"
 scope = "path"
 type = "exact"
 ```
+
+Scopes and pattern types are the same as the filter's, including
+[host matching being case-insensitive except for regex](#host-matching-is-case-insensitive-except-for-regex).
 
 ### Interaction With Other Features
 
