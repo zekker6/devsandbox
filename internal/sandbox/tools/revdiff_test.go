@@ -29,16 +29,26 @@ func TestRevdiff_DeclaresLaunchOverlay(t *testing.T) {
 	t.Errorf("CapLaunchOverlay missing from %v", caps)
 }
 
-func TestRevdiff_LaunchPatternsAcceptRevdiff(t *testing.T) {
-	// Patterns now pin the revdiff binary to its resolved path, so the test
-	// must reference that same path rather than a hardcoded one.
-	bin, err := cmdpattern.ResolveProgram("revdiff")
-	if err != nil {
-		t.Skipf("revdiff not on PATH: %v", err)
-	}
+// testRevdiffBin stands in for the resolved revdiff path. The patterns compare
+// argv[0] as a string, so the binary does not have to exist - and resolving it
+// for real meant these tests skipped wherever revdiff is not on PATH, which is
+// every CI machine, leaving the planted-binary and planted-EDITOR regressions
+// guarded by tests nothing ever ran.
+const testRevdiffBin = "/usr/local/bin/revdiff"
 
-	r := &Revdiff{}
-	patterns := r.KittyLaunchPatterns()
+// testSharedTmp stands in for the shared temp directory the production
+// callers take from SharedTmpPath. The sentinel paths below live under it.
+const testSharedTmp = "/tmp"
+
+// testBounds is what the production callers build from launchBoundsFor. The
+// project directory is set per test where it matters.
+func testBounds() cmdpattern.LaunchBounds {
+	return cmdpattern.LaunchBounds{SharedTmp: testSharedTmp}
+}
+
+func TestRevdiff_LaunchPatternsAcceptRevdiff(t *testing.T) {
+	bin := testRevdiffBin
+	patterns := kittyLaunchPatternsFor(bin, testBounds())
 	if len(patterns) == 0 {
 		t.Fatal("no launch patterns declared")
 	}
@@ -123,12 +133,7 @@ func TestRevdiff_LaunchPatternsAcceptRevdiff(t *testing.T) {
 // executable there, name it in a launch request, and have the host run it as
 // the host user. Every form below must be denied.
 func TestRevdiff_LaunchPatternsRejectPlantedBinary(t *testing.T) {
-	if _, err := cmdpattern.ResolveProgram("revdiff"); err != nil {
-		t.Skipf("revdiff not on PATH: %v", err)
-	}
-
-	r := &Revdiff{}
-	patterns := r.KittyLaunchPatterns()
+	patterns := kittyLaunchPatternsFor(testRevdiffBin, testBounds())
 	if len(patterns) == 0 {
 		t.Fatal("no launch patterns declared")
 	}
@@ -196,11 +201,8 @@ func TestRevdiff_HerdrCapabilities(t *testing.T) {
 }
 
 func TestRevdiff_HerdrLaunchScriptAcceptsRealLauncherBodies(t *testing.T) {
-	bin, err := cmdpattern.ResolveProgram("revdiff")
-	if err != nil {
-		t.Skipf("revdiff not on PATH: %v", err)
-	}
-	pat := (&Revdiff{}).HerdrLaunchScript()
+	bin := testRevdiffBin
+	pat := herdrLaunchScriptFor(bin, testBounds())
 	const sentinel = "/tmp/revdiff-done-xyz"
 
 	tests := []struct {
@@ -236,11 +238,8 @@ func TestRevdiff_HerdrLaunchScriptAcceptsRealLauncherBodies(t *testing.T) {
 }
 
 func TestRevdiff_HerdrLaunchScriptRejects(t *testing.T) {
-	bin, err := cmdpattern.ResolveProgram("revdiff")
-	if err != nil {
-		t.Skipf("revdiff not on PATH: %v", err)
-	}
-	pat := (&Revdiff{}).HerdrLaunchScript()
+	bin := testRevdiffBin
+	pat := herdrLaunchScriptFor(bin, testBounds())
 	const sentinel = "/tmp/revdiff-done-xyz"
 	okHead := "'" + bin + "' '--output=/tmp/o'"
 
@@ -272,9 +271,12 @@ func TestRevdiff_HerdrLaunchScriptRejects(t *testing.T) {
 			// editor, and revdiff spawns whatever EDITOR names — so a value
 			// pointing at the write-through shared temp directory is host
 			// execution by the same mechanism as a planted argv[0].
+			// A real editor basename, so only the path comparison can refuse
+			// it: with a name like "evil" the name allowlist rejects the value
+			// first and this case stays green with that comparison deleted.
 			name: "editor planted in the IPC directory",
 			body: "#!/bin/sh\n/usr/bin/env 'EDITOR=" +
-				filepath.Join(SharedTmpPath(os.Getenv("HOME"), "/s/home"), "evil") + "' " +
+				filepath.Join(SharedTmpPath(os.Getenv("HOME"), "/s/home"), "nvim") + "' " +
 				okHead + herdrTail(sentinel) + "\n",
 		},
 		{
@@ -302,5 +304,142 @@ func TestRevdiff_HerdrLaunchScriptRejects(t *testing.T) {
 				t.Errorf("HerdrLaunchScript accepted a body it must reject:\n%s", tt.body)
 			}
 		})
+	}
+}
+
+// TestRevdiff_HerdrLaunchScriptRejectsEditorFromProjectDir pins the second way
+// a program name reaches a file the sandbox wrote. The shared temp directory is
+// the obvious one; the project tree is the quiet one, because nothing in the
+// value names it - the host's own PATH does, whenever a virtualenv, a
+// node_modules/.bin or a `bin` direnv adds is active in the directory the
+// terminal was started in.
+func TestRevdiff_HerdrLaunchScriptRejectsEditorFromProjectDir(t *testing.T) {
+	t.Setenv("EDITOR", "")
+	t.Setenv("VISUAL", "")
+
+	projectDir := t.TempDir()
+	plantedBin := filepath.Join(projectDir, ".venv", "bin")
+	if err := os.MkdirAll(plantedBin, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(plantedBin, "nvim"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("plant editor: %v", err)
+	}
+	t.Setenv("PATH", plantedBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Synthetic roots, so neither bound covers the planted binary by accident:
+	// t.TempDir() sits under /tmp whenever TMPDIR is unset, and testSharedTmp is
+	// /tmp - which would turn the "outside every bound" case below into a
+	// rejection that looks like the rule working.
+	const (
+		syntheticSharedTmp  = "/run/devsandbox-shared"
+		syntheticProjectDir = "/run/devsandbox-project"
+		sentinel            = syntheticSharedTmp + "/revdiff-done-xyz"
+	)
+	body := "#!/bin/sh\n/usr/bin/env 'EDITOR=nvim' '" + testRevdiffBin + "' '--output=/tmp/o'" +
+		herdrTail(sentinel) + "\n"
+
+	bounded := herdrLaunchScriptFor(testRevdiffBin, cmdpattern.LaunchBounds{
+		SharedTmp:  syntheticSharedTmp,
+		ProjectDir: projectDir,
+	})
+	if bounded.MatchesBody([]byte(body)) {
+		t.Error("accepted EDITOR=nvim while the host's PATH resolves nvim inside the project tree")
+	}
+
+	// Setting the host's own EDITOR to the same name must not buy it past the
+	// check: the value is host-derived, the file it names is not.
+	t.Setenv("EDITOR", "nvim")
+	if bounded.MatchesBody([]byte(body)) {
+		t.Error("accepted the host's own EDITOR=nvim while the host's PATH resolves nvim inside the project tree")
+	}
+	t.Setenv("EDITOR", "")
+
+	unbounded := herdrLaunchScriptFor(testRevdiffBin, cmdpattern.LaunchBounds{
+		SharedTmp:  syntheticSharedTmp,
+		ProjectDir: syntheticProjectDir,
+	})
+	if !unbounded.MatchesBody([]byte(body)) {
+		t.Error("rejected an editor resolving outside every bound")
+	}
+}
+
+// TestRevdiff_HostShellTrusted covers the wrapping shell the kitty patterns
+// accept by spelling. `sh` is resolved by the terminal that runs it, so a PATH
+// reaching into the project tree makes the sandbox the supplier of the
+// interpreter - and the payload is forwarded to kitty verbatim, so denying
+// every launch is the only answer available.
+func TestRevdiff_HostShellTrusted(t *testing.T) {
+	resolved, err := cmdpattern.ResolveProgram("sh")
+	if err != nil {
+		t.Skipf("sh not resolvable on this host: %v", err)
+	}
+
+	if err := hostShellTrusted(cmdpattern.LaunchBounds{SharedTmp: testSharedTmp, ProjectDir: t.TempDir()}); err != nil {
+		t.Errorf("hostShellTrusted rejected an ordinary host shell: %v", err)
+	}
+
+	bounds := cmdpattern.LaunchBounds{SharedTmp: testSharedTmp, ProjectDir: filepath.Dir(resolved)}
+	if err := hostShellTrusted(bounds); err == nil {
+		t.Errorf("hostShellTrusted accepted `sh` resolving to %s, inside a directory the sandbox can write", resolved)
+	}
+}
+
+// TestRevdiff_HostShellTrustedRejectsSymlinkedLookup covers the spelling the
+// resolved path alone cannot see. `$PROJECT/bin` on PATH is the case
+// LaunchBounds exists for, and a `sh` symlink there resolves *out* of the
+// project tree - so a check that looks only at the symlink target reports a
+// shell nothing untrusted supplies, while the file the terminal will actually
+// open is the link, which the sandbox can repoint or replace at any point
+// before the launch.
+func TestRevdiff_HostShellTrustedRejectsSymlinkedLookup(t *testing.T) {
+	realSh, err := cmdpattern.ResolveProgram("sh")
+	if err != nil {
+		t.Skipf("sh not resolvable on this host: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	projectBin := filepath.Join(projectDir, "bin")
+	if err := os.MkdirAll(projectBin, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(realSh, filepath.Join(projectBin, "sh")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	t.Setenv("PATH", projectBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	bounds := cmdpattern.LaunchBounds{SharedTmp: testSharedTmp, ProjectDir: projectDir}
+	if err := hostShellTrusted(bounds); err == nil {
+		t.Errorf("hostShellTrusted accepted `sh` found at %s, a path the sandbox can replace, because it resolves to %s",
+			filepath.Join(projectBin, "sh"), realSh)
+	}
+}
+
+// TestRevdiff_ResolveRevdiffBinRejectsBoundInstall covers the pinned binary
+// itself. ResolveProgram says which file the name means on the host, not who may
+// rewrite it - and the project tree is bound read-write at the path the host
+// knows it by, so a revdiff resolving inside it pins the pattern to bytes the
+// sandbox chooses.
+func TestRevdiff_ResolveRevdiffBinRejectsBoundInstall(t *testing.T) {
+	projectDir := t.TempDir()
+	projectBin := filepath.Join(projectDir, "bin")
+	if err := os.MkdirAll(projectBin, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	planted := filepath.Join(projectBin, "revdiff")
+	if err := os.WriteFile(planted, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("PATH", projectBin)
+
+	bounds := cmdpattern.LaunchBounds{SharedTmp: testSharedTmp, ProjectDir: projectDir}
+	if _, err := resolveRevdiffBin(bounds); err == nil {
+		t.Errorf("resolveRevdiffBin pinned %s, which the sandbox can write", planted)
+	}
+
+	// The counterweight: the same lookup outside every bound must still resolve,
+	// or the check degenerates into denying every install.
+	if _, err := resolveRevdiffBin(cmdpattern.LaunchBounds{SharedTmp: testSharedTmp}); err != nil {
+		t.Errorf("resolveRevdiffBin rejected a revdiff outside every bound: %v", err)
 	}
 }

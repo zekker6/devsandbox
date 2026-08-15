@@ -65,6 +65,14 @@ func TestRemoveSandboxOnExit_KeepsStateWhileAnotherSessionIsLive(t *testing.T) {
 	if !strings.Contains(buf.String(), "--rm skipped") {
 		t.Errorf("no notice explaining the skipped removal, got: %q", buf.String())
 	}
+	// The level, not just the text: a cleanup the user asked for and did not
+	// get is something they have to act on, and Warn is what puts it in the
+	// raised set. Both levels write the bare message to this buffer, so the
+	// string check alone stays green after a downgrade to Info.
+	raised, _ := notice.Raised()
+	if len(raised) == 0 {
+		t.Error("the skipped removal was not raised as a warning")
+	}
 }
 
 func TestRemoveSandboxOnExit_RemovesStateWhenNoOtherSessionRemains(t *testing.T) {

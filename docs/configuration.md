@@ -77,14 +77,22 @@ enabled = false
 port = 8080
 
 # Bytes of each request/response body recorded in the proxy request log
-# Default: 262144 (256 KiB). 0 records no bodies at all.
+# Default: 262144 (256 KiB). 0 records no bodies at all. Maximum 2097152 (2 MiB).
 max_log_body_bytes = 262144
 ```
 
 `max_log_body_bytes` bounds only what is **written to the log**: the body itself
 always reaches its destination whole. Entries cut by the bound are marked
 `req_body_truncated` / `resp_body_truncated`, so a short body and a truncated one
-are distinguishable. See [Proxy: Body Capture Limit](proxy.md#body-capture-limit).
+are distinguishable. The maximum is 2 MiB - past that a single log record exceeds
+what `devsandbox logs proxy` will read back, so a larger value is rejected at
+startup rather than producing records nothing can read. A project
+`.devsandbox.toml` may only **lower** the limit, never raise it or set it to `0`:
+that file is writable from inside the sandbox, so either direction would be the
+sandbox choosing how much of its own traffic is kept. The restriction is on that
+file alone - the global config and any `[[include]]` file are host-owned and
+merge in both directions. See
+[Proxy: Body Capture Limit](proxy.md#body-capture-limit).
 
 **Prerequisite (bwrap and krun).** Proxy mode locks the sandbox's egress down
 deny-by-default, which needs `nft` or `iptables` on the host with the `nf_tables`
@@ -209,7 +217,9 @@ max_scan_bytes = 10485760 # Largest request body the scan will buffer (default 1
 decision needs the whole body, so a request past the limit - or one whose body
 stops arriving for 30 seconds - is **blocked** rather than forwarded on a
 partial scan. Raise it if a workflow legitimately uploads more than that through
-the proxy. A project `.devsandbox.toml` may only lower it.
+the proxy - in the global config or an `[[include]]` file, both of which are
+host-owned. A project `.devsandbox.toml`, which is writable from inside the
+sandbox, may only lower it.
 
 #### Rule Types
 

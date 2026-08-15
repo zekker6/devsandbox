@@ -3,6 +3,7 @@ package herdrproxy
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,13 @@ import (
 
 	"devsandbox/internal/cmdpattern"
 )
+
+// ErrSandboxVisible reports that the requested relocation directory is
+// reachable from inside the sandbox, so there is nowhere safe to put a
+// validated script. It is distinguishable because the caller can still run the
+// proxy without a relocator - every script launch is then denied - rather than
+// failing the launch outright.
+var ErrSandboxVisible = errors.New("herdr relocator: relocation directory is sandbox-visible")
 
 // Relocator copies a sandbox-supplied launch script to a host-only location
 // after validating it, and rewrites the command to point at the copy.
@@ -24,8 +32,10 @@ import (
 //
 // Instead the bytes are read exactly once, validated in memory, and written to
 // a directory only the host can write. The command then names that copy, so
-// what was validated and what runs are the same bytes. The sandbox has no way
-// to influence the script after validation.
+// what runs is what was validated - plus the fixed prologue
+// ScriptPattern.HardenBody adds, which is the only edit made and is made after
+// validation, never from the payload. The sandbox has no way to influence the
+// script afterwards.
 type Relocator struct {
 	dir string
 
@@ -37,6 +47,18 @@ type Relocator struct {
 // inside the sandbox. forbidden lists sandbox-visible mount paths; construction
 // fails if dir is equal to or beneath any of them, because relocating into a
 // sandbox-writable directory would defeat the entire mechanism.
+//
+// Both sides of that comparison contribute their symlink-resolved spelling as
+// well as the literal one, because either can be the alias: the project
+// directory arrives as os.Getwd() spelled it - `$PWD` through a symlink, if
+// that is how the user reached it - while the relocation root is built from
+// `$HOME`. A lexical test over one spelling of each misses the case where they
+// name the same tree by different names, which is the whole arrangement this
+// refusal exists to catch. See cmdpattern.ResolvedSpellings.
+//
+// The check runs before the directory is created, so a refused relocation root
+// leaves nothing behind; resolution therefore stops at the deepest ancestor
+// that already exists.
 func NewRelocator(dir string, forbidden []string) (*Relocator, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("herdr relocator: directory is empty")
@@ -45,15 +67,12 @@ func NewRelocator(dir string, forbidden []string) (*Relocator, error) {
 	if !filepath.IsAbs(clean) {
 		return nil, fmt.Errorf("herdr relocator: directory %q is not absolute", dir)
 	}
-	for _, f := range forbidden {
-		if f == "" {
-			continue
-		}
-		fc := filepath.Clean(f)
-		if clean == fc || strings.HasPrefix(clean, fc+string(filepath.Separator)) {
+	roots := cmdpattern.ResolveRoots(forbidden)
+	for _, spelling := range cmdpattern.ResolvedSpellings(clean) {
+		if root, ok := cmdpattern.PathUnderRoot(spelling, roots); ok {
 			return nil, fmt.Errorf(
-				"herdr relocator: directory %q is inside sandbox-visible path %q; "+
-					"relocated scripts would remain writable by the sandbox", clean, fc)
+				"%w: %q is inside %q, where the sandbox could replace a script after it was validated",
+				ErrSandboxVisible, spelling, root)
 		}
 	}
 	if err := os.MkdirAll(clean, 0o700); err != nil {
@@ -91,12 +110,21 @@ func (r *Relocator) Relocate(text string, pat cmdpattern.ScriptPattern) (rewritt
 		return "", true, fmt.Errorf("launch script does not match the declared pattern")
 	}
 
-	dest, err := r.write(body)
+	dest, err := r.write(pat.HardenBody(body))
 	if err != nil {
 		return "", true, err
 	}
-	return "sh " + dest, true, nil
+	// The shell is named by absolute path rather than left to the host's PATH.
+	// The bare spelling is resolved by whatever shell herdr types this into, and
+	// a project-local bin directory on that PATH - a virtualenv, node_modules,
+	// a `bin` direnv adds - is bind-mounted read-write into the sandbox, so the
+	// sandbox could supply the interpreter for its own script. /bin/sh is the
+	// location POSIX fixes and the one the accepted shebang already requires.
+	return hostShell + " " + dest, true, nil
 }
+
+// hostShell is the interpreter the relocated script is handed to. See Relocate.
+const hostShell = "/bin/sh"
 
 // parseShScript recognizes the `sh <path>` form and returns the path. The path
 // must be absolute and free of characters the shell would act on, since it is

@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-func TestAcquireSessionLock(t *testing.T) {
+func TestAcquireSession_CreatesLockFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	lockFile, err := AcquireSessionLock(tmpDir)
+	lockFile, err := AcquireSession(tmpDir)
 	if err != nil {
-		t.Fatalf("AcquireSessionLock failed: %v", err)
+		t.Fatalf("AcquireSession failed: %v", err)
 	}
-	defer func() { _ = lockFile.Close() }()
+	defer func() { _ = lockFile.Release() }()
 
 	// Verify lock file was created
 	lockPath := filepath.Join(tmpDir, LockFileName)
@@ -34,9 +34,9 @@ func TestIsSessionActive_WithLock(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Acquire lock
-	lockFile, err := AcquireSessionLock(tmpDir)
+	lockFile, err := AcquireSession(tmpDir)
 	if err != nil {
-		t.Fatalf("AcquireSessionLock failed: %v", err)
+		t.Fatalf("AcquireSession failed: %v", err)
 	}
 
 	// Check if active
@@ -45,7 +45,7 @@ func TestIsSessionActive_WithLock(t *testing.T) {
 	}
 
 	// Release lock
-	_ = lockFile.Close()
+	_ = lockFile.Release()
 
 	// Check again - should not be active
 	if IsSessionActive(tmpDir) {
@@ -53,22 +53,22 @@ func TestIsSessionActive_WithLock(t *testing.T) {
 	}
 }
 
-func TestAcquireSessionLock_MultipleSessions(t *testing.T) {
+func TestAcquireSession_MultipleSessionsShareTheLock(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// First session
-	lock1, err := AcquireSessionLock(tmpDir)
+	lock1, err := AcquireSession(tmpDir)
 	if err != nil {
 		t.Fatalf("First lock failed: %v", err)
 	}
-	defer func() { _ = lock1.Close() }()
+	defer func() { _ = lock1.Release() }()
 
 	// Second session (should succeed - shared locks)
-	lock2, err := AcquireSessionLock(tmpDir)
+	lock2, err := AcquireSession(tmpDir)
 	if err != nil {
 		t.Fatalf("Second lock failed: %v", err)
 	}
-	defer func() { _ = lock2.Close() }()
+	defer func() { _ = lock2.Release() }()
 
 	// Both should show as active
 	if !IsSessionActive(tmpDir) {
@@ -76,7 +76,7 @@ func TestAcquireSessionLock_MultipleSessions(t *testing.T) {
 	}
 
 	// Close first lock
-	_ = lock1.Close()
+	_ = lock1.Release()
 
 	// Should still be active (second lock held)
 	if !IsSessionActive(tmpDir) {

@@ -82,8 +82,10 @@ tasks:
       - go test -exec true -tags integration_krun ./test/integration/...
       # Same compile-only check for the e2e docker tests. They live behind the
       # e2e build tag and need a `devsandbox:local` image to do anything, so no
-      # routine task compiles them - a helper signature drift in the untagged
-      # e2e files would go unnoticed. This type-checks them without running one.
+      # routine task compiles them - the untagged e2e files are already covered
+      # by `go vet ./...` and cross-test, but a helper signature drift in the
+      # build-tagged ones would go unnoticed. This type-checks them without
+      # running one.
       - go test -exec true -tags e2e ./e2e/...
       - task: test:plugins
 

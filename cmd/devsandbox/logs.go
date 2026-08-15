@@ -398,8 +398,12 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 				filepath.Base(file), oversized, proxyLogMaxLineBytes>>20)
 		}
 		if err != nil {
-			notice.Warn("%s was read only up to the first unreadable record: %v",
-				filepath.Base(file), err)
+			if len(fileEntries) == 0 {
+				notice.Warn("%s could not be read: %v", filepath.Base(file), err)
+			} else {
+				notice.Warn("%s was read only up to the first unreadable record: %v",
+					filepath.Base(file), err)
+			}
 		}
 
 		// Prepend entries (since we're reading newest first)
@@ -502,7 +506,9 @@ func followProxyLogs(logDir string, filter *ProxyLogFilter, jsonOutput, showBody
 	if currentFile != "" {
 		entries, oversized, err := readUncompressedProxyLogFile(currentFile, 10)
 		if oversized > 0 {
-			notice.Warn("%d recent record(s) past the %d MiB line limit were skipped",
+			// Counted over the whole file, not over the 10 entries shown: the
+			// reader steps over an oversized record wherever it sits.
+			notice.Warn("%d record(s) past the %d MiB line limit were skipped",
 				oversized, proxyLogMaxLineBytes>>20)
 		}
 		if err != nil {
@@ -732,11 +738,20 @@ func readUncompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, i
 // stops rather than a loss of records. A writer killed mid-rotation leaves its
 // last member without a trailer, and everything it flushed has already been
 // read by the time the reader notices.
-func isBenignArchiveEnd(err error) bool {
-	return errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, gzip.ErrChecksum) ||
-		errors.Is(err, gzip.ErrHeader)
+//
+// A bad checksum or a malformed header describes that tail only once records
+// have actually come out of the file. Met with nothing read they mean the file
+// is not the archive its name claims, and classifying them as benign anyway
+// reported a corrupt or non-gzip archive as an empty one - no entries, no error
+// and no warning, which is the silent failure this project does not accept.
+func isBenignArchiveEnd(err error, recovered int) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if recovered == 0 {
+		return false
+	}
+	return errors.Is(err, gzip.ErrChecksum) || errors.Is(err, gzip.ErrHeader)
 }
 
 func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, int, error) {
@@ -760,7 +775,7 @@ func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, int
 		}
 		if err != nil {
 			// Truncated or corrupted gzip stream - stop reading.
-			if !isBenignArchiveEnd(err) {
+			if !isBenignArchiveEnd(err, len(entries)+oversized) {
 				readErr = fmt.Errorf("gzip stream: %w", err)
 			}
 			break
@@ -781,7 +796,7 @@ func readCompressedProxyLogFile(path string, limit int) ([]proxy.RequestLog, int
 		if scanErr != nil {
 			// The error travels with the entries read so far rather than being
 			// dropped.
-			if !isBenignArchiveEnd(scanErr) {
+			if !isBenignArchiveEnd(scanErr, len(entries)+oversized) {
 				readErr = scanErr
 			}
 			break
@@ -1202,18 +1217,28 @@ func readLoggingErrorsLog(path string, since time.Time) ([]string, error) {
 }
 
 func readProxyInternalLogs(logDir string, since time.Time) ([]string, error) {
-	pattern := filepath.Join(logDir, proxy.ProxyLogPrefix+"*"+proxy.ProxyLogSuffix)
-	files, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
+	// Both the active file and its compressed rotations, because the writer
+	// produces both: matching only one suffix is how this reader used to return
+	// nothing at all.
+	var files []string
+	for _, suffix := range []string{proxy.ProxyLogSuffix, proxy.ProxyLogArchiveSuffix} {
+		matches, err := filepath.Glob(filepath.Join(logDir, proxy.ProxyLogPrefix+"*"+suffix))
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, matches...)
 	}
 
 	sort.Strings(files)
 
 	var lines []string
 	for _, file := range files {
-		l, err := readGzipLogFile(file, since)
+		l, err := readProxyLogFile(file, since)
 		if err != nil {
+			// A file that cannot be read is reported, not skipped. Swallowing
+			// it made an unreadable log indistinguishable from an empty one,
+			// which is how the whole reader stayed silently broken.
+			notice.Warn("skipping %s: %v", file, err)
 			continue
 		}
 		lines = append(lines, l...)
@@ -1222,42 +1247,72 @@ func readProxyInternalLogs(logDir string, since time.Time) ([]string, error) {
 	return lines, nil
 }
 
-func readGzipLogFile(path string, since time.Time) ([]string, error) {
+// readProxyLogFile reads one internal proxy log, compressed or not.
+//
+// The encoding is sniffed rather than taken from the name because the two have
+// disagreed: the writer named its *active* file `.log.gz` and wrote plain text
+// into it, so every such file already on disk is mislabeled. Sniffing reads
+// those and the correctly named ones alike.
+func readProxyLogFile(path string, since time.Time) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 
-	var lines []string
+	r := bufio.NewReader(f)
+	magic, err := r.Peek(2)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil // empty file, nothing to report
+		}
+		return nil, err
+	}
+	if magic[0] != 0x1f || magic[1] != 0x8b {
+		return scanProxyLogLines(r, since), nil
+	}
 
-	// Handle concatenated gzip streams
+	var lines []string
+	// Handle concatenated gzip streams.
 	for {
-		gz, err := gzip.NewReader(f)
-		if err == io.EOF {
+		gz, err := gzip.NewReader(r)
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			break
-		}
-
-		scanner := bufio.NewScanner(gz)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// Proxy internal logs have format: 2024/01/15 10:30:00 message
-			if !since.IsZero() && len(line) >= 19 {
-				if t, err := time.Parse("2006/01/02 15:04:05", line[:19]); err == nil {
-					if t.Before(since) {
-						continue
-					}
-				}
+			if len(lines) > 0 {
+				// A truncated trailing stream after readable data is a log
+				// still being written, not a broken file.
+				break
 			}
-			lines = append(lines, line)
+			return nil, err
 		}
+		lines = append(lines, scanProxyLogLines(gz, since)...)
 		_ = gz.Close()
 	}
 
 	return lines, nil
+}
+
+// scanProxyLogLines returns the lines of an internal proxy log at or after
+// since. Its records are stamped `2024/01/15 10:30:00 message`; a line that does
+// not parse as one is kept, since dropping it would hide exactly the output a
+// caller reading these logs is looking for.
+func scanProxyLogLines(r io.Reader, since time.Time) []string {
+	var lines []string
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !since.IsZero() && len(line) >= 19 {
+			if t, err := time.Parse("2006/01/02 15:04:05", line[:19]); err == nil {
+				if t.Before(since) {
+					continue
+				}
+			}
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 func followInternalLogs(logDir, logType string, since time.Time) error {

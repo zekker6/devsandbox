@@ -28,6 +28,10 @@ Two invariants matter, both because they have already been violated:
 
 - **Pin the program to its resolved absolute path** (`cmdpattern.ResolveProgram`), never match on basename. A few directories are write-through binds shared with the host at an *identical* path - `internal/sandbox/tools/sharedtmp.go`'s directory is one - so basename matching lets the sandbox supply the binary. Most of the sandbox home is an overlay whose writes never reach the host, which is exactly why the resolved path is safe and the basename is not. If the binary cannot be resolved, deny everything rather than falling back.
 - **Never validate a file the sandbox can still write.** Read it once, validate those bytes, and copy them somewhere the sandbox cannot reach before handing the path to the host. Validating in place leaves a swap window.
+- **A path the host will *write* needs a root, not just a shape - and a root is not the whole answer.** `sentinelPathRe` accepted any absolute path of safe characters, and the clause it guards is `printf "%s" "$rc" > '<sentinel>'.tmp && mv -f '<sentinel>'.tmp '<sentinel>'` - so `/home/u/.bashrc` had the host destroy that file on the sandbox's word. `sentinelAllowed` confines it to a root the caller derives from `SharedTmpPath`, the same function that emits the bind mount, and an empty root denies rather than falling back to the shape test. The confinement is lexical for the reason above, so it bounds the path the script *names*, not the inode the redirect resolves to - and that root is sandbox-writable at an identical path, so a symlink planted at `<sentinel>.tmp` was followed and the victim truncated. Where devsandbox owns the bytes it can fix that: `ScriptPattern.HardenBody` prepends `set -C`, which makes every shell that can run the body open a `>` target `O_CREAT|O_EXCL`, and `Relocator` writes *that* rather than the validated bytes. Where the payload is forwarded verbatim (the kitty `; touch '<sentinel>'` form) nothing can be inserted, so it stays a narrowing and says so.
+- **A name the host's `PATH` resolves is host-derived only while that `PATH` stays out of the sandbox's reach.** `EDITOR=nvim` was accepted on the grounds that the sandbox supplies the name and the host the location - but `builder.go` binds the project tree read-write at its own path, and `.venv/bin`, `node_modules/.bin` and a `bin` direnv or mise adds are all inside it and routinely on `PATH`. `cmdpattern.LaunchBounds` carries both writable roots (shared temp *and* project dir), built once in `tools.launchBoundsFor` so a validator's bound cannot drift from the mount; a lookup landing under either is refused, in the bare and the absolute form alike, and the same rule covers `env`. The wrapping shell splits by who owns the bytes: herdr's relocated command is devsandbox's own text and names `/bin/sh` absolutely, while the kitty argv is forwarded byte for byte and the upstream launcher emits bare `sh`, so the only move left is `hostShellTrusted` dropping the entire pattern set when the host resolves `sh` inside a bound.
+- **A writable root has two spellings and a deny list needs both.** `projectDir` is `os.Getwd()`, which returns `$PWD` verbatim whenever it names the same directory - so a shell that cd'd through a symlink hands devsandbox the *link's* name, while `--bind <dir> <dir>` has bwrap bind the *target's* inode. Both names then reach the same read-write tree, and a lexical test over one of them bounds nothing written as the other: `HostProgramPaths` reports what the host resolved, which is the real path, and the herdr relocation root is built from `$HOME` while the project bound came from `$PWD`. `cmdpattern.ResolvedSpellings` / `ResolveRoots` carry both forms, and `LaunchBounds.UntrustedRoots` and `herdrproxy.NewRelocator` go through them. Only a **deny** list may be expanded this way - widening an allow bound (`SentinelRoot`, the filter's cwd confinement) with a second spelling admits a path the caller never derived. Resolution stops at the deepest existing ancestor, because the shared temp directory does not exist yet when the bounds are built and the relocator must decide before it creates anything.
+- **An allowlist of program names does not bound the program's flags.** `EDITOR` accepting `--?[A-Za-z0-9-]+` reinstated the whole hole `knownEditors` closes: every editor in that table has a flag that makes its trailing operand code - `nvim -u`, `vim -S`, `emacs -l`, `hx -c`, `kak -e` - and the operand is a file in the read-write project tree. `editorOptionWords` keys the accepted words on the editor, because `-c` is `--create-frame` to emacsclient and an ex command to vim; an editor with no entry takes no flags. The one escape hatch is a value byte-identical to the host's own `EDITOR`/`VISUAL`, which is host-derived by construction.
 
 Scope mutations to resources the sandbox created, taking their ids from the server's response and never from the client. Deny by default: a method with no explicit validator is refused, not passed through.
 
@@ -142,10 +146,21 @@ falls through to host. Three things are load-bearing:
   the `HandleConnectFunc` in `setupMITM`'s transparent branch; adding them to the request hook silently does nothing.
 - **Canonicalize the host on both sides, and key the cache on the canonical form.** `BLOCKED.EXAMPLE.COM` and
   `blocked.example.com.` reach the same server as `blocked.example.com`, so `NormalizeHost` lowercases and strips one
-  trailing dot, and rule compilation does the same to host-scoped `exact` and `glob` patterns. Regex patterns are left
-  as the author wrote them, which is documented rather than fixed. Anything else that compares or map-keys a host -
-  `log_skip` rules, the credential injector's `host` matcher, the ask-mode decision cache, `Server.bypassedHosts` -
-  goes through the same helper or drifts from it.
+  trailing dot, and rule compilation does the same to host-scoped `exact` and `glob` patterns. A **host**-scoped regex
+  cannot be rewritten without corrupting its metacharacters, so it is compiled with `(?i)` instead - leaving it verbatim
+  would silently retire every existing host regex containing uppercase, because the target is now always lowercase.
+  A **url**-scoped regex is the one left as written, because a URL's path half *is* case-sensitive; that one is
+  documented rather than fixed. Canonicalizing one side only is the same bug in the other direction: `canonicalizeURL`
+  and `canonicalizeURLPattern` share `canonicalizeAuthority` so a url rule and a url target agree, including on dropping
+  the port the scheme implies - MITM rebuilds every `req.URL` from the CONNECT target, so *every* intercepted HTTPS
+  request arrives spelled `https://host:443/...`. Anything else that compares or map-keys a host - `log_skip` rules, the
+  credential injector's `host` matcher, the ask-mode decision cache, `Server.bypassedHosts` - goes through the same
+  helper or drifts from it.
+- **The host a request goes to is `req.URL.Host`, never `req.Host`.** goproxy rebuilds `req.URL` from the CONNECT target
+  and leaves `req.Host` as the tunneled request spelled it, while the transport dials `req.URL.Host`. Matching the
+  header meant `CONNECT evil:443` carrying `Host: allowed` was checked against a name it was not contacting, and the
+  same value keyed the decision cache, so one ask-mode approval was reusable against any destination. `RequestHost`
+  is the single reader; filtering, the cache, the ask prompt and the audit event all go through it.
 
 ## Session designation
 
@@ -175,11 +190,20 @@ sampling liveness or a `--rm` teardown mid-removal holds `.lock` exclusively too
 silently demotes the launch to concurrent, whose writes are discarded at exit. Taking the shared lock is retried rather
 than failed outright for the same teardown.
 
-**Consume the designation through `SessionHandle.IsPrimary()`, never through `Config.IsConcurrent`.** They are not
-complements: `DesignateSession` only reroutes bwrap launches, so a docker or krun launch is `IsConcurrent == false` even
-when it lost the designation. The sandbox home is derived from the project name, so such a launch shares one with a live
-bwrap session - and gating `CleanupStaleSessionDirs` on `!IsConcurrent` sent it straight through that session's upper and
-work dirs.
+**Gate cleanup that touches shared sandbox state on `SessionHandle.IsPrimary()`, not on `Config.IsConcurrent`.** They are
+not complements: `DesignateSession` only reroutes bwrap launches, so a docker or krun launch is `IsConcurrent == false`
+even when it lost the designation. The sandbox home is derived from the project name, so such a launch shares one with a
+live bwrap session - and gating `CleanupStaleSessionDirs` on `!IsConcurrent` sent it straight through that session's
+upper and work dirs. `IsConcurrent` remains the right question for the two things that genuinely ask "am I on a session
+overlay": the builder's overlay routing, and the concurrent-session notice. The `--rm` teardown may also read it, because
+`RemoveSandboxIfIdle` re-probes liveness under the exclusive lock rather than trusting the flag.
+
+**A removal renames before it deletes.** The exclusive lock does not hold a launch off on its own: `RemoveAll` unlinks
+`.lock` as an ordinary entry, and `acquireSharedLock` reopens the path with `O_CREATE` on every retry - so the moment the
+file is gone a waiting launch creates a fresh inode, flocks it, conflicts with nothing, is designated primary, and runs
+against a root still being deleted. `RemoveSandboxIfIdle` renames the tree to `.removing-<name>-<pid>` under the lock and
+deletes it afterwards, so the name vanishes atomically and the slow chmod walk runs off the path nobody is racing.
+`ListSandboxes` skips that prefix, or a removal in flight reads as a sandbox.
 
 ## Platform-specific packages
 

@@ -25,7 +25,14 @@ import (
 
 const (
 	ProxyLogPrefix = "proxy"
-	ProxyLogSuffix = ".log.gz"
+	// ProxyLogSuffix names the *active* file, which holds plain text.
+	// ProxyLogArchiveSuffix names a rotation, which is gzipped. Spelling the
+	// active file `.log.gz` and leaving ArchiveSuffix empty is what this
+	// replaces: nothing ever compressed, every file was plain text under a
+	// `.gz` name, and `devsandbox logs internal --type proxy` opened it with a
+	// gzip reader and reported no entries.
+	ProxyLogSuffix        = ".log"
+	ProxyLogArchiveSuffix = ".log.gz"
 )
 
 type Server struct {
@@ -139,9 +146,10 @@ func NewServer(cfg *Config) (*Server, error) {
 
 	// Create rotating file writer for goproxy's internal logs (warnings, errors)
 	proxyLogger, err := NewRotatingFileWriter(RotatingFileWriterConfig{
-		Dir:    cfg.InternalLogDir,
-		Prefix: ProxyLogPrefix,
-		Suffix: ProxyLogSuffix,
+		Dir:           cfg.InternalLogDir,
+		Prefix:        ProxyLogPrefix,
+		Suffix:        ProxyLogSuffix,
+		ArchiveSuffix: ProxyLogArchiveSuffix,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create proxy logger: %w", err)
@@ -221,9 +229,14 @@ func NewServer(cfg *Config) (*Server, error) {
 	// with any other default with no queue to ask: the request was allowed
 	// through unprompted while its log entry recorded FilterAction="ask",
 	// so the audit trail asserted a user had approved a request nobody saw.
+	// IsEnabled() is part of the condition because it is part of filterEngine's:
+	// a config with an ask rule but no default_action does no filtering at all,
+	// so an ask server built for it is a socket and an accept goroutine nothing
+	// can reach - and a failure creating it would abort a launch that was never
+	// going to ask anything.
 	var askServer *AskServer
 	var askQueue *AskQueue
-	if cfg.Filter != nil && cfg.Filter.usesAskAction() {
+	if cfg.Filter.IsEnabled() && cfg.Filter.usesAskAction() {
 		askServer, err = NewAskServer(cfg.SandboxBase)
 		if err != nil {
 			_ = proxyLogger.Close()
@@ -389,6 +402,21 @@ func (s *Server) applyFilterDecision(req *http.Request, entry *RequestLog, reqBo
 	return nil
 }
 
+// finalizeEntry detaches the request-log entry from the goproxy context after a
+// request hook has already written it.
+//
+// goproxy's handleHttp calls filterResponse unconditionally, including for the
+// response a request hook short-circuited with (http.go), so the OnResponse
+// hook below runs for a blocked request too. Without this the entry is written
+// a second time and counted twice by RequestCount, while the CONNECT path -
+// which never reaches the response hook - counts once, leaving the two paths
+// disagreeing about how many requests the session made.
+func finalizeEntry(ctx *goproxy.ProxyCtx) {
+	if ctx != nil {
+		ctx.UserData = nil
+	}
+}
+
 func (s *Server) setupLogging() {
 	// Set up request logging and filtering
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
@@ -409,6 +437,7 @@ func (s *Server) setupLogging() {
 				s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 				_ = s.reqLogger.Log(entry)
 			}
+			finalizeEntry(ctx)
 			return nil, resp
 		}
 
@@ -437,6 +466,7 @@ func (s *Server) setupLogging() {
 					s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 					_ = s.reqLogger.Log(entry)
 				}
+				finalizeEntry(ctx)
 				return nil, resp
 			}
 		}
@@ -458,6 +488,7 @@ func (s *Server) setupLogging() {
 						s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 						_ = s.reqLogger.Log(entry)
 					}
+					finalizeEntry(ctx)
 					return nil, resp
 				}
 				scanBody = freshBody
@@ -495,6 +526,7 @@ func (s *Server) setupLogging() {
 						s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 						_ = s.reqLogger.Log(entry)
 					}
+					finalizeEntry(ctx)
 					return nil, resp
 
 				case RedactionActionRedact:
@@ -524,6 +556,7 @@ func (s *Server) setupLogging() {
 							s.reqLogger.LogResponse(entry, resp, entry.Timestamp)
 							_ = s.reqLogger.Log(entry)
 						}
+						finalizeEntry(ctx)
 						return nil, resp
 					}
 					req.URL = parsedURL
@@ -724,8 +757,11 @@ func (s *Server) handleAskMode(req *http.Request, entry *RequestLog, reqBody []b
 		ID:     fmt.Sprintf("%d", id),
 		Method: req.Method,
 		URL:    req.URL.String(),
-		Host:   req.Host,
-		Path:   req.URL.Path,
+		// The authority the request is actually sent to, not the Host header
+		// the sandbox wrote: the prompt must name the destination the user is
+		// being asked to approve. See RequestHost.
+		Host: RequestHost(req),
+		Path: req.URL.Path,
 	}
 
 	// Add selected headers

@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func runSetToolMode(t *testing.T, initial, tool, mode string) string {
@@ -147,5 +149,50 @@ func TestSetToolMode_ReplacesWithoutFollowing(t *testing.T) {
 	}
 	if !strings.Contains(string(got), `mount_mode = "overlay"`) {
 		t.Errorf("config = %q, want mount_mode = \"overlay\"", got)
+	}
+}
+
+// TestSetToolMode_RefusesFifo covers the other half of the symlink refusal.
+// O_NOFOLLOW sees only symlinks, so a FIFO at the same name blocked the open
+// until a writer appeared: the command hung with no output instead of reaching
+// the non-regular check and refusing. The sandbox chooses whether the name is a
+// FIFO, so the hang is reachable in exactly the case the symlink fix exists for.
+func TestSetToolMode_RefusesFifo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".devsandbox.toml")
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Skipf("cannot create a FIFO here: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- SetToolMode(path, "claude", "readonly") }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNotRegularFile) {
+			t.Errorf("error = %v, want ErrNotRegularFile", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetToolMode blocked on a FIFO instead of refusing it")
+	}
+}
+
+// TestSetToolMode_PreservesExistingMode pins that rewriting one setting is not
+// how a config the user deliberately kept private becomes world-readable. The
+// staged-file rename replaced an os.WriteFile that left an existing file's mode
+// alone.
+func TestSetToolMode_PreservesExistingMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".devsandbox.toml")
+	if err := os.WriteFile(path, []byte("[tools.claude]\nmount_mode = \"overlay\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetToolMode(path, "claude", "readonly"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %04o, want 0600 (rewriting widened the file)", got)
 	}
 }

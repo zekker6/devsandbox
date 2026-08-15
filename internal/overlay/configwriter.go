@@ -17,7 +17,8 @@ import (
 // a directory, a device. SetToolMode refuses to read or rewrite one.
 var ErrNotRegularFile = errors.New("not a regular file")
 
-// readRegularFile reads path, refusing to follow a symlink sitting there.
+// readRegularFile reads path, refusing to follow a symlink sitting there and
+// refusing to block on anything that is not a plain file.
 //
 // `overlay migrate --set-mode` runs on the host and rewrites a path inside the
 // project directory, which is bind-mounted read-write into the sandbox. A
@@ -26,8 +27,13 @@ var ErrNotRegularFile = errors.New("not a regular file")
 // file - and a later --set-mode would then read that file, rewrite it as TOML
 // and hand it back, skipping the confirmation prompt entirely when only one
 // config is affected. Same construct copyFile closes on the migration path.
+//
+// O_NONBLOCK is what makes the non-regular check below reachable. O_NOFOLLOW
+// covers symlinks only, and a FIFO at the same name blocks the open until a
+// writer appears - so the sandbox could create one and hang the command with no
+// output rather than get the refusal this function exists to give.
 func readRegularFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
 			return nil, fmt.Errorf("%q: %w", path, ErrNotRegularFile)
@@ -50,7 +56,16 @@ func readRegularFile(path string) ([]byte, error) {
 // directory, so the write lands on the name itself rather than through whatever
 // a symlink at that name points to, and a failure part-way leaves the original
 // intact rather than truncated.
+//
+// An existing file keeps the permissions it had: rewriting one setting must not
+// be how a config the user deliberately kept at 0600 becomes world-readable.
+// Only a file this call creates gets 0644.
 func writeRegularFile(path string, content []byte) (retErr error) {
+	perm := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
+		perm = fi.Mode().Perm()
+	}
+
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".devsandbox-config-*")
 	if err != nil {
 		return err
@@ -69,7 +84,7 @@ func writeRegularFile(path string, content []byte) (retErr error) {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
+	if err := os.Chmod(tmpName, perm); err != nil {
 		return err
 	}
 	return os.Rename(tmpName, path)

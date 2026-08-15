@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 
+	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/kittyproxy"
 	"devsandbox/internal/notice"
 )
@@ -31,6 +32,7 @@ const (
 type Kitty struct {
 	mode              string
 	extraCapabilities []kittyproxy.Capability
+	projectDir        string
 
 	logger ErrorLogger
 	proxy  *kittyproxy.Proxy
@@ -67,9 +69,13 @@ type kittyConfig struct {
 // ConfigType implements ToolWithConfigType.
 func (k *Kitty) ConfigType() reflect.Type { return reflect.TypeFor[kittyConfig]() }
 
-func (k *Kitty) Configure(_ GlobalConfig, toolCfg map[string]any) {
+func (k *Kitty) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	k.mode = kittyModeAuto
 	k.extraCapabilities = nil
+	// Carried into the launch patterns: the project tree is bind-mounted
+	// read-write, so a program the host resolves out of it is one the sandbox
+	// supplied. See cmdpattern.LaunchBounds.
+	k.projectDir = globalCfg.ProjectDir
 
 	var cfg kittyConfig
 	decodeConfig(k.Name(), toolCfg, &cfg)
@@ -127,7 +133,7 @@ func (k *Kitty) ShellInit(_ string) string { return "" }
 // aggregate returns capabilities + launch patterns collected from every
 // available tool implementing ToolWithKittyRequirements (and optionally
 // ToolWithKittyLaunchPatterns), de-duplicated.
-func (k *Kitty) aggregate(homeDir string) ([]kittyproxy.Capability, []kittyproxy.CommandPattern) {
+func (k *Kitty) aggregate(homeDir string, bounds cmdpattern.LaunchBounds) ([]kittyproxy.Capability, []kittyproxy.CommandPattern) {
 	capSet := make(map[kittyproxy.Capability]struct{})
 	for _, c := range k.extraCapabilities {
 		capSet[c] = struct{}{}
@@ -155,7 +161,7 @@ func (k *Kitty) aggregate(homeDir string) ([]kittyproxy.Capability, []kittyproxy
 		}
 		if pp, ok := t.(ToolWithKittyLaunchPatterns); ok {
 			declaredPatterns[t.Name()] = true
-			patterns = append(patterns, pp.KittyLaunchPatterns()...)
+			patterns = append(patterns, pp.KittyLaunchPatterns(bounds)...)
 		}
 	}
 
@@ -173,7 +179,7 @@ func (k *Kitty) aggregate(homeDir string) ([]kittyproxy.Capability, []kittyproxy
 }
 
 // Start implements ActiveTool.
-func (k *Kitty) Start(ctx context.Context, _, sandboxHome string) error {
+func (k *Kitty) Start(ctx context.Context, homeDir, sandboxHome string) error {
 	if k.mode == kittyModeDisabled {
 		return nil
 	}
@@ -182,7 +188,12 @@ func (k *Kitty) Start(ctx context.Context, _, sandboxHome string) error {
 		return nil
 	}
 
-	caps, patterns := k.aggregate("")
+	// Availability is still probed with the empty home (every tool that
+	// declares kitty patterns is host-resolved, not home-relative), but the
+	// bounds have to be the real ones: a launch pattern bounds the sentinel path
+	// against the shared temp directory, and an empty value there denies every
+	// launch.
+	caps, patterns := k.aggregate("", launchBoundsFor(homeDir, sandboxHome, k.projectDir))
 	if len(caps) == 0 {
 		switch k.mode {
 		case kittyModeAuto:

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -421,5 +422,83 @@ func TestServerCONNECT_NoMITM_NoFilter(t *testing.T) {
 	}
 	if entries[0].FilterAction != "" {
 		t.Errorf("filter_action = %q, want it unset when no filter is configured", entries[0].FilterAction)
+	}
+}
+
+// TestServerHTTP_BlockedRequestIsLoggedOnce covers the plain-HTTP half of
+// applyFilterDecision, which had no end-to-end test at all, and pins the
+// double-count it hid: goproxy calls filterResponse even for the response a
+// request hook short-circuited with, so the OnResponse hook ran for a blocked
+// request too and wrote its entry a second time. The CONNECT path logs once, so
+// the two disagreed about how many requests the session made.
+func TestServerHTTP_BlockedRequestIsLoggedOnce(t *testing.T) {
+	cfg := NewConfig(shortTempDir(t), 0)
+	cfg.MITM = false
+	cfg.Filter = &FilterConfig{
+		DefaultAction: FilterActionAllow,
+		Rules: []FilterRule{
+			{Pattern: "blocked.example.com", Type: PatternTypeExact, Scope: FilterScopeHost, Action: FilterActionBlock},
+		},
+	}
+
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	proxyURL, err := url.Parse("http://" + srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   10 * time.Second,
+	}
+	resp, err := client.Get("http://blocked.example.com/secret")
+	if err != nil {
+		t.Fatalf("request through proxy failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	if got := srv.RequestCount(); got != 1 {
+		t.Errorf("RequestCount() = %d, want 1", got)
+	}
+	entries := readRequestLog(t, srv)
+	if len(entries) != 1 {
+		t.Fatalf("got %d log entries, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].FilterAction != string(FilterActionBlock) {
+		t.Errorf("filter_action = %q, want %q", entries[0].FilterAction, FilterActionBlock)
+	}
+}
+
+// TestNewServer_AskServerNotBuiltWhenFilteringIsOff pins the other half of the
+// ask wiring. usesAskAction is about the rules; whether any of them is consulted
+// is IsEnabled's question. A config with an ask rule and no default_action does
+// no filtering at all, so an ask server built for it is a socket and an accept
+// goroutine nothing can reach - and a failure creating it would abort a launch
+// that was never going to ask anything.
+func TestNewServer_AskServerNotBuiltWhenFilteringIsOff(t *testing.T) {
+	cfg := NewConfig(shortTempDir(t), 0)
+	cfg.MITM = false
+	cfg.Filter = &FilterConfig{
+		Rules: []FilterRule{{Pattern: "*.example.com", Action: FilterActionAsk}},
+	}
+
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	if srv.AskServer() != nil {
+		t.Error("ask server built for a filter config that does no filtering")
 	}
 }

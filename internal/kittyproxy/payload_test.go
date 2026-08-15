@@ -31,18 +31,23 @@ func TestFilter_LaunchPayload_RejectsUnvettedOptions(t *testing.T) {
 		"copy_cmdline":            {"copy_cmdline": true},
 		"allow_remote_control":    {"allow_remote_control": true},
 		"remote_control_password": {"remote_control_password": []string{"pw"}},
-		"hold_after_ssh":          {"hold_after_ssh": true},
-		"os_panel":                {"os_panel": []string{"lines=2"}},
-		"source_window":           {"source_window": "title:secrets"},
-		"next_to":                 {"next_to": "title:secrets"},
-		"add_to_session":          {"add_to_session": "."},
-		"foreign match":           {"match": "title:secrets"},
+		// kitty runs the user's shell in the window once the vetted command
+		// exits (cmdline_for_hold), so this is hold_after_ssh's general form.
+		"hold":           {"hold": true},
+		"hold_after_ssh": {"hold_after_ssh": true},
+		"os_panel":       {"os_panel": []string{"lines=2"}},
+		"source_window":  {"source_window": "title:secrets"},
+		"next_to":        {"next_to": "title:secrets"},
+		"add_to_session": {"add_to_session": "."},
+		"foreign match":  {"match": "title:secrets"},
 		// A `function` marker spec has kitty runpy.run_path the file, and both
 		// marker and logo resolve an absolute path verbatim - into the shared
 		// temp directory the sandbox writes at the host's own path.
 		"marker function": {"marker": "function /home/user/.cache/devsandbox/tmp/x.py"},
 		"marker text":     {"marker": "text 1 foo"},
 		"logo":            {"logo": "/home/user/.cache/devsandbox/tmp/l.png"},
+		// A color spec with no `=` is a path kitty opens and parses.
+		"color file": {"color": []string{"/home/user/.ssh/id_ed25519"}},
 	}
 	f := launchFilter(t)
 	for name, extra := range cases {
@@ -77,7 +82,6 @@ func TestFilter_LaunchPayload_AllowsInertOptions(t *testing.T) {
 		"cwd current":       {"cwd": "current"},
 		"cwd last_reported": {"cwd": "last_reported"},
 		"window title":      {"window_title": "revdiff"},
-		"hold":              {"hold": true},
 		"keep_focus":        {"keep_focus": true},
 		"colors":            {"color": []string{"background=white"}},
 		"logo_alpha":        {"logo_alpha": -1.0},
@@ -172,8 +176,16 @@ func TestFilter_Envelope_RejectsBypassFields(t *testing.T) {
 
 	cases := map[string]map[string]any{
 		"encrypted": {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed,
-			"encrypted": "Zm9v", "enc_proto": "1", "pubkey": "k", "iv": "i", "tag": "t"},
-		"password": {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed, "password": "hunter2"},
+			"encrypted": "Zm9v"},
+		// The fields that ride with an encrypted envelope are not declared, so
+		// they deny as unknown rather than decoding and being forwarded
+		// unread. Each is checked on its own: declaring any one of them would
+		// admit it while the check that matters looks only at `encrypted`.
+		"enc_proto": {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed, "enc_proto": "1"},
+		"pubkey":    {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed, "pubkey": "k"},
+		"iv":        {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed, "iv": "i"},
+		"tag":       {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed, "tag": "t"},
+		"password":  {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed, "password": "hunter2"},
 		"unknown field": {"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed,
 			"stream_id": "s"},
 	}

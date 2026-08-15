@@ -140,7 +140,10 @@ func (e *LogSkipEngine) ShouldSkip(entry *RequestLog) bool {
 	}
 	host := NormalizeHost(u.Host)
 	path := u.Path
-	full := entry.URL
+	// Canonicalized, not raw: compileScopedPattern canonicalizes a url-scoped
+	// pattern's authority, so matching the raw string here would put the two
+	// sides of the comparison on different spellings.
+	full := canonicalizeURL(u)
 	for _, r := range e.rules {
 		var target string
 		switch r.rule.GetScope() {

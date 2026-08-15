@@ -165,6 +165,9 @@ func TestAcquireSession_WaitsOutAnExclusiveHolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed exclusive lock: %v", err)
 	}
+	// The goroutine below is the normal path that closes this, but a t.Fatalf
+	// before it runs would leave the fd open while TempDir cleanup races it.
+	t.Cleanup(func() { _ = held.Close() })
 
 	released := make(chan struct{})
 	go func() {
@@ -304,6 +307,13 @@ func TestDesignateSession_NonBwrapKeepsPersistentOverlay(t *testing.T) {
 		t.Errorf("docker launch was routed to a session overlay: concurrent=%v id=%q",
 			cfg.IsConcurrent, cfg.SessionID)
 	}
+	// The point of the invariant: IsConcurrent and IsPrimary are not
+	// complements. This launch lost the designation and must say so, which is
+	// what stops cleanup gated on IsPrimary from running through the live
+	// session's upper and work dirs.
+	if handle.IsPrimary() {
+		t.Error("docker launch reported primary while another session held the designation")
+	}
 }
 
 func TestRemoveSandboxIfIdle_KeepsStateWhileAnotherHolderIsLive(t *testing.T) {
@@ -354,6 +364,56 @@ func TestRemoveSandboxIfIdle_RemovesWhenNoHolderRemains(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Errorf("sandbox root still present after removal: %v", err)
+	}
+}
+
+// TestRemoveSandboxIfIdle_LeavesNothingListable pins that the tree is renamed
+// out of the way rather than deleted in place.
+//
+// Holding the exclusive lock does not hold a launch off on its own: a removal
+// unlinks the lock files as ordinary entries and acquireSharedLock reopens the
+// path with O_CREATE on every retry, so the moment .lock is gone a waiting
+// launch creates a fresh inode, flocks it, conflicts with nothing and is
+// designated primary against a root still being deleted. Renaming first makes
+// the name vanish atomically. The staging directory must also not surface as a
+// sandbox while the delete runs.
+func TestRemoveSandboxIfIdle_LeavesNothingListable(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "sandbox")
+	if err := os.MkdirAll(filepath.Join(root, "home", "overlay"), 0o755); err != nil {
+		t.Fatalf("seed sandbox state: %v", err)
+	}
+
+	handle, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("AcquireSession failed: %v", err)
+	}
+	if err := handle.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+	if _, err := RemoveSandboxIfIdle(root); err != nil {
+		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
+	}
+
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("removal left %q behind in the sandbox base directory", e.Name())
+	}
+
+	// And a staging directory that outlives a killed removal is not a sandbox.
+	staged := filepath.Join(base, removalStagingPrefix+"sandbox-999")
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := ListSandboxes(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Errorf("ListSandboxes reported %d sandbox(es), want 0 - a removal in flight is not one", len(listed))
 	}
 }
 

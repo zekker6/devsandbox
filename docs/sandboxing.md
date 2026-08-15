@@ -395,9 +395,11 @@ devsandbox sandboxes prune --all --volumes
 devsandbox sandboxes prune --dry-run
 ```
 
-A sandbox with a live session is never pruned. `--orphaned` narrows the candidate set rather than
-selecting on its own, so it combines with `--keep`, `--older-than` and `--all`; bare `prune` already
-removes only orphaned sandboxes.
+A sandbox with a live session is left out of the candidate set. Liveness is sampled when the list is
+built, though, so a session started *during* the confirmation prompt is not seen - answer the prompt
+before launching into the same project, or use `--dry-run` first. `--orphaned` narrows the candidate
+set rather than selecting on its own, so it combines with `--keep`, `--older-than` and `--all`; bare
+`prune` already removes only orphaned sandboxes.
 
 ## Port Forwarding
 

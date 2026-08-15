@@ -72,10 +72,18 @@ func (f *Filter) hasCap(c Capability) bool {
 // back on the response verbatim. `no_response` is a fire-and-forget flag; we
 // pass it through too.
 //
-// The encryption fields are declared only so a denial can name them: kitty
+// `encrypted` and `password` are declared only so a denial can name them: kitty
 // executes the command inside `encrypted` and ignores the outer `cmd`, so an
 // encrypted envelope forwarded on the strength of its outer name would run
 // something this filter never saw.
+//
+// The encryption fields that ride *with* `encrypted` - enc_proto, pubkey, iv,
+// tag - are deliberately absent. Declaring a field in a StrictUnmarshal struct
+// is what admits it, and an approved envelope is forwarded byte for byte, so a
+// field nothing reads is an unchecked instruction to the host. kitty's own
+// client omits all four unless it is encrypting, and an encrypting client is
+// denied either way; the unknown-field denial names whichever one it met, which
+// is the fail-closed direction this file's version pin depends on.
 type command struct {
 	Cmd        string          `json:"cmd"`
 	Version    []int           `json:"version,omitempty"`
@@ -84,10 +92,6 @@ type command struct {
 	Payload    json.RawMessage `json:"payload,omitempty"`
 
 	Encrypted json.RawMessage `json:"encrypted,omitempty"`
-	EncProto  string          `json:"enc_proto,omitempty"`
-	PubKey    string          `json:"pubkey,omitempty"`
-	IV        string          `json:"iv,omitempty"`
-	Tag       string          `json:"tag,omitempty"`
 	Password  json.RawMessage `json:"password,omitempty"`
 }
 

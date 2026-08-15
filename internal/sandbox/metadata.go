@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"devsandbox/internal/fsutil"
@@ -170,6 +171,12 @@ func ListSandboxes(baseDir string) ([]*Metadata, error) {
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		// A sandbox RemoveSandboxIfIdle has renamed aside is being deleted, not
+		// used: reporting it would offer the user a sandbox that is about to
+		// stop existing, and sizing it would walk a tree shrinking underneath.
+		if strings.HasPrefix(entry.Name(), removalStagingPrefix) {
 			continue
 		}
 

@@ -7,7 +7,10 @@ import "devsandbox/internal/cmdpattern"
 // internal/sandbox/tools/revdiff.go) compiling against kittyproxy.
 // New code should import cmdpattern directly.
 
-type CommandPattern = cmdpattern.CommandPattern
+type (
+	CommandPattern = cmdpattern.CommandPattern
+	LaunchBounds   = cmdpattern.LaunchBounds
+)
 
 var (
 	MatchAny                  = cmdpattern.MatchAny

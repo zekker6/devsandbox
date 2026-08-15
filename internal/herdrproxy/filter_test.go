@@ -246,8 +246,31 @@ func TestDecideRelocatesLaunchScript(t *testing.T) {
 	if out.Params.PaneID != "pane7" || len(out.Params.Keys) != 1 || out.Params.Keys[0] != "Enter" {
 		t.Errorf("rewrite altered other params: %+v", out.Params)
 	}
-	if !strings.HasPrefix(out.Params.Text, "sh /") {
-		t.Errorf("rewritten text = %q, want it to name the relocated script", out.Params.Text)
+	if !strings.HasPrefix(out.Params.Text, hostShell+" /") {
+		t.Errorf("rewritten text = %q, want %q naming the relocated script", out.Params.Text, hostShell+" /…")
+	}
+}
+
+// TestDecideDeniesScriptLaunchWithoutRelocator covers the filter running with
+// no relocator, which is what a session gets when the relocation directory
+// would land somewhere the sandbox can write. The script must not run in place.
+func TestDecideDeniesScriptLaunchWithoutRelocator(t *testing.T) {
+	f := newFilterFixture(t)
+	f.panes.Add("pane7")
+
+	cfg := f.filter.cfg
+	cfg.Relocator = nil
+	noReloc := NewFilter(cfg)
+
+	line := `{"id":"cli:request","method":"pane.send_input","params":{"pane_id":"pane7","text":"sh ` +
+		f.scriptPath + `","keys":["Enter"]}}`
+
+	d := noReloc.Decide([]byte(line))
+	if d.Allow {
+		t.Error("Decide allowed a script launch with nowhere safe to relocate it")
+	}
+	if d.Rewritten != nil {
+		t.Error("Decide rewrote a denied request")
 	}
 }
 

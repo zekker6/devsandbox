@@ -104,3 +104,35 @@ func TestStrictUnmarshal_RejectsMalformedJSON(t *testing.T) {
 		t.Fatal("accepted truncated JSON")
 	}
 }
+
+// dec.More() reports false when the next byte is a stray closing delimiter, so
+// `{...}}` read as a clean parse here while json.loads and serde both reject the
+// whole line. The proxy being the more permissive of the two parsers is the
+// shape every bug this file guards against has had.
+func TestStrictUnmarshal_RejectsStrayClosingDelimiter(t *testing.T) {
+	for _, raw := range []string{`{"type":"overlay"}}`, `{"type":"overlay"}]`} {
+		var p testPayload
+		if err := StrictUnmarshal([]byte(raw), &p); err == nil {
+			t.Errorf("accepted %s, decoded to %+v", raw, p)
+		}
+	}
+}
+
+// A top-level null decodes into a struct pointer as a silent no-op, so the
+// caller would vet a zero value it believes came off the wire.
+func TestStrictUnmarshal_RejectsNull(t *testing.T) {
+	var p testPayload
+	if err := StrictUnmarshal([]byte(`null`), &p); err == nil {
+		t.Fatal("accepted a top-level null as an object payload")
+	}
+}
+
+// keysAreExact can only scan a struct's declared names. A non-struct target
+// made it a no-op, degrading StrictUnmarshal to DisallowUnknownFields - which
+// this package's doc comment explains is not enough.
+func TestStrictUnmarshal_RejectsNonStructTarget(t *testing.T) {
+	m := map[string]any{}
+	if err := StrictUnmarshal([]byte(`{"args":["x"],"ARGS":["y"]}`), &m); err == nil {
+		t.Fatal("accepted a non-struct target, leaving the key scan disabled")
+	}
+}

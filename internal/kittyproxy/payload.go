@@ -37,6 +37,13 @@ type launchPayload struct {
 	// local shell, and os_panel/source_window/next_to/add_to_session all
 	// reposition the launch against host state the sandbox chose.
 	//
+	// hold is the general form of hold_after_ssh and belongs with it, not with
+	// the cosmetic options its name suggests: kitty's own spec says "the shell
+	// will be run after the launched command exits", and cmdline_for_hold
+	// (kitty/utils.py) rewrites the argv to `kitten run-shell` to do it. So a
+	// launch whose argv passed the allowlist ends at an interactive host shell
+	// in a window the sandbox then owns, with the allowlist deciding nothing.
+	//
 	// marker and logo are here for the same reason as watcher, not for the
 	// cosmetic reason their names suggest: a `function <path>` marker spec has
 	// kitty runpy.run_path the file (kitty/marks.py), and both resolve their
@@ -51,6 +58,7 @@ type launchPayload struct {
 	StdinSource           string          `json:"stdin_source"`
 	AllowRemoteControl    bool            `json:"allow_remote_control"`
 	RemoteControlPassword []string        `json:"remote_control_password"`
+	Hold                  bool            `json:"hold"`
 	HoldAfterSSH          bool            `json:"hold_after_ssh"`
 	OSPanel               []string        `json:"os_panel"`
 	SourceWindow          string          `json:"source_window"`
@@ -59,9 +67,14 @@ type launchPayload struct {
 	Marker                string          `json:"marker"`
 	Logo                  string          `json:"logo"`
 
-	// Anchored to host-derived values rather than trusted as sent.
-	Cwd   string `json:"cwd"`
-	Match string `json:"match"`
+	// Anchored to host-derived values rather than trusted as sent. color is
+	// here rather than below it because kitty reads an element with no `=` as a
+	// path to a .conf file it opens (kitty/colors.py), which is the same host
+	// file read logo is refused for; only the inline `name=value` form is a
+	// colour.
+	Cwd   string   `json:"cwd"`
+	Match string   `json:"match"`
+	Color []string `json:"color"`
 
 	// Placement, titles and decoration: they cannot influence what runs or
 	// what the launched process can read.
@@ -74,11 +87,9 @@ type launchPayload struct {
 	KeepFocus               bool     `json:"keep_focus"`
 	CopyColors              bool     `json:"copy_colors"`
 	Location                string   `json:"location"`
-	Hold                    bool     `json:"hold"`
 	Var                     []string `json:"var"`
 	LogoPosition            string   `json:"logo_position"`
 	LogoAlpha               float64  `json:"logo_alpha"`
-	Color                   []string `json:"color"`
 	Spacing                 []string `json:"spacing"`
 	Bias                    float64  `json:"bias"`
 	StdinAddFormatting      bool     `json:"stdin_add_formatting"`
@@ -119,6 +130,8 @@ func (p *launchPayload) vet(hostWindowID string) string {
 		return "launch allow_remote_control is not permitted (would bypass this proxy)"
 	case len(p.RemoteControlPassword) > 0:
 		return "launch remote_control_password is not permitted (would bypass this proxy)"
+	case p.Hold:
+		return "launch hold is not permitted (runs a host shell once the vetted command exits)"
 	case p.HoldAfterSSH:
 		return "launch hold_after_ssh is not permitted (runs a host shell)"
 	case len(p.OSPanel) > 0:
@@ -136,6 +149,11 @@ func (p *launchPayload) vet(hostWindowID string) string {
 	}
 	if _, ok := hostResolvedCwds[p.Cwd]; !ok {
 		return fmt.Sprintf("launch cwd=%q is not permitted (only kitty's host-resolved keywords are)", p.Cwd)
+	}
+	for _, spec := range p.Color {
+		if !strings.Contains(spec, "=") {
+			return fmt.Sprintf("launch color=%q is not permitted (a spec with no %q reads a host file the sandbox names)", spec, "=")
+		}
 	}
 	if p.Match != "" {
 		if hostWindowID == "" || p.Match != "window_id:"+hostWindowID {

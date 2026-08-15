@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -121,8 +123,10 @@ func (w *RotatingFileWriter) openOrRotate() error {
 	lastFile, lastSize := w.findLastFile()
 
 	if lastFile != "" && lastSize < w.cfg.MaxSize {
-		// Reuse existing uncompressed file
-		file, err := os.OpenFile(lastFile, os.O_WRONLY|os.O_APPEND, 0o600)
+		// Reuse existing uncompressed file. O_RDWR rather than O_WRONLY so the
+		// descriptor rotation hands to the compressor can be read from; see
+		// dupClaimedFile.
+		file, err := os.OpenFile(lastFile, os.O_RDWR|os.O_APPEND, 0o600)
 		if err != nil {
 			// Fall back to creating new file
 			return w.rotate()
@@ -157,6 +161,34 @@ func claimFile(f *os.File) bool {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil
 }
 
+// dupClaimedFile duplicates f's descriptor so the claim on it survives closing
+// f. flock lives on the open file description, and a duplicate shares that
+// description, so the lock is released only once every descriptor referring to
+// it is closed.
+//
+// This is what lets rotation hand its claim to the compressor. Reopening the
+// path there instead leaves the file unclaimed between the close and the
+// compressor's own flock, and a concurrent session pruning the shared directory
+// in that window sees a free file and unlinks the entries about to be archived.
+// A nil return means the duplicate could not be taken; the caller falls back to
+// reopening, which is the narrower window rather than no compression at all.
+//
+// F_DUPFD_CLOEXEC rather than dup(2): os.OpenFile marks every descriptor
+// close-on-exec, and this is the one place that flag would otherwise be dropped.
+// These files are opened O_RDWR, so a plain duplicate rides into every process
+// devsandbox forks while a compression is in flight - the sandbox workload among
+// them - handing it a writable descriptor on a host log outside its mount
+// namespace and a share of the flock that outlives the compressor closing its
+// own copy. Setting the flag after the fact would leave that same window open
+// between the two calls.
+func dupClaimedFile(f *os.File) *os.File {
+	fd, err := unix.FcntlInt(f.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil
+	}
+	return os.NewFile(uintptr(fd), f.Name())
+}
+
 // claimedByAnotherWriter reports whether a live writer holds path. Used to keep
 // pruning off a file that is still being appended to; an unopenable path is
 // treated as free, since it is not a file anyone is writing.
@@ -177,19 +209,28 @@ func claimedByAnotherWriter(path string) bool {
 func (w *RotatingFileWriter) rotate() error {
 	oldPath := w.currentPath
 
+	archiving := oldPath != "" && w.cfg.ArchiveSuffix != ""
+
 	// Close current file
 	if w.bufWriter != nil {
 		_ = w.bufWriter.Flush()
 		w.bufWriter = nil
 	}
+	var claimed *os.File
 	if w.file != nil {
+		// Taken before the close, so the claim on the file being archived is
+		// never released: the compressor inherits it rather than racing to
+		// retake it.
+		if archiving {
+			claimed = dupClaimedFile(w.file)
+		}
 		_ = w.file.Close()
 		w.file = nil
 	}
 
 	// Compress the old file if configured and it exists
-	if oldPath != "" && w.cfg.ArchiveSuffix != "" {
-		w.startCompression(oldPath)
+	if archiving {
+		w.startCompression(oldPath, claimed)
 	}
 
 	index := w.findNextIndex()
@@ -212,7 +253,7 @@ func (w *RotatingFileWriter) rotate() error {
 			continue
 		}
 
-		f, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 		if err == nil {
 			// O_EXCL proves this writer created the file, not that it still
 			// holds it: between the create and the flock another session's
@@ -268,7 +309,13 @@ func (w *RotatingFileWriter) archivePath(srcPath string) string {
 // startCompression compresses srcPath in the background, claiming both the
 // source and the archive path for the duration so rotation cannot reopen a file
 // the compressor is about to read, truncate or unlink.
-func (w *RotatingFileWriter) startCompression(srcPath string) {
+//
+// src, when non-nil, is the descriptor rotation duplicated off the active file
+// before closing it, and it already carries this writer's advisory claim on
+// srcPath. That hand-off is what keeps the file continuously claimed: the map
+// above binds this writer only, so a concurrent session's pruning is held off by
+// the flock and nothing else.
+func (w *RotatingFileWriter) startCompression(srcPath string, src *os.File) {
 	archivePath := w.archivePath(srcPath)
 
 	w.compressMu.Lock()
@@ -289,7 +336,7 @@ func (w *RotatingFileWriter) startCompression(srcPath string) {
 			w.compressWG.Done()
 		}()
 
-		w.compressFile(srcPath)
+		w.compressFile(srcPath, src)
 	}()
 }
 
@@ -301,21 +348,63 @@ func (w *RotatingFileWriter) compressionOwns(path string) bool {
 	return ok
 }
 
-// compressFile compresses a file with gzip and removes the original
-func (w *RotatingFileWriter) compressFile(srcPath string) {
+// compressFile compresses a file with gzip and removes the original.
+//
+// src, when non-nil, is the descriptor rotation handed over with its claim
+// already held; otherwise the path is reopened and claimed here.
+//
+// Both paths are claimed with the same advisory lock the active file uses, for
+// the whole copy. compressing/compressionOwns bind this writer only, and
+// concurrent sessions for one project share the log directory: the other
+// process prunes by name and consults claimedByAnotherWriter, so without the
+// locks it unlinks a half-written archive - leaving this copy writing to an
+// inode nothing can reach and those entries gone - or unlinks the source while
+// a writer that took it over is still appending to it. The archive is covered
+// by the source's claim as well as its own: pruning runs oldest name first and
+// stops at the first held file, and the source sorts ahead of the archive it
+// compresses to.
+func (w *RotatingFileWriter) compressFile(srcPath string, src *os.File) {
 	archivePath := w.archivePath(srcPath)
 
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return
+	if src == nil {
+		opened, err := os.Open(srcPath)
+		if err != nil {
+			return
+		}
+		src = opened
+
+		// A source another writer holds is no longer this writer's to archive:
+		// it owns those bytes now and will compress them when it rotates.
+		// Removing it here would unlink a file it is still appending to.
+		if !claimFile(src) {
+			_ = src.Close()
+			return
+		}
 	}
 	defer func() { _ = src.Close() }()
 
-	dst, err := os.OpenFile(archivePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// The handed-over descriptor is positioned wherever the last write left it,
+	// and a reopened one is only at the start by luck of not having been written
+	// through. Either way the archive must hold the whole file.
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+
+	// Opened without O_TRUNC so the claim is decided before anything is
+	// destroyed: losing it means another process is writing this archive, and
+	// truncating first would have already taken its contents.
+	dst, err := os.OpenFile(archivePath, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
 	defer func() { _ = dst.Close() }()
+
+	if !claimFile(dst) {
+		return
+	}
+	if err := dst.Truncate(0); err != nil {
+		return
+	}
 
 	gz := gzip.NewWriter(dst)
 	defer func() { _ = gz.Close() }()

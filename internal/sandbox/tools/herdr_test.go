@@ -2,6 +2,7 @@ package tools
 
 import (
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -156,10 +157,11 @@ func TestHerdrHostSocket(t *testing.T) {
 func TestHerdrScriptsPathIsOutsideSandboxReach(t *testing.T) {
 	const home = "/home/u"
 	const sandboxHome = "/home/u/.local/share/devsandbox/proj/home"
+	const projectDir = "/home/u/src/proj"
 
 	got := herdrScriptsPath(home, sandboxHome)
 
-	for _, forbidden := range sandboxVisiblePaths(home, sandboxHome) {
+	for _, forbidden := range sandboxVisiblePaths(home, sandboxHome, projectDir) {
 		if got == forbidden || strings.HasPrefix(got, forbidden+"/") {
 			t.Errorf("scripts path %q lies inside sandbox-visible path %q", got, forbidden)
 		}
@@ -167,6 +169,90 @@ func TestHerdrScriptsPathIsOutsideSandboxReach(t *testing.T) {
 	if !strings.HasPrefix(got, filepath.Join(home, herdrScriptsRelPath)) {
 		t.Errorf("scripts path %q is not under the expected root", got)
 	}
+}
+
+// TestHerdr_RelocatorRefusesProjectAncestorOfScriptsDir covers a project
+// directory that contains the relocation root. The project tree is bind-mounted
+// read-write at the path the host knows it by, so a script relocated there
+// would stay swappable after validation; the session must run without a
+// relocator - which denies every script launch - rather than relocate into it.
+func TestHerdr_RelocatorRefusesProjectAncestorOfScriptsDir(t *testing.T) {
+	home := t.TempDir()
+	sandboxHome := filepath.Join(home, ".local", "share", "devsandbox", "proj", "home")
+	scriptsDir := herdrScriptsPath(home, sandboxHome)
+
+	for _, projectDir := range []string{
+		filepath.Join(home, ".cache"),
+		filepath.Join(home, ".cache", "devsandbox"),
+		scriptsDir,
+	} {
+		t.Run(projectDir, func(t *testing.T) {
+			h := &Herdr{projectDir: projectDir}
+
+			relocator, err := h.relocatorFor(home, sandboxHome)
+			if err != nil {
+				t.Fatalf("relocatorFor returned error %v, want a nil relocator and no error", err)
+			}
+			if relocator != nil {
+				_ = relocator.Cleanup()
+				t.Fatal("relocatorFor built a relocator inside the read-write project bind")
+			}
+			if _, err := os.Stat(scriptsDir); err == nil {
+				t.Error("the refused relocation directory was created anyway")
+			}
+		})
+	}
+}
+
+// TestHerdr_RelocatorRefusesProjectSymlinkedOntoScriptsDir is the same refusal
+// reached by a different spelling. h.projectDir is os.Getwd()'s answer, which
+// is $PWD verbatim when it names the same directory - so a project entered
+// through a symlink is known to devsandbox by the link's name while bwrap binds
+// the target read-write. Comparing only the literal spellings finds no overlap
+// and relocates into the project bind.
+func TestHerdr_RelocatorRefusesProjectSymlinkedOntoScriptsDir(t *testing.T) {
+	home := t.TempDir()
+	sandboxHome := filepath.Join(home, ".local", "share", "devsandbox", "proj", "home")
+	scriptsDir := herdrScriptsPath(home, sandboxHome)
+
+	cache := filepath.Join(home, ".cache")
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	projectDir := filepath.Join(home, "proj-link")
+	if err := os.Symlink(cache, projectDir); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	h := &Herdr{projectDir: projectDir}
+
+	relocator, err := h.relocatorFor(home, sandboxHome)
+	if err != nil {
+		t.Fatalf("relocatorFor returned error %v, want a nil relocator and no error", err)
+	}
+	if relocator != nil {
+		_ = relocator.Cleanup()
+		t.Fatal("relocatorFor built a relocator inside the read-write project bind, reached through its symlink spelling")
+	}
+	if _, err := os.Stat(scriptsDir); err == nil {
+		t.Error("the refused relocation directory was created anyway")
+	}
+}
+
+func TestHerdr_RelocatorAcceptsProjectOutsideScriptsDir(t *testing.T) {
+	home := t.TempDir()
+	sandboxHome := filepath.Join(home, ".local", "share", "devsandbox", "proj", "home")
+
+	h := &Herdr{projectDir: filepath.Join(home, "src", "proj")}
+
+	relocator, err := h.relocatorFor(home, sandboxHome)
+	if err != nil {
+		t.Fatalf("relocatorFor returned error: %v", err)
+	}
+	if relocator == nil {
+		t.Fatal("relocatorFor refused a project directory that contains no relocated script")
+	}
+	_ = relocator.Cleanup()
 }
 
 func TestHerdrScriptsPathIsPerSession(t *testing.T) {
@@ -611,7 +697,7 @@ func TestHerdr_AgentReportingNeedsBothHostAnchors(t *testing.T) {
 				t.Errorf("reason = %q, want it to name %q", why, tt.wantWhy)
 			}
 
-			caps, _ := h.capabilities("")
+			caps, _ := h.capabilities("", testBounds())
 			has := slices.Contains(caps, herdrproxy.CapAgentReporting)
 			if has != tt.want {
 				t.Errorf("capabilities() = %v, want CapAgentReporting present=%v", caps, tt.want)
@@ -797,7 +883,7 @@ func TestHerdr_StartEnforceWithoutAgentStillStarts(t *testing.T) {
 	if h.proxy == nil {
 		t.Fatal("enforce mode did not start the proxy")
 	}
-	caps, _ := h.capabilities("")
+	caps, _ := h.capabilities("", testBounds())
 	if len(caps) != 0 {
 		t.Errorf("capabilities = %v, want none without host anchors", caps)
 	}

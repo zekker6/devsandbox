@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"syscall"
 )
 
@@ -26,9 +25,22 @@ type layerEntry struct {
 // layerMerge accumulates entries across uppers in walk order, last-write-wins,
 // and reproduces the two overlayfs constructs that hide *lower* layers rather
 // than replacing a single path: a whiteout, and an opaque directory.
-type layerMerge struct{ byRel map[string]layerEntry }
+type layerMerge struct {
+	byRel map[string]layerEntry
+	// children indexes each recorded path by its parent, so pruning a subtree
+	// costs the size of that subtree instead of a scan of every entry recorded
+	// so far. Scanning was O(n) per non-directory - which is most of an upper -
+	// and a cache upper reaches six figures of entries, where the quadratic
+	// version spent minutes before the dry run printed anything.
+	children map[string]map[string]struct{}
+}
 
-func newLayerMerge() *layerMerge { return &layerMerge{byRel: map[string]layerEntry{}} }
+func newLayerMerge() *layerMerge {
+	return &layerMerge{
+		byRel:    map[string]layerEntry{},
+		children: map[string]map[string]struct{}{},
+	}
+}
 
 // add records e as the winner for its path. When e hides everything the lower
 // layers hold beneath that path, every descendant recorded so far is dropped
@@ -54,14 +66,49 @@ func newLayerMerge() *layerMerge { return &layerMerge{byRel: map[string]layerEnt
 // and a non-directory has no children to lose.
 func (m *layerMerge) add(e layerEntry) {
 	if e.isWhiteout || e.isOpaque || !e.isDir {
-		prefix := e.rel + string(filepath.Separator)
-		for rel := range m.byRel {
-			if strings.HasPrefix(rel, prefix) {
-				delete(m.byRel, rel)
-			}
-		}
+		m.prune(e.rel)
 	}
+	m.link(e.rel)
 	m.byRel[e.rel] = e
+}
+
+// link records rel under each of its ancestors so prune can walk down to it.
+//
+// Every ancestor is linked, not just the immediate parent, because an entry can
+// be recorded without its parent ever being: a directory whose Lstat returns
+// EPERM is skipped while WalkDir still descends into it. Linking only the parent
+// would leave such a subtree unreachable, and the whiteout above it would fail
+// to hide it. The walk stops at the first link already present, which was
+// created together with every link above it, so this is O(1) after the first
+// entry in a directory.
+func (m *layerMerge) link(rel string) {
+	for child := rel; ; {
+		parent := filepath.Dir(child)
+		kids := m.children[parent]
+		if kids == nil {
+			kids = map[string]struct{}{}
+			m.children[parent] = kids
+		}
+		if _, linked := kids[child]; linked {
+			return
+		}
+		kids[child] = struct{}{}
+		if parent == child || parent == "." || parent == string(filepath.Separator) {
+			return
+		}
+		child = parent
+	}
+}
+
+// prune drops everything recorded beneath rel, depth first. rel itself stays:
+// the caller is about to overwrite it. An ancestor that was only ever linked
+// carries no byRel entry, and deleting a key that is not there is a no-op.
+func (m *layerMerge) prune(rel string) {
+	for child := range m.children[rel] {
+		m.prune(child)
+		delete(m.byRel, child)
+	}
+	delete(m.children, rel)
 }
 
 // rels returns the recorded paths in lexicographic order. Every path is a
@@ -116,6 +163,15 @@ func BuildPlan(sources []UpperSource, hostPath string) (Plan, error) {
 			}
 			isWhiteout := fi.Mode()&os.ModeCharDevice != 0 && isZeroDev(fi)
 			if !isWhiteout && !isMigratable(fi) {
+				// Skipping the entry is not the same as ignoring it. A FIFO or
+				// socket is still a non-directory in a higher upper, so it
+				// masks whatever the lower layers hold at that path — the
+				// `rm -rf d && mkfifo d` case, which otherwise migrated the
+				// earlier upper's `d` and every `d/*` back onto the host, i.e.
+				// exactly the files the sandbox deleted. Nothing is recorded in
+				// its place, because the applier has no form to promote it to.
+				merged.prune(rel)
+				delete(merged.byRel, rel)
 				return nil
 			}
 			merged.add(layerEntry{

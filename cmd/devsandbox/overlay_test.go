@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"devsandbox/internal/sandbox"
 )
 
 func TestOverlayMigrate_RequiresScopeFlag(t *testing.T) {
@@ -78,6 +83,26 @@ func TestOverlayMigrate_AllSandboxes_EmptyReportsNone(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "No sandboxes to migrate") {
 		t.Errorf("want 'No sandboxes to migrate', got:\n%s", buf.String())
+	}
+}
+
+func TestResolveSandboxes_AllSkipsRemovalStaging(t *testing.T) {
+	home := t.TempDir()
+	base := sandbox.SandboxBasePath(home)
+	for _, name := range []string{"alpha", ".removing-beta-1234", "gamma"} {
+		if err := os.MkdirAll(filepath.Join(base, name, "home"), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+
+	names, err := resolveSandboxes(home, &overlayMigrateFlags{allSandboxes: true})
+	if err != nil {
+		t.Fatalf("resolveSandboxes: %v", err)
+	}
+
+	want := []string{"alpha", "gamma"}
+	if !slices.Equal(names, want) {
+		t.Errorf("resolveSandboxes() = %v, want %v (a sandbox staged for removal must not be migrated)", names, want)
 	}
 }
 

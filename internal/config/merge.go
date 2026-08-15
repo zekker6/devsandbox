@@ -79,11 +79,7 @@ func mergeConfigs(base, overlay *Config) *Config {
 			overlay.Proxy.Redaction.DefaultAction,
 		)
 	}
-	// The scan limit only tightens: the project file is writable from inside the
-	// sandbox, so a larger value there would be the sandbox deciding how much
-	// host memory one request may hold.
-	if overlay.Proxy.Redaction.MaxScanBytes > 0 &&
-		overlay.Proxy.Redaction.MaxScanBytes < result.Proxy.Redaction.GetMaxScanBytes() {
+	if overlay.Proxy.Redaction.MaxScanBytes > 0 {
 		result.Proxy.Redaction.MaxScanBytes = overlay.Proxy.Redaction.MaxScanBytes
 	}
 	// Rules are always additive (overlay prepends for higher priority)
@@ -259,6 +255,35 @@ func mergeAnyMap(base, overlay map[string]any) map[string]any {
 		result[k] = v
 	}
 	return result
+}
+
+// mergeProjectConfig merges the project-local `.devsandbox.toml` into base.
+//
+// It is the untrusted merge: that file lives in the project directory, which is
+// bind-mounted read-write, so the sandbox can rewrite it between runs. The
+// limits that bound host memory per request are therefore allowed to tighten
+// and not to loosen — and the clamp lives here rather than in mergeConfigs
+// because mergeConfigs also merges `[[include]]` files, which are host-owned
+// config the user wrote. Clamping those silently dropped a raise the user
+// asked for, which is the failure mode a limit must never have.
+func mergeProjectConfig(base, local *Config) *Config {
+	merged := mergeConfigs(base, local)
+	if merged == base || base == nil {
+		return merged
+	}
+
+	// 0 is the loosest value in the direction that matters here — it records no
+	// bodies at all — so it is refused alongside a raise, or the project file
+	// could blank its own audit trail.
+	if merged.Proxy.MaxLogBodyBytes != nil &&
+		(*merged.Proxy.MaxLogBodyBytes <= 0 ||
+			*merged.Proxy.MaxLogBodyBytes > base.Proxy.GetMaxLogBodyBytes()) {
+		merged.Proxy.MaxLogBodyBytes = base.Proxy.MaxLogBodyBytes
+	}
+	if merged.Proxy.Redaction.GetMaxScanBytes() > base.Proxy.Redaction.GetMaxScanBytes() {
+		merged.Proxy.Redaction.MaxScanBytes = base.Proxy.Redaction.MaxScanBytes
+	}
+	return merged
 }
 
 // mergeStringMap merges two string maps, overlay wins for conflicts.

@@ -229,9 +229,23 @@ func (c *Config) DesignateSession() (*SessionHandle, error) {
 	return handle, nil
 }
 
+// removalStagingPrefix names the directory RemoveSandboxIfIdle renames a
+// sandbox to before deleting it. ListSandboxes skips the prefix so a removal in
+// flight - or one a kill left half-done - is not reported as a sandbox.
+const removalStagingPrefix = ".removing-"
+
 // RemoveSandboxIfIdle removes the sandbox state only while no session holds it,
-// and reports whether it removed anything. The exclusive lock is held across the
-// removal so a launch cannot take a hold on state that is halfway gone.
+// and reports whether it removed anything.
+//
+// The tree is renamed aside under the exclusive lock and only then deleted. The
+// lock alone does not hold a launch off, because a removal unlinks the lock
+// files as ordinary entries and acquireSharedLock reopens the path with O_CREATE
+// on every retry: the moment `.lock` is gone a waiting launch creates a fresh
+// inode, flocks that, conflicts with nothing, is designated primary by the same
+// mechanism, and proceeds against a root still being deleted. Renaming first
+// makes the name vanish atomically, so that launch finds no sandbox rather than
+// half of one - and the slow part, a chmod walk over a tree that can hold the Go
+// module and npm caches, then runs off the path nobody is racing.
 //
 // The caller must release its own handle first: its own shared lock is
 // indistinguishable from another session's here.
@@ -250,9 +264,18 @@ func RemoveSandboxIfIdle(sandboxRoot string) (bool, error) {
 		}
 		return false, err
 	}
-	defer func() { _ = lock.Close() }()
 
-	if err := RemoveSandbox(sandboxRoot); err != nil {
+	staged := filepath.Join(filepath.Dir(sandboxRoot),
+		fmt.Sprintf("%s%s-%d", removalStagingPrefix, filepath.Base(sandboxRoot), os.Getpid()))
+	renameErr := os.Rename(sandboxRoot, staged)
+	// Released before the removal: the name it guards no longer exists, and
+	// holding it across the walk only lengthens the window nothing is watching.
+	_ = lock.Close()
+	if renameErr != nil {
+		return false, fmt.Errorf("failed to stage sandbox root for removal: %w", renameErr)
+	}
+
+	if err := RemoveSandbox(staged); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -267,13 +290,6 @@ const (
 	sharedLockRetries    = 50
 	sharedLockRetryDelay = 40 * time.Millisecond
 )
-
-// AcquireSessionLock acquires a shared lock on the sandbox.
-// The caller must keep the returned file open for the session duration.
-// The lock is automatically released when the file is closed or process exits.
-func AcquireSessionLock(sandboxRoot string) (*os.File, error) {
-	return acquireSharedLock(sandboxRoot, LockFileName)
-}
 
 // acquireSharedLock takes one of the locks a session holds for its lifetime,
 // retrying briefly while another process holds it exclusively.

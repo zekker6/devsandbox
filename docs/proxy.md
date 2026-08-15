@@ -472,6 +472,8 @@ Logs are stored as gzip-compressed JSONL files:
 - Maximum 5 files kept per type
 - Older files are automatically pruned
 - The index in the file name keeps counting up for the rest of the day; a pruned name is not reused
+- Pruning stops at a file a live session is still writing to, or one whose compression has not finished, so the directory can legitimately hold more than the cap until those finish. A compression claims both the file it is reading and the archive it is writing, so a *concurrent session* pruning the same directory leaves both alone too
+- Concurrent sessions for the same project each write their own file rather than sharing one
 
 ### Log Entry Format
 
@@ -491,6 +493,8 @@ Each log entry contains:
     ]
   },
   "req_body": "eyJ1c2VyIjogImpvaG4ifQ==",
+  "req_headers_truncated": false,
+  "req_body_truncated": false,
   "status": 201,
   "resp_headers": {
     "Content-Type": [
@@ -498,12 +502,21 @@ Each log entry contains:
     ]
   },
   "resp_body": "eyJpZCI6IDEyM30=",
+  "resp_headers_truncated": false,
+  "resp_body_truncated": false,
   "duration_ns": 89000000,
   "error": ""
 }
 ```
 
-Note: Request/response bodies are base64-encoded.
+Note: Request/response bodies are base64-encoded. The four `*_truncated` flags say
+whether the recorded copy was cut by a bound - see
+[Body Capture Limit](#body-capture-limit) - so a short body and a clipped one stay
+distinguishable when parsing logs.
+
+In transparent mode (`mitm = false`) each HTTPS tunnel produces one entry with
+`"method": "CONNECT"`, the URL `https://<host>:<port>`, and the filter decision.
+It carries no headers or body, because a CONNECT has none.
 
 ### Body Capture Limit
 
@@ -723,12 +736,30 @@ host-scoped regex is tested against is already lowercase with no trailing dot, s
 in `\.$` matches nothing.
 
 The `url` scope canonicalizes the host half of the URL the same way and leaves the path exactly as
-sent, because a URL's path is case-sensitive and its authority is not. The `path` scope is matched
-verbatim.
+sent, because a URL's path is case-sensitive and its authority is not. Both sides are canonicalized:
+a `url` pattern's authority is lowercased and stripped of a trailing dot exactly as the request's is,
+so `https://API.Example.com/**` and `https://api.example.com/**` are the same rule. A port the scheme
+already implies is dropped from both, so `https://api.example.com/v1` matches a request whose URL the
+proxy builds as `https://api.example.com:443/v1` - which is every intercepted HTTPS request, since the
+URL is reconstructed from the CONNECT target. Write a non-default port explicitly when you mean one.
+
+A `url`-scoped `regex` is the exception: it is left exactly as written, because the path half of a URL
+is case-sensitive and compiling the whole pattern case-insensitively would widen it there. Spell the
+host in lower case with no trailing dot and no default port, or use `(?i)` on the host portion only.
+
+The `path` scope is matched verbatim.
 
 ### Ask Mode
 
-In ask mode, unmatched requests require user approval via a separate monitor terminal. This is particularly useful when running AI agents autonomously - you can approve or block each request the agent makes that reaches the proxy, giving you real-time control over that traffic. Like every other proxy feature, this is bounded by how strongly the backend routes traffic through the proxy - see [Backend-Specific Behavior](#backend-specific-behavior).
+In ask mode, requests require user approval via a separate monitor terminal. This is particularly useful when running AI agents autonomously - you can approve or block each request the agent makes that reaches the proxy, giving you real-time control over that traffic. Like every other proxy feature, this is bounded by how strongly the backend routes traffic through the proxy - see [Backend-Specific Behavior](#backend-specific-behavior).
+
+Ask mode is reached two ways: `default_action = "ask"`, which prompts for every request no rule
+matched, and `action = "ask"` on a single rule, which prompts only for what that rule matches. Either
+one needs a monitor. **A request nobody answers within `ask_timeout`, or that arrives with no monitor
+connected, is blocked** - so start `devsandbox proxy monitor` in a second terminal whenever any rule
+carries `action = "ask"`. The startup banner below only advertises the monitor for
+`default_action = "ask"`; a rule-level ask under an `allow` default prints
+`Filter: N rules, default action: allow` and still blocks its matches without one.
 
 **Step 1**: Start the sandbox with ask mode:
 
@@ -1082,7 +1113,7 @@ The intended use case is endpoints you'd otherwise see hundreds of times per ses
 
 ### How It Works
 
-Each rule has a pattern and an optional `scope` (default `host`) and `type` (default `glob`, regex auto-detected on metacharacters). Matching reuses the same engine as filter rules: `host` matches the request hostname (port stripped), `path` matches the URL path, `url` matches the full URL string. Rules are evaluated in order, first match wins. Skip is **absolute** - a matched entry is never logged, even if the request errored, was blocked by the security filter, or triggered a redaction rule.
+Each rule has a pattern and an optional `scope` (default `host`) and `type` (default `glob`, regex auto-detected on metacharacters). Matching reuses the same engine as filter rules, including its canonicalization - see [Host matching is case-insensitive](#host-matching-is-case-insensitive): `host` matches the request hostname (port stripped), `path` matches the URL path, `url` matches the full URL with its authority canonicalized and a default port dropped. Rules are evaluated in order, first match wins. Skip is **absolute** - a matched entry is never logged, even if the request errored, was blocked by the security filter, or triggered a redaction rule.
 
 ### Configuration
 

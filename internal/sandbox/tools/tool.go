@@ -307,7 +307,13 @@ type ToolWithKittyRequirements interface {
 type ToolWithKittyLaunchPatterns interface {
 	Tool
 
-	KittyLaunchPatterns() []kittyproxy.CommandPattern
+	// bounds carries the host-derived directories a pattern anchors to: the
+	// shared temp directory, taken from SharedTmpPath so a pattern bounding a
+	// path the host will write cannot drift from the bind mount that produces
+	// it, and the project directory, which is bind-mounted read-write and so
+	// cannot supply a program the host resolves. An empty shared directory must
+	// be treated as "deny", not "unbounded".
+	KittyLaunchPatterns(bounds cmdpattern.LaunchBounds) []kittyproxy.CommandPattern
 }
 
 // ToolWithHerdrRequirements is implemented by tools that need access to the
@@ -347,5 +353,6 @@ type ToolWithAgentSessionDir interface {
 type ToolWithHerdrLaunchScript interface {
 	Tool
 
-	HerdrLaunchScript() cmdpattern.ScriptPattern
+	// bounds carries the same meaning as in ToolWithKittyLaunchPatterns.
+	HerdrLaunchScript(bounds cmdpattern.LaunchBounds) cmdpattern.ScriptPattern
 }

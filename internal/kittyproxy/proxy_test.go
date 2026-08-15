@@ -2,8 +2,10 @@ package kittyproxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -112,20 +114,13 @@ func (l *recordingLogger) all() []string {
 	return out
 }
 
+// fmtMsg renders a log line exactly as the production logger does. It used to
+// be a "minimal sprintf substitute" that concatenated the arguments and applied
+// no verbs, which meant every log assertion tested the substitute rather than
+// the format string - and the `%q` quoting that stops sandbox-chosen argv from
+// forging whole `allow cmd=…` records could not be observed at all.
 func fmtMsg(format string, args []any) string {
-	// minimal sprintf substitute that just concatenates
-	out := format
-	for _, a := range args {
-		out += " " + jsonOrString(a)
-	}
-	return out
-}
-func jsonOrString(a any) string {
-	b, err := json.Marshal(a)
-	if err != nil {
-		return ""
-	}
-	return string(b)
+	return fmt.Sprintf(format, args...)
 }
 
 // roundTrip sends one DCS frame to the proxy and returns the response payload.
@@ -185,8 +180,15 @@ func TestProxy_AllowsAndForwards(t *testing.T) {
 	if !owned.Contains(42) {
 		t.Error("expected owned set to contain id 42 after launch")
 	}
-	if len(up.Received()) != 1 {
-		t.Errorf("upstream received %d frames", len(up.Received()))
+	received := up.Received()
+	if len(received) != 1 {
+		t.Fatalf("upstream received %d frames", len(received))
+	}
+	// Byte-identical, not merely present. The whole StrictUnmarshal argument
+	// rests on the premise that what was validated is what the host parses, so
+	// a re-marshal anywhere in forward would break it silently.
+	if !bytes.Equal(received[0], cmd) {
+		t.Errorf("forwarded bytes differ from the validated request:\n got %s\nwant %s", received[0], cmd)
 	}
 }
 

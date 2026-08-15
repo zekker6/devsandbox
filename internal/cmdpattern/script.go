@@ -1,7 +1,6 @@
 package cmdpattern
 
 import (
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -23,7 +22,8 @@ import (
 // That is the completion-sentinel form emitted by the revdiff launcher. The
 // leading command must satisfy Statement; the trailing clause must match
 // byte-for-byte apart from the sentinel path, which must be a canonical
-// absolute path of safe characters and identical in all three positions.
+// absolute path of safe characters, identical in all three positions, and
+// inside Bounds.SentinelRoot().
 //
 // Anything else — a second statement, a heredoc, command substitution, a
 // pipeline, an unexpected redirect — is rejected. The pattern does not try to
@@ -37,6 +37,14 @@ type ScriptPattern struct {
 	// Statement matches the leading command's argv.
 	Statement CommandPattern
 
+	// Bounds carries the host-derived directories this pattern anchors to: the
+	// one the completion sentinel must live under, and the roots the sandbox
+	// can write at a path the host resolves. An empty SharedTmp rejects every
+	// body - the trailing clause has the host write and rename a file, so a
+	// pattern that cannot bound where must deny rather than accept any absolute
+	// path. See sentinelAllowed and LaunchBounds.
+	Bounds LaunchBounds
+
 	// MaxBytes caps the body size. Zero means defaultScriptMaxBytes.
 	MaxBytes int
 }
@@ -49,6 +57,45 @@ const defaultScriptMaxBytes = 64 << 10 // 64 KiB — launcher scripts are one li
 var sentinelTailRe = regexp.MustCompile(
 	`^; rc=\$\?; printf "%s" "\$rc" > '([^']*)'\.tmp && mv -f '([^']*)'\.tmp '([^']*)'$`,
 )
+
+// noClobberPrologue is the line HardenBody inserts. `set -C` makes every shell
+// that can run this body open a `>` target with O_CREAT|O_EXCL, so a redirect
+// onto an existing path - a symlink included - fails instead of writing through
+// it.
+const noClobberPrologue = "set -C"
+
+// HardenBody returns the bytes to run for a body MatchesBody accepted.
+//
+// The accepted tail is not a `touch`: it redirects into '<sentinel>'.tmp and
+// renames that over '<sentinel>'. sentinelAllowed bounds the path the script
+// *names* to the shared temp directory, but that directory is bind-mounted
+// read-write at an identical path on both sides, so the sandbox can plant a
+// symlink at '<sentinel>'.tmp and have the host's own shell follow it - the
+// redirect truncates whatever it points at and writes the exit code there. No
+// lexical check on the path can prevent that, because the resolution happens in
+// the launcher's shell after validation.
+//
+// `set -C` is what closes it. Under noclobber both shells this body can run in
+// refuse the redirect rather than following the link: dash opens `>` targets
+// with O_CREAT|O_EXCL unconditionally, and bash refuses an existing regular
+// file outright and falls back to O_EXCL when the path does not stat - which is
+// the dangling-symlink case. The sentinel write then fails and the `&&` keeps
+// the rename from running; nothing outside the shared directory is touched.
+//
+// The rename itself needs no guard: rename(2) acts on the link, not its target.
+//
+// Callers must run this output rather than the validated bytes. It is only
+// meaningful for a body MatchesBody accepted - the prologue is inert on its
+// own, but the argument for it is the accepted tail.
+func (s ScriptPattern) HardenBody(body []byte) []byte {
+	text := string(body)
+	if strings.HasPrefix(text, "#!") {
+		if nl := strings.IndexByte(text, '\n'); nl >= 0 {
+			return []byte(text[:nl+1] + noClobberPrologue + "\n" + text[nl+1:])
+		}
+	}
+	return []byte(noClobberPrologue + "\n" + text)
+}
 
 // MatchesBody reports whether body is a script this pattern accepts.
 func (s ScriptPattern) MatchesBody(body []byte) bool {
@@ -103,7 +150,7 @@ func (s ScriptPattern) matchesStatement(line string) bool {
 	if m[2] != sentinel || m[3] != sentinel {
 		return false
 	}
-	if !sentinelPathRe.MatchString(sentinel) || filepath.Clean(sentinel) != sentinel {
+	if !sentinelAllowed(sentinel, s.Bounds.SentinelRoot()) {
 		return false
 	}
 
@@ -124,7 +171,7 @@ func (s ScriptPattern) matchesHead(head string) bool {
 	// The launcher emits `env` unquoted as the command word. Only an absolute
 	// path the host itself resolves is accepted, so neither a PATH-relative
 	// `env` nor a path the sandbox planted ending in `/env` can stand in.
-	if len(toks) > 0 && !toks[0].quoted && isEnvBin(toks[0].value) {
+	if len(toks) > 0 && !toks[0].quoted && isEnvBin(toks[0].value, s.Bounds) {
 		toks = toks[1:]
 	}
 
@@ -132,7 +179,7 @@ func (s ScriptPattern) matchesHead(head string) bool {
 	// child's environment identically — `env` parses its own arguments, and a
 	// bare leading token is a shell assignment prefix — so both are held to the
 	// same allowlist.
-	i, ok := consumeEnvAssignments(toks)
+	i, ok := consumeEnvAssignments(toks, s.Bounds)
 	if !ok {
 		return false
 	}

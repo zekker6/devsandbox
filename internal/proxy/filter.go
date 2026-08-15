@@ -71,26 +71,34 @@ func compileRule(rule FilterRule) (compiledRule, error) {
 	return compiledRule{rule: rule, matcher: matcher}, nil
 }
 
-// compileScopedPattern compiles a pattern for the given scope. Host-scoped
-// exact and glob patterns are canonicalized the same way NormalizeHost
-// canonicalizes the request host, so both sides of the comparison agree and a
-// rule written "BLOCKED.Example.com." still matches.
+// compileScopedPattern compiles a pattern for the given scope. Exact and glob
+// patterns are canonicalized on the same axis their match target is - the whole
+// pattern for host scope, the authority alone for url scope - so both sides of
+// the comparison agree and a rule written "BLOCKED.Example.com." or
+// "https://API.Example.com/**" still matches.
 //
-// A host-scoped regex cannot be rewritten that way - lowercasing a pattern would
-// corrupt its metacharacters - so it is compiled case-insensitively instead.
-// Leaving it verbatim is what a rule author would expect only if the match
-// target were verbatim too, and it is not: NormalizeHost lowercases every host
-// before matching, so `^API\.example\.com$` could never match again once
-// canonicalization landed, silently retiring an existing block rule on upgrade.
-// Case-insensitive is also what DNS means, and an author who genuinely wants
-// case sensitivity can still say so with an inner (?-i).
+// A regex cannot be rewritten that way - lowercasing a pattern would corrupt its
+// metacharacters. A host-scoped one is compiled case-insensitively instead:
+// leaving it verbatim is what a rule author would expect only if the match
+// target were verbatim too, and it is not, so `^API\.example\.com$` could never
+// match again once canonicalization landed, silently retiring an existing block
+// rule on upgrade. Case-insensitive is also what DNS means, and an author who
+// genuinely wants case sensitivity can still say so with an inner (?-i).
+//
+// A url-scoped regex is left verbatim, because the path half of a URL *is*
+// case-sensitive and folding the whole pattern would widen it there. Such a
+// pattern has to spell its host in lower case with no default port; that is
+// documented rather than rewritten.
 func compileScopedPattern(pattern string, t PatternType, scope FilterScope) (func(string) bool, error) {
-	if scope == FilterScopeHost {
-		if t == PatternTypeRegex {
+	switch {
+	case t == PatternTypeRegex:
+		if scope == FilterScopeHost {
 			pattern = "(?i)" + pattern
-		} else {
-			pattern = canonicalizeHost(pattern)
 		}
+	case scope == FilterScopeHost:
+		pattern = canonicalizeHost(pattern)
+	case scope == FilterScopeURL:
+		pattern = canonicalizeURLPattern(pattern)
 	}
 	return compilePattern(pattern, t)
 }
@@ -142,7 +150,7 @@ func (e *FilterEngine) Match(req *http.Request) FilterDecision {
 
 	// Check decision cache
 	if e.config.IsCacheEnabled() {
-		if decision := e.getCachedDecision(req.Host); decision != "" {
+		if decision := e.getCachedDecision(RequestHost(req)); decision != "" {
 			return FilterDecision{
 				Action:    decision,
 				IsDefault: false,
@@ -231,9 +239,6 @@ func (e *FilterEngine) defaultDecision() FilterDecision {
 // getMatchTarget extracts the appropriate string to match based on scope.
 func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) string {
 	switch scope {
-	case FilterScopeHost:
-		return NormalizeHost(req.Host)
-
 	case FilterScopePath:
 		return req.URL.Path
 
@@ -241,9 +246,33 @@ func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) stri
 		return canonicalizeURL(req.URL)
 
 	default:
-		return NormalizeHost(req.Host)
+		return NormalizeHost(RequestHost(req))
 	}
 }
+
+// RequestHost returns the authority the request will actually be sent to.
+//
+// req.URL.Host is that authority; req.Host is only the client's Host header. On
+// the MITM path goproxy rebuilds req.URL from the CONNECT target and leaves
+// req.Host as the tunneled request spelled it, while the transport dials
+// req.URL.Host - so a sandbox sending `CONNECT evil.example.com:443` with
+// `Host: allowed.example.com` matched every host-scoped rule against the name it
+// was not contacting. Everything that decides or records where a request went
+// has to read the same field, or the decision describes a different destination
+// than the connection.
+func RequestHost(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if req.URL != nil && req.URL.Host != "" {
+		return req.URL.Host
+	}
+	return req.Host
+}
+
+// defaultSchemePorts are the ports a scheme already implies. A URL spelling one
+// explicitly names the same resource as one omitting it.
+var defaultSchemePorts = map[string]string{"http": "80", "https": "443"}
 
 // canonicalizeURL renders a URL with its authority canonicalized the way
 // NormalizeHost canonicalizes a host, and its path left exactly as sent.
@@ -253,27 +282,71 @@ func (e *FilterEngine) getMatchTarget(req *http.Request, scope FilterScope) stri
 // "https://API.EXAMPLE.COM/x" or "https://api.example.com./x". The path is the
 // case-sensitive half of a URL; the host half is not, and treating the whole
 // string as case-sensitive let the host half inherit the wrong rule.
+//
+// The scheme's default port is dropped for the same reason. On the MITM path
+// req.URL is always rebuilt from the CONNECT target, which carries a port, so
+// every HTTPS request arrived here spelled "https://host:443/..." and no rule
+// written the way the docs write them could ever match one.
 func canonicalizeURL(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
-	host := u.Hostname()
-	canon := canonicalizeHost(host)
-	if canon == host {
-		return u.String()
+	c := *u
+	c.Scheme = strings.ToLower(u.Scheme)
+	c.Host = canonicalizeAuthority(c.Scheme, u.Host)
+	return c.String()
+}
+
+// canonicalizeAuthority lowercases a "host[:port]" authority, strips a single
+// trailing dot from the host, and drops a port the scheme already implies.
+func canonicalizeAuthority(scheme, authority string) string {
+	host, port, err := net.SplitHostPort(authority)
+	if err != nil {
+		// No port: strip IPv6 brackets, canonicalize, put them back.
+		host = authority
+		bracketed := strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")
+		if bracketed {
+			host = host[1 : len(host)-1]
+		}
+		host = canonicalizeHost(host)
+		if bracketed || strings.Contains(host, ":") {
+			return "[" + host + "]"
+		}
+		return host
 	}
 
-	c := *u
-	switch port := u.Port(); {
-	case port != "":
-		c.Host = net.JoinHostPort(canon, port)
-	case strings.Contains(canon, ":"):
-		// Bare IPv6 literal: Hostname() dropped the brackets the authority needs.
-		c.Host = "[" + canon + "]"
-	default:
-		c.Host = canon
+	host = canonicalizeHost(host)
+	if port == defaultSchemePorts[scheme] {
+		port = ""
 	}
-	return c.String()
+	if port == "" {
+		if strings.Contains(host, ":") {
+			return "[" + host + "]"
+		}
+		return host
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// canonicalizeURLPattern applies canonicalizeAuthority to a url-scoped pattern's
+// authority and leaves the rest of it byte for byte.
+//
+// It is done lexically rather than with url.Parse because a pattern is not a
+// URL: a glob's `?`, `[` and `]` are metacharacters url.Parse would read as a
+// query string or a malformed IPv6 literal. Without this the two sides of the
+// comparison disagree - the target is canonicalized and the pattern is not - so
+// a rule naming "https://API.Example.com/**" silently matched nothing.
+func canonicalizeURLPattern(pattern string) string {
+	rawScheme, rest, ok := strings.Cut(pattern, "://")
+	if !ok {
+		return pattern
+	}
+	scheme := strings.ToLower(rawScheme)
+	end := strings.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	return scheme + "://" + canonicalizeAuthority(scheme, rest[:end]) + rest[end:]
 }
 
 // NormalizeHost extracts the hostname without port, handling IPv6 addresses

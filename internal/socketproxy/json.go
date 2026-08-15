@@ -39,7 +39,10 @@ func StrictUnmarshal(raw []byte, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
-	if dec.More() {
+	// Not dec.More(): it reports false for a stray `}` or `]`, so `{...}}` read
+	// as a clean parse here while the parsers on the other side of this proxy
+	// reject the whole line. Comparing offsets refuses anything after the value.
+	if rest := bytes.TrimSpace(raw[dec.InputOffset():]); len(rest) > 0 {
 		return fmt.Errorf("unexpected trailing data after JSON value")
 	}
 	return nil
@@ -48,15 +51,19 @@ func StrictUnmarshal(raw []byte, dst any) error {
 // keysAreExact reports whether every key of the top-level object is a
 // byte-exact JSON name dst declares and appears at most once.
 //
-// A raw value that is not an object, or a dst that is not a struct pointer, is
-// left to Decode: it produces the accurate type error, and there are no keys to
-// confuse. Only the top level is scanned, because every nested value these
-// payloads carry is either a scalar, an array of scalars, or a json.RawMessage
-// that its own validator strict-decodes in turn.
+// Both "not an object" and "not a struct pointer" are refused here rather than
+// left to Decode. Decode produces the accurate type error for most non-objects,
+// but not for the two shapes that matter: a top-level `null` decodes into a
+// struct pointer as a silent no-op, leaving the caller vetting a zero value it
+// believes came off the wire, and a non-struct dst makes this scan a no-op that
+// degrades StrictUnmarshal to DisallowUnknownFields - which this package's own
+// doc comment explains is not enough. Only the top level is scanned, because
+// every nested value these payloads carry is either a scalar, an array of
+// scalars, or a json.RawMessage that its own validator strict-decodes in turn.
 func keysAreExact(raw []byte, dst any) error {
 	declared, ok := declaredJSONNames(dst)
 	if !ok {
-		return nil
+		return fmt.Errorf("strict decode target %T is not a struct pointer", dst)
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -64,8 +71,10 @@ func keysAreExact(raw []byte, dst any) error {
 	if err != nil {
 		return err
 	}
+	// The token itself is not quoted back: it is sandbox-supplied and this
+	// error reaches a log line.
 	if delim, isDelim := tok.(json.Delim); !isDelim || delim != '{' {
-		return nil
+		return fmt.Errorf("json: expected an object")
 	}
 
 	seen := make(map[string]struct{}, len(declared))

@@ -13,6 +13,7 @@ func revdiffScriptPattern() ScriptPattern {
 	return ScriptPattern{
 		Shebangs:  []string{"#!/bin/sh"},
 		Statement: CommandPattern{Program: "revdiff", ResolvedBin: testBin, ArgsMatcher: MatchAny()},
+		Bounds:    LaunchBounds{SharedTmp: testSentinelRoot},
 	}
 }
 
@@ -262,5 +263,35 @@ func TestScriptPatternNoShebangAllowed(t *testing.T) {
 	body := "'" + testBin + "' '--output=/tmp/o'" + tail("/tmp/s") + "\n"
 	if !p.MatchesBody([]byte(body)) {
 		t.Error("MatchesBody rejected a shebang-less body whose single statement is valid, want accepted")
+	}
+}
+
+// TestScriptPatternConfinesSentinel covers the herdr side of the same bound.
+// The tail here writes and renames rather than touching, so an unbounded path
+// was an arbitrary host-file overwrite, not just an empty-file create.
+func TestScriptPatternConfinesSentinel(t *testing.T) {
+	head := "'" + testBin + "' '--output=/tmp/o'"
+
+	tests := []struct {
+		name     string
+		root     string
+		sentinel string
+		want     bool
+	}{
+		{"inside the root", testSentinelRoot, testSentinelRoot + "/revdiff-done-1", true},
+		{"host rc file", testSentinelRoot, "/home/u/.bashrc", false},
+		{"sibling of the root", testSentinelRoot, testSentinelRoot + "foo/done", false},
+		{"empty root denies", "", testSentinelRoot + "/revdiff-done-1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := revdiffScriptPattern()
+			p.Bounds.SharedTmp = tt.root
+			body := "#!/bin/sh\n" + head + tail(tt.sentinel) + "\n"
+			if got := p.MatchesBody([]byte(body)); got != tt.want {
+				t.Errorf("MatchesBody(sentinel=%q) = %v, want %v", tt.sentinel, got, tt.want)
+			}
+		})
 	}
 }

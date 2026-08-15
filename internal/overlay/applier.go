@@ -171,7 +171,11 @@ func splitRoot(op Operation) (root, rel string, err error) {
 func copyFile(op Operation) (retErr error) {
 	// O_NOFOLLOW: the planner classified the source with Lstat, so a symlink
 	// here means the upper changed between planning and application.
-	in, err := os.OpenFile(op.Source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK plus the IsRegular check below cover the other half of that
+	// swap window: isMigratable skips a FIFO at plan time, but one put there
+	// afterwards would block this open forever with no timeout and no message,
+	// which is the failure that comment names.
+	in, err := os.OpenFile(op.Source, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
@@ -180,6 +184,11 @@ func copyFile(op Operation) (retErr error) {
 			retErr = err
 		}
 	}()
+	if fi, err := in.Stat(); err != nil {
+		return err
+	} else if !fi.Mode().IsRegular() {
+		return fmt.Errorf("source %q is no longer a regular file", op.Source)
+	}
 
 	// Write a fresh entry beside the destination and rename over it. The
 	// destination is never opened, so a symlink sitting there is replaced rather

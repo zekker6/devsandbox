@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -222,7 +223,7 @@ func (h *Herdr) Environment(homeDir, _ string) []EnvVar {
 // A tool that declares a launch capability without a script pattern gets that
 // capability dropped. kitty warns and continues in that situation; herdr does
 // not, because an unconstrained herdr launch is arbitrary host execution.
-func (h *Herdr) aggregate(homeDir string) ([]herdrproxy.Capability, cmdpattern.ScriptPattern) {
+func (h *Herdr) aggregate(homeDir string, bounds cmdpattern.LaunchBounds) ([]herdrproxy.Capability, cmdpattern.ScriptPattern) {
 	capSet := make(map[herdrproxy.Capability]struct{})
 	var script cmdpattern.ScriptPattern
 
@@ -241,7 +242,7 @@ func (h *Herdr) aggregate(homeDir string) ([]herdrproxy.Capability, cmdpattern.S
 		declared := req.HerdrCapabilities()
 		sp, hasScript := t.(ToolWithHerdrLaunchScript)
 		if hasScript {
-			script = sp.HerdrLaunchScript()
+			script = sp.HerdrLaunchScript(bounds)
 		}
 
 		for _, c := range declared {
@@ -298,8 +299,8 @@ func (h *Herdr) agentReporting() (bool, string) {
 // capabilities is aggregate plus the capabilities herdr itself contributes.
 // CapAgentReporting is one of those: it is granted on host-derived facts about
 // this launch rather than declared by a tool.
-func (h *Herdr) capabilities(homeDir string) ([]herdrproxy.Capability, cmdpattern.ScriptPattern) {
-	caps, script := h.aggregate(homeDir)
+func (h *Herdr) capabilities(homeDir string, bounds cmdpattern.LaunchBounds) ([]herdrproxy.Capability, cmdpattern.ScriptPattern) {
+	caps, script := h.aggregate(homeDir, bounds)
 	if ok, _ := h.agentReporting(); ok {
 		caps = append(caps, herdrproxy.CapAgentReporting)
 	}
@@ -353,6 +354,32 @@ func (h *Herdr) filterConfig(
 	}
 }
 
+// relocatorFor builds the launch-script relocator for this session.
+//
+// Relocated scripts must land outside everything the sandbox can write. Passing
+// the sandbox-visible paths makes that a checked invariant rather than an
+// assumption, and the check can genuinely fire: the relocation root sits under
+// the host's cache directory, which a project directory such as `~/.cache` is
+// an ancestor of - and the project tree is bind-mounted read-write at its own
+// path, so a script relocated into it stays swappable after validation.
+//
+// That case returns a nil relocator and a nil error rather than aborting the
+// launch: the filter then denies every script launch, which narrows the
+// capability instead of the sandbox. Any other failure is fatal as before.
+func (h *Herdr) relocatorFor(homeDir, sandboxHome string) (*herdrproxy.Relocator, error) {
+	scriptsDir := herdrScriptsPath(homeDir, sandboxHome)
+	relocator, err := herdrproxy.NewRelocator(scriptsDir, sandboxVisiblePaths(homeDir, sandboxHome, h.projectDir))
+	switch {
+	case err == nil:
+		return relocator, nil
+	case errors.Is(err, herdrproxy.ErrSandboxVisible):
+		notice.Warn("herdr: %v; launch scripts are denied for this session", err)
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
 // Start implements ActiveTool.
 func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 	if h.mode == herdrModeDisabled {
@@ -365,7 +392,10 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		homeDir = h.homeDir
 	}
 
-	caps, script := h.capabilities("")
+	// Availability is probed with the empty home as before; the shared temp
+	// directory must be the real one, because the launch script pattern bounds
+	// its completion sentinel against it and an empty value denies every body.
+	caps, script := h.capabilities("", launchBoundsFor(homeDir, sandboxHome, h.projectDir))
 	if len(caps) == 0 && h.mode == herdrModeAuto {
 		// Nothing needs herdr; do not open a socket at all.
 		return nil
@@ -384,13 +414,16 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		return fmt.Errorf("herdr: host socket %s not reachable: %w", hostSock, err)
 	}
 
-	// Relocated scripts must land outside everything the sandbox can write.
-	// Passing the sandbox-visible paths makes that a checked invariant rather
-	// than an assumption.
-	scriptsDir := herdrScriptsPath(homeDir, sandboxHome)
-	relocator, err := herdrproxy.NewRelocator(scriptsDir, sandboxVisiblePaths(homeDir, sandboxHome))
+	relocator, err := h.relocatorFor(homeDir, sandboxHome)
 	if err != nil {
 		return fmt.Errorf("herdr: %w", err)
+	}
+	// A refused relocation directory leaves relocator nil, which the filter
+	// handles by denying script launches; nothing below may assume otherwise.
+	cleanupRelocator := func() {
+		if relocator != nil {
+			_ = relocator.Cleanup()
+		}
 	}
 
 	ownedTabs := cmdpattern.NewOwnedSet[string]()
@@ -401,12 +434,12 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 	filter := herdrproxy.NewFilter(h.filterConfig(caps, script, relocator, ownedTabs, ownedPanes, homeDir))
 
 	if _, err := ensureRunDir(sandboxHome); err != nil {
-		_ = relocator.Cleanup()
+		cleanupRelocator()
 		return fmt.Errorf("herdr: %w", err)
 	}
 	listenPath := filepath.Join(runDir(sandboxHome), herdrProxySocketName)
 	if err := checkSocketPath(listenPath); err != nil {
-		_ = relocator.Cleanup()
+		cleanupRelocator()
 		return fmt.Errorf("herdr: %w", err)
 	}
 
@@ -415,7 +448,7 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		proxy.SetLogger(h.logger)
 	}
 	if err := proxy.Start(ctx); err != nil {
-		_ = relocator.Cleanup()
+		cleanupRelocator()
 		return fmt.Errorf("herdr: start proxy: %w", err)
 	}
 
@@ -446,7 +479,7 @@ func (h *Herdr) Stop() error {
 
 // sandboxVisiblePaths lists directories the sandbox can write that also exist
 // on the host at the same path. Relocated scripts must never land in one.
-func sandboxVisiblePaths(homeDir, sandboxHome string) []string {
+func sandboxVisiblePaths(homeDir, sandboxHome, projectDir string) []string {
 	var paths []string
 	if sandboxHome != "" {
 		paths = append(paths, sandboxHome)
@@ -455,6 +488,13 @@ func sandboxVisiblePaths(homeDir, sandboxHome string) []string {
 		// The shared temp directory is a write-through bind shared with the
 		// host at an identical path.
 		paths = append(paths, SharedTmpRoot(homeDir))
+	}
+	if projectDir != "" {
+		// AddProjectBindings binds the project tree read-write at the path the
+		// host knows it by, so a project directory that contains the relocation
+		// root - `~/.cache` or `~/.cache/devsandbox`, say - leaves every
+		// relocated script writable from inside the sandbox.
+		paths = append(paths, projectDir)
 	}
 	return paths
 }
@@ -492,7 +532,11 @@ func (h *Herdr) Check(homeDir string) CheckResult {
 	}
 	result.AddInfo("control socket: " + sock)
 
-	caps, _ := h.capabilities(homeDir)
+	// The script pattern is discarded here, and the capability set does not
+	// depend on it — a tool contributes a launch capability by declaring a
+	// pattern at all, not by what the pattern bounds — so doctor has no sandbox
+	// home to derive the bounds from and does not need one.
+	caps, _ := h.capabilities(homeDir, cmdpattern.LaunchBounds{})
 	if reporting, why := h.agentReporting(); reporting {
 		result.AddInfo("agent session reporting: active for " + h.launchedAgent)
 	} else {

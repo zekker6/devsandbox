@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -575,5 +576,72 @@ func TestBuildPlan_MarksHostDirReplacement(t *testing.T) {
 
 	if got := plan.DirReplacements(); got != 2 {
 		t.Errorf("DirReplacements() = %d, want 2", got)
+	}
+}
+
+// TestBuildPlan_RuntimeEntryInLaterUpperHidesEarlierDir extends
+// TestBuildPlan_NonDirInLaterUpperHidesEarlierDir to the forms the applier
+// cannot promote.
+//
+// Skipping such an entry is not the same as ignoring it: a FIFO or a socket is
+// still a non-directory in a higher upper, so it masks the lower subtree even
+// though nothing is planned in its place. Returning early without pruning
+// migrated the earlier upper's `d` and every `d/*` back onto the host - exactly
+// the files the sandbox deleted with `rm -rf d`.
+func TestBuildPlan_RuntimeEntryInLaterUpperHidesEarlierDir(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		place func(t *testing.T, path string) error
+	}{
+		{"fifo", func(_ *testing.T, path string) error { return syscall.Mkfifo(path, 0o600) }},
+		{"socket", func(_ *testing.T, path string) error {
+			l, err := net.Listen("unix", path)
+			if err != nil {
+				return err
+			}
+			// Closing a unix listener unlinks its socket by default, which would
+			// leave the upper with no entry at all and quietly turn this into a
+			// test of nothing. The socket has to outlive the listener, the way
+			// the ones an agent leaves behind in a sandbox home do.
+			if ul, ok := l.(*net.UnixListener); ok {
+				ul.SetUnlinkOnClose(false)
+			}
+			return l.Close()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			upperA := filepath.Join(tmp, "upperA")
+			upperB := filepath.Join(tmp, "upperB")
+			host := filepath.Join(tmp, "host")
+			if err := os.MkdirAll(host, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(upperA, "d", "old.txt"), "A")
+			if err := os.MkdirAll(upperB, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.place(t, filepath.Join(upperB, "d")); err != nil {
+				t.Skipf("cannot create %s: %v", tc.name, err)
+			}
+
+			plan, err := BuildPlan([]UpperSource{
+				{Kind: UpperPrimary, Path: upperA, SandboxID: "s1"},
+				{Kind: UpperSession, Path: upperB, SandboxID: "s1", SessionID: "b"},
+			}, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := relPaths(plan.Operations)
+			for _, rel := range []string{"d", filepath.Join("d", "old.txt")} {
+				if slices.Contains(got, rel) {
+					t.Errorf("entry %q hidden by a %s in a later upper was planned; ops=%v", rel, tc.name, got)
+				}
+			}
+			if err := Apply(plan); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+		})
 	}
 }

@@ -236,24 +236,27 @@ func applySetMode(cmd *cobra.Command, homeDir string, sandboxNames []string, too
 }
 
 // resolveSandboxes returns the list of sandbox names to operate on.
-// For --all-sandboxes, enumerates every directory under the sandbox base.
+//
+// For --all-sandboxes the enumeration goes through sandbox.ListSandboxes rather
+// than reading the base directory directly, so it applies the same notion of
+// "this is a sandbox" the rest of the CLI does. Reading the directory raw
+// included the `.removing-` trees RemoveSandboxIfIdle renames a sandbox to
+// before deleting it, so a migration could read the upper of a sandbox being
+// deleted - or one an interrupted removal left staged.
 func resolveSandboxes(homeDir string, f *overlayMigrateFlags) ([]string, error) {
 	if !f.allSandboxes {
 		return []string{f.sandbox}, nil
 	}
-	base := sandbox.SandboxBasePath(homeDir)
-	entries, err := os.ReadDir(base)
+	sandboxes, err := sandbox.ListSandboxes(sandbox.SandboxBasePath(homeDir))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("list sandboxes: %w", err)
 	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
+	// The directory name, not Metadata.Name: the caller joins it back onto the
+	// sandbox base path, and a metadata file records the project name, which
+	// need not be the directory it lives in.
+	names := make([]string, 0, len(sandboxes))
+	for _, s := range sandboxes {
+		names = append(names, filepath.Base(s.SandboxRoot))
 	}
 	sort.Strings(names)
 	return names, nil

@@ -121,7 +121,17 @@ type ProxyConfig struct {
 	// whole; only the recorded copy is bounded, and an entry cut short is
 	// marked with req_body_truncated / resp_body_truncated.
 	// nil → DefaultMaxLogBodyBytes. 0 records no bodies at all.
+	// Read through GetMaxLogBodyBytes.
 	MaxLogBodyBytes *int `toml:"max_log_body_bytes"`
+}
+
+// GetMaxLogBodyBytes returns the request-log body capture limit, defaulting to
+// DefaultMaxLogBodyBytes when unset.
+func (p ProxyConfig) GetMaxLogBodyBytes() int {
+	if p.MaxLogBodyBytes == nil {
+		return DefaultMaxLogBodyBytes
+	}
+	return *p.MaxLogBodyBytes
 }
 
 // IsEnabled returns whether proxy is enabled (defaults to false).
@@ -1141,7 +1151,9 @@ port = 8080
 # Bytes of each request/response body recorded in the proxy request log
 # (default: 262144). The body itself is always forwarded whole; only the
 # recorded copy is bounded, and a shortened entry is marked truncated.
-# Set to 0 to record no bodies at all.
+# Set to 0 to record no bodies at all. Maximum 2097152 (2 MiB): past that an
+# entry exceeds what "devsandbox logs proxy" reads back, so it is rejected at
+# startup. A project .devsandbox.toml may only lower this.
 # max_log_body_bytes = 262144
 
 # Additional environment variables set to the proxy URL when proxy is active.
@@ -1219,6 +1231,12 @@ port = 8080
 # [proxy.redaction]
 # enabled = true
 # default_action = "block"  # "block", "redact", or "log"
+
+# Largest request body the secret scan will hold while deciding
+# (default: 10485760, 10 MiB). A body past this - or one that stalls for 30s -
+# is blocked, not forwarded unscanned, since a scan of part of a body proves
+# nothing about the rest. A project .devsandbox.toml may only lower this.
+# max_scan_bytes = 10485760
 
 # Source-based rule: detects exact secret value
 # [[proxy.redaction.rules]]
@@ -1541,7 +1559,7 @@ func LoadWithProjectDir(globalPath, projectDir string, opts *LoadOptions) (*Conf
 			return nil, err
 		}
 		if localCfg != nil {
-			cfg = mergeConfigs(cfg, localCfg)
+			cfg = mergeProjectConfig(cfg, localCfg)
 		}
 	}
 

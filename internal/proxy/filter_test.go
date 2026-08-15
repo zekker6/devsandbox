@@ -801,6 +801,91 @@ func TestURLScopeCanonicalizesAuthority(t *testing.T) {
 	}
 }
 
+// TestURLScopeCanonicalizesPattern is the other side of the same comparison.
+// Canonicalizing only the target silently retires every url rule whose pattern
+// spells its host with any uppercase - it can no longer match anything, and
+// under an allow default a block rule that matches nothing is not an error.
+func TestURLScopeCanonicalizesPattern(t *testing.T) {
+	engine, err := NewFilterEngine(&FilterConfig{
+		DefaultAction: FilterActionAllow,
+		Rules: []FilterRule{
+			{Pattern: "https://API.Example.com./**", Type: PatternTypeGlob, Scope: FilterScopeURL, Action: FilterActionBlock},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.com/secret", nil)
+	if got := engine.Match(req).Action; got != FilterActionBlock {
+		t.Errorf("Match = %q, want block", got)
+	}
+}
+
+// TestURLScopeDropsDefaultPort covers the spelling every intercepted HTTPS
+// request actually arrives in. goproxy rebuilds req.URL from the CONNECT
+// target, which always carries a port, so req.URL.String() is
+// "https://host:443/..." - and no url rule written the way the docs write them
+// could ever match one.
+func TestURLScopeDropsDefaultPort(t *testing.T) {
+	engine, err := NewFilterEngine(&FilterConfig{
+		DefaultAction: FilterActionAllow,
+		Rules: []FilterRule{
+			{Pattern: "https://api.example.com/**", Type: PatternTypeGlob, Scope: FilterScopeURL, Action: FilterActionBlock},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, raw := range []string{
+		"https://api.example.com/v1/users",
+		"https://api.example.com:443/v1/users",
+	} {
+		req := httptest.NewRequest(http.MethodGet, raw, nil)
+		if got := engine.Match(req).Action; got != FilterActionBlock {
+			t.Errorf("Match(%q) = %q, want block", raw, got)
+		}
+	}
+
+	// A non-default port is a different endpoint and stays outside the rule.
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.com:8443/v1/users", nil)
+	if got := engine.Match(req).Action; got != FilterActionAllow {
+		t.Errorf("Match(explicit non-default port) = %q, want allow", got)
+	}
+}
+
+// TestHostScopeMatchesConnectTargetNotHostHeader is the bypass this pins shut.
+// On the MITM path goproxy rebuilds req.URL from the CONNECT target and leaves
+// req.Host as the tunneled request spelled it, while the transport dials
+// req.URL.Host. Matching req.Host meant `CONNECT evil:443` carrying
+// `Host: allowed` was checked against a name it was not contacting - and the
+// same value keyed the ask-mode decision cache, so one approval was reusable
+// against any destination.
+func TestHostScopeMatchesConnectTargetNotHostHeader(t *testing.T) {
+	engine, err := NewFilterEngine(&FilterConfig{
+		DefaultAction: FilterActionAllow,
+		Rules: []FilterRule{
+			{Pattern: "evil.example.com", Type: PatternTypeExact, Scope: FilterScopeHost, Action: FilterActionBlock},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "https://evil.example.com:443/x", nil)
+	req.Host = "allowed.example.com"
+	if got := engine.Match(req).Action; got != FilterActionBlock {
+		t.Errorf("Match = %q, want block (matched the Host header, not the connect target)", got)
+	}
+
+	// And the mirror: a forged Host header must not pull an unrelated rule in.
+	req = httptest.NewRequest(http.MethodGet, "https://allowed.example.com:443/x", nil)
+	req.Host = "evil.example.com"
+	if got := engine.Match(req).Action; got != FilterActionAllow {
+		t.Errorf("Match = %q, want allow", got)
+	}
+}
+
 // TestUsesAskAction pins what decides whether the ask queue gets built. Keying
 // it on the default action alone left `action = "ask"` on a rule with nothing to
 // ask: the request was allowed through unprompted while its log entry recorded

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/fsutil"
 )
 
@@ -93,6 +94,30 @@ func SharedTmpEnv(homeDir, sandboxHome string) []EnvVar {
 // identical string on the host and inside the sandbox.
 func SharedTmpPath(homeDir, sandboxHome string) string {
 	return filepath.Join(homeDir, sharedTmpRelPath, sharedTmpSessionID(sandboxHome))
+}
+
+// sharedTmpForPatterns returns the shared directory for use as a bound inside a
+// launch pattern, or "" when it cannot be derived.
+//
+// It guards on the same inputs SharedTmpBinding does, so a pattern bounds
+// exactly the directory the bind mount creates and never a path built from an
+// empty home. A pattern receiving "" must deny rather than fall back to an
+// unbounded check.
+func sharedTmpForPatterns(homeDir, sandboxHome string) string {
+	if homeDir == "" || sandboxHome == "" {
+		return ""
+	}
+	return SharedTmpPath(homeDir, sandboxHome)
+}
+
+// launchBoundsFor returns the host-derived directories a launch validator
+// anchors to, built in one place so the two proxies cannot disagree about what
+// the sandbox can reach.
+func launchBoundsFor(homeDir, sandboxHome, projectDir string) cmdpattern.LaunchBounds {
+	return cmdpattern.LaunchBounds{
+		SharedTmp:  sharedTmpForPatterns(homeDir, sandboxHome),
+		ProjectDir: projectDir,
+	}
 }
 
 // SharedTmpRoot returns the directory holding one entry per sandbox home. It is

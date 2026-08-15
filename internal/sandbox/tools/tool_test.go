@@ -61,7 +61,7 @@ func (herdrStubTool) ShellInit(string) string             { return "" }
 func (herdrStubTool) HerdrCapabilities() []herdrproxy.Capability {
 	return []herdrproxy.Capability{herdrproxy.CapLaunchOverlay}
 }
-func (herdrStubTool) HerdrLaunchScript() cmdpattern.ScriptPattern {
+func (herdrStubTool) HerdrLaunchScript(cmdpattern.LaunchBounds) cmdpattern.ScriptPattern {
 	return cmdpattern.ScriptPattern{Shebangs: []string{"#!/bin/sh"}}
 }
 
@@ -80,7 +80,7 @@ func TestHerdrInterfacesAreSatisfiable(t *testing.T) {
 	if !ok {
 		t.Fatal("stub does not satisfy ToolWithHerdrLaunchScript")
 	}
-	if got := script.HerdrLaunchScript(); len(got.Shebangs) != 1 {
+	if got := script.HerdrLaunchScript(cmdpattern.LaunchBounds{SharedTmp: "/tmp"}); len(got.Shebangs) != 1 {
 		t.Errorf("HerdrLaunchScript() = %+v, want the declared shebang allowlist", got)
 	}
 }

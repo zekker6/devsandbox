@@ -153,6 +153,37 @@ func TestReadCompressedProxyLogFile_TruncatedStream(t *testing.T) {
 	}
 }
 
+// A .gz that is not gzip at all reported no entries, no error and no warning,
+// which reads as an empty archive rather than an unreadable one. The
+// mid-rotation tolerance a malformed header buys is only meaningful once a
+// member has been read whole; on the first one it hides the whole file.
+func TestReadCompressedProxyLogFile_NonGzipReportsError(t *testing.T) {
+	path := writeArchive(t, []byte("this is not a gzip stream at all\n"))
+
+	entries, _, err := readProxyLogFileWithLimit(path, 0)
+	if err == nil {
+		t.Fatalf("readProxyLogFileWithLimit reported success on a non-gzip archive (entries=%d)", len(entries))
+	}
+	if len(entries) != 0 {
+		t.Errorf("entries = %d, want 0", len(entries))
+	}
+}
+
+// The same file with one good member in front is a writer killed mid-rotation:
+// the records it flushed are real and must still arrive, without an error.
+func TestReadCompressedProxyLogFile_GarbageAfterGoodMemberIsBenign(t *testing.T) {
+	good := writeGzipLines(t, `{"ts":"2026-08-14T10:00:00Z","method":"GET"}`)
+	path := writeArchive(t, append(good, []byte("not a gzip header")...))
+
+	entries, _, err := readProxyLogFileWithLimit(path, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := methodsOf(entries), []string{"GET"}; !equalStrings(got, want) {
+		t.Fatalf("entries = %v, want %v", got, want)
+	}
+}
+
 // Rotation appends gzip members, so an archive can hold more than one.
 func TestReadCompressedProxyLogFile_ConcatenatedMembers(t *testing.T) {
 	first := writeGzipLines(t, `{"ts":"2026-08-14T10:00:00Z","method":"GET"}`)

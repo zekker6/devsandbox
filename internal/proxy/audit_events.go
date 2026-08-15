@@ -32,10 +32,9 @@ func (s *Server) emitFilterDecision(req *http.Request, decision FilterDecision) 
 		}
 	}
 
-	host := req.URL.Host
-	if host == "" {
-		host = req.Host
-	}
+	// Canonicalized so a tunnel's filter decision and its proxy.mitm.bypass
+	// event carry the same spelling and can be joined on `host`.
+	host := NormalizeHost(RequestHost(req))
 
 	fields := map[string]any{
 		"host":                host,

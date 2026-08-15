@@ -2136,11 +2136,11 @@ func TestGetMaxScanBytes(t *testing.T) {
 	}
 }
 
-// TestMergeConfigs_RedactionScanLimitOnlyTightens covers the direction the
+// TestMergeProjectConfig_RedactionScanLimitOnlyTightens covers the direction the
 // overlay may move the limit. The project file is writable from inside the
 // sandbox, so a larger value there would be the sandbox choosing how much host
 // memory one request may hold.
-func TestMergeConfigs_RedactionScanLimitOnlyTightens(t *testing.T) {
+func TestMergeProjectConfig_RedactionScanLimitOnlyTightens(t *testing.T) {
 	tests := []struct {
 		name          string
 		base, overlay int
@@ -2159,10 +2159,82 @@ func TestMergeConfigs_RedactionScanLimitOnlyTightens(t *testing.T) {
 			overlay := &Config{}
 			overlay.Proxy.Redaction.MaxScanBytes = tt.overlay
 
-			got := mergeConfigs(base, overlay).Proxy.Redaction.MaxScanBytes
+			got := mergeProjectConfig(base, overlay).Proxy.Redaction.MaxScanBytes
 			if got != tt.want {
 				t.Errorf("merged max_scan_bytes = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestMergeProjectConfig_LogBodyLimitOnlyTightens pins the same policy for the
+// request-log capture limit, which merged unconditionally beside it. 0 is the
+// value that matters: it records no bodies at all, so an unconditional merge
+// let a .devsandbox.toml writable from inside the sandbox blank the sandbox's
+// own audit trail.
+func TestMergeProjectConfig_LogBodyLimitOnlyTightens(t *testing.T) {
+	ptr := func(v int) *int { return &v }
+	tests := []struct {
+		name          string
+		base, overlay *int
+		want          int
+	}{
+		{"overlay tightens", ptr(4096), ptr(1024), 1024},
+		{"overlay widens", ptr(1024), ptr(4096), 1024},
+		{"overlay disables body capture", ptr(4096), ptr(0), 4096},
+		{"overlay tightens from default", nil, ptr(1024), 1024},
+		{"overlay widens past default", nil, ptr(DefaultMaxLogBodyBytes * 2), DefaultMaxLogBodyBytes},
+		{"overlay unset", ptr(2048), nil, 2048},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &Config{}
+			base.Proxy.MaxLogBodyBytes = tt.base
+			overlay := &Config{}
+			overlay.Proxy.MaxLogBodyBytes = tt.overlay
+
+			got := mergeProjectConfig(base, overlay).Proxy.GetMaxLogBodyBytes()
+			if got != tt.want {
+				t.Errorf("merged max_log_body_bytes = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMergeConfigs_TrustedOverlayMayRaiseLimits is the other half of
+// TestMergeProjectConfig_RedactionScanLimitOnlyTightens.
+//
+// mergeConfigs merges two kinds of file: the project-local `.devsandbox.toml`,
+// which the sandbox can rewrite, and `[[include]]` files, which are host-owned
+// config the user wrote. Clamping in mergeConfigs applied the project file's
+// rule to both, so an include raising either limit was silently ignored - a
+// limit the user configured failing to apply with no error, which is the one
+// failure mode a limit must never have. The clamp lives in mergeProjectConfig.
+func TestMergeConfigs_TrustedOverlayMayRaiseLimits(t *testing.T) {
+	ptr := func(v int) *int { return &v }
+
+	base := &Config{}
+	base.Proxy.Redaction.MaxScanBytes = 1024
+	base.Proxy.MaxLogBodyBytes = ptr(1024)
+
+	overlay := &Config{}
+	overlay.Proxy.Redaction.MaxScanBytes = 4096
+	overlay.Proxy.MaxLogBodyBytes = ptr(4096)
+
+	merged := mergeConfigs(base, overlay)
+	if got := merged.Proxy.Redaction.MaxScanBytes; got != 4096 {
+		t.Errorf("include raised max_scan_bytes to 4096, merged = %d", got)
+	}
+	if got := merged.Proxy.GetMaxLogBodyBytes(); got != 4096 {
+		t.Errorf("include raised max_log_body_bytes to 4096, merged = %d", got)
+	}
+
+	// The same overlay through the project-file path is clamped back.
+	clamped := mergeProjectConfig(base, overlay)
+	if got := clamped.Proxy.Redaction.MaxScanBytes; got != 1024 {
+		t.Errorf("project file raised max_scan_bytes, merged = %d, want 1024", got)
+	}
+	if got := clamped.Proxy.GetMaxLogBodyBytes(); got != 1024 {
+		t.Errorf("project file raised max_log_body_bytes, merged = %d, want 1024", got)
 	}
 }

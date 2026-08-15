@@ -12,8 +12,11 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // readRotatedEntries returns every line readable from a writer's active and
@@ -352,6 +355,288 @@ func TestRotatingFileWriter_RotationDuringCompression(t *testing.T) {
 
 	if entries := readRotatedEntries(t, tmpDir, "test"); !slices.Contains(entries, survivor) {
 		t.Errorf("entry written after rotation was lost: the compressor unlinked the reopened file")
+	}
+}
+
+// claimState is what a second process sees when it looks at a log file on its
+// way to pruning it: gone, free to unlink, or held by a live writer.
+type claimState string
+
+const (
+	claimGone claimState = "gone"
+	claimFree claimState = "free"
+	claimHeld claimState = "held"
+)
+
+func sampleClaim(path string) claimState {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return claimGone
+	}
+	defer func() { _ = f.Close() }()
+
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return claimHeld
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return claimFree
+}
+
+// TestDupClaimedFile_KeepsClaimAcrossClose pins the mechanism rotation relies
+// on: flock lives on the open file description, so a duplicate descriptor holds
+// the same lock and closing the original releases nothing.
+func TestDupClaimedFile_KeepsClaimAcrossClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "active.log")
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if !claimFile(f) {
+		t.Fatal("could not claim a file nothing else holds")
+	}
+	if _, err := f.WriteString("entry\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	dup := dupClaimedFile(f)
+	if dup == nil {
+		t.Fatal("dupClaimedFile returned nil")
+	}
+	defer func() { _ = dup.Close() }()
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if got := sampleClaim(path); got != claimHeld {
+		t.Errorf("claim after closing the original: got %q, want %q", got, claimHeld)
+	}
+
+	// The duplicate must also be readable from the start, since it is what the
+	// compressor copies out of.
+	if _, err := dup.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("seek: %v", err)
+	}
+	got, err := io.ReadAll(dup)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "entry\n" {
+		t.Errorf("read %q from the duplicate, want %q", got, "entry\n")
+	}
+
+	if err := dup.Close(); err != nil {
+		t.Fatalf("close duplicate: %v", err)
+	}
+	if got := sampleClaim(path); got != claimFree {
+		t.Errorf("claim after closing every descriptor: got %q, want %q", got, claimFree)
+	}
+}
+
+// TestDupClaimedFile_IsCloseOnExec pins the other half of the duplicate's
+// contract. Every descriptor os.OpenFile produces is close-on-exec, which is
+// what keeps a host log out of the processes devsandbox spawns while a session
+// runs; a plain dup(2) drops that flag, so the duplicate rotation hands the
+// compressor would ride into every child forked during the compression - a
+// read-write descriptor on a host file, and a share of the flock that outlives
+// the compressor closing its own copy.
+func TestDupClaimedFile_IsCloseOnExec(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "active.log")
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if !claimFile(f) {
+		t.Fatal("could not claim a file nothing else holds")
+	}
+
+	dup := dupClaimedFile(f)
+	if dup == nil {
+		t.Fatal("dupClaimedFile returned nil")
+	}
+	defer func() { _ = dup.Close() }()
+
+	flags, err := unix.FcntlInt(dup.Fd(), unix.F_GETFD, 0)
+	if err != nil {
+		t.Fatalf("F_GETFD on the duplicate: %v", err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		t.Error("the duplicated descriptor is not close-on-exec; it leaks into every process forked during compression")
+	}
+}
+
+// TestStartCompression_ArchivesTheHandedOverDescriptor covers the window between
+// rotation closing the active file and the compressor claiming it. A compressor
+// that reopens the path finds the file unclaimed in between, which is exactly
+// what a concurrent session's pruning tests before unlinking - so the entries
+// about to be archived can be taken out from under it, and the compression then
+// finds nothing to open and writes no archive at all.
+//
+// The unlink here is that prune, applied at the one instant it does damage. What
+// makes it survivable is the descriptor rotation hands over: it carries the
+// claim and it names the inode, so the archive is written from the bytes
+// regardless of what happened to the name.
+func TestStartCompression_ArchivesTheHandedOverDescriptor(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "test_0001.log")
+	archivePath := filepath.Join(tmpDir, "test_0001.log.gz")
+
+	const entry = "entry written before the rotation"
+	f, err := os.OpenFile(srcPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	if !claimFile(f) {
+		t.Fatal("could not claim a file nothing else holds")
+	}
+	if _, err := f.WriteString(entry + "\n"); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	// What rotate does: duplicate before closing, so the claim is never dropped.
+	claimed := dupClaimedFile(f)
+	if claimed == nil {
+		t.Fatal("dupClaimedFile returned nil")
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close source: %v", err)
+	}
+
+	// The concurrent session, pruning in the instant the old code left open.
+	if err := os.Remove(srcPath); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	w := &RotatingFileWriter{cfg: RotatingFileWriterConfig{
+		Dir: tmpDir, Prefix: "test", Suffix: ".log", ArchiveSuffix: ".log.gz",
+	}}
+	w.startCompression(srcPath, claimed)
+	w.compressWG.Wait()
+
+	if got := readLogFileLines(t, archivePath); !slices.Equal(got, []string{entry}) {
+		t.Errorf("archive holds %v, want %v", got, []string{entry})
+	}
+}
+
+// TestRotatingFileWriter_RotationKeepsTheArchivedFileClaimed is the end-to-end
+// half: while a rotation's compression is in flight, the file it is reading must
+// look claimed to the other session, since claimedByAnotherWriter is the whole
+// of what stops that session's pruning from removing it.
+func TestRotatingFileWriter_RotationKeepsTheArchivedFileClaimed(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	w, err := NewRotatingFileWriter(RotatingFileWriterConfig{
+		Dir:           tmpDir,
+		Prefix:        "test",
+		Suffix:        ".log",
+		ArchiveSuffix: ".log.gz",
+		MaxSize:       2 << 20,
+		MaxFiles:      8,
+	})
+	if err != nil {
+		t.Fatalf("NewRotatingFileWriter failed: %v", err)
+	}
+
+	const seeded = "entry written before the rotation"
+	if _, err := w.Write([]byte(seeded + "\n")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	rotatedAway := w.CurrentPath()
+
+	// Incompressible, so the compression this rotation starts is still running
+	// when the claim is sampled.
+	if _, err := w.Write(append(incompressibleBytes(2<<20), '\n')); err != nil {
+		t.Fatalf("bulk Write failed: %v", err)
+	}
+
+	if got := sampleClaim(rotatedAway); got == claimFree {
+		t.Error("the file being archived was free for the taking: another session's pruning would have unlinked it")
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if entries := readRotatedEntries(t, tmpDir, "test"); !slices.Contains(entries, seeded) {
+		t.Error("the archived entry did not survive the rotation")
+	}
+}
+
+// lockPath opens path and holds the same advisory lock a writer takes, standing
+// in for a second process working in the log directory. flock is held per open
+// file description, so a lock taken here conflicts with this process's other
+// descriptors exactly as another process's would.
+func lockPath(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	if !claimFile(f) {
+		t.Fatalf("could not claim %s", path)
+	}
+}
+
+// TestCompressFile_ArchiveHeldByAnotherWriter pins that a compression whose
+// archive path is held elsewhere writes nothing. The claim is what keeps a
+// second process's pruning off a half-written archive; taking it after an
+// O_TRUNC would destroy the contents it exists to protect.
+func TestCompressFile_ArchiveHeldByAnotherWriter(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "test_0001.log")
+	archivePath := filepath.Join(tmpDir, "test_0001.log.gz")
+
+	if err := os.WriteFile(srcPath, []byte("entry\n"), 0o600); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	const held = "another writer's bytes"
+	if err := os.WriteFile(archivePath, []byte(held), 0o600); err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	lockPath(t, archivePath)
+
+	w := &RotatingFileWriter{cfg: RotatingFileWriterConfig{
+		Dir: tmpDir, Prefix: "test", Suffix: ".log", ArchiveSuffix: ".log.gz",
+	}}
+	w.compressFile(srcPath, nil)
+
+	got, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("read archive: %v", err)
+	}
+	if string(got) != held {
+		t.Errorf("archive held by another writer was overwritten: got %q, want %q", got, held)
+	}
+	if _, err := os.Stat(srcPath); err != nil {
+		t.Errorf("source removed although nothing archived it: %v", err)
+	}
+}
+
+// TestCompressFile_SourceHeldByAnotherWriter pins that a source another writer
+// has claimed is left alone: those bytes belong to that writer now, and
+// removing the file would unlink one it is still appending to.
+func TestCompressFile_SourceHeldByAnotherWriter(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "test_0001.log")
+	archivePath := filepath.Join(tmpDir, "test_0001.log.gz")
+
+	if err := os.WriteFile(srcPath, []byte("entry\n"), 0o600); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	lockPath(t, srcPath)
+
+	w := &RotatingFileWriter{cfg: RotatingFileWriterConfig{
+		Dir: tmpDir, Prefix: "test", Suffix: ".log", ArchiveSuffix: ".log.gz",
+	}}
+	w.compressFile(srcPath, nil)
+
+	if _, err := os.Stat(srcPath); err != nil {
+		t.Errorf("source claimed by another writer was removed: %v", err)
+	}
+	if _, err := os.Stat(archivePath); err == nil {
+		t.Error("archived a file another writer is still appending to")
 	}
 }
 
