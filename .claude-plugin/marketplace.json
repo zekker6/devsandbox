@@ -1,0 +1,20 @@
+{
+  "name": "devsandbox",
+  "description": "Plugins for devsandbox, the sandbox for AI coding assistants",
+  "owner": {
+    "name": "zekker6",
+    "url": "https://github.com/zekker6"
+  },
+  "plugins": [
+    {
+      "name": "devsandbox-config",
+      "source": "./.claude-plugin/devsandbox-config",
+      "description": "Answer devsandbox configuration questions from the published documentation instead of from memory"
+    },
+    {
+      "name": "devsandbox-triage",
+      "source": "./.claude-plugin/devsandbox-triage",
+      "description": "Recognize command failures caused by devsandbox's isolation and point at the setting or document that explains them"
+    }
+  ]
+}
