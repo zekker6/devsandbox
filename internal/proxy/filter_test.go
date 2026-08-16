@@ -631,6 +631,53 @@ func TestFilterEngine_CacheHostAliasing(t *testing.T) {
 	}
 }
 
+// TestFilterEngine_CacheDoesNotOverrideExplicitRules pins that a remembered
+// ask-mode answer substitutes only for a prompt, never for a rule that already
+// decided. The cache is keyed on the host alone and records nothing about which
+// rule asked, so reading it ahead of rule evaluation turned one approval of a
+// narrowly-scoped `ask` into a host-wide allow that outranked every later
+// block - logged only as "cached decision", with no sign a block was skipped.
+func TestFilterEngine_CacheDoesNotOverrideExplicitRules(t *testing.T) {
+	cfg := &FilterConfig{
+		DefaultAction:  FilterActionAllow,
+		CacheDecisions: boolPtr(true),
+		Rules: []FilterRule{
+			{Pattern: "/secret", Scope: FilterScopePath, Action: FilterActionAsk},
+			{Pattern: "blocked.example.com", Action: FilterActionBlock},
+			{Pattern: "allowed.example.com", Action: FilterActionAllow},
+		},
+	}
+
+	engine, err := NewFilterEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create filter engine: %v", err)
+	}
+
+	// The answer the user gave to the path-scoped prompt, remembered.
+	engine.CacheDecision("blocked.example.com", FilterActionAllow)
+	engine.CacheDecision("allowed.example.com", FilterActionBlock)
+
+	req := func(host, path string) *http.Request {
+		return &http.Request{Host: host, URL: &url.URL{Host: host, Path: path}}
+	}
+
+	if d := engine.Match(req("blocked.example.com", "/other")); d.Action != FilterActionBlock {
+		t.Errorf("Match on a blocked host with a remembered allow = %s, want %s", d.Action, FilterActionBlock)
+	}
+	if d := engine.MatchHost("blocked.example.com:443"); d.Action != FilterActionBlock {
+		t.Errorf("MatchHost on a blocked host with a remembered allow = %s, want %s", d.Action, FilterActionBlock)
+	}
+	// The mirror case: a remembered block must not retire an explicit allow.
+	if d := engine.Match(req("allowed.example.com", "/other")); d.Action != FilterActionAllow {
+		t.Errorf("Match on an allowed host with a remembered block = %s, want %s", d.Action, FilterActionAllow)
+	}
+	// Where the matched rule is the `ask` itself, the remembered answer is
+	// exactly what it is for and must still stand in.
+	if d := engine.Match(req("blocked.example.com", "/secret")); d.Action != FilterActionAllow {
+		t.Errorf("Match on the asking rule = %s, want the remembered %s", d.Action, FilterActionAllow)
+	}
+}
+
 func TestFilterEngine_CacheNormalization(t *testing.T) {
 	cfg := &FilterConfig{
 		DefaultAction:  FilterActionAsk,

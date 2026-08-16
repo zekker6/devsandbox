@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"devsandbox/internal/socketproxy"
 )
@@ -61,7 +62,21 @@ func (p *Proxy) logInf(format string, args ...any) {
 	}
 }
 
+// ioTimeout bounds every read this proxy performs.
+//
+// socketproxy.Server closes only *client* connections on Stop, so a read with
+// no deadline is unstoppable: it holds a goroutine and its fds for the life of
+// the process and makes Stop burn its drain timeout. The filter denies the two
+// payload flags that ask kitty to withhold or defer its reply, so nothing
+// legitimate approaches this bound - it is the backstop for an upstream that
+// stops answering for any other reason.
+const ioTimeout = 30 * time.Second
+
 func (p *Proxy) handle(_ context.Context, conn net.Conn) {
+	if err := conn.SetReadDeadline(time.Now().Add(ioTimeout)); err != nil {
+		p.logErr("set client read deadline: %v", err)
+		return
+	}
 	r := bufio.NewReader(conn)
 	payload, err := ReadFrame(r)
 	if err != nil {
@@ -91,6 +106,12 @@ func (p *Proxy) forward(client net.Conn, payload []byte, d Decision) {
 		return
 	}
 	defer func() { _ = upstream.Close() }()
+
+	if err := upstream.SetDeadline(time.Now().Add(ioTimeout)); err != nil {
+		p.logErr("set upstream deadline: %v", err)
+		_ = WriteFrame(client, denyResponse("upstream deadline failed"))
+		return
+	}
 
 	if err := WriteFrame(upstream, payload); err != nil {
 		p.logErr("write upstream: %v", err)

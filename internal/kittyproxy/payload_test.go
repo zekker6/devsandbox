@@ -168,6 +168,44 @@ func TestFilter_LaunchPayload_KittyCLIPayloadAllowed(t *testing.T) {
 	}
 }
 
+// TestFilter_RejectsRepliesTheProxyCannotWaitFor covers the two flags that tell
+// kitty to withhold or defer its reply. The proxy is 1-request/1-response and
+// reads the upstream frame synchronously, and socketproxy.Server closes only
+// client connections on Stop - so forwarding either one parks a handler and two
+// host fds indefinitely and makes Stop burn its drain timeout. kitty's own
+// client sends both as false (see the pinned fixture), so denying them costs
+// nothing legitimate.
+func TestFilter_RejectsRepliesTheProxyCannotWaitFor(t *testing.T) {
+	f := launchFilter(t)
+	allowed := map[string]any{"type": "overlay", "args": []string{"revdiff"}}
+
+	t.Run("envelope no_response", func(t *testing.T) {
+		raw, err := json.Marshal(map[string]any{
+			"cmd": "launch", "version": []int{0, 46, 2}, "payload": allowed,
+			"no_response": true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := f.Decide(raw); d.Allow {
+			t.Fatal("expected deny for an envelope asking for no response")
+		}
+	})
+
+	for name, payload := range map[string]map[string]any{
+		"payload no_response": {"type": "overlay", "args": []string{"revdiff"},
+			"no_response": true},
+		"payload wait_for_child_to_exit": {"type": "overlay", "args": []string{"revdiff"},
+			"wait_for_child_to_exit": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if d := f.Decide(mkCmd(t, "launch", payload)); d.Allow {
+				t.Fatalf("expected deny for %s", name)
+			}
+		})
+	}
+}
+
 // kitty executes the command inside `encrypted` and ignores the outer `cmd`,
 // so the envelope needs the same deny-by-default decode as the payload.
 func TestFilter_Envelope_RejectsBypassFields(t *testing.T) {

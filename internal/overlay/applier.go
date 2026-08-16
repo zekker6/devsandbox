@@ -41,10 +41,7 @@ func applyOne(op Operation) error {
 			return err
 		}
 		if op.IsSymlink {
-			if err := reconcileDestination(op); err != nil {
-				return err
-			}
-			return os.Symlink(op.LinkTarget, op.HostPath)
+			return replaceWithSymlink(op)
 		}
 		if op.IsDir {
 			if err := reconcileDestination(op); err != nil {
@@ -59,6 +56,62 @@ func applyOne(op Operation) error {
 		return copyFile(op)
 	}
 	return fmt.Errorf("unknown op kind: %v", op.Kind)
+}
+
+// replaceWithSymlink stages the link beside its destination and renames it into
+// place.
+//
+// The ordering is the one copyFile's comment argues for, and it is load-bearing
+// here for the same reason: reconcileDestination's removal is recursive and
+// irreversible, so it must not run until the replacement is known to exist.
+// os.Symlink refuses to create over any existing entry, so reconciling first
+// and creating after left every failure between the two - an interrupt during
+// the RemoveAll walk, ENOSPC or EROFS on the symlink(2) - with the host subtree
+// deleted and nothing put back.
+//
+// rename(2) replaces the destination without following it, so a symlink or
+// regular file sitting there is swapped rather than written through.
+func replaceWithSymlink(op Operation) (retErr error) {
+	tmpName, err := stagedName(op.HostPath)
+	if err != nil {
+		return err
+	}
+	if err := os.Symlink(op.LinkTarget, tmpName); err != nil {
+		return err
+	}
+	defer func() {
+		if retErr != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	// Fully staged: now it is safe to clear a destination whose type rename
+	// cannot replace on its own.
+	if err := reconcileDestination(op); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, op.HostPath)
+}
+
+// stagedName reserves an unused path beside dest for an entry that is not a
+// regular file, where os.CreateTemp cannot be used. The file it creates is
+// removed rather than returned, so the caller can put a symlink or a directory
+// at the name; O_EXCL is what makes the reservation exclusive against a
+// concurrent applier.
+func stagedName(dest string) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(dest), ".devsandbox-migrate-*")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := os.Remove(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // reconcileDestination removes an existing destination whose entry type the
@@ -84,16 +137,17 @@ func reconcileDestination(op Operation) error {
 		return err
 	}
 	switch {
-	case op.IsSymlink:
-		// os.Symlink refuses to create over any existing entry.
 	case op.IsDir:
 		if fi.IsDir() {
 			return nil
 		}
 	default:
 		if !fi.IsDir() {
-			// copyFile renames over a regular file or a symlink without
-			// following it; only a directory is in the way.
+			// copyFile and replaceWithSymlink both rename over a regular file
+			// or a symlink without following it; only a directory is in the
+			// way. Leaving it for the rename is what keeps the replacement
+			// atomic - unlinking here would open a window with neither entry
+			// present.
 			return nil
 		}
 	}

@@ -159,6 +159,40 @@ func TestScriptPatternRejects(t *testing.T) {
 			body: "#!/bin/sh\nEDITOR=nvim '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
 		},
 		{
+			// Without the `env` prefix nothing parses this as an assignment:
+			// POSIX recognizes one only while the name and `=` are unquoted, so
+			// the shell runs the token as the command word. `env` is what makes
+			// the quoted form an assignment, and it is absent here.
+			name: "quoted editor assignment with no env prefix",
+			body: "#!/bin/sh\n'EDITOR=nvim' '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			// The same token with a `/` in it: the shell skips the PATH lookup
+			// and execs it as a pathname relative to the launcher's cwd, which
+			// is the project tree bind-mounted read-write.
+			name: "quoted editor assignment naming a path with no env prefix",
+			body: "#!/bin/sh\n'EDITOR=/usr/bin/nano' '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			// A quoted inert assignment is the same non-assignment; the value
+			// side being harmless does not make the token stop being argv[0].
+			name: "quoted inert assignment with no env prefix",
+			body: "#!/bin/sh\n'REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true' '" +
+				testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			// U+00A0 is not IFS whitespace, so the shell reads this line as a
+			// command word and looks it up on PATH. Trimming it as "blank"
+			// would hide a second statement from the one-statement check while
+			// leaving its bytes in the body the host runs.
+			name: "second line of non-IFS unicode whitespace",
+			body: "#!/bin/sh\n" + okHead + tail(sentinel) + "\n \n",
+		},
+		{
+			name: "second line of vertical tab",
+			body: "#!/bin/sh\n" + okHead + tail(sentinel) + "\n\v\n",
+		},
+		{
 			name: "unallowlisted variable as an unquoted bare assignment",
 			body: "#!/bin/sh\nBASH_ENV=/tmp/x.sh '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
 		},

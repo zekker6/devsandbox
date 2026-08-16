@@ -146,6 +146,14 @@ func (p *launchPayload) vet(hostWindowID string) string {
 		return "launch marker= is not permitted (a function spec loads host code into kitty)"
 	case p.Logo != "":
 		return "launch logo= is not permitted (reads a host file the sandbox names)"
+	case p.NoResponse:
+		return "launch no_response is not permitted (kitty writes no reply, so the proxy would wait on one forever)"
+	case p.WaitForChildToExit:
+		// kitty holds the reply until the launched process exits, and
+		// response_timeout is the sandbox's own value - so this turns one
+		// request into a handler and two host fds parked for as long as the
+		// sandbox's own command chooses to run.
+		return "launch wait_for_child_to_exit is not permitted (defers the reply until the launched process exits)"
 	}
 	if _, ok := hostResolvedCwds[p.Cwd]; !ok {
 		return fmt.Sprintf("launch cwd=%q is not permitted (only kitty's host-resolved keywords are)", p.Cwd)

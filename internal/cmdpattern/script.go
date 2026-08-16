@@ -171,15 +171,16 @@ func (s ScriptPattern) matchesHead(head string) bool {
 	// The launcher emits `env` unquoted as the command word. Only an absolute
 	// path the host itself resolves is accepted, so neither a PATH-relative
 	// `env` nor a path the sandbox planted ending in `/env` can stand in.
+	envConsumed := false
 	if len(toks) > 0 && !toks[0].quoted && isEnvBin(toks[0].value, s.Bounds) {
 		toks = toks[1:]
+		envConsumed = true
 	}
 
-	// Consume leading KEY=VAL assignments, quoted or bare. Both forms reach the
-	// child's environment identically — `env` parses its own arguments, and a
-	// bare leading token is a shell assignment prefix — so both are held to the
-	// same allowlist.
-	i, ok := consumeEnvAssignments(toks, s.Bounds)
+	// Consume leading KEY=VAL assignments. Which spellings are assignments at
+	// all depends on whether `env` was consumed, which is why that answer is
+	// threaded through rather than inferred here: see consumeEnvAssignments.
+	i, ok := consumeEnvAssignments(toks, s.Bounds, envConsumed)
 	if !ok {
 		return false
 	}
@@ -259,13 +260,20 @@ func tokenizeScriptHead(s string) ([]scriptToken, bool) {
 
 // splitScriptLines returns the body's non-blank lines. A trailing newline is
 // normal; blank lines carry no statements and are ignored.
+//
+// "Blank" is space and tab only, deliberately not unicode.IsSpace: the shell's
+// default IFS is space, tab and newline, so a line holding U+000B, U+000C,
+// U+0085 or U+00A0 is a command word to it and gets a PATH lookup. Treating
+// such a line as blank would drop it before the one-statement check while
+// leaving its bytes in the body HardenBody returns and the host runs - a second
+// statement naming a file the sandbox can plant on PATH.
 func splitScriptLines(body string) []string {
 	if strings.ContainsRune(body, '\r') {
 		return nil
 	}
 	var out []string
 	for line := range strings.SplitSeq(body, "\n") {
-		if strings.TrimSpace(line) == "" {
+		if strings.Trim(line, " \t") == "" {
 			continue
 		}
 		out = append(out, strings.TrimRight(line, " \t"))

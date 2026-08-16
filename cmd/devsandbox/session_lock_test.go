@@ -57,8 +57,16 @@ func TestRemoveSandboxOnExit_KeepsStateWhileAnotherSessionIsLive(t *testing.T) {
 	}
 	defer func() { _ = concurrent.Release() }()
 
-	removeSandboxOnExit(primary, root)
+	// The worktree teardown --rm passes here used to be its own defer ordered
+	// ahead of this call, so it ran whether or not the sandbox turned out to be
+	// idle - deleting a live session's worktree, uncommitted work included,
+	// while this function correctly declined to touch the state beside it.
+	torndown := false
+	removeSandboxOnExit(primary, root, func() { torndown = true })
 
+	if torndown {
+		t.Error("worktree teardown ran while another session was live")
+	}
 	if _, err := os.Stat(statePath); err != nil {
 		t.Errorf("sandbox state removed while a session was live: %v", err)
 	}
@@ -84,8 +92,19 @@ func TestRemoveSandboxOnExit_RemovesStateWhenNoOtherSessionRemains(t *testing.T)
 		t.Fatalf("AcquireSession failed: %v", err)
 	}
 
-	removeSandboxOnExit(handle, root)
+	// The counterweight: the teardown must still run on the idle path, and
+	// while the tree it works on is still in place.
+	torndown := false
+	removeSandboxOnExit(handle, root, func() {
+		if _, err := os.Stat(root); err != nil {
+			t.Errorf("worktree teardown ran after the sandbox root was taken away: %v", err)
+		}
+		torndown = true
+	})
 
+	if !torndown {
+		t.Error("worktree teardown did not run on an idle sandbox")
+	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Errorf("sandbox root still present after --rm: %v", err)
 	}

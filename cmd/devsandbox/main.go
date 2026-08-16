@@ -473,21 +473,30 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	// via the defer below. Removing the entire sandbox root would destroy the
 	// primary session's persistent state.
 	if rmFlag && !cfg.IsConcurrent {
-		defer func() { removeSandboxOnExit(sessionHandle, cfg.SandboxRoot) }()
-		// Registered AFTER the sandbox-removal defer so that LIFO ordering
-		// runs the worktree teardown FIRST, while the directory still exists.
+		// The worktree teardown is handed to removeSandboxOnExit rather than
+		// registered as its own defer. LIFO ordering ran it first - which it
+		// must be, since the worktree lives under the sandbox root - but that
+		// left it outside the liveness check: `git worktree remove --force`
+		// deletes the directory and its uncommitted work, and only then does
+		// the sandbox removal decline because another session is still live.
+		// IsConcurrent is not the answer either. DesignateSession only reroutes
+		// bwrap launches, so a docker or krun launch that lost the designation
+		// reaches here with IsConcurrent false while a bwrap session holds the
+		// same project's sandbox.
+		var removeWorktree func()
 		if worktreeHandle != nil {
 			handle := worktreeHandle
 			repoRoot := worktreeRepoRoot
-			defer func() {
+			removeWorktree = func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				mgr := worktree.NewManager()
 				if err := mgr.Remove(ctx, repoRoot, handle.Path); err != nil {
 					notice.Warn("failed to remove worktree: %v", err)
 				}
-			}()
+			}
 		}
+		defer func() { removeSandboxOnExit(sessionHandle, cfg.SandboxRoot, removeWorktree) }()
 	}
 
 	// Concurrent session: clean up session-scoped overlay dirs on exit.
@@ -818,7 +827,12 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 // sandbox and removes the state, unless another session is still holding it.
 // A concurrent session that started after this one is still live at exit and
 // its overlay lower layers are exactly the state --rm would delete.
-func removeSandboxOnExit(handle *sandbox.SessionHandle, sandboxRoot string) {
+// removeSandboxOnExit performs the --rm teardown. beforeRemove, when non-nil,
+// is the worktree removal: it has to run before the sandbox root goes, because
+// the worktree sits under it, and it must not run at all unless the sandbox is
+// idle - so it goes through RemoveSandboxIfIdle's own liveness gate rather than
+// being ordered ahead of it by a second defer.
+func removeSandboxOnExit(handle *sandbox.SessionHandle, sandboxRoot string, beforeRemove func()) {
 	// Released here rather than left to the deferred release registered at
 	// acquisition time: that defer runs after this one (LIFO), so the liveness
 	// probe below would otherwise see this launch's own lock.
@@ -826,7 +840,7 @@ func removeSandboxOnExit(handle *sandbox.SessionHandle, sandboxRoot string) {
 		notice.Warn("failed to release session lock: %v", err)
 	}
 
-	removed, err := sandbox.RemoveSandboxIfIdle(sandboxRoot)
+	removed, err := sandbox.RemoveSandboxIfIdle(sandboxRoot, beforeRemove)
 	switch {
 	case err != nil:
 		notice.Warn("failed to remove sandbox: %v", err)

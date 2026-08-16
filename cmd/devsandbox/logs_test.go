@@ -370,3 +370,23 @@ func TestReadUncompressedProxyLogFile_ReadsAllEntries(t *testing.T) {
 		t.Errorf("entries = %v, want %v", got, want)
 	}
 }
+
+// TestViewProxyLogs_RejectsNegativeLast covers a bad flag value reaching a
+// slice index. `if last == 0 { last = 100 }` does not cover negatives, so the
+// trims below it evaluated entries[len(entries)-last:] with last < 0 - an index
+// past the end, which panics rather than reporting anything.
+func TestViewProxyLogs_RejectsNegativeLast(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "proxy-requests_0001.jsonl")
+	if err := os.WriteFile(path, []byte(`{"ts":"2026-08-14T10:00:00Z","method":"GET"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	err := viewProxyLogs(dir, nil, -1, false, false, false, true, false)
+	if err == nil {
+		t.Fatal("viewProxyLogs accepted --last -1, want an error")
+	}
+	if !strings.Contains(err.Error(), "--last") {
+		t.Errorf("error does not name the flag: %v", err)
+	}
+}

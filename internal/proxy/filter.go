@@ -148,26 +148,16 @@ func (e *FilterEngine) Match(req *http.Request) FilterDecision {
 		}
 	}
 
-	// Check decision cache
-	if e.config.IsCacheEnabled() {
-		if decision := e.getCachedDecision(RequestHost(req)); decision != "" {
-			return FilterDecision{
-				Action:    decision,
-				IsDefault: false,
-				Reason:    "cached decision",
-			}
-		}
-	}
-
-	// Evaluate rules in order
+	// Evaluate rules in order, then let a remembered answer stand in only where
+	// a prompt is what would otherwise happen.
 	for _, compiled := range e.compiledRules {
 		target := e.getMatchTarget(req, compiled.rule.GetScope())
 		if compiled.matcher(target) {
-			return matchedDecision(compiled.rule)
+			return e.decisionFor(&compiled.rule, RequestHost(req))
 		}
 	}
 
-	return e.defaultDecision()
+	return e.decisionFor(nil, RequestHost(req))
 }
 
 // MatchHost evaluates a CONNECT target ("example.com:443") against the
@@ -190,6 +180,38 @@ func (e *FilterEngine) MatchHost(hostport string) FilterDecision {
 
 	host := NormalizeHost(hostport)
 
+	for _, compiled := range e.compiledRules {
+		if compiled.rule.GetScope() != FilterScopeHost {
+			continue
+		}
+		if compiled.matcher(host) {
+			return e.decisionFor(&compiled.rule, host)
+		}
+	}
+
+	return e.decisionFor(nil, host)
+}
+
+// decisionFor turns the matched rule - or its absence - into a decision,
+// substituting a remembered ask-mode answer only where the outcome would
+// otherwise be a prompt.
+//
+// The cache used to be read *before* any rule was evaluated, which made it a
+// blanket host-wide override: it is keyed on the host alone and records nothing
+// about which rule asked, so approving and remembering one request that matched
+// a path-scoped `ask` rule installed an `allow` that short-circuited a later
+// host-scoped `block` for the rest of the session, logged only as "cached
+// decision". Nothing was wrong with the cache's key until rule-level `ask`
+// became reachable - the ask queue is now gated on usesAskAction() rather than
+// on the default action alone, which is what puts a narrow rule's answer in
+// front of every other rule.
+//
+// An explicit allow or block therefore wins outright, and "remember" keeps
+// meaning what the prompt offered: do not ask me again about this host.
+func (e *FilterEngine) decisionFor(rule *FilterRule, host string) FilterDecision {
+	if rule != nil && rule.Action != FilterActionAsk {
+		return matchedDecision(*rule)
+	}
 	if e.config.IsCacheEnabled() {
 		if decision := e.getCachedDecision(host); decision != "" {
 			return FilterDecision{
@@ -199,16 +221,9 @@ func (e *FilterEngine) MatchHost(hostport string) FilterDecision {
 			}
 		}
 	}
-
-	for _, compiled := range e.compiledRules {
-		if compiled.rule.GetScope() != FilterScopeHost {
-			continue
-		}
-		if compiled.matcher(host) {
-			return matchedDecision(compiled.rule)
-		}
+	if rule != nil {
+		return matchedDecision(*rule)
 	}
-
 	return e.defaultDecision()
 }
 

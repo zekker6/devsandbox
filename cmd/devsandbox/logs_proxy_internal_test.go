@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +53,51 @@ func TestReadProxyInternalLogs_ReadsActiveAndArchived(t *testing.T) {
 		if !slices.Contains(lines, want) {
 			t.Errorf("missing %q; got %v", want, lines)
 		}
+	}
+}
+
+// TestReadProxyInternalLogs_ReportsOversizedLine pins that the scanner's own
+// error reaches the per-file reporting this reader already does. A record past
+// bufio.MaxScanTokenSize ends the scan, and dropping scanner.Err() handed back
+// a silently truncated log - the same failure the request-log readers above are
+// hardened against, and worse in the gzip case because an aborted scan leaves
+// the deflate stream mid-member so every later member is lost too. Silence here
+// is what made an unreadable log indistinguishable from an empty one.
+func TestReadProxyInternalLogs_ReportsOversizedLine(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, path, content string)
+		suff  string
+	}{
+		{
+			name: "active",
+			suff: proxy.ProxyLogSuffix,
+			write: func(t *testing.T, path, content string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{name: "archived", suff: proxy.ProxyLogArchiveSuffix, write: writeGz},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureNotices(t)
+			dir := t.TempDir()
+			huge := "2026/08/14 10:00:00 " + strings.Repeat("x", bufio.MaxScanTokenSize+1)
+			tc.write(t, filepath.Join(dir, proxy.ProxyLogPrefix+"_20260814_0001"+tc.suff), huge+"\n")
+
+			lines, err := readProxyInternalLogs(dir, time.Time{})
+			if err != nil {
+				t.Fatalf("readProxyInternalLogs: %v", err)
+			}
+			if len(lines) != 0 {
+				t.Errorf("truncated scan still contributed %d line(s)", len(lines))
+			}
+			if !strings.Contains(buf.String(), "token too long") {
+				t.Errorf("the truncated scan was not reported, got: %q", buf.String())
+			}
+		})
 	}
 }
 

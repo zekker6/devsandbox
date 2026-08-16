@@ -82,12 +82,25 @@ const maxEnvProgramFlags = 4
 // argv, which is how `'--output=/tmp/o'` stays an argument. A token that does
 // look like one but is not accepted fails the whole head: falling through to
 // the argv matcher instead would decide the same case for the wrong reason.
-func consumeEnvAssignments(toks []scriptToken, bounds LaunchBounds) (int, bool) {
+//
+// envConsumed says whether an `env` program word was stripped ahead of these
+// tokens, and it decides what a *quoted* token means. Only `env` parses its own
+// arguments: with it, `'EDITOR=nvim'` is an assignment it applies to the child.
+// Without it the shell is parsing, and POSIX recognizes an assignment prefix
+// only while the name and `=` are unquoted - so a quoted token is the command
+// word, and the shell does a PATH lookup (or a pathname exec, once it contains
+// a `/`) for a file literally named `EDITOR=nvim`. Vetting it as a variable
+// would leave the program it actually names unreviewed, at a path the sandbox
+// can write; the argv matcher never sees the token at all.
+func consumeEnvAssignments(toks []scriptToken, bounds LaunchBounds, envConsumed bool) (int, bool) {
 	i := 0
 	for i < len(toks) {
 		name, value, ok := splitEnvAssignment(toks[i].value)
 		if !ok {
 			break
+		}
+		if !envConsumed && toks[i].quoted {
+			return 0, false
 		}
 		if !envAssignmentAllowed(name, value, toks[i].quoted, bounds) {
 			return 0, false

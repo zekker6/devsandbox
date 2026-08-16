@@ -329,7 +329,7 @@ func TestRemoveSandboxIfIdle_KeepsStateWhileAnotherHolderIsLive(t *testing.T) {
 	}
 	defer func() { _ = other.Release() }()
 
-	removed, err := RemoveSandboxIfIdle(root)
+	removed, err := RemoveSandboxIfIdle(root, nil)
 	if err != nil {
 		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestRemoveSandboxIfIdle_RemovesWhenNoHolderRemains(t *testing.T) {
 		t.Fatalf("Release failed: %v", err)
 	}
 
-	removed, err := RemoveSandboxIfIdle(root)
+	removed, err := RemoveSandboxIfIdle(root, nil)
 	if err != nil {
 		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestRemoveSandboxIfIdle_LeavesNothingListable(t *testing.T) {
 	if err := handle.Release(); err != nil {
 		t.Fatalf("Release failed: %v", err)
 	}
-	if _, err := RemoveSandboxIfIdle(root); err != nil {
+	if _, err := RemoveSandboxIfIdle(root, nil); err != nil {
 		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
 	}
 
@@ -417,10 +417,40 @@ func TestRemoveSandboxIfIdle_LeavesNothingListable(t *testing.T) {
 	}
 }
 
+// TestAcquireSession_SurvivesTheRemovalItRacesAgainst covers the window a --rm
+// teardown opens after its rename: the sandbox root no longer exists, and
+// O_CREATE creates the lock file but never its parent. Every retry then failed
+// ENOENT identically, so the launch burned the full retry budget and died
+// naming a missing lock file - against a teardown whole point is to be waited
+// out. "The sandbox is gone" means build a fresh one.
+func TestAcquireSession_SurvivesTheRemovalItRacesAgainst(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "sandbox")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("seed sandbox state: %v", err)
+	}
+
+	// Exactly the state a completed teardown leaves: the name is gone, its
+	// parent is not.
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	handle, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("AcquireSession failed against a removed sandbox root: %v", err)
+	}
+	defer func() { _ = handle.Release() }()
+
+	if !handle.IsPrimary() {
+		t.Error("the only launch of a freshly recreated sandbox is not primary")
+	}
+}
+
 func TestRemoveSandboxIfIdle_MissingRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "never-created")
 
-	removed, err := RemoveSandboxIfIdle(root)
+	removed, err := RemoveSandboxIfIdle(root, nil)
 	if err != nil {
 		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
 	}

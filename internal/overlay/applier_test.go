@@ -635,3 +635,82 @@ func TestApply_FileOverHostDirectoryStillReplaces(t *testing.T) {
 		t.Errorf("host file = %q, want %q", got, "replacement")
 	}
 }
+
+// symlinkOverHostDir builds the one-operation plan both tests below apply: a
+// symlink landing where the host holds a directory with contents.
+func symlinkOverHostDir(host, target string) Plan {
+	return Plan{
+		HostPath: host,
+		Operations: []Operation{{
+			Kind:            OpOverwrite,
+			RelPath:         "d",
+			HostPath:        filepath.Join(host, "d"),
+			Mode:            os.ModeSymlink | 0o777,
+			IsSymlink:       true,
+			LinkTarget:      target,
+			ReplacesHostDir: true,
+		}},
+	}
+}
+
+// TestApply_FailedSymlinkLeavesHostDirectoryIntact is the symlink arm of
+// TestApply_UnreadableSourceLeavesHostDirectoryIntact. The arm used to call
+// reconcileDestination - a recursive, irreversible RemoveAll - and only then
+// os.Symlink, with nothing staged, so any failure of the symlink(2) left the
+// host subtree deleted with nothing put back. An empty link target is the
+// deterministic way to fail that call: symlink(2) rejects it with ENOENT.
+func TestApply_FailedSymlinkLeavesHostDirectoryIntact(t *testing.T) {
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host")
+	writeFile(t, filepath.Join(host, "d", "precious.txt"), "host data")
+
+	if err := Apply(symlinkOverHostDir(host, "")); err == nil {
+		t.Fatal("Apply succeeded on an uncreatable symlink, want error")
+	}
+
+	if _, err := os.Stat(filepath.Join(host, "d", "precious.txt")); err != nil {
+		t.Fatalf("host directory was destroyed before the symlink proved creatable: %v", err)
+	}
+}
+
+// TestApply_SymlinkOverHostDirectoryStillReplaces is the counterweight, so the
+// guard above cannot pass by disabling the replacement.
+func TestApply_SymlinkOverHostDirectoryStillReplaces(t *testing.T) {
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host")
+	writeFile(t, filepath.Join(host, "d", "old.txt"), "host data")
+
+	if err := Apply(symlinkOverHostDir(host, "/etc/hostname")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.Readlink(filepath.Join(host, "d"))
+	if err != nil {
+		t.Fatalf("host path is not a symlink: %v", err)
+	}
+	if got != "/etc/hostname" {
+		t.Errorf("link target = %q, want %q", got, "/etc/hostname")
+	}
+}
+
+// TestApply_SymlinkReplacesHostFileAtomically pins that a non-directory
+// destination is left for the rename rather than unlinked first: reconciling a
+// regular file away would leave a window with neither entry present, which is
+// the window copyFile's rename exists to avoid.
+func TestApply_SymlinkReplacesHostFileAtomically(t *testing.T) {
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host")
+	writeFile(t, filepath.Join(host, "d"), "host data")
+
+	if err := Apply(symlinkOverHostDir(host, "/etc/hostname")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.Readlink(filepath.Join(host, "d"))
+	if err != nil {
+		t.Fatalf("host path is not a symlink: %v", err)
+	}
+	if got != "/etc/hostname" {
+		t.Errorf("link target = %q, want %q", got, "/etc/hostname")
+	}
+}

@@ -355,6 +355,13 @@ Status filters support:
 }
 
 func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, showBody, compact, noColor, showStats bool) error {
+	// Rejected up front rather than clamped: the trims below index
+	// entries[len(entries)-last:], so a negative value indexes past the end and
+	// panics. `logs internal` guards its own --last with `last > 0`.
+	if last < 0 {
+		return fmt.Errorf("--last must not be negative, got %d", last)
+	}
+
 	// Find both compressed and uncompressed log files
 	activePattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogSuffix)
 	archivePattern := filepath.Join(logDir, proxy.RequestLogPrefix+"*"+proxy.RequestLogArchiveSuffix)
@@ -1269,7 +1276,7 @@ func readProxyLogFile(path string, since time.Time) ([]string, error) {
 		return nil, err
 	}
 	if magic[0] != 0x1f || magic[1] != 0x8b {
-		return scanProxyLogLines(r, since), nil
+		return scanProxyLogLines(r, since)
 	}
 
 	var lines []string
@@ -1287,8 +1294,12 @@ func readProxyLogFile(path string, since time.Time) ([]string, error) {
 			}
 			return nil, err
 		}
-		lines = append(lines, scanProxyLogLines(gz, since)...)
+		got, err := scanProxyLogLines(gz, since)
 		_ = gz.Close()
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, got...)
 	}
 
 	return lines, nil
@@ -1298,7 +1309,12 @@ func readProxyLogFile(path string, since time.Time) ([]string, error) {
 // since. Its records are stamped `2024/01/15 10:30:00 message`; a line that does
 // not parse as one is kept, since dropping it would hide exactly the output a
 // caller reading these logs is looking for.
-func scanProxyLogLines(r io.Reader, since time.Time) []string {
+//
+// The scanner's own error is reported rather than dropped. A record longer than
+// bufio.MaxScanTokenSize ends the scan, and swallowing that hands the caller a
+// silently truncated log - and in the gzip branch, an aborted scan that also
+// leaves the deflate stream mid-member, so every later member is lost too.
+func scanProxyLogLines(r io.Reader, since time.Time) ([]string, error) {
 	var lines []string
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -1312,7 +1328,10 @@ func scanProxyLogLines(r io.Reader, since time.Time) []string {
 		}
 		lines = append(lines, line)
 	}
-	return lines
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read proxy log: %w", err)
+	}
+	return lines, nil
 }
 
 func followInternalLogs(logDir, logType string, since time.Time) error {

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -249,7 +250,14 @@ const removalStagingPrefix = ".removing-"
 //
 // The caller must release its own handle first: its own shared lock is
 // indistinguishable from another session's here.
-func RemoveSandboxIfIdle(sandboxRoot string) (bool, error) {
+// beforeRemove, when non-nil, runs once the sandbox is known to be idle and
+// before any of it is taken away. It is for teardown that must not happen at
+// all while another session is live, and that needs the tree still in place -
+// the --rm worktree removal is both, since the worktree lives under
+// sandboxRoot. It runs under the exclusive lock so no session can appear
+// between the liveness answer and the work that depends on it, and it is not
+// reached at all when the sandbox is busy or already gone.
+func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) {
 	if _, err := os.Stat(sandboxRoot); err != nil {
 		if os.IsNotExist(err) {
 			return true, nil
@@ -263,6 +271,10 @@ func RemoveSandboxIfIdle(sandboxRoot string) (bool, error) {
 			return false, nil
 		}
 		return false, err
+	}
+
+	if beforeRemove != nil {
+		beforeRemove()
 	}
 
 	staged := filepath.Join(filepath.Dir(sandboxRoot),
@@ -306,6 +318,18 @@ func acquireSharedLock(sandboxRoot, name string) (*os.File, error) {
 		// the previous handle pointed into.
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 		if err != nil {
+			// O_CREATE creates the lock file, never its parent, and the
+			// teardown renames the whole sandbox root away - so once that
+			// rename lands every remaining attempt fails ENOENT identically and
+			// the launch dies naming a missing file. Recreating the root is the
+			// right answer to "the sandbox is gone": the launch goes on to build
+			// a fresh one, which is what it would have done had it started a
+			// moment later.
+			if errors.Is(err, fs.ErrNotExist) {
+				if mkErr := os.MkdirAll(sandboxRoot, 0o755); mkErr != nil {
+					return nil, fmt.Errorf("failed to recreate sandbox root: %w", mkErr)
+				}
+			}
 			lastErr = fmt.Errorf("failed to open lock file: %w", err)
 			continue
 		}

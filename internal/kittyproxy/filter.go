@@ -69,8 +69,11 @@ func (f *Filter) hasCap(c Capability) bool {
 // CLI populates on most calls (including every `launch`). It is NOT a capability
 // gate — the proxy is 1-request/1-response per connection, so the UUID flows
 // through to the upstream request and the upstream-stamped `async_id` flows
-// back on the response verbatim. `no_response` is a fire-and-forget flag; we
-// pass it through too.
+// back on the response verbatim. `no_response` is declared only so a denial can
+// name it: it tells kitty to write nothing back, and this proxy is
+// 1-request/1-response, so forwarding it parks the handler in ReadFrame on a
+// reply that never comes. kitty's own client sends `no_response: false` on
+// every command the proxy supports.
 //
 // `encrypted` and `password` are declared only so a denial can name them: kitty
 // executes the command inside `encrypted` and ignores the outer `cmd`, so an
@@ -106,6 +109,9 @@ func (f *Filter) Decide(raw []byte) Decision {
 	}
 	if len(c.Password) > 0 {
 		return Decision{Cmd: c.Cmd, Reason: "password-authenticated commands are forbidden (use allow_remote_control = socket-only)"}
+	}
+	if c.NoResponse {
+		return Decision{Cmd: c.Cmd, Reason: "no_response is forbidden (kitty writes no reply, so the proxy would wait on one forever)"}
 	}
 	switch c.Cmd {
 	case "launch":

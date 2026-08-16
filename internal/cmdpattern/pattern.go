@@ -473,7 +473,9 @@ func MatchShellExecEnvSentinel(inner CommandPattern, bounds LaunchBounds) func([
 		for i, tok := range argv {
 			assigns[i] = scriptToken{value: tok, quoted: true}
 		}
-		n, ok := consumeEnvAssignments(assigns, bounds)
+		// Every path to here has consumed an `env` word: either the unquoted
+		// prefix above, or the quoted argv[0] the !envConsumed branch requires.
+		n, ok := consumeEnvAssignments(assigns, bounds, true)
 		if !ok {
 			return false
 		}
