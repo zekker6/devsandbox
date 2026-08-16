@@ -76,6 +76,31 @@ tasks:
       # unnoticed. `-exec true` builds the test binary but runs `true` instead of
       # it, so this type-checks the tagged package without booting a microVM.
       - go test -exec true -tags integration_krun ./test/integration/...
+      - task: test:plugins
+
+  test:plugins:
+    desc: Checks for the bundled Claude Code plugins
+    cmds:
+      # The triage hook matches devsandbox's own output, so a message reworded
+      # in the Go sources can silently stop it matching. Nothing in `go test`
+      # covers a shell hook, which is why this runs as part of `task test`.
+      - bash .claude-plugin/devsandbox-triage/scripts/triage_test.sh
+      # The config skill routes by URL into the published site, so a page
+      # renamed or moved under docs/ leaves it fetching a 404 with nothing to
+      # notice. Map each URL back to the source file the site builds it from
+      # and require that file to exist.
+      - |
+        skill=.claude-plugin/devsandbox-config/skills/devsandbox-config/SKILL.md
+        missing=0
+        for path in $(grep -oE 'docs/[a-z0-9][a-z0-9/-]*/' "$skill" | sed -E 's,^docs/,,; s,/$,,' | sort -u); do
+          if [ -f "docs/$path.md" ]; then
+            echo "ok       docs/$path.md"
+          else
+            echo "MISSING  docs/$path.md  (skill fetches .../docs/$path/)"
+            missing=1
+          fi
+        done
+        exit "$missing"
 
   test:e2e:
     deps:

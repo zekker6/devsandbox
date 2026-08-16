@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.19.0...HEAD)
 
+### Added
+
+- The repository is now a Claude Code plugin marketplace with two plugins, installed independently: [`devsandbox-config`](https://github.com/zekker6/devsandbox/tree/main/.claude-plugin/devsandbox-config) answers configuration questions from the current documentation instead of a recalled older release, and [`devsandbox-triage`](https://github.com/zekker6/devsandbox/blob/main/.claude-plugin/devsandbox-triage/README.md) explains a command that failed on a sandbox restriction once, instead of letting the agent retry against the boundary. See [Claude Code plugin](https://github.com/zekker6/devsandbox#claude-code-plugin).
+
 ## [v0.19.0](https://github.com/zekker6/devsandbox/releases/tag/v0.19.0) - 2026-08-13
 
 ### Breaking Changes

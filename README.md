@@ -389,6 +389,25 @@ devsandbox run-agent claude ...     # Wrapper entrypoint: re-enter the sandbox
 devsandbox image build              # Build Docker image (macOS)
 ```
 
+## Claude Code plugin
+
+The repository doubles as a [Claude Code](https://code.claude.com/docs/) plugin marketplace with two plugins, installed independently:
+
+```
+/plugin marketplace add zekker6/devsandbox
+/plugin install devsandbox-config@devsandbox
+/plugin install devsandbox-triage@devsandbox
+```
+
+| Plugin | What it adds |
+|---|---|
+| `devsandbox-config` | A skill that answers configuration questions by fetching this site's documentation, rather than recalling an older release |
+| `devsandbox-triage` | A Bash tool hook that recognizes a failing command as one of devsandbox's restrictions and names the setting or document that explains it |
+
+Ask the first in plain language - "which key lets the agent commit?", "how do I allow only github.com?", "why is my `keep_containers` setting ignored?". Answers cite the page and section they came from, and a setting that does not exist is reported as missing instead of invented. It reads the pages under `https://zekker6.github.io/devsandbox/docs/` at the time it answers, so it needs network; without one it says so rather than guessing. Inside a devsandbox checkout it reads the local `docs/` instead, which match the code in front of you.
+
+The second stays quiet until a command fails on something the sandbox blocks - a read-only `.git`, an unmounted `~/.ssh`, a request the proxy filter refused - and then explains the cause once instead of letting the agent retry against the boundary. It matches a fixed table of signatures taken from devsandbox's own sources and emits nothing on anything it does not recognize. Needs `jq`; see [its README](https://github.com/zekker6/devsandbox/blob/main/.claude-plugin/devsandbox-triage/README.md).
+
 ## Documentation
 
 | Page | Contents |

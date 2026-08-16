@@ -1,0 +1,17 @@
+{
+  "name": "devsandbox-config",
+  "description": "Answer devsandbox configuration questions from the published documentation instead of from memory",
+  "author": {
+    "name": "Zakhar Besarab"
+  },
+  "homepage": "https://zekker6.github.io/devsandbox/docs/",
+  "repository": "https://github.com/zekker6/devsandbox",
+  "license": "MIT",
+  "keywords": [
+    "devsandbox",
+    "sandbox",
+    "configuration",
+    "toml",
+    "isolation"
+  ]
+}

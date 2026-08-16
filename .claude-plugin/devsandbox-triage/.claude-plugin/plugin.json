@@ -1,0 +1,16 @@
+{
+  "name": "devsandbox-triage",
+  "description": "Recognize command failures caused by devsandbox's isolation and point at the setting or document that explains them",
+  "author": {
+    "name": "Zakhar Besarab"
+  },
+  "homepage": "https://zekker6.github.io/devsandbox/docs/",
+  "repository": "https://github.com/zekker6/devsandbox",
+  "license": "MIT",
+  "keywords": [
+    "devsandbox",
+    "sandbox",
+    "troubleshooting",
+    "hooks"
+  ]
+}
