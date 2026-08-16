@@ -242,9 +242,11 @@ jq_missing_case() {
 	[ "$with_data" = 1 ] && extra=("CLAUDE_PLUGIN_DATA=$tmp/data")
 	err="$tmp/err"
 	# Absolute path to bash: PATH holds only the stubbed utilities, so env
-	# itself could not resolve the interpreter.
-	got1=$(env -i PATH="$bin" TMPDIR="$tmp" HOME="$tmp" "${extra[@]}" "$BASH" "$HOOK" </dev/null 2>"$err")
-	got2=$(env -i PATH="$bin" TMPDIR="$tmp" HOME="$tmp" "${extra[@]}" "$BASH" "$HOOK" </dev/null 2>>"$err")
+	# itself could not resolve the interpreter. ${extra[@]+...} rather than a
+	# bare "${extra[@]}" because bash 3.2 - what macOS ships, and what CI runs
+	# there - counts an empty array as unset under `set -u`.
+	got1=$(env -i PATH="$bin" TMPDIR="$tmp" HOME="$tmp" ${extra[@]+"${extra[@]}"} "$BASH" "$HOOK" </dev/null 2>"$err")
+	got2=$(env -i PATH="$bin" TMPDIR="$tmp" HOME="$tmp" ${extra[@]+"${extra[@]}"} "$BASH" "$HOOK" </dev/null 2>>"$err")
 	jq -e '.systemMessage | test("jq is not on PATH")' >/dev/null 2>&1 <<<"$got1" || {
 		ok=0
 		echo "      first run did not report: ${got1:-<empty>}"
