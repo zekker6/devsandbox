@@ -1,6 +1,6 @@
 # devsandbox-triage
 
-A `PostToolUse` hook that recognizes a failing Bash command as one of devsandbox's documented restrictions and hands the model the setting or document that explains it.
+A Bash tool hook that recognizes a failing command as one of devsandbox's documented restrictions and hands the model the setting or document that explains it.
 
 Install it separately from the `devsandbox-config` plugin, which carries the configuration skill:
 
@@ -21,6 +21,10 @@ Two tiers, separated by how much the signature proves on its own:
 | Ambient | only when `$DEVSANDBOX` is set or the command invoked `devsandbox` | `Read-only file system`, `Permission denied (publickey)`, cloud SDK credential errors |
 
 An ambient signature is an ordinary kernel or tool error that means nothing on its own, which is why it needs the context gate. A named one identifies devsandbox by itself.
+
+## Events
+
+Registered on both `PostToolUse` and `PostToolUseFailure`, because a signature lands on either. A non-zero exit makes Claude Code treat the tool call as failed, so `docker run` against the proxied socket arrives on `PostToolUseFailure` with the output in `error`; a command that does not check the status - `curl` without `-f` prints the proxy's 403 body and still exits 0 - arrives on `PostToolUse` with the output in `tool_response`. Registering only the first would miss every blocked request that a tool reports in its body rather than its exit code.
 
 The note always ends by telling the model not to work around the boundary, and to report the restriction to the user instead. Whether to loosen a sandbox restriction is the user's decision, not the agent's.
 

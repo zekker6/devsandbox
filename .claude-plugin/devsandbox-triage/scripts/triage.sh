@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 #
-# PostToolUse triage. Recognizes a failing Bash command as one of devsandbox's
+# Bash tool triage. Recognizes a failing Bash command as one of devsandbox's
 # documented restrictions and tells the model which setting or document
 # explains it. Matches a fixed signature table and stays silent on anything it
 # does not recognize, so an ordinary failure costs nothing.
+#
+# Registered on both PostToolUse and PostToolUseFailure. A non-zero exit makes
+# Claude Code throw, which routes to PostToolUseFailure; the two events carry
+# the command output in different fields, and a signature can land on either -
+# a proxy-refused `curl` without -f prints the 403 body and still exits 0.
 
 set -uo pipefail
 
@@ -12,19 +17,47 @@ payload=$(cat)
 if ! command -v jq >/dev/null 2>&1; then
 	# A hook that cannot parse its input must say so once rather than fail
 	# silently, but it runs on every Bash call, so the notice is stamped.
-	marker="${CLAUDE_PLUGIN_DATA:-}/jq-missing-reported"
-	if [ -z "${CLAUDE_PLUGIN_DATA:-}" ] || [ ! -e "$marker" ]; then
-		[ -n "${CLAUDE_PLUGIN_DATA:-}" ] && mkdir -p "${CLAUDE_PLUGIN_DATA}" 2>/dev/null && : >"$marker"
+	# CLAUDE_PLUGIN_DATA is the durable spot; $TMPDIR keeps "once" true when
+	# the hook runs somewhere that does not set it, which is otherwise a
+	# notice on every command. The uid suffix stops one user's marker in a
+	# shared /tmp from silencing everyone else's.
+	dir="${CLAUDE_PLUGIN_DATA:-${TMPDIR:-/tmp}}"
+	marker="$dir/devsandbox-triage-jq-missing.${UID:-0}"
+	if [ ! -e "$marker" ]; then
+		mkdir -p "$dir" 2>/dev/null
+		: >"$marker" 2>/dev/null
 		printf '%s\n' '{"systemMessage":"devsandbox-triage: jq is not on PATH, so sandbox error triage is disabled. Install jq to enable it."}'
 	fi
 	exit 0
 fi
 
-tool=$(jq -r '.tool_name // ""' <<<"$payload")
+# Malformed input is a silent no-op, not a stderr complaint: the hook runs on
+# every Bash call and its whole contract is to cost nothing when it does not
+# recognize what it was given.
+event=$(jq -r '.hook_event_name // "PostToolUse"' <<<"$payload" 2>/dev/null) || exit 0
+case "$event" in
+PostToolUse | PostToolUseFailure) ;;
+*) exit 0 ;;
+esac
+
+tool=$(jq -r '.tool_name // ""' <<<"$payload" 2>/dev/null) || exit 0
 [ "$tool" = "Bash" ] || exit 0
 
-cmd=$(jq -r '.tool_input.command // ""' <<<"$payload")
-out=$(jq -r '.tool_output | if type == "object" then (.text // tostring) else (. // "" | tostring) end' <<<"$payload")
+cmd=$(jq -r '.tool_input.command? // ""' <<<"$payload" 2>/dev/null) || exit 0
+
+# PostToolUseFailure carries the shell error - "Exit code N", stderr, stdout -
+# in .error and has no .tool_response. PostToolUse carries {stdout, stderr}
+# in .tool_response.
+out=$(jq -r '
+	if (.error // null) != null then
+		.error | if type == "string" then . else tostring end
+	else
+		.tool_response
+		| if type == "object" then
+			[(.stdout? // ""), (.stderr? // "")] | map(select(. != "")) | join("\n")
+		elif type == "string" then .
+		else "" end
+	end' <<<"$payload" 2>/dev/null) || exit 0
 
 [ -n "$out" ] || exit 0
 
@@ -69,7 +102,11 @@ Check: $4"
 	body="$body
 
 This is a signature match, not a diagnosis - confirm it fits before acting. Do not work around the sandbox boundary; report the restriction and the fix to the user and let them decide. For the exact configuration key, use the devsandbox-config skill if it is installed."
-	jq -n --arg t "$body" '{additionalContext: $t}'
+	# additionalContext reaches the model only under hookSpecificOutput, keyed
+	# by the event that fired; a bare top-level key fails schema validation and
+	# is dropped.
+	jq -n --arg t "$body" --arg e "$event" \
+		'{hookSpecificOutput: {hookEventName: $e, additionalContext: $t}}'
 	exit 0
 }
 

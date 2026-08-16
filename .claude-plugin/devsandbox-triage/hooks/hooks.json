@@ -11,6 +11,18 @@
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/triage.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
