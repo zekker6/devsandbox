@@ -493,8 +493,6 @@ Each log entry contains:
     ]
   },
   "req_body": "eyJ1c2VyIjogImpvaG4ifQ==",
-  "req_headers_truncated": false,
-  "req_body_truncated": false,
   "status": 201,
   "resp_headers": {
     "Content-Type": [
@@ -502,17 +500,19 @@ Each log entry contains:
     ]
   },
   "resp_body": "eyJpZCI6IDEyM30=",
-  "resp_headers_truncated": false,
-  "resp_body_truncated": false,
-  "duration_ns": 89000000,
-  "error": ""
+  "duration_ns": 89000000
 }
 ```
 
-Note: Request/response bodies are base64-encoded. The four `*_truncated` flags say
-whether the recorded copy was cut by a bound - see
-[Body Capture Limit](#body-capture-limit) - so a short body and a clipped one stay
-distinguishable when parsing logs.
+Note: Request/response bodies are base64-encoded. Four `*_truncated` flags -
+`req_headers_truncated`, `req_body_truncated`, `resp_headers_truncated` and
+`resp_body_truncated` - say whether the recorded copy was cut by a bound, see
+[Body Capture Limit](#body-capture-limit), so a short body and a clipped one stay
+distinguishable when parsing logs. They appear only as `true`: each is omitted
+from the entry when nothing was cut, as above, so a parser must read an absent
+flag as false rather than expecting the key. The same holds for every other
+optional field - `error`, `status`, `filter_action`, `redaction_matches` and the
+rest are absent rather than zero-valued when they do not apply.
 
 In transparent mode (`mitm = false`) each HTTPS tunnel produces one entry with
 `"method": "CONNECT"`, the URL `https://<host>:<port>`, and the filter decision.

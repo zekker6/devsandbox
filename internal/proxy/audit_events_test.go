@@ -333,3 +333,67 @@ func TestRequestLogger_RequestCount(t *testing.T) {
 		t.Errorf("count after 5 Log calls = %d, want 5", got)
 	}
 }
+
+// The host on every audit event has to be spelled the way the filter decision
+// spells it, or a query joining the events for one request on `host` - which is
+// what the field exists for - silently drops the ones that differ. goproxy
+// rebuilds req.URL from the CONNECT target, which always carries a port, so the
+// port case is not an edge case: it is every intercepted HTTPS request.
+func TestAuditEventHostsAgreeWithFilterDecision(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		reqHost string
+		want    string
+	}{
+		{"port from the CONNECT target", "https://api.example.com:443/v1/x", "api.example.com", "api.example.com"},
+		{"uppercase authority", "https://API.Example.COM/v1/x", "API.Example.COM", "api.example.com"},
+		{"trailing dot", "https://api.example.com./v1/x", "api.example.com.", "api.example.com"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, mw := newServerWithAuditWriter(t, true)
+			req := reqFor(t, "POST", tc.rawURL)
+			req.Host = tc.reqHost
+
+			s.emitFilterDecision(req, FilterDecision{Action: FilterActionBlock})
+			s.emitRedactionApplied(req, &RedactionResult{
+				Matched: true,
+				Matches: []RedactionMatch{{RuleName: "openai_key", Location: "body"}},
+			})
+			s.emitCredentialInjected(NormalizeHost(RequestHost(req)), "gh", "Authorization")
+
+			got := mw.snapshot()
+			if len(got) != 3 {
+				t.Fatalf("got %d entries, want 3", len(got))
+			}
+			for _, e := range got {
+				if e.Fields["host"] != tc.want {
+					t.Errorf("%v host = %v, want %v", e.Fields["event"], e.Fields["host"], tc.want)
+				}
+			}
+		})
+	}
+}
+
+// RequestHost reads the authority the request is sent to, never the Host header
+// the sandbox wrote. An audit event recording the header would describe a
+// destination the connection never had.
+func TestAuditEventHostIgnoresHostHeader(t *testing.T) {
+	s, mw := newServerWithAuditWriter(t, false)
+	req := reqFor(t, "POST", "https://evil.example.com:443/x")
+	req.Host = "allowed.example.com"
+
+	s.emitRedactionApplied(req, &RedactionResult{
+		Matched: true,
+		Matches: []RedactionMatch{{RuleName: "openai_key", Location: "body"}},
+	})
+
+	got := mw.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	if got[0].Fields["host"] != "evil.example.com" {
+		t.Errorf("host = %v, want evil.example.com (the authority dialed)", got[0].Fields["host"])
+	}
+}

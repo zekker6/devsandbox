@@ -449,11 +449,7 @@ func (s *Server) setupLogging() {
 		for _, injector := range s.credentialInjectors {
 			if injector.Match(req) {
 				if injector.Inject(req) {
-					host := req.URL.Host
-					if host == "" {
-						host = req.Host
-					}
-					s.emitCredentialInjected(host, injector.Name(), injector.Header())
+					s.emitCredentialInjected(NormalizeHost(RequestHost(req)), injector.Name(), injector.Header())
 				}
 				break // first match wins
 			}

@@ -67,10 +67,9 @@ func (s *Server) emitRedactionApplied(req *http.Request, result *RedactionResult
 	if s == nil || s.dispatcher == nil || result == nil || !result.Matched {
 		return
 	}
-	host := req.URL.Host
-	if host == "" {
-		host = req.Host
-	}
+	// Canonicalized through the same helpers as proxy.filter.decision so the
+	// two events for one request can be joined on `host`. See RequestHost.
+	host := NormalizeHost(RequestHost(req))
 	for _, m := range result.Matches {
 		_ = s.dispatcher.Event(logging.LevelInfo, "proxy.redaction.applied", map[string]any{
 			"host":        host,
@@ -84,6 +83,11 @@ func (s *Server) emitRedactionApplied(req *http.Request, result *RedactionResult
 // emitCredentialInjected sends a proxy.credential.injected event when a
 // credential injector successfully adds an auth header. Includes only the
 // injector name and the header name — never the credential value.
+//
+// host must already be canonical: like emitMITMBypass, this takes the host as a
+// string rather than a request, so the caller reads it via RequestHost and
+// canonicalizes it via NormalizeHost. The emitters taking a *http.Request do
+// that themselves.
 func (s *Server) emitCredentialInjected(host, injector, headerName string) {
 	if s == nil || s.dispatcher == nil {
 		return
