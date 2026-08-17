@@ -240,7 +240,7 @@ func applySetMode(cmd *cobra.Command, homeDir string, sandboxNames []string, too
 // For --all-sandboxes the enumeration goes through sandbox.ListSandboxes rather
 // than reading the base directory directly, so it applies the same notion of
 // "this is a sandbox" the rest of the CLI does. Reading the directory raw
-// included the `.removing-` trees RemoveSandboxIfIdle renames a sandbox to
+// included the `.removing` directory RemoveSandboxIfIdle renames a sandbox into
 // before deleting it, so a migration could read the upper of a sandbox being
 // deleted - or one an interrupted removal left staged.
 func resolveSandboxes(homeDir string, f *overlayMigrateFlags) ([]string, error) {

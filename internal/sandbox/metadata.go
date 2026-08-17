@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"devsandbox/internal/fsutil"
@@ -173,10 +172,13 @@ func ListSandboxes(baseDir string) ([]*Metadata, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		// A sandbox RemoveSandboxIfIdle has renamed aside is being deleted, not
-		// used: reporting it would offer the user a sandbox that is about to
-		// stop existing, and sizing it would walk a tree shrinking underneath.
-		if strings.HasPrefix(entry.Name(), removalStagingPrefix) {
+		// The directory RemoveSandboxIfIdle renames sandboxes into before
+		// deleting them holds trees that are being removed, not used: reporting
+		// one would offer the user a sandbox that is about to stop existing, and
+		// sizing it would walk a tree shrinking underneath. One a kill stranded
+		// is reclaimed by ListAbandonedStaging instead, so skipping here does
+		// not make it permanent.
+		if entry.Name() == stagingDirName {
 			continue
 		}
 

@@ -835,9 +835,10 @@ started before it.
 
 Sandbox state is removed only when no other session is still using it. Because a
 concurrent session's lower layers are that state, deleting it would take the
-running session with it; the removal is skipped and reported instead. A primary
-`--rm --worktree` run still removes its worktree even when the state removal is
-skipped; a concurrent one removes neither.
+running session with it; the removal is skipped and reported instead. The
+worktree is removed on the same answer: when another session still holds the
+sandbox, a `--rm --worktree` run leaves both the state and the checkout in
+place, whether it was the primary session or a concurrent one.
 
 **Managing Containers:**
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -157,7 +158,16 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				return err
 			}
 
-			if len(sandboxes) == 0 {
+			// Trees a killed teardown stranded between the rename and the
+			// delete. Every listing path skips them by design, so prune is the
+			// only thing that can reclaim them - and they are reclaimable even
+			// when no sandbox is left to prune.
+			stranded, err := sandbox.ListAbandonedStaging(baseDir)
+			if err != nil {
+				notice.Warn("failed to scan for interrupted removals: %v", err)
+			}
+
+			if len(sandboxes) == 0 && len(stranded) == 0 {
 				fmt.Println("No sandboxes found.")
 				return nil
 			}
@@ -167,7 +177,7 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				s.Active = sandbox.IsSessionActive(s.SandboxRoot)
 			}
 
-			// Parse duration
+			// Parse duration for pruning
 			var duration time.Duration
 			if olderThan != "" {
 				var err error
@@ -187,7 +197,7 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 
 			toPrune := sandbox.SelectForPruning(sandboxes, opts)
 
-			if len(toPrune) == 0 {
+			if len(toPrune) == 0 && len(stranded) == 0 {
 				fmt.Println("No sandboxes to prune.")
 				return nil
 			}
@@ -224,8 +234,20 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				totalSize += s.SizeBytes
 			}
 
+			strandedSizes := make([]int64, len(stranded))
+			for i, path := range stranded {
+				size, err := sandbox.GetSandboxSize(path)
+				if err != nil {
+					notice.Warn("failed to calculate size for %s: %v", filepath.Base(path), err)
+				}
+				strandedSizes[i] = size
+				totalSize += size
+			}
+
 			// Show what will be removed
-			fmt.Printf("Sandboxes to remove (%d):\n\n", len(toPrune))
+			if len(toPrune) > 0 {
+				fmt.Printf("Sandboxes to remove (%d):\n\n", len(toPrune))
+			}
 			for _, s := range toPrune {
 				status := ""
 				if s.Orphaned {
@@ -245,6 +267,16 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 					fmt.Printf("    Size: %s\n", sandbox.FormatSize(s.SizeBytes))
 				}
 				fmt.Println()
+			}
+			if len(stranded) > 0 {
+				fmt.Printf("Interrupted removals to reclaim (%d):\n\n", len(stranded))
+				for i, path := range stranded {
+					fmt.Printf("  %s\n", filepath.Base(path))
+					if strandedSizes[i] > 0 {
+						fmt.Printf("    Size: %s\n", sandbox.FormatSize(strandedSizes[i]))
+					}
+					fmt.Println()
+				}
 			}
 			if totalSize > 0 {
 				fmt.Printf("Total: %s\n\n", sandbox.FormatSize(totalSize))
@@ -306,7 +338,20 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				}
 			}
 
+			var reclaimed int
+			for _, path := range stranded {
+				if err := sandbox.RemoveSandbox(path); err != nil {
+					notice.Error("Failed to reclaim %s: %v", filepath.Base(path), err)
+					failed++
+				} else {
+					reclaimed++
+				}
+			}
+
 			fmt.Printf("Removed %d sandbox(es)", removed)
+			if reclaimed > 0 {
+				fmt.Printf(", reclaimed %d interrupted removal(s)", reclaimed)
+			}
 			if failed > 0 {
 				fmt.Printf(", %d failed", failed)
 			}

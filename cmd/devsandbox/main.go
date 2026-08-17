@@ -488,7 +488,10 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 			handle := worktreeHandle
 			repoRoot := worktreeRepoRoot
 			removeWorktree = func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				// The same bound acquireSharedLock sizes its wait from: this
+				// runs under the sandbox's exclusive lock, so a launch racing
+				// the teardown has to be able to outwait it.
+				ctx, cancel := context.WithTimeout(context.Background(), sandbox.TeardownGracePeriod)
 				defer cancel()
 				mgr := worktree.NewManager()
 				if err := mgr.Remove(ctx, repoRoot, handle.Path); err != nil {
@@ -827,11 +830,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 // sandbox and removes the state, unless another session is still holding it.
 // A concurrent session that started after this one is still live at exit and
 // its overlay lower layers are exactly the state --rm would delete.
-// removeSandboxOnExit performs the --rm teardown. beforeRemove, when non-nil,
-// is the worktree removal: it has to run before the sandbox root goes, because
-// the worktree sits under it, and it must not run at all unless the sandbox is
-// idle - so it goes through RemoveSandboxIfIdle's own liveness gate rather than
-// being ordered ahead of it by a second defer.
+//
+// beforeRemove, when non-nil, is the worktree removal: it has to run before the
+// sandbox root goes, because the worktree sits under it, and it must not run at
+// all unless the sandbox is idle - so it goes through RemoveSandboxIfIdle's own
+// liveness gate rather than being ordered ahead of it by a second defer.
 func removeSandboxOnExit(handle *sandbox.SessionHandle, sandboxRoot string, beforeRemove func()) {
 	// Released here rather than left to the deferred release registered at
 	// acquisition time: that defer runs after this one (LIFO), so the liveness

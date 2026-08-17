@@ -201,9 +201,25 @@ overlay": the builder's overlay routing, and the concurrent-session notice. The 
 **A removal renames before it deletes.** The exclusive lock does not hold a launch off on its own: `RemoveAll` unlinks
 `.lock` as an ordinary entry, and `acquireSharedLock` reopens the path with `O_CREATE` on every retry - so the moment the
 file is gone a waiting launch creates a fresh inode, flocks it, conflicts with nothing, is designated primary, and runs
-against a root still being deleted. `RemoveSandboxIfIdle` renames the tree to `.removing-<name>-<pid>` under the lock and
+against a root still being deleted. `RemoveSandboxIfIdle` renames the tree to `.removing/<name>-<pid>` under the lock and
 deletes it afterwards, so the name vanishes atomically and the slow chmod walk runs off the path nobody is racing.
-`ListSandboxes` skips that prefix, or a removal in flight reads as a sandbox.
+`ListSandboxes` skips `.removing` by exact name, or a removal in flight reads as a sandbox.
+
+**Staging is a directory, not a name prefix, and the difference is a data-loss bug.** Staging beside the sandboxes as
+`.removing-<name>-<pid>` puts both in one namespace, and no test over a name separates them: a bare prefix check also
+hides a real sandbox whose project basename starts with `.removing-`, leaving it unlistable and unprunable, and the
+obvious repair - also requiring a trailing `-<pid>` - is worse, because a sandbox directory is `<basename>-<8 hex>` and
+roughly one hash in 43 is all decimal digits. Such a sandbox then parses as a staged removal whose pid is above any
+`pid_max`, so `ListAbandonedStaging` reports live state and `prune` deletes it. Inside `.removing/` there is nothing but
+staged trees, so `stagedPID` reads the pid suffix without inferring anything about the name in front of it. Anything that
+reclaims stranded state must keep that property rather than reintroduce a shape test.
+
+**The staging root is created once and never removed.** It is shared across the whole sandbox base, so an rmdir that
+fires when it looks empty races a teardown for a *different* project: that one's `MkdirAll` is a no-op against the
+existing directory, and between it returning and its `os.Rename` issuing there is nothing staged for the first teardown
+to see. The rmdir then succeeds, the rename fails ENOENT, and that teardown reports a failed removal having already run
+`beforeRemove` - which deletes the `--worktree` checkout - and released its lock. An empty directory `ListSandboxes`
+skips by name costs nothing; tidying it up costs a half-applied `--rm`.
 
 ## Platform-specific packages
 

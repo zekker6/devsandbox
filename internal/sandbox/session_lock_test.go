@@ -395,16 +395,30 @@ func TestRemoveSandboxIfIdle_LeavesNothingListable(t *testing.T) {
 		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
 	}
 
+	// Nothing of the sandbox survives. The staging directory itself does, and
+	// deliberately: reclaiming it races a concurrent teardown for a different
+	// project, so it stays as a fixed part of the base layout and must be empty
+	// rather than absent.
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
+		if e.Name() == stagingDirName {
+			staged, err := os.ReadDir(filepath.Join(base, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range staged {
+				t.Errorf("removal left %q staged behind", s.Name())
+			}
+			continue
+		}
 		t.Errorf("removal left %q behind in the sandbox base directory", e.Name())
 	}
 
 	// And a staging directory that outlives a killed removal is not a sandbox.
-	staged := filepath.Join(base, removalStagingPrefix+"sandbox-999")
+	staged := filepath.Join(base, stagingDirName, "sandbox-999")
 	if err := os.MkdirAll(staged, 0o755); err != nil {
 		t.Fatal(err)
 	}

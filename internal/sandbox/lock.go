@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -124,7 +126,7 @@ func acquireDesignationGate(sandboxRoot string) (*os.File, error) {
 	path := filepath.Join(sandboxRoot, PrimaryLockFileName)
 
 	var lastErr error
-	for attempt := range sharedLockRetries {
+	for attempt := range designationGateRetries {
 		if attempt > 0 {
 			time.Sleep(sharedLockRetryDelay)
 		}
@@ -230,10 +232,40 @@ func (c *Config) DesignateSession() (*SessionHandle, error) {
 	return handle, nil
 }
 
-// removalStagingPrefix names the directory RemoveSandboxIfIdle renames a
-// sandbox to before deleting it. ListSandboxes skips the prefix so a removal in
-// flight - or one a kill left half-done - is not reported as a sandbox.
-const removalStagingPrefix = ".removing-"
+// stagingDirName is the one directory under the sandbox base that holds trees
+// renamed aside for deletion. ListSandboxes skips it by exact name, so a
+// removal in flight - or one a kill left half-done - is not reported as a
+// sandbox.
+//
+// A directory rather than a sibling `.removing-<name>` prefix, because a prefix
+// shares a namespace with the sandboxes themselves and no test over a name can
+// separate the two reliably. A bare prefix check also hides a real sandbox whose
+// project basename begins with the prefix, leaving it unlistable and unprunable;
+// adding a trailing-pid check to fix that is worse, since a sandbox directory is
+// `<basename>-<8 hex>` and roughly one hash in 43 is all decimal digits - so
+// such a sandbox parses as a staged removal whose pid is above any pid_max, and
+// prune deletes live state. Inside this directory nothing but staged trees
+// exists, so the pid suffix can be read without inferring anything about the
+// name in front of it. `.removing` cannot collide with a sandbox directory,
+// which always carries the `-<8 hex>` suffix GenerateSandboxName appends.
+//
+// It is created on the first teardown and never removed - see
+// RemoveSandboxIfIdle for why reclaiming it races a concurrent teardown.
+const stagingDirName = ".removing"
+
+// stagedPID returns the pid of the teardown that staged an entry of the staging
+// directory. Only called for entries inside stagingDirName.
+func stagedPID(name string) (int, bool) {
+	i := strings.LastIndexByte(name, '-')
+	if i <= 0 {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(name[i+1:])
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
 
 // RemoveSandboxIfIdle removes the sandbox state only while no session holds it,
 // and reports whether it removed anything.
@@ -277,8 +309,15 @@ func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) 
 		beforeRemove()
 	}
 
-	staged := filepath.Join(filepath.Dir(sandboxRoot),
-		fmt.Sprintf("%s%s-%d", removalStagingPrefix, filepath.Base(sandboxRoot), os.Getpid()))
+	baseDir := filepath.Dir(sandboxRoot)
+	stagingRoot := filepath.Join(baseDir, stagingDirName)
+	if err := os.MkdirAll(stagingRoot, 0o755); err != nil {
+		_ = lock.Close()
+		return false, fmt.Errorf("failed to create removal staging directory: %w", err)
+	}
+
+	staged := filepath.Join(stagingRoot,
+		fmt.Sprintf("%s-%d", filepath.Base(sandboxRoot), os.Getpid()))
 	renameErr := os.Rename(sandboxRoot, staged)
 	// Released before the removal: the name it guards no longer exists, and
 	// holding it across the walk only lengthens the window nothing is watching.
@@ -290,17 +329,87 @@ func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) 
 	if err := RemoveSandbox(staged); err != nil {
 		return false, err
 	}
+	// The staging root is deliberately left in place. Removing it when it looks
+	// empty races another teardown for a different project under the same base:
+	// that one's MkdirAll is a no-op against the directory this one created, and
+	// between its MkdirAll returning and its rename issuing there is nothing
+	// staged here to see - so the rmdir succeeds and its rename then fails
+	// ENOENT, after it has already run beforeRemove and released its lock. It
+	// would report a failed removal having already deleted the worktree. An
+	// empty directory ListSandboxes skips by name is the cheaper outcome.
 	return true, nil
 }
 
+// ListAbandonedStaging returns the removal staging trees under baseDir whose
+// teardown is no longer running.
+//
+// RemoveSandboxIfIdle renames a sandbox aside before deleting it, so a kill
+// between the rename and the delete strands the tree under a name every listing
+// path deliberately skips. Without this it is invisible to `sandboxes list`, to
+// prune and to `overlay --all-sandboxes` at once, and nothing ever reclaims the
+// disk. The pid in the name is what tells a stranded tree apart from a removal
+// still in flight, which must be left to the process doing it.
+func ListAbandonedStaging(baseDir string) ([]string, error) {
+	stagingRoot := filepath.Join(baseDir, stagingDirName)
+	entries, err := os.ReadDir(stagingRoot)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read removal staging directory: %w", err)
+	}
+
+	var abandoned []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, ok := stagedPID(entry.Name())
+		if !ok || processAlive(pid) {
+			continue
+		}
+		abandoned = append(abandoned, filepath.Join(stagingRoot, entry.Name()))
+	}
+	return abandoned, nil
+}
+
+// processAlive reports whether a process with the given PID exists. Signal 0
+// performs the permission and existence checks without delivering anything.
+func processAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+}
+
+// TeardownGracePeriod bounds the work RemoveSandboxIfIdle runs while holding
+// the sandbox exclusively - in practice the --rm worktree removal, which
+// beforeRemove carries and which is capped at exactly this. It is exported so
+// that cap and the wait below are one number: a shared-lock budget shorter than
+// the teardown it must outlast aborts the very launch the retry exists for.
+const TeardownGracePeriod = 30 * time.Second
+
 // sharedLockRetries and sharedLockRetryDelay bound the wait for the exclusive
 // holders a launch legitimately races: a --rm teardown, which holds the lock
-// across a chmod walk and a recursive removal, and the momentary probes
-// IsSessionActive and the primary designation take. Failing outright is what a
-// launch issued straight after `devsandbox --rm ...` used to hit.
+// across beforeRemove, and the momentary probes IsSessionActive and the primary
+// designation take. Failing outright is what a launch issued straight after
+// `devsandbox --rm ...` used to hit.
+//
+// The budget covers TeardownGracePeriod rather than a round number. The
+// teardown's slow half - the chmod walk and recursive delete over the Go module
+// and npm caches - runs after the rename and off the lock, but beforeRemove
+// does not, and `git worktree remove --force` over a checkout carrying build
+// artifacts is not bounded by anything smaller.
 const (
-	sharedLockRetries    = 50
 	sharedLockRetryDelay = 40 * time.Millisecond
+	// +1 because the first attempt does not sleep, so N attempts wait N-1 delays.
+	sharedLockRetries = int(TeardownGracePeriod/sharedLockRetryDelay) + 1
+
+	// designationGateRetries bounds a different wait: the gate is held only
+	// across two flock calls and a file open, never across a teardown, so it
+	// does not inherit the budget above.
+	designationGateRetries = 50
 )
 
 // acquireSharedLock takes one of the locks a session holds for its lifetime,
@@ -343,10 +452,38 @@ func acquireSharedLock(sandboxRoot, name string) (*os.File, error) {
 			return nil, fmt.Errorf("failed to acquire lock: %w", err)
 		}
 
+		// A successful flock says nothing about whether the descriptor still
+		// lives at lockPath. RemoveSandboxIfIdle renames the root aside and only
+		// then releases its own lock, so an open that lands before that rename
+		// and a flock that lands after it succeed against the lock inode inside
+		// the .removing-* tree: the session would hold a lock on a directory
+		// that is being deleted, and acquireDesignationGate then fails ENOENT
+		// opening .primary.lock under a parent nothing recreates. Retrying is
+		// the fix, because the next attempt's open gets ENOENT and rebuilds the
+		// root.
+		if !sameFileAt(lockPath, f) {
+			_ = f.Close()
+			lastErr = fmt.Errorf("%w: %s was renamed aside mid-acquire", ErrSandboxBusy, sandboxRoot)
+			continue
+		}
+
 		return f, nil
 	}
 
 	return nil, lastErr
+}
+
+// sameFileAt reports whether path still names the inode f holds open.
+func sameFileAt(path string, f *os.File) bool {
+	atPath, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return os.SameFile(atPath, held)
 }
 
 // acquireExclusiveLock opens path and takes a non-blocking exclusive flock on

@@ -89,7 +89,7 @@ func TestOverlayMigrate_AllSandboxes_EmptyReportsNone(t *testing.T) {
 func TestResolveSandboxes_AllSkipsRemovalStaging(t *testing.T) {
 	home := t.TempDir()
 	base := sandbox.SandboxBasePath(home)
-	for _, name := range []string{"alpha", ".removing-beta-1234", "gamma"} {
+	for _, name := range []string{"alpha", filepath.Join(".removing", "beta-1234"), "gamma"} {
 		if err := os.MkdirAll(filepath.Join(base, name, "home"), 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
