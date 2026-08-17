@@ -102,7 +102,10 @@ func TestFilter_LaunchPayload_AllowsInertOptions(t *testing.T) {
 
 // `match` selects the tab the new window lands in, so it is anchored to the
 // host window devsandbox itself is running in (KITTY_WINDOW_ID) rather than
-// left free-form.
+// left free-form. `window_id:` is the tab-match field naming the tab that
+// contains a given window; `id:` is denied here because in a tab match it
+// means a tab id, which has nothing to do with KITTY_WINDOW_ID. This is the
+// one command whose grammar differs from decideOwnedMutation's - see vet.
 func TestFilter_LaunchPayload_MatchAnchoredToHostWindow(t *testing.T) {
 	f := NewFilter(FilterConfig{
 		Capabilities:   []Capability{CapLaunchOverlay},
@@ -133,7 +136,9 @@ func TestFilter_LaunchPayload_MatchAnchoredToHostWindow(t *testing.T) {
 }
 
 // Without a host window id there is nothing to anchor `match` against, so any
-// selector is refused rather than accepted on the sandbox's word.
+// selector is refused rather than accepted on the sandbox's word. The selector
+// is the one a known host window would accept, so this pins the empty-id arm
+// rather than passing on the grammar check.
 func TestFilter_LaunchPayload_MatchDeniedWithoutHostWindow(t *testing.T) {
 	f := launchFilter(t)
 	cmd := mkCmd(t, "launch", map[string]any{
@@ -148,6 +153,11 @@ func TestFilter_LaunchPayload_MatchDeniedWithoutHostWindow(t *testing.T) {
 // launch must still be allowed: kitty serializes its whole option set, not
 // just the options the launcher passed, so a field list that is merely
 // plausible would deny every real launch.
+//
+// What this pins is that field list. The `match` value is not independent
+// evidence of the selector grammar - the fixture is hand-authored, so it can
+// only agree with vet by construction. Settle that question against
+// kitty/rc/launch.py for the pinned KittyPayloadVersion, not against this file.
 func TestFilter_LaunchPayload_KittyCLIPayloadAllowed(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "launch-overlay-kitty-0.46.2.json"))
 	if err != nil {

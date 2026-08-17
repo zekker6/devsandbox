@@ -164,6 +164,16 @@ func (p *launchPayload) vet(hostWindowID string) string {
 		}
 	}
 	if p.Match != "" {
+		// `window_id:`, and deliberately not the `id:` decideOwnedMutation
+		// requires. launch is the one command here that matches a *tab*:
+		// kitty/rc/launch.py imports MATCH_TAB_OPTION, and its protocol_spec
+		// reads "match/str: The tab to open the new window in". In that
+		// grammar `window_id:<id>` names the tab containing window <id>, which
+		// is the narrowing wanted, while `id:` would name a tab by tab id - an
+		// id space unrelated to KITTY_WINDOW_ID. The window-matching commands
+		// (close-window, focus-window, send-text, get-text) take
+		// MATCH_WINDOW_OPTION, where the field is `id`. The two spellings
+		// differing is correct; making them agree breaks this one.
 		if hostWindowID == "" || p.Match != "window_id:"+hostWindowID {
 			return fmt.Sprintf("launch match=%q forbidden (only the host window devsandbox runs in)", p.Match)
 		}

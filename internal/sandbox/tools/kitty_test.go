@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/kittyproxy"
 )
 
@@ -37,9 +38,16 @@ func (fakeKittyConsumer) ShellInit(string) string             { return "" }
 func (fakeKittyConsumer) KittyCapabilities() []kittyproxy.Capability {
 	return []kittyproxy.Capability{kittyproxy.CapLaunchOverlay}
 }
-func (fakeKittyConsumer) KittyLaunchPatterns() []kittyproxy.CommandPattern {
+func (fakeKittyConsumer) KittyLaunchPatterns(cmdpattern.LaunchBounds) []kittyproxy.CommandPattern {
 	return []kittyproxy.CommandPattern{{Program: "revdiff", ArgsMatcher: kittyproxy.MatchAny()}}
 }
+
+// Without this, a signature change on the interface leaves the fake compiling
+// as an ordinary method that no longer implements it: aggregate's type
+// assertion then fails silently, the fake's patterns are dropped, and every
+// test registering it exercises the degraded "any command allowed" branch
+// instead of the pattern path it was written for.
+var _ ToolWithKittyLaunchPatterns = fakeKittyConsumer{}
 
 func TestKitty_Available(t *testing.T) {
 	t.Setenv("KITTY_LISTEN_ON", "")
