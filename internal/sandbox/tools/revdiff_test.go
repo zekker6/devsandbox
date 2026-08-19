@@ -432,14 +432,25 @@ func TestRevdiff_ResolveRevdiffBinRejectsBoundInstall(t *testing.T) {
 	}
 	t.Setenv("PATH", projectBin)
 
-	bounds := cmdpattern.LaunchBounds{SharedTmp: testSharedTmp, ProjectDir: projectDir}
+	// A synthetic shared temp root, so that bound cannot cover the planted
+	// binary by accident: t.TempDir() sits under /tmp whenever TMPDIR is unset,
+	// and testSharedTmp is /tmp - which would make the project-tree rejection
+	// pass for the wrong reason and turn the "outside every bound" case below
+	// into a rejection that looks like the rule working.
+	const (
+		syntheticSharedTmp  = "/run/devsandbox-shared"
+		syntheticProjectDir = "/run/devsandbox-project"
+	)
+
+	bounds := cmdpattern.LaunchBounds{SharedTmp: syntheticSharedTmp, ProjectDir: projectDir}
 	if _, err := resolveRevdiffBin(bounds); err == nil {
 		t.Errorf("resolveRevdiffBin pinned %s, which the sandbox can write", planted)
 	}
 
 	// The counterweight: the same lookup outside every bound must still resolve,
 	// or the check degenerates into denying every install.
-	if _, err := resolveRevdiffBin(cmdpattern.LaunchBounds{SharedTmp: testSharedTmp}); err != nil {
+	outside := cmdpattern.LaunchBounds{SharedTmp: syntheticSharedTmp, ProjectDir: syntheticProjectDir}
+	if _, err := resolveRevdiffBin(outside); err != nil {
 		t.Errorf("resolveRevdiffBin rejected a revdiff outside every bound: %v", err)
 	}
 }
