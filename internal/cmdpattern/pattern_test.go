@@ -118,6 +118,21 @@ const (
 	syntheticProjectDir = "/run/devsandbox-project"
 )
 
+// resolvedTempDir is t.TempDir() with the symlinks in it resolved, so the path
+// it hands back is the one the kernel - and therefore ResolvedSpellings - calls
+// real. On macOS the per-test directory sits under /var, which is a symlink to
+// /private/var, so the raw t.TempDir() spelling is itself an unresolved one and
+// a test comparing against it is asserting the wrong half of the pair.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return dir
+}
+
 // plantEditorOnPath writes an executable named name into a project-local bin
 // directory and puts that directory first on PATH - the virtualenv, direnv or
 // mise bin every real project has, and the reason a bare program name is not by
@@ -892,7 +907,7 @@ func TestMatchShellExecEnvSentinel_AcceptsHostEditorValueVerbatim(t *testing.T) 
 // devsandbox the link's spelling while bwrap binds the target's inode. A bound
 // holding only the link bounds nothing written as the target.
 func TestUntrustedRootsCoversSymlinkedProjectDir(t *testing.T) {
-	real := t.TempDir()
+	real := resolvedTempDir(t)
 	link := filepath.Join(t.TempDir(), "proj-link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlink unsupported here: %v", err)
@@ -925,7 +940,7 @@ func TestResolveRootsDropsEmptyAndDuplicateSpellings(t *testing.T) {
 // so resolution has to stop at the deepest existing ancestor rather than give
 // up and drop the resolved spelling entirely.
 func TestResolvedSpellingsKeepsUnresolvableSuffix(t *testing.T) {
-	real := t.TempDir()
+	real := resolvedTempDir(t)
 	link := filepath.Join(t.TempDir(), "home-link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlink unsupported here: %v", err)
