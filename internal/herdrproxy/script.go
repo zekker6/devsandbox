@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,8 +107,12 @@ func (r *Relocator) Relocate(text string, pat cmdpattern.ScriptPattern) (rewritt
 	if err != nil {
 		return "", true, err
 	}
-	if !pat.MatchesBody(body) {
+	match, ok := pat.MatchBody(body)
+	if !ok {
 		return "", true, fmt.Errorf("launch script does not match the declared pattern")
+	}
+	if err := clearStderrFile(match.StderrFile, pat.Bounds.SentinelRoot()); err != nil {
+		return "", true, err
 	}
 
 	dest, err := r.write(pat.HardenBody(body))
@@ -125,6 +130,51 @@ func (r *Relocator) Relocate(text string, pat cmdpattern.ScriptPattern) (rewritt
 
 // hostShell is the interpreter the relocated script is handed to. See Relocate.
 const hostShell = "/bin/sh"
+
+// clearStderrFile unlinks the file an accepted body redirects stderr into, so
+// the `set -C` prologue HardenBody adds can create it fresh.
+//
+// Neither half works alone. Noclobber refuses a redirect onto an existing path,
+// and the launcher creates this one with mktemp, so hardening it as received
+// fails the redirect, leaves revdiff unrun and reports a shell error in its
+// place. Unlinking without the prologue is the hole the prologue exists for: the
+// path is in the shared temp directory, which the sandbox writes at the spelling
+// the host reads, so a symlink planted there is followed and its target
+// truncated. Together the shell opens the path with O_CREAT|O_EXCL - creating
+// the file when nothing is there, failing when the sandbox re-planted something
+// in between. The launch fails; nothing outside the directory is touched.
+//
+// The removal goes through os.Root because lexical containment bounds the path
+// the body *names*, not the inode this unlink reaches. sentinelAllowed proves
+// no `..` and the right prefix; it proves nothing about an intermediate
+// component being a symlink the sandbox planted, and following one here would
+// hand the sandbox an unlink of any file the invoking user can remove. os.Root
+// refuses to traverse one, so a crafted path fails the launch instead.
+func clearStderrFile(path, root string) error {
+	if path == "" {
+		return nil
+	}
+	// Unreachable for a path MatchBody accepted, which bounds it to a non-empty
+	// root. Kept because the alternative to a bound here is an unlink with none.
+	if root == "" {
+		return fmt.Errorf("herdr relocator: no root bounds the stderr file %q", path)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("herdr relocator: stderr file %q is not inside %q", path, root)
+	}
+
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("herdr relocator: open %q: %w", root, err)
+	}
+	defer func() { _ = dir.Close() }()
+
+	if err := dir.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("herdr relocator: clear stderr file %q: %w", path, err)
+	}
+	return nil
+}
 
 // parseShScript recognizes the `sh <path>` form and returns the path. The path
 // must be absolute and free of characters the shell would act on, since it is

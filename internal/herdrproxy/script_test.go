@@ -465,3 +465,159 @@ func TestNewRelocatorRefusesSymlinkedRelocationRoot(t *testing.T) {
 		t.Errorf("NewRelocator error = %v, want one wrapping ErrSandboxVisible", err)
 	}
 }
+
+// fakeRevdiff writes an executable stand-in for the launched program and
+// returns a pattern pinned to it, bounded to shared.
+func fakeRevdiff(t *testing.T, shared, script string) (string, cmdpattern.ScriptPattern) {
+	t.Helper()
+	prog := filepath.Join(t.TempDir(), "revdiff")
+	if err := os.WriteFile(prog, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake revdiff: %v", err)
+	}
+	return prog, cmdpattern.ScriptPattern{
+		Shebangs: []string{"#!/bin/sh"},
+		Statement: cmdpattern.CommandPattern{
+			Program:     "revdiff",
+			ResolvedBin: prog,
+			ArgsMatcher: cmdpattern.MatchAny(),
+		},
+		Bounds: cmdpattern.LaunchBounds{SharedTmp: shared},
+	}
+}
+
+// redirectBody reproduces a launcher body (v0.8.23+): the command with its
+// stderr redirected to errFile, then the completion-sentinel clause.
+func redirectBody(prog, sentinel, errFile string) string {
+	q := "'" + sentinel + "'"
+	return "#!/bin/sh\n'" + prog + "' '--output=/tmp/o' 2>'" + errFile + "'" +
+		"; rc=$?; printf \"%s\" \"$rc\" > " + q + ".tmp && mv -f " + q + ".tmp " + q + "\n"
+}
+
+// TestRelocatedScriptCapturesStderr runs the relocated script the way herdr
+// does and pins that the launcher's stderr capture still works through the
+// hardening.
+//
+// The two halves fight each other if only one is applied. The launcher creates
+// the file with mktemp, so it exists when the host shell opens it, and `set -C`
+// refuses a redirect onto an existing path: hardened alone, the redirect fails,
+// revdiff never runs, and the sentinel carries a shell error instead of the
+// launch's exit code.
+func TestRelocatedScriptCapturesStderr(t *testing.T) {
+	shared := t.TempDir()
+	sentinel := filepath.Join(shared, "revdiff-done-xyz")
+	errFile := filepath.Join(shared, "revdiff-err-xyz")
+
+	// mktemp creates the file; that is the case this test exists for.
+	if err := os.WriteFile(errFile, nil, 0o600); err != nil {
+		t.Fatalf("pre-create stderr file: %v", err)
+	}
+
+	prog, pattern := fakeRevdiff(t, shared, "#!/bin/sh\necho boom >&2\nexit 10\n")
+
+	r := newTestRelocator(t)
+	got, _, err := r.Relocate("sh "+writeScript(t, redirectBody(prog, sentinel, errFile)), pattern)
+	if err != nil {
+		t.Fatalf("Relocate returned error: %v", err)
+	}
+	if _, err := os.Lstat(errFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Lstat(stderr file) after Relocate = %v, want it removed so the redirect can create it", err)
+	}
+
+	if err := exec.Command(hostShell, relocatedPath(t, got)).Run(); err != nil {
+		t.Fatalf("run relocated script: %v", err)
+	}
+
+	if out, err := os.ReadFile(errFile); err != nil {
+		t.Errorf("read stderr file: %v", err)
+	} else if string(out) != "boom\n" {
+		t.Errorf("stderr file = %q, want %q", out, "boom\n")
+	}
+	if out, err := os.ReadFile(sentinel); err != nil {
+		t.Errorf("read sentinel: %v", err)
+	} else if string(out) != "10" {
+		t.Errorf("sentinel = %q, want the launch's own exit code %q", out, "10")
+	}
+}
+
+// TestRelocatedScriptRefusesPlantedStderrSymlink is
+// TestRelocatedScriptRefusesPlantedSentinelSymlink for the stderr redirect,
+// which truncates its target the same way. Clearing the path before the run is
+// what lets the redirect open it at all, so the noclobber prologue is the only
+// thing standing between a link planted afterwards and the file it names.
+func TestRelocatedScriptRefusesPlantedStderrSymlink(t *testing.T) {
+	shared := t.TempDir()
+	sentinel := filepath.Join(shared, "revdiff-done-xyz")
+	errFile := filepath.Join(shared, "revdiff-err-xyz")
+
+	victim := filepath.Join(t.TempDir(), "bashrc")
+	if err := os.WriteFile(victim, []byte("host content\n"), 0o600); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+
+	prog, pattern := fakeRevdiff(t, shared, "#!/bin/sh\necho boom >&2\nexit 10\n")
+
+	r := newTestRelocator(t)
+	got, _, err := r.Relocate("sh "+writeScript(t, redirectBody(prog, sentinel, errFile)), pattern)
+	if err != nil {
+		t.Fatalf("Relocate returned error: %v", err)
+	}
+
+	// The sandbox plants the link between validation and execution.
+	if err := os.Symlink(victim, errFile); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_ = exec.Command(hostShell, relocatedPath(t, got)).Run()
+
+	after, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim after run: %v", err)
+	}
+	if string(after) != "host content\n" {
+		t.Errorf("the stderr redirect clobbered %s: %q", victim, after)
+	}
+}
+
+// TestRelocateRefusesStderrFileThroughSymlinkedParent covers the unlink itself.
+//
+// The bound the pattern applies is lexical - it proves the path names a
+// location inside the shared directory, not that walking there stays inside it.
+// The sandbox writes that directory at the spelling the host reads, so it can
+// leave a symlinked component in the middle and aim the unlink at any file the
+// invoking user can remove. Nothing else in the launch would notice.
+func TestRelocateRefusesStderrFileThroughSymlinkedParent(t *testing.T) {
+	shared := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "bashrc")
+	if err := os.WriteFile(victim, []byte("host content\n"), 0o600); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(shared, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	prog, pattern := fakeRevdiff(t, shared, "#!/bin/sh\nexit 0\n")
+	body := redirectBody(prog, filepath.Join(shared, "revdiff-done-xyz"), filepath.Join(shared, "link", "bashrc"))
+
+	r := newTestRelocator(t)
+	if _, _, err := r.Relocate("sh "+writeScript(t, body), pattern); err == nil {
+		t.Error("Relocate accepted a stderr file reached through a symlinked component, want an error")
+	}
+	if _, err := os.Lstat(victim); err != nil {
+		t.Errorf("the victim was removed through the symlinked component: %v", err)
+	}
+}
+
+// TestRelocateToleratesMissingStderrFile keeps a launch working when the file
+// is already gone. Nothing guarantees it exists - only that the launcher would
+// normally have created it - and an unlink failing on ENOENT would deny a body
+// that is otherwise exactly the accepted shape.
+func TestRelocateToleratesMissingStderrFile(t *testing.T) {
+	shared := t.TempDir()
+	prog, pattern := fakeRevdiff(t, shared, "#!/bin/sh\nexit 0\n")
+	body := redirectBody(prog, filepath.Join(shared, "revdiff-done-xyz"), filepath.Join(shared, "revdiff-err-xyz"))
+
+	r := newTestRelocator(t)
+	if _, _, err := r.Relocate("sh "+writeScript(t, body), pattern); err != nil {
+		t.Errorf("Relocate returned error for an absent stderr file: %v", err)
+	}
+}

@@ -239,6 +239,42 @@ func TestScriptPatternRejects(t *testing.T) {
 			name: "quoted token concatenated with a bare suffix",
 			body: "#!/bin/sh\n'" + testBin + "'evil '--output=/tmp/o'" + tail(sentinel) + "\n",
 		},
+		{
+			name: "stdout redirect in the accepted redirect's position",
+			body: "#!/bin/sh\n" + okHead + " >'/tmp/e'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "stderr redirect with an unquoted target",
+			body: "#!/bin/sh\n" + okHead + " 2>/tmp/e" + tail(sentinel) + "\n",
+		},
+		{
+			name: "stderr redirect concatenated with a bare suffix",
+			body: "#!/bin/sh\n" + okHead + " 2>'/tmp/e'x" + tail(sentinel) + "\n",
+		},
+		{
+			name: "stderr redirect ahead of the program",
+			body: "#!/bin/sh\n2>'/tmp/e' '" + testBin + "' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "stderr redirect between the arguments",
+			body: "#!/bin/sh\n'" + testBin + "' 2>'/tmp/e' '--output=/tmp/o'" + tail(sentinel) + "\n",
+		},
+		{
+			name: "two stderr redirects",
+			body: "#!/bin/sh\n" + okHead + " 2>'/tmp/e' 2>'/tmp/f'" + tail(sentinel) + "\n",
+		},
+		{
+			// `2>&1` duplicates a descriptor rather than naming a file, so it
+			// is not the accepted spelling and the bare token carries `>`.
+			name: "stderr duplicated onto stdout",
+			body: "#!/bin/sh\n" + okHead + " 2>&1" + tail(sentinel) + "\n",
+		},
+		{
+			// Only the redirect's own token is exempt from the quoting rule.
+			// The program still has to be a quoted word, not a redirect target.
+			name: "redirect standing in for the program",
+			body: "#!/bin/sh\n2>'" + testBin + "'" + tail(sentinel) + "\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -327,5 +363,134 @@ func TestScriptPatternConfinesSentinel(t *testing.T) {
 				t.Errorf("MatchesBody(sentinel=%q) = %v, want %v", tt.sentinel, got, tt.want)
 			}
 		})
+	}
+}
+
+// redirect reproduces the ` 2>'<path>'` the launcher (v0.8.23+) appends to the
+// command so a fast-failing revdiff's error text survives the overlay closing.
+func redirect(path string) string {
+	return " 2>'" + path + "'"
+}
+
+// TestScriptPatternAcceptsStderrRedirect pins the shape the launcher actually
+// emits, and that the accepted target is reported back. The report is the point:
+// the caller has to unlink that file before running the hardened body, because
+// the launcher creates it with mktemp and `set -C` refuses an existing path.
+func TestScriptPatternAcceptsStderrRedirect(t *testing.T) {
+	p := revdiffScriptPattern()
+	const (
+		sentinel = testSentinelRoot + "/revdiff-done-xyz"
+		errFile  = testSentinelRoot + "/revdiff-err-xyz"
+	)
+
+	tests := []struct {
+		name string
+		head string
+	}{
+		{
+			name: "minimal form",
+			head: "REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '" + testBin + "' '--output=/tmp/o'",
+		},
+		{
+			name: "with /usr/bin/env prefix",
+			head: "/usr/bin/env 'EDITOR=nvim' REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '" +
+				testBin + "' '--output=/tmp/o' 'main'",
+		},
+		{
+			name: "no env assignment at all",
+			head: "'" + testBin + "' '--output=/tmp/o'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := "#!/bin/sh\n" + tt.head + redirect(errFile) + tail(sentinel) + "\n"
+			m, ok := p.MatchBody([]byte(body))
+			if !ok {
+				t.Fatalf("MatchBody rejected a real launcher body:\n%s", body)
+			}
+			if m.StderrFile != errFile {
+				t.Errorf("StderrFile = %q, want %q", m.StderrFile, errFile)
+			}
+		})
+	}
+}
+
+// TestScriptPatternReportsNoStderrFile keeps the pre-0.8.23 body reporting an
+// empty target rather than a stale one: an unlink driven by a leftover value
+// would delete a file no accepted body names.
+func TestScriptPatternReportsNoStderrFile(t *testing.T) {
+	p := revdiffScriptPattern()
+	body := "#!/bin/sh\n'" + testBin + "' '--output=/tmp/o'" + tail(testSentinelRoot+"/s") + "\n"
+
+	m, ok := p.MatchBody([]byte(body))
+	if !ok {
+		t.Fatalf("MatchBody rejected a redirect-less body:\n%s", body)
+	}
+	if m.StderrFile != "" {
+		t.Errorf("StderrFile = %q for a body with no redirect, want empty", m.StderrFile)
+	}
+}
+
+// TestScriptPatternConfinesStderrRedirect is TestScriptPatternConfinesSentinel
+// for the second path the host opens for writing on the sandbox's word. The
+// redirect truncates its target, so an unbounded one is the same arbitrary
+// host-file overwrite the sentinel bound exists to close.
+func TestScriptPatternConfinesStderrRedirect(t *testing.T) {
+	head := "'" + testBin + "' '--output=/tmp/o'"
+	sentinel := testSentinelRoot + "/revdiff-done-1"
+
+	tests := []struct {
+		name    string
+		root    string
+		errFile string
+		want    bool
+	}{
+		{"inside the root", testSentinelRoot, testSentinelRoot + "/revdiff-err-1", true},
+		{"nested inside the root", testSentinelRoot, testSentinelRoot + "/sub/revdiff-err-1", true},
+		{"host rc file", testSentinelRoot, "/home/u/.bashrc", false},
+		{"sibling of the root", testSentinelRoot, testSentinelRoot + "foo/err", false},
+		{"escaping the root", testSentinelRoot, testSentinelRoot + "/../home/u/.bashrc", false},
+		{"relative path", testSentinelRoot, "tmp/relative", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := revdiffScriptPattern()
+			p.Bounds.SharedTmp = tt.root
+			body := "#!/bin/sh\n" + head + redirect(tt.errFile) + tail(sentinel) + "\n"
+			if got := p.MatchesBody([]byte(body)); got != tt.want {
+				t.Errorf("MatchesBody(stderr=%q) = %v, want %v", tt.errFile, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScriptPatternRejectsStderrRedirectWithoutRoot mirrors the sentinel's
+// empty-root rule. A pattern that cannot derive the directory must deny the
+// whole body rather than accept an unbounded redirect within it.
+func TestScriptPatternRejectsStderrRedirectWithoutRoot(t *testing.T) {
+	p := revdiffScriptPattern()
+	p.Bounds.SharedTmp = ""
+	body := "#!/bin/sh\n'" + testBin + "' '--output=/tmp/o'" +
+		redirect(testSentinelRoot+"/e") + tail(testSentinelRoot+"/s") + "\n"
+
+	if p.MatchesBody([]byte(body)) {
+		t.Error("MatchesBody accepted a stderr redirect with no root to bound it, want rejected")
+	}
+}
+
+// TestScriptPatternRejectsRedirectSmuggledInAnArgument is why the redirect is
+// recognized while tokenizing rather than stripped off the raw head. These
+// bytes are inside a quoted argument, where the shell will not act on them, so
+// a suffix match would read a redirect the shell never performs - and accept
+// the surrounding argv on the strength of it.
+func TestScriptPatternRejectsRedirectSmuggledInAnArgument(t *testing.T) {
+	p := revdiffScriptPattern()
+	body := "#!/bin/sh\n'" + testBin + "' 'x 2>'" + testSentinelRoot + "/e''" +
+		tail(testSentinelRoot+"/s") + "\n"
+
+	if p.MatchesBody([]byte(body)) {
+		t.Error("MatchesBody accepted a head whose redirect is inside a quoted argument, want rejected")
 	}
 }

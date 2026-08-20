@@ -169,13 +169,17 @@ func (r *Revdiff) HerdrCapabilities() []herdrproxy.Capability {
 // `sh <path>`. What needs constraining is therefore the script body:
 //
 //	#!/bin/sh
-//	[/usr/bin/env 'EDITOR=…'] REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '<revdiff>' '--output=…' …; rc=$?; printf "%s" "$rc" > '<sentinel>'.tmp && mv -f '<sentinel>'.tmp '<sentinel>'
+//	[/usr/bin/env 'EDITOR=…'] REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true '<revdiff>' '--output=…' … [2>'<stderr>']; rc=$?; printf "%s" "$rc" > '<sentinel>'.tmp && mv -f '<sentinel>'.tmp '<sentinel>'
 //
 // The program is pinned to its resolved path for the same reason as the kitty
 // patterns, and by the same helper: see resolveRevdiffBin. A binary that cannot
 // be resolved, or one resolving into a directory the sandbox writes, returns a
 // pattern that matches nothing, so the proxy denies every launch rather than
 // widening.
+//
+// The trailing redirect is the launcher's stderr capture (v0.8.23+). Its target
+// is bounded by the same Bounds as the sentinel, and the herdr proxy clears the
+// file before the run; see cmdpattern.ScriptMatch.
 func (r *Revdiff) HerdrLaunchScript(bounds cmdpattern.LaunchBounds) cmdpattern.ScriptPattern {
 	resolved, err := resolveRevdiffBin(bounds)
 	if err != nil {
