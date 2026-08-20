@@ -653,18 +653,30 @@ func symlinkOverHostDir(host, target string) Plan {
 	}
 }
 
+// uncreatableLinkTarget fails os.Symlink on every platform Go builds for: a
+// target holding a NUL is rejected by syscall.ByteSliceFromString with EINVAL
+// before any syscall is issued, so the outcome comes from the standard library
+// rather than from a kernel, a filesystem or the caller's privileges. It still
+// fails in the os.Symlink call itself, after the staging that precedes it -
+// which is the call this test needs to fail.
+//
+// An empty target used to serve that role, and it only looked deterministic.
+// Linux rejects it with ENOENT, but macOS documents neither that nor a length
+// limit on a link's contents - it creates the empty link and returns nil - so
+// the arm below asserted nothing at all on the darwin runner.
+const uncreatableLinkTarget = "target-with-\x00-inside"
+
 // TestApply_FailedSymlinkLeavesHostDirectoryIntact is the symlink arm of
 // TestApply_UnreadableSourceLeavesHostDirectoryIntact. The arm used to call
 // reconcileDestination - a recursive, irreversible RemoveAll - and only then
 // os.Symlink, with nothing staged, so any failure of the symlink(2) left the
-// host subtree deleted with nothing put back. An empty link target is the
-// deterministic way to fail that call: symlink(2) rejects it with ENOENT.
+// host subtree deleted with nothing put back.
 func TestApply_FailedSymlinkLeavesHostDirectoryIntact(t *testing.T) {
 	tmp := t.TempDir()
 	host := filepath.Join(tmp, "host")
 	writeFile(t, filepath.Join(host, "d", "precious.txt"), "host data")
 
-	if err := Apply(symlinkOverHostDir(host, "")); err == nil {
+	if err := Apply(symlinkOverHostDir(host, uncreatableLinkTarget)); err == nil {
 		t.Fatal("Apply succeeded on an uncreatable symlink, want error")
 	}
 
