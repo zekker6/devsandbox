@@ -322,7 +322,7 @@ func TestCheckRecentLogsStaysAdvisory(t *testing.T) {
 
 	var b strings.Builder
 	now := time.Now()
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		fmt.Fprintf(&b, "%s [proxy] boom\n", now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339))
 	}
 	if err := os.WriteFile(filepath.Join(logDir, "errors.log"), []byte(b.String()), 0o600); err != nil {

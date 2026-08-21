@@ -93,9 +93,7 @@ func (s *stubUpstream) serve() {
 					continue
 				}
 
-				inFlight.Add(1)
-				go func() {
-					defer inFlight.Done()
+				inFlight.Go(func() {
 					if delay > 0 {
 						time.Sleep(delay)
 					}
@@ -106,7 +104,7 @@ func (s *stubUpstream) serve() {
 					writeMu.Lock()
 					defer writeMu.Unlock()
 					_ = WriteLine(conn, []byte(reply))
-				}()
+				})
 			}
 		}()
 	}

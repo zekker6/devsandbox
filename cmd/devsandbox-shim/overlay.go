@@ -159,7 +159,7 @@ func ensureRealDirPath(base, dst string) error {
 	}
 
 	cur := base
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+	for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
 		cur = filepath.Join(cur, part)
 		if err := ensureRealDir(cur); err != nil {
 			return err

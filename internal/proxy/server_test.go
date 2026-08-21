@@ -882,7 +882,7 @@ func wsEchoHandler(t *testing.T) http.HandlerFunc {
 }
 
 func headerHasToken(header, token string) bool {
-	for _, part := range strings.Split(header, ",") {
+	for part := range strings.SplitSeq(header, ",") {
 		if strings.EqualFold(strings.TrimSpace(part), token) {
 			return true
 		}

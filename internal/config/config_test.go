@@ -80,8 +80,8 @@ func TestSandboxIsUseEmbeddedEnabled(t *testing.T) {
 		expected bool
 	}{
 		{"nil defaults to true", nil, true},
-		{"explicit true", boolPtr(true), true},
-		{"explicit false", boolPtr(false), false},
+		{"explicit true", new(true), true},
+		{"explicit false", new(false), false},
 	}
 
 	for _, tt := range tests {
@@ -114,14 +114,6 @@ func TestSandboxGetConfigVisibility(t *testing.T) {
 			}
 		})
 	}
-}
-
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-func intPtr(i int) *int {
-	return &i
 }
 
 // emptyTrustStore returns an empty trust store for tests that don't involve local configs.
@@ -382,7 +374,7 @@ var tomlKeyLine = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_."-]*\s*=`)
 // commented: they are alternatives to the line above and would collide.
 func uncommentTemplate(template string) string {
 	var out []string
-	for _, line := range strings.Split(template, "\n") {
+	for line := range strings.SplitSeq(template, "\n") {
 		body, ok := strings.CutPrefix(strings.TrimSpace(line), "# ")
 		if !ok {
 			out = append(out, line)
@@ -502,7 +494,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "negative max log body bytes",
 			cfg: &Config{
-				Proxy: ProxyConfig{MaxLogBodyBytes: intPtr(-1)},
+				Proxy: ProxyConfig{MaxLogBodyBytes: new(-1)},
 			},
 			wantErr: true,
 			errMsg:  "max_log_body_bytes cannot be negative",
@@ -510,7 +502,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "zero max log body bytes",
 			cfg: &Config{
-				Proxy: ProxyConfig{MaxLogBodyBytes: intPtr(0)},
+				Proxy: ProxyConfig{MaxLogBodyBytes: new(0)},
 			},
 			wantErr: false, // explicit opt-out of body capture
 		},
@@ -1654,11 +1646,11 @@ func TestApplyIncludes_MissingFileWarns(t *testing.T) {
 
 func TestMergeConfigs_RedactionEnabledCannotBeDisabledByOverlay(t *testing.T) {
 	base := &Config{}
-	base.Proxy.Redaction.Enabled = boolPtr(true)
+	base.Proxy.Redaction.Enabled = new(true)
 	base.Proxy.Redaction.DefaultAction = "block"
 
 	overlay := &Config{}
-	overlay.Proxy.Redaction.Enabled = boolPtr(false)
+	overlay.Proxy.Redaction.Enabled = new(false)
 	overlay.Proxy.Redaction.DefaultAction = "log"
 
 	result := mergeConfigs(base, overlay)
@@ -1675,7 +1667,7 @@ func TestMergeConfigs_RedactionEnabledCannotBeDisabledByOverlay(t *testing.T) {
 func TestMergeConfigs_RedactionOverlayCanEnable(t *testing.T) {
 	base := &Config{}
 	overlay := &Config{}
-	overlay.Proxy.Redaction.Enabled = boolPtr(true)
+	overlay.Proxy.Redaction.Enabled = new(true)
 
 	result := mergeConfigs(base, overlay)
 

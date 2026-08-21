@@ -1370,8 +1370,8 @@ func TestGetToolBindings_DockerHostRemapped(t *testing.T) {
 	// Find DOCKER_HOST in env vars
 	var dockerHost string
 	for _, env := range envVars {
-		if strings.HasPrefix(env, "DOCKER_HOST=") {
-			dockerHost = strings.TrimPrefix(env, "DOCKER_HOST=")
+		if after, ok := strings.CutPrefix(env, "DOCKER_HOST="); ok {
+			dockerHost = after
 			break
 		}
 	}

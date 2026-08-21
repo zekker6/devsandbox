@@ -19,7 +19,7 @@ func TestOwnedSet_AddContains(t *testing.T) {
 func TestOwnedSet_Concurrent(t *testing.T) {
 	s := NewOwnedSet()
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -27,7 +27,7 @@ func TestOwnedSet_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		if !s.Contains(i) {
 			t.Errorf("missing id %d after concurrent Add", i)
 		}

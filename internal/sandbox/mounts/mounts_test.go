@@ -2,6 +2,7 @@ package mounts
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,9 +216,7 @@ func (l *testLogger) Warnf(format string, args ...any) {
 
 func (l *testLogger) Event(name string, fields map[string]any) {
 	cp := make(map[string]any, len(fields))
-	for k, v := range fields {
-		cp[k] = v
-	}
+	maps.Copy(cp, fields)
 	l.events = append(l.events, testEvent{name: name, fields: cp})
 }
 

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1817,7 +1818,7 @@ func TestGenerateSafeGitconfig_RoundTripsThroughGit(t *testing.T) {
 		t.Fatalf("git config --list: %v", err)
 	}
 	var keys []string
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(out), "\n"), "\n") {
 		key, _, _ := strings.Cut(line, "=")
 		keys = append(keys, key)
 	}
@@ -3185,12 +3186,7 @@ func TestGit_Check_ConfigPaths(t *testing.T) {
 	}
 
 	hasPath := func(result CheckResult, path string) bool {
-		for _, p := range result.ConfigPaths {
-			if p == path {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(result.ConfigPaths, path)
 	}
 
 	hasIssue := func(result CheckResult, substr string) bool {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -53,7 +54,7 @@ type Server struct {
 	wg                  sync.WaitGroup
 	mu                  sync.Mutex
 	running             bool
-	requestID           uint64
+	requestID           atomic.Uint64
 	debug               bool // DEVSANDBOX_DEBUG: log per-request lifecycle to the internal proxy log
 }
 
@@ -558,9 +559,7 @@ func (s *Server) setupLogging() {
 					req.URL = parsedURL
 
 					// Replace headers
-					for k, vals := range result.Headers {
-						req.Header[k] = vals
-					}
+					maps.Copy(req.Header, result.Headers)
 
 					// Update log entry with redacted values
 					if entry != nil {
@@ -628,8 +627,8 @@ func (s *Server) debugf(format string, args ...any) {
 // stripQuery returns the URL with any query string removed. Debug logs must not
 // carry query parameters, which can contain tokens.
 func stripQuery(rawURL string) string {
-	if i := strings.IndexByte(rawURL, '?'); i >= 0 {
-		return rawURL[:i]
+	if before, _, ok := strings.Cut(rawURL, "?"); ok {
+		return before
 	}
 	return rawURL
 }
@@ -648,7 +647,7 @@ func (s *Server) Start() error {
 	port := s.config.Port
 
 	bindAddr := s.config.GetBindAddress()
-	for i := 0; i < MaxPortRetries; i++ {
+	for range MaxPortRetries {
 		if port > 65535 {
 			break
 		}
@@ -684,23 +683,19 @@ func (s *Server) Start() error {
 
 	s.running = true
 
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			notice.Error("proxy server error: %v", err)
 		}
-	}()
+	})
 
 	return nil
 }
 
 // isAddrInUse checks if the error is "address already in use"
 func isAddrInUse(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		var sysErr *os.SyscallError
-		if errors.As(opErr.Err, &sysErr) {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok {
+		if sysErr, ok := errors.AsType[*os.SyscallError](opErr.Err); ok {
 			return errors.Is(sysErr.Err, syscall.EADDRINUSE)
 		}
 	}
@@ -746,7 +741,7 @@ func (s *Server) Stop() error {
 // Returns the filter action and logs unanswered requests to internal logs.
 func (s *Server) handleAskMode(req *http.Request, entry *RequestLog, reqBody []byte) FilterAction {
 	// Generate unique request ID
-	id := atomic.AddUint64(&s.requestID, 1)
+	id := s.requestID.Add(1)
 
 	// Build ask request
 	askReq := &AskRequest{

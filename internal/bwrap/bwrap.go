@@ -51,7 +51,7 @@ func waitForFirstChildPID(parentPID int, timeout time.Duration) (int, error) {
 			time.Sleep(pollInterval)
 			continue
 		}
-		for _, field := range strings.Fields(string(data)) {
+		for field := range strings.FieldsSeq(string(data)) {
 			pid, parseErr := strconv.Atoi(field)
 			if parseErr == nil && pid > 0 {
 				return pid, nil

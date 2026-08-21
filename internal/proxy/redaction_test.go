@@ -34,7 +34,7 @@ func newTestInjector(name, host, header, token string, enabled bool) *GenericInj
 
 func TestRedactionEngine_SourceResolution_Value(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "literal", Source: &RedactionSource{Value: "super-secret-123"}},
@@ -55,7 +55,7 @@ func TestRedactionEngine_SourceResolution_Value(t *testing.T) {
 func TestRedactionEngine_SourceResolution_Env(t *testing.T) {
 	t.Setenv("TEST_REDACT_SECRET", "env-secret-456")
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "from-env", Source: &RedactionSource{Env: "TEST_REDACT_SECRET"}},
@@ -77,7 +77,7 @@ func TestRedactionEngine_SourceResolution_File(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "from-file", Source: &RedactionSource{File: secretFile}},
@@ -99,7 +99,7 @@ func TestRedactionEngine_SourceResolution_EnvFileKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "db-pass", Source: &RedactionSource{EnvFileKey: "DB_PASSWORD"}},
@@ -116,7 +116,7 @@ func TestRedactionEngine_SourceResolution_EnvFileKey(t *testing.T) {
 
 func TestRedactionEngine_SourceResolution_Unresolvable(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "missing", Source: &RedactionSource{Env: "NONEXISTENT_VAR_XYZ"}},
@@ -130,7 +130,7 @@ func TestRedactionEngine_SourceResolution_Unresolvable(t *testing.T) {
 
 func TestRedactionEngine_Scan_BodyMatch(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "api-key", Source: &RedactionSource{Value: "sk-secret123"}},
@@ -164,7 +164,7 @@ func TestRedactionEngine_Scan_BodyMatch(t *testing.T) {
 
 func TestRedactionEngine_Scan_HeaderMatch(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "token", Source: &RedactionSource{Value: "Bearer my-leaked-token"}},
@@ -191,7 +191,7 @@ func TestRedactionEngine_Scan_HeaderMatch(t *testing.T) {
 
 func TestRedactionEngine_Scan_URLMatch(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "url-secret", Source: &RedactionSource{Value: "api_key=secret999"}},
@@ -218,7 +218,7 @@ func TestRedactionEngine_Scan_URLMatch(t *testing.T) {
 
 func TestRedactionEngine_Scan_RegexMatch(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "openai-key", Pattern: `sk-[a-zA-Z0-9]{8,}`},
@@ -243,7 +243,7 @@ func TestRedactionEngine_Scan_RegexMatch(t *testing.T) {
 
 func TestRedactionEngine_Scan_NoMatch(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "secret", Source: &RedactionSource{Value: "super-secret-value"}},
@@ -268,7 +268,7 @@ func TestRedactionEngine_Scan_NoMatch(t *testing.T) {
 
 func TestRedactionEngine_Scan_ActionPrecedence(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionLog,
 		Rules: []RedactionRule{
 			{Name: "log-rule", Action: RedactionActionLog, Source: &RedactionSource{Value: "secret-a"}},
@@ -303,7 +303,7 @@ func TestRedactionEngine_Scan_ActionPrecedence(t *testing.T) {
 
 func TestRedactionEngine_Scan_Redact(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionRedact,
 		Rules: []RedactionRule{
 			{Name: "api-key", Source: &RedactionSource{Value: "sk-secret123"}},
@@ -352,7 +352,7 @@ func TestRedactionEngine_Scan_Redact(t *testing.T) {
 
 func TestRedactionEngine_Disabled(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(false),
+		Enabled:       new(false),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "secret", Source: &RedactionSource{Value: "should-not-match"}},
@@ -369,7 +369,7 @@ func TestRedactionEngine_Disabled(t *testing.T) {
 
 func TestRedactionEngine_EmptyBody(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "secret", Source: &RedactionSource{Value: "some-secret"}},
@@ -395,7 +395,7 @@ func TestRedactionEngine_Scan_MixedActions_AllSecretsRedacted(t *testing.T) {
 	logSecret := "log-only-secret-456"
 	redactSecret := "redact-this-secret-789"
 	cfg := &RedactionConfig{
-		Enabled: boolPtr(true),
+		Enabled: new(true),
 		Rules: []RedactionRule{
 			{
 				Name:   "log-rule",
@@ -441,7 +441,7 @@ func TestRedactionEngine_Scan_MixedActions_AllSecretsRedacted(t *testing.T) {
 func TestRedactionEngine_Scan_LogOnlyActionDoesNotRedactBody(t *testing.T) {
 	secret := "super-secret-value-123"
 	cfg := &RedactionConfig{
-		Enabled: boolPtr(true),
+		Enabled: new(true),
 		Rules: []RedactionRule{
 			{
 				Name:   "log-only-rule",
@@ -475,7 +475,7 @@ func TestRedactionEngine_Scan_MixedActions_BlockEscalation_AllFieldsSanitized(t 
 	logSecret := "log-secret-AAA"
 	blockSecret := "block-secret-BBB"
 	cfg := &RedactionConfig{
-		Enabled: boolPtr(true),
+		Enabled: new(true),
 		Rules: []RedactionRule{
 			{
 				Name:   "log-rule",
@@ -526,7 +526,7 @@ func TestRedactionEngine_Scan_MixedActions_BlockEscalation_AllFieldsSanitized(t 
 
 func TestRedactionEngine_MatchesValue_SourceRule(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "api-key", Source: &RedactionSource{Value: "secret-abc-123"}},
@@ -545,7 +545,7 @@ func TestRedactionEngine_MatchesValue_SourceRule(t *testing.T) {
 
 func TestRedactionEngine_MatchesValue_PatternRule(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "openai-keys", Pattern: "sk-[a-zA-Z0-9]{20,}"},
@@ -564,7 +564,7 @@ func TestRedactionEngine_MatchesValue_PatternRule(t *testing.T) {
 
 func TestRedactionEngine_MatchesValue_NoMatch(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "api-key", Source: &RedactionSource{Value: "secret-abc-123"}},
@@ -584,7 +584,7 @@ func TestRedactionEngine_MatchesValue_NoMatch(t *testing.T) {
 
 func TestRedactionEngine_MatchesValue_MultipleMatches(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "exact-match", Source: &RedactionSource{Value: "sk-abcdefghijklmnopqrstuvwxyz"}},
@@ -605,7 +605,7 @@ func TestRedactionEngine_MatchesValue_MultipleMatches(t *testing.T) {
 func TestRedactionEngine_MatchesValue_SourceContains(t *testing.T) {
 	// Source rules use strings.Contains — value can be a substring
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "partial", Source: &RedactionSource{Value: "secret"}},
@@ -629,7 +629,7 @@ func TestValidateCredentialRedactionConflicts_SourceConflict(t *testing.T) {
 	injector := newTestInjector("github", "api.github.com", "Authorization", "secret-abc-123", true)
 
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "api-key", Source: &RedactionSource{Value: "secret-abc-123"}},
@@ -656,7 +656,7 @@ func TestValidateCredentialRedactionConflicts_PatternConflict(t *testing.T) {
 	injector := newTestInjector("github", "api.github.com", "Authorization", "sk-abcdefghijklmnopqrstuvwxyz", true)
 
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "openai-keys", Pattern: "sk-[a-zA-Z0-9]{20,}"},
@@ -680,7 +680,7 @@ func TestValidateCredentialRedactionConflicts_NoConflict(t *testing.T) {
 	injector := newTestInjector("github", "api.github.com", "Authorization", "github-token-xyz", true)
 
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "aws-keys", Pattern: "AKIA[0-9A-Z]{16}"},
@@ -709,7 +709,7 @@ func TestValidateCredentialRedactionConflicts_NilEngine(t *testing.T) {
 
 func TestValidateCredentialRedactionConflicts_NoInjectors(t *testing.T) {
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "some-rule", Source: &RedactionSource{Value: "some-secret"}},
@@ -731,7 +731,7 @@ func TestValidateCredentialRedactionConflicts_DisabledInjectorSkipped(t *testing
 	injector := newTestInjector("github", "api.github.com", "Authorization", "", false)
 
 	cfg := &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "catch-all", Source: &RedactionSource{Value: "anything"}},
@@ -752,7 +752,7 @@ func TestValidateCredentialRedactionConflicts_DisabledInjectorSkipped(t *testing
 func newScanEngine(t *testing.T, limit int, timeout time.Duration) *RedactionEngine {
 	t.Helper()
 	engine, err := NewRedactionEngine(&RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},

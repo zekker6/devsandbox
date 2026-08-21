@@ -95,12 +95,10 @@ func exitCodeFromError(err error) int {
 	if err == nil {
 		return 0
 	}
-	var cmdExit *isolator.CommandExitError
-	if errors.As(err, &cmdExit) {
+	if cmdExit, ok := errors.AsType[*isolator.CommandExitError](err); ok {
 		return cmdExit.Code
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return exitErr.ExitCode()
 	}
 	return 1

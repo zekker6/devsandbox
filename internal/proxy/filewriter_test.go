@@ -158,7 +158,7 @@ func TestRotatingFileWriter_Rotation(t *testing.T) {
 
 	// Write enough data to trigger multiple rotations
 	msg := strings.Repeat("x", 30) + "\n"
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		_, err := w.Write([]byte(msg))
 		if err != nil {
 			t.Fatalf("Write %d failed: %v", i, err)

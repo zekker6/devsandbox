@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,9 +23,7 @@ func (m *auditMemWriter) Write(entry *logging.Entry) error {
 	cp := *entry
 	if entry.Fields != nil {
 		cp.Fields = make(map[string]any, len(entry.Fields))
-		for k, v := range entry.Fields {
-			cp.Fields[k] = v
-		}
+		maps.Copy(cp.Fields, entry.Fields)
 	}
 	m.entries = append(m.entries, cp)
 	return nil

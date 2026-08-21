@@ -242,9 +242,7 @@ func TestConcurrentPanesKeepSeparateMappings(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for _, p := range panes {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rec := herdrstate.Record{
 				PaneID:      p.id,
 				Agent:       p.agent,
@@ -254,7 +252,7 @@ func TestConcurrentPanesKeepSeparateMappings(t *testing.T) {
 			if err := store.Save(rec); err != nil {
 				t.Errorf("Save(%q): %v", p.id, err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

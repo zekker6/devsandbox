@@ -38,8 +38,7 @@ func TestAsCommandExit(t *testing.T) {
 	if got := asCommandExit(setupErr); !errors.Is(got, setupErr) {
 		t.Errorf("asCommandExit(non-ExitError) = %v; want the original error", got)
 	}
-	var ce2 *CommandExitError
-	if errors.As(asCommandExit(setupErr), &ce2) {
+	if _, ok := errors.AsType[*CommandExitError](asCommandExit(setupErr)); ok {
 		t.Error("a setup error must not become a CommandExitError")
 	}
 }
@@ -65,15 +64,13 @@ func TestAsCommandExitReportsATerminatingSignal(t *testing.T) {
 
 	// A terminated command is not an exit status, and must not be mistaken for one:
 	// exiting with a code would tell the shell the sandbox ran to completion.
-	var ce *CommandExitError
-	if errors.As(got, &ce) {
+	if ce, ok := errors.AsType[*CommandExitError](got); ok {
 		t.Errorf("a signaled command became a CommandExitError with code %d", ce.Code)
 	}
 
 	// The underlying *exec.ExitError stays reachable, which is what keeps the
 	// session.end audit event reporting the same -1 it reported before.
-	var ee *exec.ExitError
-	if !errors.As(got, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](got); !ok {
 		t.Error("CommandSignalError must keep wrapping the *exec.ExitError")
 	} else if ee.ExitCode() != -1 {
 		t.Errorf("wrapped ExitCode() = %d, want -1", ee.ExitCode())
@@ -100,8 +97,7 @@ func TestAsEngineOrCommandExit(t *testing.T) {
 	// silent CommandExitError - a launch failure must not be swallowed.
 	engineErr := exec.Command("sh", "-c", "exit 125").Run()
 	got := asEngineOrCommandExit(engineErr)
-	var ce *CommandExitError
-	if errors.As(got, &ce) {
+	if _, ok := errors.AsType[*CommandExitError](got); ok {
 		t.Errorf("exit 125 must not become a silent CommandExitError, got %v", got)
 	}
 	if got == nil {

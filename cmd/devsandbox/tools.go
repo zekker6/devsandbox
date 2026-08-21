@@ -493,7 +493,7 @@ func printToolInfo(info ToolInfo, _ string, _ bool) {
 		fmt.Println()
 		fmt.Println("Shell Init:")
 		// Indent each line
-		for _, line := range strings.Split(info.ShellInit, "\n") {
+		for line := range strings.SplitSeq(info.ShellInit, "\n") {
 			if line != "" {
 				fmt.Printf("  %s\n", line)
 			}

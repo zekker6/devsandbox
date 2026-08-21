@@ -384,8 +384,7 @@ func TestBwrapLaunchReportsTheLockdownAbort(t *testing.T) {
 	if !errors.Is(err, ErrEgressLockdown) {
 		t.Fatalf("launch() error = %v, want it to wrap ErrEgressLockdown", err)
 	}
-	var exitErr *CommandExitError
-	if errors.As(err, &exitErr) {
+	if _, ok := errors.AsType[*CommandExitError](err); ok {
 		t.Errorf("launch() error = %v, want it NOT to be a silent CommandExitError - the workload never ran", err)
 	}
 }

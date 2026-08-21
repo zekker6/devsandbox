@@ -3,6 +3,7 @@ package config
 
 import (
 	"devsandbox/internal/source"
+	"maps"
 )
 
 // mergeConfigs merges overlay config into base config.
@@ -157,9 +158,7 @@ func mergeConfigs(base, overlay *Config) *Config {
 		if result.Sandbox.Environment == nil {
 			result.Sandbox.Environment = make(map[string]source.Source, len(overlay.Sandbox.Environment))
 		}
-		for k, v := range overlay.Sandbox.Environment {
-			result.Sandbox.Environment[k] = v
-		}
+		maps.Copy(result.Sandbox.Environment, overlay.Sandbox.Environment)
 	}
 
 	// Port forwarding settings
@@ -226,9 +225,7 @@ func mergeToolsConfig(base, overlay map[string]any) map[string]any {
 
 	result := make(map[string]any)
 	// Copy base
-	for k, v := range base {
-		result[k] = v
-	}
+	maps.Copy(result, base)
 	// Merge overlay
 	for k, v := range overlay {
 		if baseVal, exists := result[k]; exists {
@@ -248,12 +245,8 @@ func mergeToolsConfig(base, overlay map[string]any) map[string]any {
 // mergeAnyMap merges two map[string]any, overlay wins for conflicts.
 func mergeAnyMap(base, overlay map[string]any) map[string]any {
 	result := make(map[string]any)
-	for k, v := range base {
-		result[k] = v
-	}
-	for k, v := range overlay {
-		result[k] = v
-	}
+	maps.Copy(result, base)
+	maps.Copy(result, overlay)
 	return result
 }
 
@@ -292,11 +285,7 @@ func mergeStringMap(base, overlay map[string]string) map[string]string {
 		return nil
 	}
 	result := make(map[string]string)
-	for k, v := range base {
-		result[k] = v
-	}
-	for k, v := range overlay {
-		result[k] = v
-	}
+	maps.Copy(result, base)
+	maps.Copy(result, overlay)
 	return result
 }

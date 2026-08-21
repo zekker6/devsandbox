@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -182,29 +183,29 @@ func ParseStatusFilter(s string) (exact, min, max int, err error) {
 	}
 
 	// Comparison: >=400, <500
-	if strings.HasPrefix(s, ">=") {
-		min, err = strconv.Atoi(strings.TrimPrefix(s, ">="))
+	if after, ok := strings.CutPrefix(s, ">="); ok {
+		min, err = strconv.Atoi(after)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf("invalid status filter: %s", s)
 		}
 		return 0, min, 0, nil
 	}
-	if strings.HasPrefix(s, ">") {
-		val, err := strconv.Atoi(strings.TrimPrefix(s, ">"))
+	if after, ok := strings.CutPrefix(s, ">"); ok {
+		val, err := strconv.Atoi(after)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf("invalid status filter: %s", s)
 		}
 		return 0, val + 1, 0, nil
 	}
-	if strings.HasPrefix(s, "<=") {
-		max, err = strconv.Atoi(strings.TrimPrefix(s, "<="))
+	if after, ok := strings.CutPrefix(s, "<="); ok {
+		max, err = strconv.Atoi(after)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf("invalid status filter: %s", s)
 		}
 		return 0, 0, max, nil
 	}
-	if strings.HasPrefix(s, "<") {
-		val, err := strconv.Atoi(strings.TrimPrefix(s, "<"))
+	if after, ok := strings.CutPrefix(s, "<"); ok {
+		val, err := strconv.Atoi(after)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf("invalid status filter: %s", s)
 		}
@@ -393,8 +394,7 @@ func viewProxyLogs(logDir string, filter *ProxyLogFilter, last int, jsonOutput, 
 	var entries []proxy.RequestLog
 
 	// Process files in reverse order (newest first)
-	for i := len(files) - 1; i >= 0; i-- {
-		file := files[i]
+	for _, file := range slices.Backward(files) {
 
 		// Both readers return the entries they got alongside the error, so a
 		// file that stops short still contributes what it held rather than

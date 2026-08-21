@@ -397,8 +397,7 @@ func classifyKill(err error) killStatus {
 // exitStatusOf returns the process exit status behind a wait error, or -1 when
 // there is none to report.
 func exitStatusOf(err error) int {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		return ee.ExitCode()
 	}
 	return -1

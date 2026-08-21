@@ -132,9 +132,9 @@ func (m *Manager) findWorktree(ctx context.Context, repoRoot, path string) (*exi
 	if err != nil {
 		return nil, fmt.Errorf("worktree: git worktree list: %w", err)
 	}
-	for _, block := range strings.Split(string(out), "\n\n") {
+	for block := range strings.SplitSeq(string(out), "\n\n") {
 		var cur existingWorktree
-		for _, line := range strings.Split(block, "\n") {
+		for line := range strings.SplitSeq(block, "\n") {
 			switch {
 			case strings.HasPrefix(line, "worktree "):
 				raw := strings.TrimPrefix(line, "worktree ")

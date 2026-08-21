@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"testing"
 	"time"
@@ -107,9 +108,7 @@ func (c *captureWriter) Write(entry *logging.Entry) error {
 	cp := *entry
 	if entry.Fields != nil {
 		cp.Fields = make(map[string]any, len(entry.Fields))
-		for k, v := range entry.Fields {
-			cp.Fields[k] = v
-		}
+		maps.Copy(cp.Fields, entry.Fields)
 	}
 	c.entries = append(c.entries, cp)
 	return nil

@@ -34,7 +34,7 @@ func promptTrust(input io.Reader, output io.Writer, projectDir, configContent st
 	if content := strings.TrimSpace(configContent); content == "" {
 		_, _ = fmt.Fprintf(output, "  (no recognized settings)\n")
 	} else {
-		for _, line := range strings.Split(content, "\n") {
+		for line := range strings.SplitSeq(content, "\n") {
 			_, _ = fmt.Fprintf(output, "  %s\n", line)
 		}
 	}

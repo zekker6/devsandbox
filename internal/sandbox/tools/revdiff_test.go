@@ -3,6 +3,7 @@ package tools
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"devsandbox/internal/cmdpattern"
@@ -21,10 +22,8 @@ func TestRevdiff_DeclaresLaunchOverlay(t *testing.T) {
 	r := &Revdiff{}
 	caps := r.KittyCapabilities()
 	want := kittyproxy.CapLaunchOverlay
-	for _, c := range caps {
-		if c == want {
-			return
-		}
+	if slices.Contains(caps, want) {
+		return
 	}
 	t.Errorf("CapLaunchOverlay missing from %v", caps)
 }

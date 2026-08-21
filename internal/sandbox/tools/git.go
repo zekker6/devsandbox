@@ -1107,14 +1107,14 @@ func generateSafeGitconfig(values map[string]string, dst string) error {
 	// The file-valued keys already point at the in-sandbox copies: copyAuxFiles
 	// rewrote the ones it copied and deleted the rest, so whatever is left here
 	// resolves inside the sandbox.
-	core := ""
+	var core strings.Builder
 	for _, f := range gitAuxFiles {
 		if v, ok := safeConfigValue("core."+f.emit, values[f.key]); ok {
-			core += "\t" + f.emit + " = " + v + "\n"
+			core.WriteString("\t" + f.emit + " = " + v + "\n")
 		}
 	}
-	if core != "" {
-		content += "[core]\n" + core
+	if core.String() != "" {
+		content += "[core]\n" + core.String()
 	}
 
 	return fsutil.WriteFileAtomic(dst, []byte(content), 0o644)

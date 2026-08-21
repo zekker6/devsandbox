@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 
 	"devsandbox/internal/config"
 )
@@ -114,8 +115,8 @@ func (r *ActiveToolsRunner) cleanup() {
 // do not abort teardown — callers have no useful remediation for a Stop
 // failure, but the operator should see them.
 func (r *ActiveToolsRunner) stopStarted() {
-	for i := len(r.started) - 1; i >= 0; i-- {
-		t := r.started[i]
+	for _, t := range slices.Backward(r.started) {
+
 		if err := t.Stop(); err != nil && r.logger != nil {
 			r.logger.LogErrorf("tools", "stop %s: %v", t.Name(), err)
 		}

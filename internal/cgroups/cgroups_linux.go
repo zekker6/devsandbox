@@ -128,8 +128,7 @@ func runScopeProbe(props []string) error {
 	// once the scope exists, so a payload killed by a signal still answers the
 	// question the probe asks - the properties were accepted. Reporting it as a
 	// refusal would send the user after cgroup delegation over their own value.
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			return nil
 		}

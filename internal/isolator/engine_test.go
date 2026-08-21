@@ -83,7 +83,7 @@ func TestMicroVMArchGap(t *testing.T) {
 		if !strings.Contains(row.Hint, "\n") {
 			t.Errorf("Hint is a single unwrapped line: %q", row.Hint)
 		}
-		for _, line := range strings.Split(row.Hint, "\n") {
+		for line := range strings.SplitSeq(row.Hint, "\n") {
 			if len(line) > 90 {
 				t.Errorf("Hint line is %d chars, want <= 90 for the doctor table: %q", len(line), line)
 			}

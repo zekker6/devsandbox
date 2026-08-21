@@ -68,7 +68,7 @@ func TestRedactionIntegration_BlockSecretInBody(t *testing.T) {
 
 	cfg := NewConfig(tmpDir, 0)
 	cfg.Redaction = &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},
@@ -131,7 +131,7 @@ func TestRedactionIntegration_NoSecretAllowed(t *testing.T) {
 
 	cfg := NewConfig(tmpDir, 0)
 	cfg.Redaction = &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},
@@ -190,7 +190,7 @@ func TestRedactionIntegration_RedactAction(t *testing.T) {
 	defer upstream.Close()
 
 	env := setupRedactionTest(t, &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionRedact,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: secret}},
@@ -229,7 +229,7 @@ func TestRedactionIntegration_LogAction(t *testing.T) {
 	defer upstream.Close()
 
 	env := setupRedactionTest(t, &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionLog,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: secret}},
@@ -263,7 +263,7 @@ func TestRedactionIntegration_RedactSecretInURL(t *testing.T) {
 	defer upstream.Close()
 
 	env := setupRedactionTest(t, &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionRedact,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: secret}},
@@ -299,7 +299,7 @@ func TestRedactionIntegration_RedactSecretInHeader(t *testing.T) {
 	defer upstream.Close()
 
 	env := setupRedactionTest(t, &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionRedact,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: secret}},
@@ -336,7 +336,7 @@ func TestRedactionIntegration_OversizedBodyBlocked(t *testing.T) {
 	defer upstream.Close()
 
 	env := setupRedactionTest(t, &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},
@@ -373,7 +373,7 @@ func TestRedactionIntegration_BodyAtScanLimitForwarded(t *testing.T) {
 	defer upstream.Close()
 
 	env := setupRedactionTest(t, &RedactionConfig{
-		Enabled:       boolPtr(true),
+		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
 		Rules: []RedactionRule{
 			{Name: "test-secret", Source: &RedactionSource{Value: "super-secret-value-123"}},

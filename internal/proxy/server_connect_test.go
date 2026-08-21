@@ -264,7 +264,7 @@ func readRequestLog(t *testing.T, srv *Server) []RequestLog {
 	}
 
 	var entries []RequestLog
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		if line == "" {
 			continue
 		}
@@ -325,7 +325,7 @@ func newAskTunnelServer(t *testing.T) (*Server, string) {
 	cfg.Filter = &FilterConfig{
 		DefaultAction:  FilterActionAsk,
 		AskTimeout:     5,
-		CacheDecisions: boolPtr(true),
+		CacheDecisions: new(true),
 	}
 
 	srv, err := NewServer(cfg)

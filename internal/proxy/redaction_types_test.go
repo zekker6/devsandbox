@@ -12,8 +12,8 @@ func TestRedactionConfig_IsEnabled(t *testing.T) {
 	}{
 		{"nil config", nil, false},
 		{"nil enabled defaults to false", &RedactionConfig{}, false},
-		{"explicit true", &RedactionConfig{Enabled: boolPtr(true)}, true},
-		{"explicit false", &RedactionConfig{Enabled: boolPtr(false)}, false},
+		{"explicit true", &RedactionConfig{Enabled: new(true)}, true},
+		{"explicit false", &RedactionConfig{Enabled: new(false)}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,7 +54,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"valid source rule",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Source: &RedactionSource{Env: "SECRET"}},
@@ -65,7 +65,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"valid pattern rule",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Pattern: "sk-[a-zA-Z0-9]+"},
@@ -76,7 +76,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"invalid: both source and pattern",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Source: &RedactionSource{Env: "SECRET"}, Pattern: "sk-.*"},
@@ -87,7 +87,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"invalid: neither source nor pattern",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Name: "empty-rule"},
@@ -98,7 +98,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"invalid: source with no fields set",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Source: &RedactionSource{}},
@@ -109,7 +109,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"invalid action",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: "explode",
 			},
 			true,
@@ -117,7 +117,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"invalid rule action",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Source: &RedactionSource{Env: "SECRET"}, Action: "explode"},
@@ -128,7 +128,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"invalid regex pattern",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Pattern: "[invalid"},
@@ -139,7 +139,7 @@ func TestRedactionConfig_Validate(t *testing.T) {
 		{
 			"auto-generated name",
 			&RedactionConfig{
-				Enabled:       boolPtr(true),
+				Enabled:       new(true),
 				DefaultAction: RedactionActionBlock,
 				Rules: []RedactionRule{
 					{Source: &RedactionSource{Env: "SECRET"}},

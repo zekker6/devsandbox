@@ -45,8 +45,7 @@ func asCommandExit(err error) error {
 	if err == nil {
 		return nil
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		if code := ee.ExitCode(); code >= 0 {
 			return &CommandExitError{Code: code}
 		}

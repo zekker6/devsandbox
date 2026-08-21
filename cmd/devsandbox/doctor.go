@@ -486,7 +486,7 @@ func printDoctorHints(results []checkResult) {
 	fmt.Printf("\n%s\n", heading)
 	for _, r := range pending {
 		fmt.Printf("\n  %s:\n", r.name)
-		for _, line := range strings.Split(r.hint, "\n") {
+		for line := range strings.SplitSeq(r.hint, "\n") {
 			fmt.Printf("    %s\n", line)
 		}
 	}

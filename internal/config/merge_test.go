@@ -10,13 +10,13 @@ import (
 func Test_mergeConfigs_ScalarOverride(t *testing.T) {
 	base := &Config{
 		Proxy: ProxyConfig{
-			Enabled: boolPtr(false),
+			Enabled: new(false),
 			Port:    8080,
 		},
 	}
 	overlay := &Config{
 		Proxy: ProxyConfig{
-			Enabled: boolPtr(true),
+			Enabled: new(true),
 			Port:    9090,
 		},
 	}
@@ -144,14 +144,14 @@ func Test_mergeConfigs_NilOverlay(t *testing.T) {
 func Test_mergeConfigs_ExplicitFalseOverridesTrue(t *testing.T) {
 	base := &Config{
 		Proxy: ProxyConfig{
-			Enabled: boolPtr(true),
+			Enabled: new(true),
 			Port:    8080,
 		},
 	}
 	// Explicit false should override true
 	overlay := &Config{
 		Proxy: ProxyConfig{
-			Enabled: boolPtr(false),
+			Enabled: new(false),
 		},
 	}
 
@@ -169,7 +169,7 @@ func Test_mergeConfigs_ExplicitFalseOverridesTrue(t *testing.T) {
 func Test_mergeConfigs_NilValuesNotOverride(t *testing.T) {
 	base := &Config{
 		Proxy: ProxyConfig{
-			Enabled: boolPtr(true),
+			Enabled: new(true),
 			Port:    9090,
 		},
 	}
@@ -364,12 +364,12 @@ func Test_mergeConfigs_DockerDockerfileNotOverriddenByEmpty(t *testing.T) {
 func Test_mergeConfigs_MITMOverlay(t *testing.T) {
 	base := &Config{
 		Proxy: ProxyConfig{
-			MITM: boolPtr(true),
+			MITM: new(true),
 		},
 	}
 	overlay := &Config{
 		Proxy: ProxyConfig{
-			MITM: boolPtr(false),
+			MITM: new(false),
 		},
 	}
 
@@ -383,7 +383,7 @@ func Test_mergeConfigs_MITMOverlay(t *testing.T) {
 func Test_mergeConfigs_MITMNilNotOverride(t *testing.T) {
 	base := &Config{
 		Proxy: ProxyConfig{
-			MITM: boolPtr(false),
+			MITM: new(false),
 		},
 	}
 	overlay := &Config{

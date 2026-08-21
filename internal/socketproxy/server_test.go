@@ -243,7 +243,7 @@ func TestServer_HandlesMultipleConnections(t *testing.T) {
 
 	const n = 10
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			c, err := net.Dial("unix", path)
 			if err != nil {

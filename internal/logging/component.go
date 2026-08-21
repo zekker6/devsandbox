@@ -2,6 +2,7 @@ package logging
 
 import (
 	"fmt"
+	"maps"
 	"time"
 )
 
@@ -103,9 +104,7 @@ func (l *ComponentLogger) Event(name string, fields map[string]any) {
 		return
 	}
 	merged := make(map[string]any, len(fields)+1)
-	for k, v := range fields {
-		merged[k] = v
-	}
+	maps.Copy(merged, fields)
 	merged["component"] = l.component
 	_ = l.dispatcher.Event(LevelInfo, name, merged)
 }

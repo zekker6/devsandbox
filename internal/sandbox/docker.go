@@ -47,8 +47,8 @@ func ListDockerSandboxes() ([]*Metadata, error) {
 
 	var sandboxes []*Metadata
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(strings.TrimSpace(string(output)), "\n")
+	for line := range lines {
 		if line == "" {
 			continue
 		}
@@ -117,7 +117,7 @@ func parseLabels(labelStr string) map[string]string {
 	if labelStr == "" {
 		return labels
 	}
-	for _, pair := range strings.Split(labelStr, ",") {
+	for pair := range strings.SplitSeq(labelStr, ",") {
 		parts := strings.SplitN(pair, "=", 2)
 		if len(parts) == 2 {
 			labels[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
@@ -222,7 +222,7 @@ func GetContainerVolumes(containerName string) []string {
 	}
 
 	var volumes []string
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			volumes = append(volumes, line)

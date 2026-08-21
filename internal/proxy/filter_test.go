@@ -605,7 +605,7 @@ func TestFilterEngine_HostAliasing_NarrowBlockFirst(t *testing.T) {
 func TestFilterEngine_CacheHostAliasing(t *testing.T) {
 	cfg := &FilterConfig{
 		DefaultAction:  FilterActionAsk,
-		CacheDecisions: boolPtr(true),
+		CacheDecisions: new(true),
 	}
 
 	engine, err := NewFilterEngine(cfg)
@@ -640,7 +640,7 @@ func TestFilterEngine_CacheHostAliasing(t *testing.T) {
 func TestFilterEngine_CacheDoesNotOverrideExplicitRules(t *testing.T) {
 	cfg := &FilterConfig{
 		DefaultAction:  FilterActionAllow,
-		CacheDecisions: boolPtr(true),
+		CacheDecisions: new(true),
 		Rules: []FilterRule{
 			{Pattern: "/secret", Scope: FilterScopePath, Action: FilterActionAsk},
 			{Pattern: "blocked.example.com", Action: FilterActionBlock},
@@ -681,7 +681,7 @@ func TestFilterEngine_CacheDoesNotOverrideExplicitRules(t *testing.T) {
 func TestFilterEngine_CacheNormalization(t *testing.T) {
 	cfg := &FilterConfig{
 		DefaultAction:  FilterActionAsk,
-		CacheDecisions: boolPtr(true),
+		CacheDecisions: new(true),
 	}
 
 	engine, err := NewFilterEngine(cfg)
@@ -714,7 +714,7 @@ func TestFilterEngine_CacheNormalization(t *testing.T) {
 func TestFilterEngine_ConcurrentReaders(t *testing.T) {
 	cfg := &FilterConfig{
 		DefaultAction:  FilterActionAllow,
-		CacheDecisions: boolPtr(true),
+		CacheDecisions: new(true),
 		Rules: []FilterRule{
 			{Pattern: "blocked.example.com", Action: FilterActionBlock, Scope: FilterScopeHost},
 			{Pattern: "*.internal", Action: FilterActionBlock, Scope: FilterScopeHost},
@@ -734,7 +734,7 @@ func TestFilterEngine_ConcurrentReaders(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan string, workers*4)
 
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func(worker int) {
 			defer wg.Done()
@@ -744,7 +744,7 @@ func TestFilterEngine_ConcurrentReaders(t *testing.T) {
 				URL:  &url.URL{Host: "blocked.example.com", Path: "/"},
 			}
 
-			for n := 0; n < iterations; n++ {
+			for n := range iterations {
 				switch worker % 4 {
 				case 0:
 					if decision := engine.Match(req); decision.Action != FilterActionBlock {
@@ -782,10 +782,6 @@ func TestFilterEngine_ConcurrentReaders(t *testing.T) {
 	for msg := range errs {
 		t.Error(msg)
 	}
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }
 
 // TestHostRegexIsCaseInsensitive pins the fix for a rule silently retired by

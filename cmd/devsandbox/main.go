@@ -140,13 +140,11 @@ Proxy Mode (--proxy):
 	if err := rootCmd.Execute(); err != nil {
 		// A non-zero exit from the sandboxed command is its result, not a
 		// devsandbox failure: propagate the code and stay silent, like a shell.
-		var cmdExit *isolator.CommandExitError
-		if errors.As(err, &cmdExit) {
+		if cmdExit, ok := errors.AsType[*isolator.CommandExitError](err); ok {
 			os.Exit(cmdExit.Code)
 		}
 		// Same reasoning for a sandbox that was terminated rather than exited.
-		var cmdSignal *isolator.CommandSignalError
-		if errors.As(err, &cmdSignal) {
+		if cmdSignal, ok := errors.AsType[*isolator.CommandSignalError](err); ok {
 			dieOf(cmdSignal.Signal)
 		}
 		notice.Error("%v", err)
