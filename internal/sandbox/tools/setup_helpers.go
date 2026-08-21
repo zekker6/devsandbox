@@ -4,6 +4,8 @@ package tools
 import (
 	"os"
 	"path/filepath"
+
+	"devsandbox/internal/fsutil"
 )
 
 // SetupConfigWithSuffix copies a config file and appends a suffix.
@@ -26,7 +28,10 @@ func SetupConfigWithSuffix(srcPath, destPath, suffix string) error {
 		return err
 	}
 
-	// Write with suffix
+	// Write with suffix. destPath is inside the sandbox home, which is bound
+	// read-write into the sandbox, so the sandbox can replace it with a symlink
+	// to a host file between launches; os.WriteFile would follow that link and
+	// truncate the target. WriteFileAtomic renames over it instead.
 	modified := string(original) + suffix
-	return os.WriteFile(destPath, []byte(modified), 0o644)
+	return fsutil.WriteFileAtomic(destPath, []byte(modified), 0o644)
 }

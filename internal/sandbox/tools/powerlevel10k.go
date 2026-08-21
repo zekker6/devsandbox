@@ -3,6 +3,8 @@ package tools
 import (
 	"os"
 	"path/filepath"
+
+	"devsandbox/internal/fsutil"
 )
 
 func init() {
@@ -147,5 +149,9 @@ fi
 `
 	modified := string(original) + indicator
 
-	return os.WriteFile(sandboxP10k, []byte(modified), 0o644)
+	// The destination is inside the sandbox home, which is bound read-write
+	// into the sandbox: a previous session can leave a symlink here pointing
+	// at a host file, and os.WriteFile would follow it and truncate that file.
+	// WriteFileAtomic renames a fresh inode over the link instead.
+	return fsutil.WriteFileAtomic(sandboxP10k, []byte(modified), 0o644)
 }

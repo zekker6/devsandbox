@@ -147,7 +147,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 | `.env` / `.env.*` files | Hidden (masked with `/dev/null`); scanned up to 3 directory levels below the project root, skipping `node_modules`, `.git`, `vendor`, `.venv`. Configurable - [`hide_env_files`](docs/configuration.md#sandbox-settings) / `--no-hide-env` expose them |
 | `~/.ssh` | Not mounted |
 | `~/.aws`, `~/.azure`, `~/.gcloud` | Not mounted |
-| `~/.gitconfig` | Sanitized (user.name/email only) |
+| `~/.gitconfig` | Sanitized: identity plus your global ignore/attributes rules, no credentials ([what the safe copy carries](docs/configuration.md#what-the-safe-copy-carries)) |
 | `.git` directory | Read-only (no commits, no credentials) |
 | mise-managed tools | Read-only |
 | Network (default) | Full access |
@@ -230,6 +230,11 @@ By default, `.git` is mounted read-only - you can view history, diff, and status
 | `readonly` | read-only | blocked | none **(default)** |
 | `readwrite` | read-write | allowed | SSH, GPG, credentials |
 | `disabled` | read-write | allowed | none |
+
+In `readonly` mode devsandbox generates the sandbox's `~/.gitconfig` from your fully resolved global config, so an
+identity defined in an `[include]` or `[includeIf "gitdir:..."]` block is carried in, along with your global ignore and
+attributes files. Credential helpers, signing keys and everything else are dropped - see
+[what the safe copy carries](docs/configuration.md#what-the-safe-copy-carries).
 
 ```toml
 # ~/.config/devsandbox/config.toml

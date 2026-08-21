@@ -251,11 +251,12 @@ func newToolsCheckCmd() *cobra.Command {
 			}
 
 			type CheckResult struct {
-				Name       string        `json:"name"`
-				Available  bool          `json:"available"`
-				BinaryPath string        `json:"binary_path,omitempty"`
-				Bindings   []BindingInfo `json:"bindings,omitempty"`
-				Issues     []string      `json:"issues,omitempty"`
+				Name        string        `json:"name"`
+				Available   bool          `json:"available"`
+				BinaryPath  string        `json:"binary_path,omitempty"`
+				Bindings    []BindingInfo `json:"bindings,omitempty"`
+				ConfigPaths []string      `json:"config_paths,omitempty"`
+				Issues      []string      `json:"issues,omitempty"`
 			}
 
 			var results []CheckResult
@@ -273,6 +274,7 @@ func newToolsCheckCmd() *cobra.Command {
 					checkResult := checker.Check(homeDir)
 					result.Available = checkResult.Available
 					result.BinaryPath = checkResult.BinaryPath
+					result.ConfigPaths = checkResult.ConfigPaths
 					result.Issues = checkResult.Issues
 				}
 
@@ -338,6 +340,17 @@ func newToolsCheckCmd() *cobra.Command {
 						}
 						src := shortenPath(b.Source, homeDir)
 						fmt.Printf("    %s %s%s\n", status, src, note)
+					}
+				}
+
+				// The host files the tool reads its configuration from. Labelled,
+				// because they are not bindings: the git tool reports the global
+				// config it resolves the sandbox copy from and the ignore and
+				// attributes files it will carry in, which is how a
+				// core.excludesFile set from an [include] becomes visible.
+				if len(r.ConfigPaths) > 0 {
+					for _, p := range r.ConfigPaths {
+						fmt.Printf("    %s config: %s\n", color("\033[36m", "•"), shortenPath(p, homeDir))
 					}
 				}
 

@@ -94,7 +94,10 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 
 Hiding is on by default and can be turned off: [`hide_env_files = false`](configuration.md#sandbox-settings) in the `[sandbox]` section, or `--no-hide-env` for a single run. Either one makes every matching file readable inside the sandbox, so check a shared config before assuming a run has the default. When a tool only needs a secret's *value*, pass it through [`[sandbox.environment]`](configuration.md#sandbox-environment-variables) or have the proxy inject it instead of exposing the file.
 
-**Git Credentials** - By default, `~/.gitconfig` is replaced with a sanitized copy containing only user.name and email.
+**Git Credentials** - By default, `~/.gitconfig` is replaced with a sanitized copy carrying only your identity
+(`user.name`, `user.email`) and your global ignore and attributes files, which are copied in read-only. Values
+defined through an `[include]` or `[includeIf]` block are resolved and carried in; everything else, credential
+helpers and signing keys included, is dropped. See [what the safe copy carries](configuration.md#what-the-safe-copy-carries).
 Use `git.mode = "readwrite"` for full git access.
 
 ### What's Available

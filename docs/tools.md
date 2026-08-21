@@ -110,6 +110,10 @@ Checking tools...
     ✓ ~/.local/share/mise
 ✓ git (/usr/bin/git)
     ○ ~/.local/share/devsandbox/<project>/home/.gitconfig.safe (optional, missing)
+    ○ ~/.local/share/devsandbox/<project>/home/.gitignore.safe (optional, missing)
+    ○ ~/.local/share/devsandbox/<project>/home/.gitattributes.safe (optional, missing)
+    • config: ~/.gitconfig
+    • config: ~/.config/git/ignore
 ✓ claude (/home/user/.local/bin/claude)
     ✓ ~/.claude
     ✓ ~/.claude.json
@@ -118,6 +122,10 @@ Checking tools...
 
 Summary: 3/4 tools available
 ```
+
+The `config:` lines are the host files the tool reads its configuration from, resolved the same way a
+launch resolves them - so a `core.excludesFile` set from an `[include]` is reported at the path it
+actually names. They are not bindings; the lines above them are.
 
 ## Tool Management with mise
 
@@ -511,6 +519,8 @@ Maximum isolation - `.git` directory is mounted read-only:
 
 - View history, diff, log, status
 - Branch operations (local only)
+- Sanitized `~/.gitconfig`: your resolved identity and global ignore/attributes rules
+  ([what the safe copy carries](configuration.md#what-the-safe-copy-carries))
 - **No commits** (`.git` is read-only)
 - **No SSH access**
 - **No GPG signing**

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"devsandbox/internal/sandbox/tools"
 )
 
 // dockerBuildSkip caches the skip reason so the (relatively expensive) build
@@ -765,6 +767,102 @@ func TestDockerIsolator_ConfigHash_ChangesOnPIDsLimit(t *testing.T) {
 	}
 	if iso1.configHash(cfg) == unset.configHash(cfg) {
 		t.Error("configHash should differ between a set and an unset pids limit")
+	}
+}
+
+// TestDockerIsolator_ConfigHash_ChangesOnGeneratedToolFile guards the content
+// of the configs devsandbox generates under the sandbox home. The git tool
+// rewrites .gitconfig.safe atomically on every launch, so a host identity
+// change swaps the inode behind a mount path that does not move - and a kept
+// container binds the file at creation, pinning the old inode. Without the
+// content in the hash the container is reused and the sandbox keeps the
+// previous identity.
+func TestDockerIsolator_ConfigHash_ChangesOnGeneratedToolFile(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	homeDir := t.TempDir()
+	sandboxHome := t.TempDir()
+	projectDir := t.TempDir()
+
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	cfg := &Config{HomeDir: homeDir, SandboxHome: sandboxHome, ProjectDir: projectDir}
+
+	writeHostIdentity := func(name string) {
+		t.Helper()
+		content := fmt.Sprintf("[user]\n\tname = %s\n\temail = %s@example.com\n", name, name)
+		if err := os.WriteFile(filepath.Join(homeDir, ".gitconfig"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write host gitconfig: %v", err)
+		}
+	}
+
+	writeHostIdentity("First")
+	first := iso.configHash(cfg)
+
+	safe := filepath.Join(sandboxHome, ".gitconfig.safe")
+	before, err := os.ReadFile(safe)
+	if err != nil {
+		t.Fatalf("git setup did not generate %s: %v", safe, err)
+	}
+
+	writeHostIdentity("Second")
+	second := iso.configHash(cfg)
+
+	after, err := os.ReadFile(safe)
+	if err != nil {
+		t.Fatalf("read regenerated safe gitconfig: %v", err)
+	}
+	if string(before) == string(after) {
+		t.Fatalf("safe gitconfig did not track the host identity change: %q", after)
+	}
+	if first == second {
+		t.Error("configHash should differ when a generated tool config changes behind an unchanged mount path")
+	}
+}
+
+// TestDockerIsolator_ConfigHash_IgnoresHostFileContent keeps the content
+// hashing scoped to what devsandbox generates: a host file bound directly is
+// the user's own and an edit to it must not recreate a kept container.
+func TestDockerIsolator_ConfigHash_IgnoresHostFileContent(t *testing.T) {
+	homeDir := t.TempDir()
+	sandboxHome := t.TempDir()
+
+	hostFile := filepath.Join(homeDir, "hostfile")
+	if err := os.WriteFile(hostFile, []byte("before"), 0o644); err != nil {
+		t.Fatalf("write host file: %v", err)
+	}
+	mount := hostFile + ":/home/sandboxuser/hostfile:ro"
+
+	if _, ok := generatedMountDigest(mount, sandboxHome); ok {
+		t.Error("a mount source outside the sandbox home must not be content-hashed")
+	}
+
+	generated := filepath.Join(sandboxHome, "generated")
+	if err := os.WriteFile(generated, []byte("before"), 0o644); err != nil {
+		t.Fatalf("write generated file: %v", err)
+	}
+	genMount := generated + ":/home/sandboxuser/generated:ro"
+
+	firstDigest, ok := generatedMountDigest(genMount, sandboxHome)
+	if !ok {
+		t.Fatal("a regular file under the sandbox home must be content-hashed")
+	}
+	if err := os.WriteFile(generated, []byte("after"), 0o644); err != nil {
+		t.Fatalf("rewrite generated file: %v", err)
+	}
+	secondDigest, ok := generatedMountDigest(genMount, sandboxHome)
+	if !ok {
+		t.Fatal("a regular file under the sandbox home must be content-hashed")
+	}
+	if firstDigest == secondDigest {
+		t.Error("digest should track the file content")
+	}
+
+	if _, ok := generatedMountDigest(sandboxHome+":/home/sandboxuser:ro", sandboxHome); ok {
+		t.Error("a directory mount must not be content-hashed")
 	}
 }
 
@@ -1649,5 +1747,83 @@ func TestDockerIsolator_Build_EnvVarsOverridePassthrough(t *testing.T) {
 	}
 	if hostIdx != -1 && hostIdx > configIdx {
 		t.Errorf("EnvVars must appear after EnvPassthrough; host=%d config=%d", hostIdx, configIdx)
+	}
+}
+
+// auxMountTool emits a single Optional binding whose source the test creates
+// between two configHash calls. It stands in for git's sanitized ignore and
+// attributes copies: those appear only once the resolved host config names
+// them, which changes the mounts baked into a kept container without changing
+// any other hashed input.
+type auxMountTool struct{ source string }
+
+func (a *auxMountTool) Name() string          { return "aux-mount-probe" }
+func (a *auxMountTool) Description() string   { return "test tool" }
+func (a *auxMountTool) Available(string) bool { return true }
+func (a *auxMountTool) Bindings(homeDir, _ string) []tools.Binding {
+	return []tools.Binding{{
+		Source:           a.source,
+		Dest:             filepath.Join(homeDir, ".aux-mount-probe"),
+		HomeRelativeDest: true,
+		Type:             tools.MountBind,
+		ReadOnly:         true,
+		Optional:         true,
+		Category:         tools.CategoryConfig,
+	}}
+}
+func (a *auxMountTool) Environment(_, _ string) []tools.EnvVar { return nil }
+func (a *auxMountTool) ShellInit(string) string                { return "" }
+
+// TestDockerIsolator_ConfigHash_ChangesOnToolMounts guards a kept container
+// against being reused with a stale set of tool mounts. Volume mounts are baked
+// at `docker create` and cannot be added over `docker exec`, so a mount that
+// appears after the container was created is simply absent - and a generated
+// config key naming a path nothing mounts fails silently.
+func TestDockerIsolator_ConfigHash_ChangesOnToolMounts(t *testing.T) {
+	homeDir := t.TempDir()
+	probe := &auxMountTool{source: filepath.Join(homeDir, "aux-mount-probe-source")}
+	tools.Register(probe)
+	defer tools.Unregister(probe.Name())
+
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+	cfg := &Config{
+		HomeDir:     homeDir,
+		SandboxHome: filepath.Join(t.TempDir(), "home"),
+		ProjectDir:  t.TempDir(),
+		Shell:       "bash",
+	}
+
+	before := iso.configHash(cfg)
+	if err := os.WriteFile(probe.source, []byte("*.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after := iso.configHash(cfg)
+
+	if before == after {
+		t.Error("configHash unchanged after a tool mount appeared; a kept container would be reused without that mount")
+	}
+}
+
+// TestDockerIsolator_ConfigHash_StableAcrossHostTerminalEnv pins the other half
+// of the same decision: the tool environment is not hashed, so a kept container
+// is not thrown away every time the user launches from a different terminal
+// pane. Those identifiers are read-only signals about the host pane, and
+// recreating the container for them would defeat keep_container entirely.
+func TestDockerIsolator_ConfigHash_StableAcrossHostTerminalEnv(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+	cfg := &Config{
+		HomeDir:     t.TempDir(),
+		SandboxHome: filepath.Join(t.TempDir(), "home"),
+		ProjectDir:  t.TempDir(),
+		Shell:       "bash",
+	}
+
+	t.Setenv("KITTY_WINDOW_ID", "1")
+	first := iso.configHash(cfg)
+	t.Setenv("KITTY_WINDOW_ID", "2")
+	if second := iso.configHash(cfg); first != second {
+		t.Errorf("configHash changed with the host terminal window id (%s vs %s)", first, second)
 	}
 }

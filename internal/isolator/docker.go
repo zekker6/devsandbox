@@ -1553,6 +1553,25 @@ func (d *DockerIsolator) remapToContainerHome(hostPath, homeDir, projectDir stri
 	return hostPath
 }
 
+// remapHomePrefix rewrites a path under the host home directory to the same
+// path under the container home. Unlike remapToContainerHome it has no project
+// directory exception: the caller has already declared the path to name a
+// location inside the sandbox home, which the project directory never is.
+// A path that is not under homeDir is returned unchanged - see the
+// HomeRelativeDest invariant test in internal/sandbox/tools.
+func remapHomePrefix(dest, homeDir string) string {
+	if homeDir == "" {
+		return dest
+	}
+	if dest == homeDir {
+		return containerHome
+	}
+	if strings.HasPrefix(dest, homeDir+"/") {
+		return containerHome + strings.TrimPrefix(dest, homeDir)
+	}
+	return dest
+}
+
 // copyOverlayShadowPath returns a deterministic shadow mount path for a container
 // destination. The source is bound read-only there and the shim copies it onto the
 // real destination, which is how every engine this isolator drives realizes a
@@ -1646,10 +1665,17 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 				}
 			}
 			dest := b.Dest
-			if dest == "" {
+			switch {
+			case dest == "":
 				// Remap home directory paths to /home/sandboxuser
 				// Paths under project dir stay unchanged (project mounted at host path)
 				dest = d.remapToContainerHome(b.Source, cfg.HomeDir, cfg.ProjectDir)
+			case b.HomeRelativeDest:
+				// A destination inside the sandbox home, spelled with the host
+				// home prefix because bwrap binds the sandbox home there. This
+				// backend puts it at /home/sandboxuser, so the prefix has to be
+				// rewritten or the mount lands at a path the guest never reads.
+				dest = remapHomePrefix(dest, cfg.HomeDir)
 			}
 
 			// Determine if this is a tmpoverlay candidate
@@ -1776,13 +1802,80 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 		_, _ = fmt.Fprintf(h, "envhide=%s\n", f)
 	}
 
+	// Tool mounts — the resolved mount strings, not just the config inputs that
+	// feed them. A tool's destination or the set of files it copies in can
+	// change while every other hashed input stays byte-identical: a devsandbox
+	// upgrade that remaps a destination, or a host-side change that makes an
+	// Optional source exist for the first time (git's sanitized ignore and
+	// attributes copies appear only once the resolved global config names
+	// them). Hashing the tool config alone left a kept container running with
+	// mounts baked at the old paths, and a generated config key pointing at a
+	// path nothing mounts resolves to nothing, silently.
+	//
+	// The tool environment is deliberately not hashed. The values that move are
+	// the FromHost terminal identifiers (KITTY_WINDOW_ID, HERDR_PANE_ID,
+	// ZELLIJ_PANE_ID, SSH_AUTH_SOCK), which differ per pane and would recreate
+	// the container on every launch from a new window. The FromHost values that
+	// do select state - CODEX_HOME, CLAUDE_CONFIG_DIR, PI_CODING_AGENT_DIR,
+	// OPENCODE_CONFIG_DIR - each name the directory their tool binds, so a
+	// change to one moves the mount set hashed here; everything else derives
+	// from the home/sandbox paths and the tool config already hashed above.
+	toolMounts, _, overlayManifest := d.getToolBindings(cfg)
+	for _, m := range toolMounts {
+		_, _ = fmt.Fprintf(h, "toolmount=%s\n", m)
+		if digest, ok := generatedMountDigest(m, cfg.SandboxHome); ok {
+			_, _ = fmt.Fprintf(h, "toolfile=%s\n", digest)
+		}
+	}
+
 	// Overlay manifest — changes in overlay paths require container recreation.
-	_, _, overlayManifest := d.getToolBindings(cfg)
 	for _, entry := range overlayManifest.Overlays {
 		_, _ = fmt.Fprintf(h, "overlay=%s:%s\n", entry.Path, entry.Type)
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil)[:8])
+}
+
+// generatedMountDigest returns a content digest for a tool mount whose source
+// is a file devsandbox generated under the sandbox home, and false for every
+// other mount.
+//
+// The mount string alone does not cover these. The git tool rewrites
+// .gitconfig.safe, .gitignore.safe, .gitattributes.safe and .git-config.safe on
+// every launch and writes them with a rename, so a host identity or ignore-rule
+// change produces a *new inode* behind an unchanged path. Docker binds the file
+// at container creation and pins the inode it had then, so a kept container
+// whose mount set is byte-identical keeps serving the bytes it was created
+// with - the sandbox's git identity silently stays at whatever the host had
+// when the container was first made. Hashing the bytes makes that a config
+// change like any other, so the container is recreated.
+//
+// Only sources under the sandbox home are read, because those are the files
+// devsandbox itself produced from host state during this launch, and all of
+// them are small. A host file bound directly is left alone: it is the user's
+// own, an in-place rewrite is visible through the bind mount already, and
+// hashing them would recreate the container on any unrelated dotfile edit.
+func generatedMountDigest(mount, sandboxHome string) (string, bool) {
+	if sandboxHome == "" {
+		return "", false
+	}
+	// Same split Docker itself applies to a -v argument: everything up to the
+	// first colon is the host source.
+	src, _, ok := strings.Cut(mount, ":")
+	if !ok || !strings.HasPrefix(src, sandboxHome+string(filepath.Separator)) {
+		return "", false
+	}
+	info, err := os.Stat(src)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		// An unreadable generated file is a state change in its own right, and
+		// must not hash the same as any content it could have held.
+		return "unreadable", true
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), true
 }
 
 // getContainerConfigHash reads the config hash label from an existing container.

@@ -754,7 +754,8 @@ Each tool can have its own configuration section under `[tools.<name>]`.
 ```toml
 [tools.git]
 # Git access mode:
-# - "readonly" (default): safe gitconfig with only user.name/email, no credentials
+# - "readonly" (default): safe gitconfig with your identity and global
+#   ignore/attributes rules, no credentials
 # - "readwrite": full access with credentials, SSH keys, GPG keys
 # - "disabled": no git configuration (git commands work without user config)
 mode = "readonly"
@@ -766,14 +767,70 @@ mode = "readonly"
 
 **Mode Details:**
 
-| Mode       | gitconfig | Credentials | SSH Keys | GPG Keys | Use Case                    |
-|------------|-----------|-------------|----------|----------|-----------------------------|
-| `readonly` | Safe copy | No          | No       | No       | Default, maximum isolation  |
-| `readwrite`| Full      | Read-only   | Read-only| Read-only| Trusted projects, push/sign |
-| `disabled` | None      | No          | No       | No       | Fully anonymous git         |
+| Mode       | gitconfig                          | Credentials | SSH Keys | GPG Keys | Use Case                    |
+|------------|------------------------------------|-------------|----------|----------|-----------------------------|
+| `readonly` | Safe copy: identity + ignore rules | No          | No       | No       | Default, maximum isolation  |
+| `readwrite`| Full                               | Read-only   | Read-only| Read-only| Trusted projects, push/sign |
+| `disabled` | None                               | No          | No       | No       | Fully anonymous git         |
 
 In `readwrite` mode, SSH and GPG directories are mounted read-only to protect private keys
 while still allowing git operations that need them.
+
+##### What the safe copy carries
+
+In `readonly` mode devsandbox generates the sandbox's `~/.gitconfig` itself rather than mounting yours.
+It reads your **fully resolved** global configuration, so a value defined in an `[include]` or
+`[includeIf "gitdir:..."]` block is picked up like any other; conditional includes are evaluated against
+the project directory, so the branch that matched at launch is the one carried in. Resolving includes
+needs git 2.26 or newer on the host (`git config --show-scope`); on an older git devsandbox falls back
+to the top-level sections of each global config file, silently, and a value defined only inside an
+`[include]` block is not carried in. Four keys are copied:
+
+| Key                   | Carried as                                                                     |
+|-----------------------|--------------------------------------------------------------------------------|
+| `user.name`           | Copied verbatim                                                                |
+| `user.email`          | Copied verbatim                                                                |
+| `core.excludesFile`   | File copied into the sandbox read-only, value repointed at the copy as `~/.gitignore.safe`    |
+| `core.attributesFile` | File copied into the sandbox read-only, value repointed at the copy as `~/.gitattributes.safe` |
+
+Every other key is dropped, including `credential.helper`, `alias.*`, `url.*.insteadOf`,
+`http.extraHeader`, `sendemail.smtpPass`, `user.signingkey` and the include directives themselves.
+
+The two file-valued keys fall back to git's own defaults on the host, `~/.config/git/ignore` and
+`~/.config/git/attributes` (or `$XDG_CONFIG_HOME/git/...` when that variable is set on your host), when
+the key is unset. They are carried whether or not you have a global config file at all - git honors a
+global ignore file on its own. This exists because `XDG_CONFIG_HOME` is repointed
+into the sandbox, so git's default location resolves to an empty in-sandbox path and an explicit value
+names a host path that is never mounted - and git ignores a missing `excludesFile` or `attributesFile`
+in silence, which would drop your global ignore rules with nothing to show for it. A file devsandbox
+cannot carry in is named in a warning and its key is omitted, rather than left pointing at a path that
+will not resolve. Absence of a default file you never configured is not reported.
+
+Two sources are refused deliberately rather than copied. A file inside the project directory, the
+shared temp directory, or the sandbox home is not copied: all three are mounted read-write into the
+sandbox, so their contents are the sandbox's rather than the host's - a copy from the first two would
+also freeze a launch-time snapshot over the live file. And a key whose value came from an `[include]`
+whose target is itself inside one of those directories is ignored entirely - the sandbox can write that
+file, so the path it names is not something the host chose. Both cases drop the key and report the
+omission.
+
+The repointed value is written `~/`-relative rather than as an absolute path, because git expands a
+leading `~/` against `$HOME` and the sandbox home is not at the same absolute path on every backend.
+
+Values are written git-quoted, so a name containing `#`, `;` or quotes survives intact. A value carrying
+a control character cannot be represented on one line and is dropped with a warning rather than written
+in a form that would parse as something else.
+
+Evaluating an `[includeIf "gitdir:..."]` condition means reading the configuration from inside the
+repository, which reads its local `.git/config` along the way. If git refuses that file - a broken
+config, unreadable permissions, an ownership git considers dubious - the configuration is re-read from
+outside the repository instead of being lost. Plain `[include]` blocks still expand that way; only
+conditional ones cannot be evaluated, and the launch warns when your configuration actually has one.
+
+The configuration is read fresh on every launch, so editing an included file takes effect on the next
+one. Both `~/.gitconfig` and `~/.config/git/config` are honored - the latter spelled
+`$XDG_CONFIG_HOME/git/config` when that variable is set on your host, which is the only one git reads in
+that case; a host that keeps its identity solely in the XDG location is carried in too.
 
 #### Mise
 

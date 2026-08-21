@@ -51,6 +51,18 @@ type Binding struct {
 	ReadOnly bool   // Mount as read-only (only for bind mounts)
 	Optional bool   // Skip if source doesn't exist
 
+	// HomeRelativeDest marks Dest as a path *inside the sandbox home*, spelled
+	// with the host home prefix. bwrap binds the sandbox home at the host home
+	// path, so the two spellings coincide there; Docker and krun mount it at
+	// /home/sandboxuser, and a destination left spelled with the host prefix
+	// lands where nothing in the guest reads it - for a generated config that
+	// is a silent no-op, since the tool simply does not find the file.
+	//
+	// Leave it false whenever Dest must be used verbatim: an identical-path
+	// pin (a host binary, the shared temp directory), or a path outside the
+	// sandbox home such as a repository's .git.
+	HomeRelativeDest bool
+
 	// Category classifies this binding for mount mode policy resolution.
 	// Empty defaults to CategoryConfig (safest — gets tmpoverlay under split policy).
 	Category BindingCategory
