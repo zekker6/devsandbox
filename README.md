@@ -225,16 +225,22 @@ if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bas
 
 By default, `.git` is mounted read-only - you can view history, diff, and status, but commits are blocked and no credentials are exposed.
 
-| Mode | `.git` | Commits | Credentials |
-|---|---|---|---|
-| `readonly` | read-only | blocked | none **(default)** |
-| `readwrite` | read-write | allowed | SSH, GPG, credentials |
-| `disabled` | read-write | allowed | none |
+| Mode | `.git` | Commits | Credentials | gitconfig |
+|---|---|---|---|---|
+| `readonly` | read-only | blocked | none **(default)** | safe copy: identity + ignore rules |
+| `readwrite` | read-write | allowed | SSH, GPG, credentials | yours, plus the files it references |
+| `disabled` | read-write | allowed | none | none |
 
 In `readonly` mode devsandbox generates the sandbox's `~/.gitconfig` from your fully resolved global config, so an
 identity defined in an `[include]` or `[includeIf "gitdir:..."]` block is carried in, along with your global ignore and
 attributes files. Credential helpers, signing keys and everything else are dropped - see
 [what the safe copy carries](docs/configuration.md#what-the-safe-copy-carries).
+
+In `readwrite` mode your `~/.gitconfig` is mounted as it is, and so are the files it references: the global ignore and
+attributes files, and every `[include]` / `[includeIf]` target that contributes a setting. Without them git would
+silently ignore those settings inside the sandbox. The mounted config files are read-only, so `git config --global`
+inside the sandbox fails rather than writing a copy the host never sees - see
+[what readwrite carries](docs/configuration.md#what-readwrite-carries).
 
 ```toml
 # ~/.config/devsandbox/config.toml

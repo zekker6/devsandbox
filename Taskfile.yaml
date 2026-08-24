@@ -49,7 +49,12 @@ tasks:
 
   golangci:
     cmds:
-      - golangci-lint run
+      # Through mise, not bare: mise appends its tool dirs after the inherited
+      # PATH, so a golangci-lint earlier on PATH (a ~/go/bin install, or one an
+      # editor prepends) wins the plain lookup and runs a build built against an
+      # older Go than go.mod asks for. That surfaces as a stdlib panic that
+      # reads like a broken toolchain rather than a PATH problem.
+      - mise exec -- golangci-lint run
 
   cross-test:
     desc: Verify tests compile for all release targets (linux/darwin × amd64/arm64)

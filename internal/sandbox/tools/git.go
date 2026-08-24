@@ -57,6 +57,24 @@ type Git struct {
 	mode        GitMode
 	projectDir  string
 	gitRepoRoot string // main repo root when projectDir is a worktree; empty otherwise
+
+	// mountMode is the mount mode this tool's bindings resolve under - the
+	// [tools.git] mount_mode when set, the global [overlay] default otherwise,
+	// which is the same chain ResolveBindingType applies. Empty when neither is
+	// configured.
+	//
+	// Two places need it, both because an explicit mode changes a fact the tool
+	// would otherwise assume: readWriteStaticBindings must not pin a writable
+	// bind over a configured readonly, and auxUntrustedRoots must know whether
+	// the main repo's .git is a tree the sandbox can write.
+	mountMode string
+
+	// refBindings carries the files the host's global git config *references*
+	// into a readwrite sandbox. Setup resolves the config and fills it in;
+	// Bindings only appends it, because Bindings must not run a resolver
+	// subprocess of its own. Nil until Setup runs - `tools info` calls
+	// Bindings without Setup, and must still get exactly the static set.
+	refBindings []Binding
 }
 
 func (g *Git) Name() string {
@@ -99,12 +117,31 @@ func (g *Git) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	var cfg gitConfig
 	decodeConfig(g.Name(), toolCfg, &cfg)
 
+	// Same precedence ResolveBindingType applies, and deliberately no case
+	// folding: that function switches on the raw string, so folding here would
+	// have the tool and the resolver disagree about what a mode is.
+	g.mountMode = globalCfg.DefaultMountMode
+	if cfg.MountMode != "" {
+		g.mountMode = cfg.MountMode
+	}
+
 	switch strings.ToLower(cfg.Mode) {
 	case "readwrite", "read-write", "rw":
 		g.mode = GitModeReadWrite
 	case "disabled", "none", "off":
 		g.mode = GitModeDisabled
 	}
+}
+
+// mountModeBinds reports whether mode makes ResolveBindingType produce a plain
+// bind mount rather than an overlay. Only "readwrite" and "readonly" do; every
+// other mode, the empty default included, resolves a CategoryConfig directory
+// to an overlay.
+//
+// It is what tells an overlay a binding has to escape from an explicit choice
+// the user made. Keep the value set in step with ResolveBindingType.
+func mountModeBinds(mode string) bool {
+	return mode == "readwrite" || mode == "readonly"
 }
 
 func (g *Git) Bindings(homeDir, sandboxHome string) []Binding {
@@ -127,34 +164,96 @@ func (g *Git) Bindings(homeDir, sandboxHome string) []Binding {
 	}
 }
 
-// isWorktree reports whether the project dir is a linked git worktree, whose
-// .git is a file pointing at a shared git directory elsewhere on the host.
-func (g *Git) isWorktree() bool {
+// isWorktreeProject reports whether projectDir is a git worktree whose real
+// metadata lives in a separate main repository. One spelling of the test, used
+// everywhere, so the bindings that mount that tree and the deny list that has
+// to cover it cannot disagree about when it exists.
+func (g *Git) isWorktreeProject() bool {
 	return g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir
 }
 
 // gitDirSource returns the directory holding the real .git metadata.
 // In worktree mode that is the main repo; otherwise it is the project dir.
 func (g *Git) gitDirSource() string {
-	if g.isWorktree() {
+	if g.isWorktreeProject() {
 		return g.gitRepoRoot
 	}
 	return g.projectDir
 }
 
-// worktreeGitDirBinding returns the writable bind for the shared git directory
+// worktreeMainGitDir returns the main repository's .git directory in worktree
+// mode, and "" otherwise. It is the single expression the worktree bindings and
+// sandboxWritableRoots derive from.
+func (g *Git) worktreeMainGitDir() string {
+	if !g.isWorktreeProject() {
+		return ""
+	}
+	return filepath.Join(g.gitRepoRoot, ".git")
+}
+
+// worktreeGitDirBinding returns the base binding for the shared git directory
 // backing a linked worktree. Dest is pinned to the host path so the Docker and
 // krun backends do not remap it under /home/sandboxuser: the worktree's .git
-// file carries an absolute gitdir: pointer that has to resolve unchanged.
+// file carries an absolute gitdir pointer that has to resolve unchanged.
 func (g *Git) worktreeGitDirBinding() (Binding, bool) {
-	if !g.isWorktree() {
+	gitDir := g.worktreeMainGitDir()
+	if gitDir == "" {
 		return Binding{}, false
 	}
-	gitDir := filepath.Join(g.gitRepoRoot, ".git")
 	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
 		return Binding{}, false
 	}
 	return Binding{Source: gitDir, Dest: gitDir, Category: CategoryConfig}, true
+}
+
+// bindingWritesHost reports whether b lands on the host filesystem as a mount
+// the sandbox can write, under the given mount mode.
+//
+// Only a writable bind does. Every overlay flavour keeps the sandbox's writes
+// in an upper layer, and the resolver runs on the host reading host paths - so
+// an overlaid file is not one the sandbox can put words into. An unset Type is
+// whatever ResolveBindingType will make of it, which is a writable bind for
+// "readwrite" and an overlay or a read-only bind for everything else.
+func bindingWritesHost(b Binding, mountMode string) bool {
+	if b.Type != "" {
+		return b.Type == MountBind && !b.ReadOnly
+	}
+	return mountMode == "readwrite"
+}
+
+// sandboxWritableRoots returns the host paths this tool itself mounts writable,
+// which auxUntrustedRoots must deny for the same reason it denies the project
+// dir: the sandbox writes them, the writes survive into the next launch, and
+// the resolver reads them back as though they were the host's word.
+//
+// It is derived by walking the bindings rather than by listing paths, and that
+// is the point. Three separate reviews found three separate roots missing from
+// a hand-written list - the worktree main .git, the global config chain, and
+// the ~/.ssh and ~/.gnupg directory binds - each time because the list was
+// written from the instance in hand rather than from the rule. A walk cannot
+// fall behind a binding the tool grows later.
+//
+// Only readwrite mode contributes: readonly mode pins every path it mounts to a
+// read-only bind or points it at a generated copy under the sandbox home, which
+// is denied already. The mount mode matters just as much as the git mode, since
+// mount_mode = "readonly" turns the whole set read-only.
+func (g *Git) sandboxWritableRoots(homeDir string) []string {
+	if g.mode != GitModeReadWrite {
+		return nil
+	}
+
+	// The static set only. The resolved refBindings are built by the callers of
+	// auxUntrustedRoots, so reading them here would be circular; and the two
+	// classes they hold need nothing - the config chain is pinned read-only,
+	// and an ignore or attributes file is a leaf devsandbox never reads a
+	// setting out of.
+	var roots []string
+	for _, b := range g.readWriteStaticBindings(homeDir) {
+		if bindingWritesHost(b, g.mountMode) {
+			roots = append(roots, b.Source)
+		}
+	}
+	return roots
 }
 
 // readOnlyBindings returns bindings for readonly mode (safe gitconfig + read-only .git).
@@ -197,7 +296,7 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 	// .git/worktrees/<name>; we mount the main repo's .git so the
 	// absolute gitdir: pointer resolves correctly inside the sandbox.
 	gitDirHost := g.gitDirSource()
-	isWorktree := g.isWorktree()
+	isWorktree := g.isWorktreeProject()
 	if gitDirHost != "" {
 		gitDir := filepath.Join(gitDirHost, ".git")
 		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
@@ -239,11 +338,32 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 	return bindings
 }
 
-// readWriteBindings returns bindings for readwrite mode (full git access).
+// readWriteBindings returns bindings for readwrite mode (full git access):
+// the fixed set below, plus whatever Setup resolved the host config to
+// reference.
+//
+// g.refBindings is nil whenever Setup did not run - `tools info` builds a tool
+// registry and calls Bindings straight out - and appending a nil slice yields
+// exactly the static set, which is the behavior every caller had before.
 func (g *Git) readWriteBindings(homeDir, _ string) []Binding {
+	return append(g.readWriteStaticBindings(homeDir), g.refBindings...)
+}
+
+// readWriteStaticBindings returns the readwrite bindings that do not depend on
+// the resolved host config. Split out so setupReadWriteRefs can dedup the
+// resolved bindings against them without re-entering Bindings.
+func (g *Git) readWriteStaticBindings(homeDir string) []Binding {
 	bindings := []Binding{
 		{
-			Source:   filepath.Join(homeDir, ".gitconfig"),
+			Source: filepath.Join(homeDir, ".gitconfig"),
+			// Pinned read-only for the reason configChainBinding is: this is
+			// the root of the config devsandbox resolves to decide which host
+			// files to mount, so a sandbox that can write it can choose them.
+			// The other three entries below are credentials this mode
+			// deliberately shares and devsandbox never parses, so they keep
+			// following the mount mode.
+			Type:     MountBind,
+			ReadOnly: true,
 			Category: CategoryConfig,
 			Optional: true,
 		},
@@ -267,8 +387,24 @@ func (g *Git) readWriteBindings(homeDir, _ string) []Binding {
 	// In worktree mode the project mount only contains the worktree
 	// directory. The worktree's .git is a file whose gitdir: pointer
 	// references the main repo's .git — which must also be mounted
-	// (writable, so commits can land).
+	// (writable, so commits can land). Pin Dest to the host path so
+	// the Docker backend does not remap it under /home/sandboxuser.
 	if b, ok := g.worktreeGitDirBinding(); ok {
+		// Escape the overlay, but only where there is one to escape.
+		// ResolveBindingType returns on any non-empty Type, so a pin
+		// applied unconditionally beats not just the split policy this
+		// needs to override - under which a directory source resolves to
+		// MountTmpOverlay, sending every commit to tmpfs on bwrap and to a
+		// container-local copy on Docker/krun - but also an explicit
+		// mount_mode the user set. Overriding "readonly" that way removed a
+		// boundary the documented setting promises, silently: the launch
+		// succeeded and the sandbox got host-write access to the main
+		// repository's objects, refs, index and hooks, which the host then
+		// executes on its next commit. Leaving Type unset for the two modes
+		// that already resolve to a bind honors both of them.
+		if !mountModeBinds(g.mountMode) {
+			b.Type = MountBind
+		}
 		bindings = append(bindings, b)
 	}
 
@@ -295,11 +431,12 @@ func (g *Git) ShellInit(shell string) string {
 	return ""
 }
 
-// Setup implements ToolWithSetup to generate the safe gitconfig and the
-// sanitized per-repo .git/config used by readonly mode.
+// Setup implements ToolWithSetup. In readonly mode it generates the safe
+// gitconfig and the sanitized per-repo .git/config; in readwrite mode it
+// resolves the host config and works out which of the files that config
+// references have to be bound in.
 func (g *Git) Setup(homeDir, sandboxHome string) error {
-	// Only generate safe configs for readonly mode
-	if g.mode != GitModeReadOnly {
+	if g.mode == GitModeDisabled {
 		return nil
 	}
 
@@ -315,11 +452,157 @@ func (g *Git) Setup(homeDir, sandboxHome string) error {
 		return nil
 	}
 
+	if g.mode == GitModeReadWrite {
+		return g.setupReadWriteRefs(homeDir, sandboxHome)
+	}
+
 	if err := g.setupUserGitconfig(homeDir, sandboxHome); err != nil {
 		return err
 	}
 
 	return g.setupRepoGitconfig(sandboxHome)
+}
+
+// lostIncludeAlertSuffix is the half of the degraded-resolver alert that is the
+// same whichever way the resolver failed: what the sandbox still gets, and what
+// it does not. Only the sentence in front of it differs, because an old git is
+// not something to name at the user.
+const lostIncludeAlertSuffix = "so only the top-level [include] targets of the global config files are " +
+	"carried into the sandbox; a config file included from inside another include, or by a conditional " +
+	"includeIf, is not there, and git ignores a missing include with no warning"
+
+// setupReadWriteRefs resolves the host's global git config and records the
+// bindings that carry the files it references, for readWriteBindings to append.
+//
+// readwrite mounts ~/.gitconfig verbatim, so every path-valued setting arrives
+// inside the sandbox spelled exactly as the host wrote it - naming host files
+// nothing mounts. Git ignores a missing core.excludesFile, attributesFile or
+// [include] target with exit 0 and no warning, so those settings are lost with
+// nothing on screen to say so. Binding the files the config already names is
+// what makes them resolve, and it is why nothing here rewrites a value.
+//
+// Two sets go out: the files a file-valued key names, and the files the global
+// scope is assembled from - every [include]/[includeIf] target that actually
+// contributed, plus the roots that declared them. The second set is what
+// carries a $XDG/git/config-only host its identity, since builder.go repoints
+// XDG_CONFIG_HOME into the sandbox. A third takes over when the resolver
+// cannot run at all, carrying what each config file's own top-level sections
+// still say.
+//
+// It never returns an error. Every condition it can hit is one the user should
+// merely be told about, and the two backends disagree about what an error
+// means: builder.go aborts the launch on a Setup error while docker.go only
+// warns, so returning one would make an unreadable host config fatal on bwrap
+// and cosmetic on Docker. Diagnostics go out as notice.Alert - Setup runs in
+// PhaseRunning, where a notice.Warn is diverted to the log file.
+func (g *Git) setupReadWriteRefs(homeDir, sandboxHome string) error {
+	sources := existingGlobalConfigs(homeDir)
+	entries, retriedOutsideRepo, err := g.resolveGlobalConfig(homeDir)
+	values, origins := globalConfigMap(entries)
+
+	var degraded []Binding
+	switch {
+	case err != nil:
+		// Nothing an include supplied is visible any more, so the entry list
+		// goes with it and what is left is each config file's own top-level
+		// sections. The file-valued keys are re-read from there rather than
+		// left unset: an unset core.excludesFile is not "no value", it makes
+		// auxFileBindings carry git's XDG default - a file the host does not
+		// use, in place of the one it does.
+		entries = nil
+
+		var (
+			carried    []gitConfigEntry
+			sawInclude bool
+		)
+		degraded, carried, sawInclude = g.fallbackRefBindings(sources, homeDir, sandboxHome)
+		// Read from every config file the fallback carries, not just the two
+		// roots. Unlike readonly - which generates a config and mounts no
+		// include at all - readwrite mounts the include targets, so a
+		// core.excludesFile declared inside one *applies* in the sandbox. Read
+		// only the roots and that value is invisible here, so nothing binds the
+		// file it names and git drops the host's ignore rules with exit 0 and
+		// no warning: the silent loss this whole path exists to close, reopened
+		// on the degraded branch alone.
+		values, origins = fallbackValues(carried)
+		if sawInclude {
+			// Silent when the host declares no include: the fallback then
+			// carries everything the resolver would have, and a notice raised
+			// on every launch of a correct host is one the user learns to
+			// dismiss unread.
+			if errors.Is(err, errShowScopeUnsupported) {
+				// A host git older than 2.26 has no --show-scope. That is not a
+				// setting the user got wrong, so the version is not named - but
+				// the includes it cannot expand are a real gap and are.
+				notice.Alert("git: the global config could not be fully resolved, " + lostIncludeAlertSuffix)
+			} else {
+				notice.Alert("git: could not read the resolved global config (%v); "+lostIncludeAlertSuffix, err)
+			}
+		}
+
+	case retriedOutsideRepo != nil && hasConditionalIncludes(values):
+		// The retry kept every plain [include], so this is silent unless the
+		// host actually has an includeIf - which is the identity-per-directory
+		// setup this resolver exists for, and the one thing reading outside the
+		// repository costs.
+		notice.Alert("git: the global config could not be resolved from the project directory (%v), "+
+			"so it was read outside the repository and no includeIf condition was evaluated; the config "+
+			"file a matching conditional include names is not carried into the sandbox, so a commit "+
+			"there lands with the identity the outer config sets", retriedOutsideRepo)
+	}
+
+	refs := g.auxFileBindings(values, origins, homeDir, sandboxHome)
+	refs = append(refs, g.includeOriginBindings(entries, homeDir, sandboxHome)...)
+	refs = append(refs, degraded...)
+
+	// Assigned, never appended to. tools.Register hands out singletons and
+	// docker.go calls getToolBindings twice per launch, so Setup runs more than
+	// once against this same struct; appending would emit every binding twice,
+	// which is a trackMount panic on bwrap and a "Duplicate mount point" error
+	// on Docker.
+	g.refBindings = dedupBindingDests(g.readWriteStaticBindings(homeDir), refs)
+	return nil
+}
+
+// dedupBindingDests returns the subset of candidates whose effective
+// destination collides neither with an existing binding nor with an earlier
+// candidate.
+//
+// Two bindings landing on one path are not a preference, they are a crash: a
+// duplicate mount is a trackMount panic on bwrap and a "Duplicate mount point"
+// error on Docker. The existing set wins, because a resolved reference is an
+// addition to the fixed set and never a replacement for it.
+func dedupBindingDests(existing, candidates []Binding) []Binding {
+	seen := make(map[string]struct{}, len(existing)+len(candidates))
+	for _, b := range existing {
+		seen[bindingDest(b)] = struct{}{}
+	}
+
+	var out []Binding
+	for _, b := range candidates {
+		dest := bindingDest(b)
+		if _, dup := seen[dest]; dup {
+			continue
+		}
+		seen[dest] = struct{}{}
+		out = append(out, b)
+	}
+	return out
+}
+
+// bindingDest returns the path a binding actually lands on, which is Source
+// whenever Dest is empty.
+//
+// Comparing the Dest fields alone finds no collision at all against the static
+// readwrite bindings: every one of them leaves Dest empty and is mounted at its
+// Source by both backends (builder.go's applyBinding, docker.go's
+// remapToContainerHome). A resolved ~/.gitconfig reference would then be
+// emitted a second time.
+func bindingDest(b Binding) string {
+	if b.Dest != "" {
+		return b.Dest
+	}
+	return b.Source
 }
 
 // setupUserGitconfig generates the sanitized ~/.gitconfig overlay.
@@ -331,7 +614,8 @@ func (g *Git) Setup(homeDir, sandboxHome string) error {
 func (g *Git) setupUserGitconfig(homeDir, sandboxHome string) error {
 	sources := existingGlobalConfigs(homeDir)
 
-	values, origins, retriedOutsideRepo, err := g.resolveGlobalConfig(homeDir)
+	entries, retriedOutsideRepo, err := g.resolveGlobalConfig(homeDir)
+	values, origins := globalConfigMap(entries)
 	switch {
 	case err != nil:
 		// An unsupported --show-scope means the host git predates 2.26; that is
@@ -341,7 +625,7 @@ func (g *Git) setupUserGitconfig(homeDir, sandboxHome string) error {
 				"falling back to the top-level sections of the global config files, so a value "+
 				"defined only inside an include is missing", err)
 		}
-		values, origins = fallbackValues(sources)
+		values, origins = fallbackValues(fallbackFileEntries(sources))
 
 	case retriedOutsideRepo != nil && hasConditionalIncludes(values):
 		// The retry kept every plain [include], so it is silent unless the host
@@ -438,29 +722,127 @@ func existingGlobalConfigs(homeDir string) []string {
 	return out
 }
 
-// fallbackValues reads the allowlisted keys straight out of the global config
-// files when the resolver is unavailable, alongside the origin of each one.
-// This sees only each file's own top-level sections - a value supplied by an
-// include is invisible to it, which is why it is a fallback and not the primary
-// source. Files are consumed in git's read order, so a later one overrides an
-// earlier one.
+// fallbackValues collapses an ordered fallback entry stream to the last value
+// per key, alongside the origin of each one, the way globalConfigMap does for
+// the resolver's own stream. The include directives that mark where an
+// expansion belongs are dropped: they name a file, not a setting.
 //
-// The file-valued keys are read here too, not just the identity: leaving them
-// out does not make copyAuxFiles skip them, it makes it treat a configured
+// The file-valued keys are carried here too, not just the identity: leaving
+// them out does not make copyAuxFiles skip them, it makes it treat a configured
 // core.excludesFile as unset and carry git's XDG default instead - a file the
 // host does not use, substituted for the one it does, with nothing on screen to
 // say so. Origins are returned because copyAuxFile refuses a value whose origin
 // it cannot resolve to a host file.
-func fallbackValues(sources []string) (values, origins map[string]string) {
+func fallbackValues(entries []gitConfigEntry) (values, origins map[string]string) {
 	values = make(map[string]string, 2+len(gitAuxFiles))
 	origins = make(map[string]string, 2+len(gitAuxFiles))
-	for _, path := range sources {
-		for key, value := range parseGitconfig(path) {
-			values[key] = value
-			origins[key] = gitOriginFilePrefix + path
+	for _, e := range entries {
+		if e.key == gitIncludeKey {
+			continue
 		}
+		values[e.key] = e.value
+		origins[e.key] = e.origin
 	}
 	return values, origins
+}
+
+// fallbackFileEntries reads the global config files' own top-level sections in
+// git's read order, expanding no include. That is what readonly mode is left
+// with when the resolver fails: it generates a config rather than mounting the
+// host's, so an include target is not carried into the sandbox at all and a
+// value defined only inside one has nothing to apply to.
+//
+// A read error is not reported here. Both fallback callers already raise one -
+// readonly unconditionally, readwrite through fallbackRefBindings' sawInclude -
+// and whatever the parse did manage to read is still better than nothing.
+func fallbackFileEntries(sources []string) []gitConfigEntry {
+	var entries []gitConfigEntry
+	for _, path := range sources {
+		fileEntries, _, _ := parseGitconfig(path)
+		entries = append(entries, fileEntries...)
+	}
+	return entries
+}
+
+// fallbackRefBindings carries what is still visible when the resolver cannot
+// run: the global config files git reads, and the top-level [include] targets
+// those files name.
+//
+// sawInclude reports whether the config declared any include directive at all -
+// or whether a config file could not be read, which leaves that unknowable -
+// and is what decides whether the degradation cost the user anything. A host
+// with no includes reaches exactly what a working resolver would have given it,
+// so alerting there would fire on every launch of a host with nothing wrong.
+//
+// Targets are resolved by the same spelling rule as the resolver path and
+// through the same helpers: the value's spelling decides where the file is read
+// inside the sandbox, and a relative one resolves against the declaring file's
+// directory on both sides. Only unconditional [include] targets are carried -
+// an includeIf condition cannot be evaluated here, and binding its target
+// anyway would put a work identity into a personal project's sandbox, which is
+// what the resolver path refuses for free.
+//
+// The config files themselves are bound too, not only their targets.
+// ~/.gitconfig is already in the fixed set and dedups away, but $XDG/git/config
+// is not, and builder.go repoints XDG_CONFIG_HOME into the sandbox - so a host
+// whose global config lives only there would lose the whole file, identity
+// included, in the one mode where commits land.
+//
+// carried is the key stream of every config file those bindings make readable
+// inside the sandbox, in the order git applies them - each declaring file's own
+// keys with the keys of each carried target spliced in where the [include]
+// directive stands. That is not the same as parsing the roots alone: unlike
+// readonly, this mode mounts the include target, so a core.excludesFile
+// declared inside one *applies* in the sandbox, and reading only the roots
+// leaves nothing bound for it to name.
+func (g *Git) fallbackRefBindings(sources []string, homeDir, sandboxHome string) (bindings []Binding, carried []gitConfigEntry, sawInclude bool) {
+	untrusted := g.auxUntrustedRoots(homeDir, sandboxHome)
+	refs := rootConfigRefs(homeDir)
+
+	for _, path := range sources {
+		// sources are existingGlobalConfigs' output, so each is one of git's
+		// own two roots and exists as a regular file.
+		parent, known := refs[filepath.Clean(path)]
+		if !known || pathDenied(parent.src, untrusted) {
+			continue
+		}
+		bindings = append(bindings, configChainBinding(parent.src, parent.dest, parent.homeRelative))
+
+		entries, conditional, err := parseGitconfig(path)
+		// A file that could not be read to the end tells us nothing about what
+		// it declares, and an unknown is not an absence: reporting "no
+		// includes" here would carry the parent config into the sandbox naming
+		// targets nothing mounted, with nothing on screen. Treat it as a loss
+		// so the caller's alert fires.
+		sawInclude = sawInclude || err != nil || conditional
+
+		for _, e := range entries {
+			if e.key != gitIncludeKey {
+				carried = append(carried, e)
+				continue
+			}
+			sawInclude = true
+
+			target, ok := includeTarget(e, parent, homeDir)
+			if !ok || pathDenied(target.src, untrusted) {
+				continue
+			}
+			// A file the host does not have is not a loss: git ignores a
+			// missing include target on the host too.
+			if info, err := os.Stat(target.src); err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			bindings = append(bindings, configChainBinding(target.src, target.dest, target.homeRelative))
+			// Spliced in at the directive, which is where git reads them, so a
+			// key the declaring file sets *after* its [include] still wins and
+			// one set before it does not. Only the target's own top-level
+			// sections: a nested include is not carried, so acting on a value
+			// it supplies would name a file the sandbox cannot read.
+			included, _, _ := parseGitconfig(target.src)
+			carried = append(carried, included...)
+		}
+	}
+	return bindings, carried, sawInclude
 }
 
 // setupRepoGitconfig generates the sanitized per-repo .git/config overlay.
@@ -662,27 +1044,34 @@ func parseGitConfigList(data []byte) []gitConfigEntry {
 // when that happened, and is nil otherwise.
 //
 // Errors are returned for the caller to report; no notices are emitted here.
-// The second return value maps each key to the origin git reported for it.
-func (g *Git) resolveGlobalConfig(homeDir string) (values, origins map[string]string, retriedOutsideRepo, err error) {
-	values, origins, err = runGitConfigList(g.projectDir, homeDir)
+//
+// The entries are returned rather than the collapsed value/origin maps because
+// an [include] chain is only legible in the entry list: git reports each
+// directive as an ordinary key whose origin is the *declaring* file and whose
+// value is the literal unexpanded spelling, so two files including different
+// targets both spell the key `include.path` and the map keeps one of them.
+// Callers that only need the resolved values run globalConfigMap over the
+// result.
+func (g *Git) resolveGlobalConfig(homeDir string) (entries []gitConfigEntry, retriedOutsideRepo, err error) {
+	entries, err = runGitConfigList(g.projectDir, homeDir)
 	if err == nil || errors.Is(err, errShowScopeUnsupported) {
-		return values, origins, nil, err
+		return entries, nil, err
 	}
 
 	// os.TempDir() is not guaranteed to sit outside a repository, but a retry
 	// that lands in one only fails the same way the first attempt did, and the
 	// original error is what gets reported either way.
-	retryValues, retryOrigins, retryErr := runGitConfigList(os.TempDir(), homeDir)
+	retryEntries, retryErr := runGitConfigList(os.TempDir(), homeDir)
 	if retryErr != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	return retryValues, retryOrigins, err, nil
+	return retryEntries, err, nil
 }
 
 // runGitConfigList executes the resolver with dir as its working directory and
 // reduces the output to the global scope. An empty dir inherits the process's
 // own working directory.
-func runGitConfigList(dir, homeDir string) (values, origins map[string]string, err error) {
+func runGitConfigList(dir, homeDir string) ([]gitConfigEntry, error) {
 	cmd := exec.Command("git", "config", "--list", "--show-scope", "--show-origin", "-z")
 	cmd.Dir = dir
 	cmd.Env = gitCommandEnv(os.Environ(), homeDir)
@@ -691,13 +1080,29 @@ func runGitConfigList(dir, homeDir string) (values, origins map[string]string, e
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && isUnsupportedShowScope(exitErr.Stderr) {
-			return nil, nil, errors.Join(errShowScopeUnsupported, err)
+			return nil, errors.Join(errShowScopeUnsupported, err)
 		}
-		return nil, nil, err
+		return nil, err
 	}
 
-	values, origins = globalConfigMap(parseGitConfigList(out))
-	return values, origins, nil
+	return globalScopeEntries(parseGitConfigList(out)), nil
+}
+
+// globalScopeEntries drops every entry outside the global scope, preserving the
+// order git reported the survivors in.
+//
+// Order is what makes the entry list usable: git emits an include directive
+// before the keys it pulls in, so a nested chain reads as a walk from the root
+// config outwards.
+func globalScopeEntries(entries []gitConfigEntry) []gitConfigEntry {
+	var out []gitConfigEntry
+	for _, e := range entries {
+		if e.scope != "global" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // gitIncludeIfPrefix is how git reports an includeIf directive as a config key:
@@ -734,8 +1139,8 @@ func isUnsupportedShowScope(stderr []byte) bool {
 	return strings.Contains(s, "unknown option") || strings.Contains(s, "usage:")
 }
 
-// gitCommandEnv returns env with HOME replaced by homeDir and the locale pinned
-// to C.
+// gitCommandEnv returns env with HOME replaced by homeDir, GIT_CONFIG_GLOBAL
+// dropped, and the locale pinned to C.
 //
 // The locale is not cosmetic: git translates its diagnostics, and
 // isUnsupportedShowScope decides whether to fall back silently or alert on every
@@ -743,11 +1148,29 @@ func isUnsupportedShowScope(stderr []byte) bool {
 // host those spellings differ, so the sentinel that exists to keep an old git
 // quiet would stop recognising it. LANGUAGE overrides LC_ALL for messages in
 // GNU gettext, so it is dropped rather than overridden.
+//
+// GIT_CONFIG_GLOBAL is dropped because the resolver has to see the same global
+// config the sandbox will. Set on the host, it *replaces* the global scope:
+// git reads that one file and reports neither ~/.gitconfig nor the XDG config.
+// The sandbox does not follow - builder.go clears the environment and re-adds
+// an explicit list that leaves it out, so in-sandbox git reads the statically
+// bound ~/.gitconfig. Inheriting it made every value this tool acts on describe
+// a file the sandbox never reads: harmless for includes, which are gated on
+// rootConfigRefs and denied anyway, but a core.excludesFile named there was
+// bind-mounted in on the strength of a config that does not apply.
+//
+// The rest of git's config environment needs no handling. GIT_CONFIG_SYSTEM,
+// GIT_CONFIG_NOSYSTEM and GIT_CONFIG_COUNT/KEY/VALUE all report their entries
+// outside the global scope, which globalScopeEntries already drops.
+// XDG_CONFIG_HOME is deliberately left in place: hostGitXDGDir reads the same
+// variable, so the resolver and globalConfigSources agree on where the XDG
+// config lives, and that path is handled explicitly where it is bound.
 func gitCommandEnv(env []string, homeDir string) []string {
 	out := make([]string, 0, len(env)+2)
 	for _, kv := range env {
 		switch {
 		case strings.HasPrefix(kv, "HOME="),
+			strings.HasPrefix(kv, "GIT_CONFIG_GLOBAL="),
 			strings.HasPrefix(kv, "LC_ALL="),
 			strings.HasPrefix(kv, "LANGUAGE="):
 			continue
@@ -757,22 +1180,22 @@ func gitCommandEnv(env []string, homeDir string) []string {
 	return append(out, "HOME="+homeDir, "LC_ALL=C")
 }
 
-// globalConfigMap reduces parsed entries to the global scope, last-wins, and
-// returns the origin of each surviving value alongside it.
+// globalConfigMap collapses entries to a last-wins value map and returns the
+// origin of each surviving value alongside it.
 //
-// Values pulled in through an include are labelled global by git and reported
-// with the included file as their origin, so they survive the scope filter;
-// last-wins is what lets such an include override the outer file, matching
-// git's own precedence. The origins map is keyed identically and holds git's
-// raw origin token ("file:/path/to/config"), which copyAuxFile needs in order
-// to tell a host-owned config file from one the sandbox can write.
+// It does not filter by scope: runGitConfigList hands every caller
+// globalScopeEntries' output already, and a second copy of that rule here would
+// be one more place to keep in step. Values pulled in through an include are
+// labelled global by git and reported with the included file as their origin,
+// so they survive that filter; last-wins is what lets such an include override
+// the outer file, matching git's own precedence. The origins map is keyed
+// identically and holds git's raw origin token ("file:/path/to/config"), which
+// copyAuxFile needs in order to tell a host-owned config file from one the
+// sandbox can write.
 func globalConfigMap(entries []gitConfigEntry) (values, origins map[string]string) {
 	values = make(map[string]string, len(entries))
 	origins = make(map[string]string, len(entries))
 	for _, e := range entries {
-		if e.scope != "global" {
-			continue
-		}
 		values[e.key] = e.value
 		origins[e.key] = e.origin
 	}
@@ -874,12 +1297,14 @@ func auxSource(f gitAuxFile, values map[string]string, homeDir string) (src stri
 //
 // The trust rules copyAuxFile applies are mirrored here rather than skipped:
 // reporting a file the launch will refuse to carry would be a check that
-// contradicts the thing it is checking.
+// contradicts the thing it is checking. auxFileBindings applies the same
+// refusals through the same helpers, so this reports what either mode carries.
 func (g *Git) auxSourcePaths(homeDir string) []string {
-	values, origins, _, err := g.resolveGlobalConfig(homeDir)
+	entries, _, err := g.resolveGlobalConfig(homeDir)
 	if err != nil {
-		values, origins = nil, nil
+		entries = nil
 	}
+	values, origins := globalConfigMap(entries)
 	// Check has no sandbox home, so neither the shared temp root nor the
 	// sandbox home itself can be derived here and this bounds the project
 	// directory only. It is the narrower of the two deny lists, which is the
@@ -947,9 +1372,18 @@ func (g *Git) checkProjectDir() string {
 // have the host file it aims at copied into ~/.gitignore.safe, which the
 // sandbox reads. Widening a deny list this way is the safe direction - see
 // cmdpattern.ResolveRoots.
-func auxUntrustedRoots(homeDir, sandboxHome, projectDir string) []string {
-	bounds := launchBoundsFor(homeDir, sandboxHome, projectDir)
-	return cmdpattern.ResolveRoots(append([]string{sandboxHome}, bounds.UntrustedRoots()...))
+//
+// Everything this tool itself mounts writable joins them, which sandboxWritableRoots
+// derives by walking the bindings rather than naming paths. Those roots meet the same
+// description and sit outside every bound LaunchBounds knows: the worktree main .git
+// is not projectDir, which is the whole point of worktree mode, and ~/.ssh and
+// ~/.gnupg are not either. Deriving them from the bindings is what keeps the mounts
+// and the deny list from drifting apart as the tool grows more of them.
+func (g *Git) auxUntrustedRoots(homeDir, sandboxHome string) []string {
+	bounds := launchBoundsFor(homeDir, sandboxHome, g.projectDir)
+	roots := append([]string{sandboxHome}, bounds.UntrustedRoots()...)
+	roots = append(roots, g.sandboxWritableRoots(homeDir)...)
+	return cmdpattern.ResolveRoots(roots)
 }
 
 // copyAuxFile handles one file-valued key. It returns the ~/-relative
@@ -961,7 +1395,7 @@ func auxUntrustedRoots(homeDir, sandboxHome, projectDir string) []string {
 // default is simply absent is silent - most hosts have no ~/.config/git/ignore,
 // and nothing was lost.
 func (g *Git) copyAuxFile(f gitAuxFile, values, origins map[string]string, homeDir, sandboxHome string) (string, bool) {
-	untrusted := auxUntrustedRoots(homeDir, sandboxHome, g.projectDir)
+	untrusted := g.auxUntrustedRoots(homeDir, sandboxHome)
 
 	src, configured, err := auxSource(f, values, homeDir)
 	if err != nil {
@@ -1034,6 +1468,357 @@ func (g *Git) copyAuxFile(f gitAuxFile, values, origins map[string]string, homeD
 	return "~/" + f.safeName, true
 }
 
+// auxFileBindings returns the bindings that carry the host's global ignore and
+// attributes files into a readwrite sandbox.
+//
+// readwrite mounts the host ~/.gitconfig verbatim, so the values of
+// core.excludesFile and core.attributesFile arrive inside the sandbox exactly
+// as the host wrote them - naming host paths nothing mounts. Git ignores a
+// missing excludesFile and attributesFile with exit 0 and no warning, so the
+// setting is lost with nothing on screen to say so. Binding the file the value
+// already names is what makes it resolve, and it is why nothing here rewrites
+// the value the way readonly's generated config does.
+//
+// The trust rules are copyAuxFile's, applied through the same helpers rather
+// than restated: a value set from a file the sandbox can write, or naming a
+// file inside a directory the sandbox writes, is the sandbox's word about which
+// host file devsandbox should mount. Those refusals are silent, because the
+// alternative to acting on them is mounting nothing, which is what git already
+// does with the value.
+func (g *Git) auxFileBindings(values, origins map[string]string, homeDir, sandboxHome string) []Binding {
+	untrusted := g.auxUntrustedRoots(homeDir, sandboxHome)
+
+	var bindings []Binding
+	for _, f := range gitAuxFiles {
+		src, configured, err := auxSource(f, values, homeDir)
+		if err != nil {
+			// Only a configured value can fail to expand, and the user set it:
+			// they are getting less than the config says.
+			notice.Alert("git: core.%s = %q is not a path devsandbox can resolve (%v); "+
+				"the sandbox will not see that file", f.emit, strings.TrimSpace(values[f.key]), err)
+			continue
+		}
+		if src == "" {
+			continue
+		}
+		if configured && !originTrusted(origins[f.key], untrusted) {
+			continue
+		}
+		if pathDenied(src, untrusted) {
+			continue
+		}
+		// A file the host does not have is not a loss: git ignores it on the
+		// host too, so there is nothing to carry and nothing to report.
+		if info, err := os.Stat(src); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+
+		dest, homeRelative := auxDest(f, values[f.key], src, configured, homeDir)
+		bindings = append(bindings, configRefBinding(src, dest, homeRelative))
+	}
+	return bindings
+}
+
+// configRefBinding builds the binding that carries one host file the global git
+// config *names* into a readwrite sandbox - the ignore and attributes files, and
+// nothing else.
+//
+// Type and ReadOnly are deliberately unset, unlike the readonly aux bindings in
+// readOnlyBindings: those point at generated copies in sandboxHome, where an
+// overlay would be meaningless. These point at the host's own files, so they
+// take whatever ResolveBindingType gives them and follow the user wherever they
+// move the mount mode. That is safe only because devsandbox never parses them:
+// nothing in an ignore file decides what the next launch mounts. Anything
+// devsandbox reads keys out of goes through configChainBinding instead.
+//
+// Under the default split policy this resolves to MountTmpOverlay, which for a
+// *file* source is not an overlay at all: builder.go's applyBinding and
+// docker.go both downgrade a non-directory overlay to a read-only bind, because
+// overlayfs needs a directory. So under every policy except an explicit
+// readwrite these arrive read-only anyway.
+//
+// Dest is always passed in explicitly, never left empty for the verbatim case:
+// docker.go's remapping switch tests an empty Dest first and rewrites it under
+// the container home, so leaving it empty both silently disables
+// HomeRelativeDest and rewrites a path that has to stay verbatim.
+func configRefBinding(src, dest string, homeRelative bool) Binding {
+	return Binding{
+		Source:           src,
+		Dest:             dest,
+		HomeRelativeDest: homeRelative,
+		Optional:         true,
+		Category:         CategoryConfig,
+	}
+}
+
+// configChainBinding carries one file devsandbox itself reads keys out of: a
+// global config root, or an [include] target whose settings it resolves.
+//
+// It is pinned read-only whatever the mount mode says, and that is a security
+// boundary rather than a policy default. auxFileBindings and
+// includeOriginBindings decide which host files to mount by reading these, and
+// they anchor that decision on the origin path - so a config file the sandbox
+// can write is a config file the sandbox can use to choose. Left following the
+// mount mode, an explicit mount_mode = "readwrite" made ~/.gitconfig a writable
+// host bind: a sandbox could append core.excludesFile = ~/.aws/credentials to
+// the real file on one launch and have devsandbox bind that file in - writable -
+// on the next, with originTrusted and pathDenied both satisfied. The deny list
+// cannot close that one, because the origin is the user's own ~/.gitconfig and
+// denying it would refuse the whole feature.
+//
+// Only an explicit readwrite mount mode changes behavior here. split, overlay
+// and tmpoverlay all downgrade a file source to a read-only bind already, and
+// readonly asks for one outright.
+func configChainBinding(src, dest string, homeRelative bool) Binding {
+	b := configRefBinding(src, dest, homeRelative)
+	b.Type = MountBind
+	b.ReadOnly = true
+	return b
+}
+
+// auxDest returns the in-sandbox path a file-valued key resolves to, and
+// whether that path is inside the sandbox home.
+//
+// The value's *spelling* decides this, not where the file sits on the host. A
+// ~/-spelled value is re-expanded by git against the sandbox's own $HOME, which
+// is the host home only on bwrap; Docker and krun mount it at
+// /home/sandboxuser, so the binding has to follow with HomeRelativeDest. An
+// absolute value names the same path on every backend and is bound verbatim.
+//
+// An unset key is the case that is easy to get wrong: its destination comes
+// from homeDir, never from hostGitXDGDir. builder.go pins XDG_CONFIG_HOME to
+// $HOME/.config inside the sandbox unconditionally, so in-sandbox git reads
+// $HOME/.config/git/<name> however the host's own XDG_CONFIG_HOME is set - and
+// on a host that points it outside $HOME, hostGitXDGDir is the right Source and
+// the wrong Dest.
+//
+// Dest is always set explicitly, never left empty for the verbatim case:
+// docker.go's remapping switch tests an empty Dest first and rewrites it under
+// the container home, so leaving it empty both silently disables
+// HomeRelativeDest and rewrites a path that has to stay verbatim.
+func auxDest(f gitAuxFile, raw, src string, configured bool, homeDir string) (dest string, homeRelative bool) {
+	if !configured {
+		return filepath.Join(homeDir, ".config", "git", f.xdgName), true
+	}
+	// auxSource expanded this same value without error, so only the flag it
+	// discards is left to recover.
+	_, homeRelative, _ = expandGitPathRel(strings.TrimSpace(raw), homeDir)
+	return src, homeRelative
+}
+
+// gitIncludeKey is how git reports an unconditional [include] directive.
+const gitIncludeKey = "include.path"
+
+// gitIncludePathSuffix is the trailing component of every include directive git
+// honours: `include.path` and `includeif.<condition>.path`.
+const gitIncludePathSuffix = ".path"
+
+// isIncludePathKey reports whether key is an include directive.
+//
+// The includeIf form is matched as a prefix plus a suffix rather than by
+// splitting on `.`, because the condition is a subsection carrying `.` and `/`
+// of its own - `includeif.gitdir:~/work/.path` is one key with three dots in
+// it. The condition must be non-empty, which is what keeps a bare
+// `includeif.path` - a key git does not act on - out.
+func isIncludePathKey(key string) bool {
+	if key == gitIncludeKey {
+		return true
+	}
+	cond, ok := strings.CutPrefix(key, gitIncludeIfPrefix)
+	if !ok {
+		return false
+	}
+	cond, ok = strings.CutSuffix(cond, gitIncludePathSuffix)
+	return ok && cond != ""
+}
+
+// gitOriginRef is one global-scope config file: where it lives on the host, and
+// where the sandbox has to see it.
+//
+// The two are not the same string in general. A config read from an
+// XDG_CONFIG_HOME the host points outside $HOME lives at /opt/cfg/git/config
+// and is read inside the sandbox at $HOME/.config/git/config, because
+// builder.go pins XDG_CONFIG_HOME to $HOME/.config there unconditionally. An
+// absolutely-spelled include names the same path on every backend and is bound
+// verbatim.
+type gitOriginRef struct {
+	src          string
+	dest         string
+	homeRelative bool
+}
+
+// rootConfigRefs returns the two files git reads the global scope from, keyed
+// by their cleaned host path.
+//
+// Both are home-relative destinations. ~/.gitconfig is trivially so; the XDG
+// config is so because in-sandbox git reads $HOME/.config/git/config whatever
+// the host's own XDG_CONFIG_HOME says - which makes hostGitXDGDir the right
+// Source and the wrong Dest, exactly as in auxDest.
+func rootConfigRefs(homeDir string) map[string]gitOriginRef {
+	xdg := filepath.Join(hostGitXDGDir(homeDir), "config")
+	gitconfig := filepath.Join(homeDir, ".gitconfig")
+	return map[string]gitOriginRef{
+		filepath.Clean(xdg): {
+			src:          xdg,
+			dest:         filepath.Join(homeDir, ".config", "git", "config"),
+			homeRelative: true,
+		},
+		filepath.Clean(gitconfig): {
+			src:          gitconfig,
+			dest:         gitconfig,
+			homeRelative: true,
+		},
+	}
+}
+
+// originFilePath extracts the host path from git's origin token, cleaned.
+//
+// Cleaning is load-bearing rather than tidy: git does not normalize the origin
+// it reports, so an include spelled `~/sub/../sub/inc.gitconfig` is reported as
+// origin `file:/home/u/sub/../sub/inc.gitconfig` while filepath.Join collapses
+// the same spelling to `/home/u/sub/inc.gitconfig`. Comparing the two raw finds
+// no match, and the origin is then either dropped - losing the include in
+// silence - or bound at a destination nothing derived.
+//
+// A non-file origin is refused rather than guessed at; the other forms
+// ("command line:", "blob:", "standard input:") cannot occur for the global
+// scope of a plain `git config --list`, so deny-by-default costs nothing and an
+// alert for it would be noise.
+func originFilePath(origin string) (string, bool) {
+	path, ok := strings.CutPrefix(origin, gitOriginFilePrefix)
+	if !ok || path == "" {
+		return "", false
+	}
+	return filepath.Clean(path), true
+}
+
+// includeTarget resolves one include directive to the file it names.
+//
+// The value's spelling decides the destination, and a *relative* spelling is
+// the case that only works if the parent is carried along: git resolves it
+// against the directory of the file that declared it, so both halves of the ref
+// are derived from the parent's - the source from where the parent sits on the
+// host, the destination from where the sandbox reads it - and the
+// home-relative flag is inherited rather than recomputed. Those three can
+// disagree: a relative include from an out-of-$HOME XDG config has a source
+// under /opt and a home-relative destination under $HOME/.config/git.
+func includeTarget(e gitConfigEntry, parent gitOriginRef, homeDir string) (gitOriginRef, bool) {
+	if !isIncludePathKey(e.key) {
+		return gitOriginRef{}, false
+	}
+	value := strings.TrimSpace(e.value)
+	if value == "" {
+		// [include] with no path names no file. Git ignores it; so does this.
+		return gitOriginRef{}, false
+	}
+
+	if path, homeRelative, err := expandGitPathRel(value, homeDir); err == nil {
+		return gitOriginRef{src: path, dest: path, homeRelative: homeRelative}, true
+	}
+
+	if strings.HasPrefix(value, "~") {
+		// The ~user/ form, which git resolves from the password database.
+		// The user set it and is getting less than the config says.
+		notice.Alert("git: %s = %q is not a path devsandbox can resolve; "+
+			"the sandbox will not see that included config", e.key, value)
+		return gitOriginRef{}, false
+	}
+
+	dest := filepath.Join(filepath.Dir(parent.dest), value)
+	return gitOriginRef{
+		src:          filepath.Join(filepath.Dir(parent.src), value),
+		dest:         dest,
+		homeRelative: parent.homeRelative && pathUnderDir(dest, homeDir),
+	}, true
+}
+
+// includeOriginBindings returns the bindings that carry every config file the
+// host's global git configuration is actually assembled from into a readwrite
+// sandbox.
+//
+// readwrite mounts ~/.gitconfig verbatim, so an [include] or [includeIf]
+// directive arrives inside the sandbox spelled exactly as the host wrote it,
+// naming a file nothing mounts. Git ignores a missing include target with exit
+// 0 and no warning, so an identity-per-directory setup silently loses its
+// identity in the one mode where commits land.
+//
+// The binding set is the distinct file: origins of the global scope, which is
+// the right filter for two reasons that fall out rather than being imposed: a
+// file contributing nothing is never reported as an origin and needs no binding
+// (git ignores a missing include silently), while an intermediate file in a
+// nested chain still appears, because declaring include.path *is* a contributed
+// key with that file as its origin. A non-matching includeIf target contributes
+// no origin and so is never bound - which keeps a work-identity file out of a
+// personal project's sandbox for free.
+//
+// entries must be in the order git reported them: git emits an include
+// directive before the keys it pulls in, so a single forward pass sees every
+// declaring file before the file it declares.
+//
+// The trust rules are copyAuxFile's, applied through the same helpers. An
+// origin under a root the sandbox writes is refused, and so is everything it
+// declares: the refusal is about who chose the path, and a config file the
+// sandbox can rewrite chooses its own include targets. An origin that was never
+// declared by a trusted file and is not one of git's own two roots is refused
+// on the same deny-by-default footing. All of it is silent, because the
+// alternative to acting on such a value is mounting nothing, which is what git
+// already does with it.
+func (g *Git) includeOriginBindings(entries []gitConfigEntry, homeDir, sandboxHome string) []Binding {
+	untrusted := g.auxUntrustedRoots(homeDir, sandboxHome)
+	refs := rootConfigRefs(homeDir)
+	denied := make(map[string]bool)
+	bound := make(map[string]bool)
+
+	var bindings []Binding
+	for _, e := range entries {
+		origin, ok := originFilePath(e.origin)
+		if !ok || denied[origin] {
+			continue
+		}
+
+		ref, known := refs[origin]
+		if !known {
+			denied[origin] = true
+			continue
+		}
+
+		if !bound[origin] {
+			if pathDenied(ref.src, untrusted) {
+				denied[origin] = true
+				continue
+			}
+			bound[origin] = true
+			bindings = append(bindings, configChainBinding(ref.src, ref.dest, ref.homeRelative))
+		}
+
+		target, ok := includeTarget(e, ref, homeDir)
+		if !ok {
+			continue
+		}
+		// First declaration wins, matching git's own read order. A target that
+		// is already a root - an [include] naming ~/.gitconfig - keeps the root
+		// destination it was going to be bound at anyway.
+		//
+		// One destination per source, deliberately. A host that includes the
+		// same file twice under two spellings - `~/inc.gitconfig` and
+		// `/home/u/inc.gitconfig` - reads it at two guest paths on Docker and
+		// krun, so carrying both inclusions would take two mounts; but those
+		// two destinations are the *same string* on bwrap, where the sandbox
+		// home is bound at the host home path, and a second mount on one
+		// destination is a trackMount panic - a dead launch, in place of a
+		// second application of a file whose contents are identical. The
+		// residual cost is documented with the includeIf caveat in
+		// docs/tools.md.
+		if key := filepath.Clean(target.src); !denied[key] {
+			if _, exists := refs[key]; !exists {
+				refs[key] = target
+			}
+		}
+	}
+
+	return bindings
+}
+
 // expandGitPath turns a git path value into an absolute host path.
 //
 // A leading ~/ is replaced with homeDir and an absolute path passes through.
@@ -1043,14 +1828,51 @@ func (g *Git) copyAuxFile(f gitAuxFile, values, origins map[string]string, homeD
 // resolves across all scopes (a repo-local value would win) and
 // `git config --list --type=path` expands every value, corrupting non-path ones.
 func expandGitPath(value, homeDir string) (string, error) {
+	path, _, err := expandGitPathRel(value, homeDir)
+	return path, err
+}
+
+// expandGitPathRel is expandGitPath plus the distinction expandGitPath drops:
+// whether the value was written ~/-relative.
+//
+// That distinction decides where a binding for the file has to land. The
+// sandbox home is bound at the host home path on bwrap and at
+// /home/sandboxuser on Docker and krun, so a ~/-spelled value resolves to a
+// different absolute path per backend and its binding must be marked
+// HomeRelativeDest; an absolute value names the same path everywhere and must
+// be bound verbatim. Expanding both against homeDir and forgetting which was
+// which mounts the file where Docker and krun never look, which git ignores in
+// silence.
+//
+// A ~/ spelling that climbs back out of $HOME - `~/../shared/team.gitconfig` -
+// is reported as *not* home-relative, because the flag means "a path inside the
+// sandbox home" and this is not one. git expands the value by concatenation and
+// leaves the .. for the kernel, so the origin it reports still carries the
+// segment; filepath.Join cleans it away, and a Dest with the host home prefix
+// gone is one docker.go's remapHomePrefix leaves untouched - the flag would
+// read as applied while changing nothing, which is the silent no-op it exists
+// to remove. Such a value is carried verbatim, which resolves on bwrap and on a
+// Docker host whose home shares a parent with the container home; where it does
+// not, git ignores the missing file exactly as it would without the mount. See
+// docs/tools.md for the same backend-dependent caveat on includeIf.
+func expandGitPathRel(value, homeDir string) (path string, homeRelative bool, err error) {
 	switch {
 	case strings.HasPrefix(value, "~/"):
-		return filepath.Join(homeDir, value[2:]), nil
+		expanded := filepath.Join(homeDir, value[2:])
+		return expanded, pathUnderDir(expanded, homeDir), nil
 	case filepath.IsAbs(value):
-		return filepath.Clean(value), nil
+		return filepath.Clean(value), false, nil
 	default:
-		return "", errors.New("not an absolute or ~/ path")
+		return "", false, errors.New("not an absolute or ~/ path")
 	}
+}
+
+// pathUnderDir reports whether path names something strictly inside dir. The
+// directory itself does not count: a binding whose Dest is the sandbox home
+// would mount over the home mount, and HomeRelativeDest describes a path
+// *within* it.
+func pathUnderDir(path, dir string) bool {
+	return strings.HasPrefix(filepath.Clean(path), filepath.Clean(dir)+string(filepath.Separator))
 }
 
 // pathDenied reports whether path lands in one of the sandbox-writable roots.
@@ -1224,11 +2046,13 @@ func (g *Git) Check(homeDir string) CheckResult {
 		result.AddIssue("no global git config found (~/.gitconfig or ~/.config/git/config) (will use defaults)")
 	}
 
-	// The global ignore and attributes files readonly mode carries into the
-	// sandbox. Their location follows the resolved config, so a core.excludesFile
-	// set from an included file is reported at the path it actually names.
-	// Only readonly mode carries them, and resolving costs a git subprocess, so
-	// the other two modes neither report nor pay for it.
+	// The global ignore and attributes files carried into the sandbox. Their
+	// location follows the resolved config, so a core.excludesFile set from an
+	// included file is reported at the path it actually names. Both readonly
+	// and readwrite carry them - readonly as generated copies the safe config
+	// points at, readwrite as bind mounts at the paths the host config already
+	// names - so both report them. Only disabled carries nothing, and resolving
+	// costs a git subprocess, so it neither reports nor pays for it.
 	//
 	// Tested the same way the mode line above is - by what the mode is *not*.
 	// `tools check` and `tools info` call Check on the registry singleton
@@ -1236,7 +2060,7 @@ func (g *Git) Check(homeDir string) CheckResult {
 	// an `== GitModeReadOnly` test made this branch dead on the only path that
 	// reaches it, while the switch above kept printing "readonly (safe,
 	// default)" from its default arm.
-	if g.mode != GitModeReadWrite && g.mode != GitModeDisabled {
+	if g.mode != GitModeDisabled {
 		result.AddConfigPaths(g.auxSourcePaths(homeDir)...)
 	}
 
@@ -1252,22 +2076,44 @@ func (g *Git) Check(homeDir string) CheckResult {
 }
 
 // parseGitconfig extracts the allowlisted keys from a gitconfig file's own
-// top-level sections, keyed the way git reports them ("user.name"). A file that
-// cannot be opened yields no keys.
+// top-level sections, keyed the way git reports them ("user.name"), with the
+// include directives that file declares left in place among them.
+//
+// The entries come back **in file order**, and the include directives are
+// entries of their own rather than a separate list, because git expands an
+// include where it stands: a key set above `[include]` is overridden by the
+// included file, and the same key set below it wins. A caller that expanded a
+// separate include list either before or after the declaring file's own keys
+// would be guessing at that, and the guess decides which host file gets bound
+// for core.excludesFile - so the wrong one is mounted and the right one is not,
+// which git reports as exit 0 and no ignore rules.
+//
+// err is non-nil when the file could not be opened or could not be read to the
+// end. It is not cosmetic: the degraded path decides whether the launch says an
+// include was lost from what this returns, so a truncated read that came back
+// as "no includes" would suppress the very report the fallback exists to make.
 //
 // Values come back in git's semantic form - unquoted, with an inline comment
 // stripped - because that is what the caller re-quotes. Returning the raw text
 // after the '=' is what made a host `name = "Jane Doe"` reach the sandbox as
 // `"Jane Doe"` with the quote characters part of the name, once emitted values
 // started being git-quoted.
-func parseGitconfig(path string) map[string]string {
+//
+// An include entry carries the literal unexpanded spelling as its value,
+// because that spelling is what decides where the target has to be mounted.
+// conditional reports only that an [includeIf] section was present, never what
+// it names: its condition cannot be evaluated here, and binding the target
+// anyway would carry a work identity into a personal project's sandbox. It
+// exists so the caller can say the include was lost rather than lose it in
+// silence.
+func parseGitconfig(path string) (entries []gitConfigEntry, conditional bool, err error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, false, err
 	}
 	defer func() { _ = file.Close() }()
 
-	values := make(map[string]string, 2+len(gitAuxFiles))
+	origin := gitOriginFilePrefix + path
 	scanner := bufio.NewScanner(file)
 	section := ""
 
@@ -1279,7 +2125,18 @@ func parseGitconfig(path string) map[string]string {
 
 		if strings.HasPrefix(line, "[") {
 			section = parseSectionName(line)
-			continue
+			conditional = conditional || isIncludeIfHeader(line)
+			// Git accepts a key on the same line as the header that opens its
+			// section - `[include] path = ~/inc` and `[user] name = Ada` both
+			// take effect - so what follows the ']' is a key/value line for the
+			// section just opened, not decoration. Dropping it made a one-line
+			// [include] read as "no includes at all", which on the degraded
+			// path silently loses the target *and* the report that says so.
+			rest := sectionRemainder(line)
+			if rest == "" {
+				continue
+			}
+			line = rest
 		}
 		if section == "" {
 			continue
@@ -1290,13 +2147,56 @@ func parseGitconfig(path string) map[string]string {
 			continue
 		}
 		key := section + "." + strings.ToLower(strings.TrimSpace(rawKey))
-		if !fallbackConfigKeys[key] {
+		value := parseConfigValue(strings.TrimLeft(rawValue, " \t"))
+		if key == gitIncludeKey {
+			// [include] with no path names no file; git ignores it, and
+			// reporting it would have the caller alert about nothing.
+			if value == "" {
+				continue
+			}
+		} else if !fallbackConfigKeys[key] {
 			continue
 		}
-		values[key] = parseConfigValue(strings.TrimLeft(rawValue, " \t"))
+		// scope is left unset: these entries never reach globalScopeEntries,
+		// which is the only reader, and every file parsed here is one git
+		// reads as global by construction.
+		entries = append(entries, gitConfigEntry{origin: origin, key: key, value: value})
 	}
 
-	return values
+	if err := scanner.Err(); err != nil {
+		return entries, conditional, err
+	}
+	return entries, conditional, nil
+}
+
+// sectionRemainder returns what a section header line carries after its
+// closing ']', trimmed, or "" when the line is a bare header.
+//
+// It cuts at the first ']' exactly as parseSectionName does, so the two agree
+// about where the header ends. A header carrying a subsection is quoted, and
+// parseSectionName returns "" for those, so any remainder after one is dropped
+// by the caller's empty-section guard rather than attributed to the wrong
+// section.
+func sectionRemainder(line string) string {
+	_, rest, ok := strings.Cut(strings.TrimPrefix(line, "["), "]")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(rest)
+}
+
+// isIncludeIfHeader reports whether a section header opens a conditional
+// include - `[includeIf "gitdir:~/work/"]`.
+//
+// It reads the raw header rather than going through parseSectionName, which
+// deliberately returns nothing for a subsectioned header so that an include
+// directive is never mistaken for a plain section.
+func isIncludeIfHeader(line string) bool {
+	name, _, ok := strings.Cut(strings.TrimPrefix(line, "["), "\"")
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(name), "includeif")
 }
 
 // fallbackConfigKeys is the set parseGitconfig looks for: the same allowlist

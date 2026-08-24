@@ -70,3 +70,81 @@ func TestGit_Bindings_RepoDestsAreNotHomeRelative(t *testing.T) {
 		}
 	}
 }
+
+// TestGit_Bindings_ReadWriteRefsAreHomeRelativeUnderHome asks the same question
+// TestBindings_HomeRelativeDestIsUnderHomeDir does, of the bindings that test
+// cannot reach: it iterates All() and calls Bindings without calling Setup, so
+// git's refBindings are nil there and only the four static readwrite entries
+// are seen. Everything this change resolves is invisible to it.
+//
+// The flag is asserted as a struct field rather than through a rendered path
+// because bwrap binds the sandbox home at the host home path, so the
+// home-relative and verbatim spellings of a Dest are the same string there. A
+// wrong flag is a silent no-op on bwrap and mounts the file where nothing looks
+// for it on Docker and krun.
+func TestGit_Bindings_ReadWriteRefsAreHomeRelativeUnderHome(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	sandboxHome := filepath.Join(tmpDir, "sandbox")
+	projectDir := filepath.Join(tmpDir, "project")
+	shared := filepath.Join(tmpDir, "shared", "team.gitconfig")
+	for _, d := range []string{sandboxHome, projectDir, filepath.Join(homeDir, ".config", "git"), filepath.Dir(shared)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isolateGitEnv(t, homeDir)
+	captureNotices(t)
+
+	// One config exercising every spelling the resolver can report: a
+	// ~/-spelled key, an unset key falling back to the XDG default, a
+	// ~/-spelled include, a relative include nested inside it, and an
+	// absolutely-spelled include that has to stay verbatim.
+	writeFile(t, filepath.Join(homeDir, "my-ignore"), "build/\n")
+	writeFile(t, filepath.Join(homeDir, ".config", "git", "attributes"), "*.bin binary\n")
+	writeFile(t, filepath.Join(homeDir, "inc.gitconfig"), "[include]\n\tpath = nested.gitconfig\n")
+	writeFile(t, filepath.Join(homeDir, "nested.gitconfig"), "[user]\n\temail = ada@corp\n")
+	writeFile(t, shared, "[user]\n\tname = Ada\n")
+	writeFile(t, filepath.Join(homeDir, ".gitconfig"),
+		"[core]\n\texcludesfile = ~/my-ignore\n[include]\n\tpath = ~/inc.gitconfig\n\tpath = "+shared+"\n")
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: projectDir}, map[string]any{"mode": "readwrite"})
+	if err := g.Setup(homeDir, sandboxHome); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if len(g.refBindings) == 0 {
+		t.Fatal("Setup resolved no references, so the invariant below asserts nothing")
+	}
+
+	for _, b := range g.Bindings(homeDir, sandboxHome) {
+		if !b.HomeRelativeDest {
+			continue
+		}
+		if b.Dest == "" {
+			t.Errorf("%s: HomeRelativeDest with an empty Dest, which is remapped from Source instead", b.Source)
+			continue
+		}
+		if !strings.HasPrefix(b.Dest, homeDir+"/") {
+			t.Errorf("HomeRelativeDest binding for %s: Dest = %q, want a path under %q", b.Source, b.Dest, homeDir)
+		}
+	}
+
+	// And the converse, which the loop above cannot see: an absolutely-spelled
+	// include names the same path on every backend, so flagging it would move
+	// it under the container home where git never looks.
+	var found bool
+	for _, b := range g.refBindings {
+		if b.Source != shared {
+			continue
+		}
+		found = true
+		if b.Dest != shared || b.HomeRelativeDest {
+			t.Errorf("absolute include: Dest = %q HomeRelativeDest = %v, want %q and false",
+				b.Dest, b.HomeRelativeDest, shared)
+		}
+	}
+	if !found {
+		t.Errorf("the absolutely-spelled include %s was not carried", shared)
+	}
+}

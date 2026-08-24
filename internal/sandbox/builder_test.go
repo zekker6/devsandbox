@@ -1148,6 +1148,84 @@ func TestResolveBindingType_ClaudeHomeIsNeverBoundReadWrite(t *testing.T) {
 	}
 }
 
+// TestResolveBindingType_WorktreeGitDirHonorsMountMode composes the git tool's
+// worktree binding with the resolver the launch actually runs it through, which
+// is the only place the two halves of this decision meet: the tool decides
+// whether to pin a Type, and ResolveBindingType returns untouched whenever one
+// is set.
+//
+// The defect that motivates it is the readonly row. An unconditional pin beat
+// not just the overlay policy it was written to escape but an explicit
+// mount_mode = "readonly", so the launch succeeded, nothing was reported, and
+// the sandbox held host-write access to the main repository's objects, refs,
+// index and hooks - which the host executes on its next commit. A tools-package
+// test can only assert that Type is left unset; that it then resolves read-only
+// has to be asserted here.
+func TestResolveBindingType_WorktreeGitDirHonorsMountMode(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitDir := filepath.Join(repo, ".git")
+	worktree := t.TempDir()
+
+	// Every accepted mount mode, set at both layers, plus the precedence
+	// between them. "disabled" is absent because builder.go drops the tool
+	// before any binding of it is resolved.
+	tests := []struct {
+		name         string
+		toolMode     string
+		globalMode   string
+		wantType     tools.MountType
+		wantReadOnly bool
+	}{
+		{name: "unset", wantType: tools.MountBind},
+		{name: "split", toolMode: "split", wantType: tools.MountBind},
+		{name: "overlay", toolMode: "overlay", wantType: tools.MountBind},
+		{name: "tmpoverlay", toolMode: "tmpoverlay", wantType: tools.MountBind},
+		{name: "explicit readwrite", toolMode: "readwrite", wantType: tools.MountBind},
+		{name: "explicit readonly", toolMode: "readonly", wantType: tools.MountBind, wantReadOnly: true},
+		{name: "global readonly", globalMode: "readonly", wantType: tools.MountBind, wantReadOnly: true},
+		{name: "global overlay", globalMode: "overlay", wantType: tools.MountBind},
+		{name: "tool readonly over global overlay", toolMode: "readonly", globalMode: "overlay", wantType: tools.MountBind, wantReadOnly: true},
+		{name: "tool overlay over global readonly", toolMode: "overlay", globalMode: "readonly", wantType: tools.MountBind},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			toolCfg := map[string]any{"mode": "readwrite"}
+			if tt.toolMode != "" {
+				toolCfg["mount_mode"] = tt.toolMode
+			}
+
+			g := &tools.Git{}
+			g.Configure(tools.GlobalConfig{
+				ProjectDir:       worktree,
+				GitRepoRoot:      repo,
+				DefaultMountMode: tt.globalMode,
+			}, toolCfg)
+
+			found := false
+			for _, b := range g.Bindings(t.TempDir(), t.TempDir()) {
+				if b.Source != gitDir {
+					continue
+				}
+				found = true
+				ResolveBindingType(&b, tt.toolMode, tt.globalMode)
+				if b.Type != tt.wantType {
+					t.Errorf("Type = %q, want %q", b.Type, tt.wantType)
+				}
+				if b.ReadOnly != tt.wantReadOnly {
+					t.Errorf("ReadOnly = %v, want %v", b.ReadOnly, tt.wantReadOnly)
+				}
+			}
+			if !found {
+				t.Fatalf("no binding for the main repository's .git at %s", gitDir)
+			}
+		})
+	}
+}
+
 // TestBuilder_AddProjectBindings_WorktreeLeavesMainRepoAlone verifies that
 // when ProjectDir is a worktree path (GitRepoRoot set and distinct), the
 // project bindings mount only the worktree — the main repo tree must not

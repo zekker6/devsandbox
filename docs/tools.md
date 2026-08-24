@@ -533,6 +533,7 @@ This is the safest mode for running untrusted code that needs to read repository
 Full git access for trusted projects:
 
 - All git operations including commits
+- Your `~/.gitconfig` mounted verbatim, plus the files it references (see below)
 - SSH keys (read-only access to `~/.ssh`)
 - GPG signing (read-only access to `~/.gnupg`)
 - Git credentials (read-only access to `~/.git-credentials`)
@@ -544,6 +545,82 @@ mode = "readwrite"
 ```
 
 **Security note:** SSH and GPG directories are mounted read-only to protect private keys.
+
+##### Files the host config references
+
+`readwrite` mounts your `~/.gitconfig` unchanged, so every path in it arrives inside the sandbox spelled
+exactly as the host wrote it. Those paths used to name host files nothing mounted, and git ignores a missing
+`core.excludesFile`, a missing `core.attributesFile` and a missing `[include]` target with exit 0 and no
+warning - so the settings behind them simply did not apply, with nothing on screen to say so. devsandbox now
+mounts the files the config names, so they resolve:
+
+- the files `core.excludesFile` and `core.attributesFile` name, or git's own defaults at
+  `~/.config/git/ignore` and `~/.config/git/attributes` when those keys are unset (read from
+  `$XDG_CONFIG_HOME/git/` when that variable is set on your host)
+- every `[include]` and matching `[includeIf "gitdir:..."]` target that contributed a setting, together with
+  the config files that declare them - `~/.config/git/config` (spelled `$XDG_CONFIG_HOME/git/config` when that
+  variable is set on your host) included, which is the only global config a host that keeps its identity
+  solely there has
+
+Nothing is rewritten. The config keeps its own values, and each file is mounted where its value points inside
+the sandbox. The mounts follow the same policy `~/.gitconfig` itself gets, which under the default `split`
+[overlay mode](configuration.md#overlay-settings) means **read-only** for a single file: `split` asks for an
+overlay, and overlays need a directory, so a file falls back to a read-only bind on every backend. Under
+`split`, writes never reach the host - but they do not silently vanish either, they fail. `git config --global`
+inside the sandbox therefore errors with `Device or resource busy` once any global config file is mounted,
+exactly as it already did for a host with a `~/.gitconfig`. Set the identity per command
+(`git -c user.email=...`) or per repository (`git config --local`), which writes into the project's own
+`.git/config`.
+
+Setting `mount_mode = "readwrite"` on `[tools.git]`, or a global `[overlay] default = "readwrite"`, makes the
+**ignore and attributes files** writable binds at their host paths - so a write from inside the sandbox edits
+the real file, the same caveat that already applies to `~/.ssh` and `~/.gnupg` in this mode.
+
+The config files themselves are the exception, and stay read-only under every mount mode: `~/.gitconfig`,
+`~/.config/git/config`, and every `[include]` target. devsandbox resolves those to decide which host files to
+mount, so a config the sandbox could write between launches would be a config the sandbox could use to name
+any host file for the next one.
+
+If your global config lives only at `~/.config/git/config` with no `~/.gitconfig`, this is a change: that file
+is now mounted, so `git config --global` writes to it and fails, where before it fell through to creating a
+throwaway `~/.gitconfig` inside the sandbox. In exchange the identity in it now actually applies.
+
+This is new host surface in `readwrite` mode: files outside `~/.gitconfig` are now mounted into the sandbox.
+It is marginal next to the `~/.ssh` and `~/.gnupg` this mode already carries, and it reaches only files your
+own global git config names, but it is a widening and worth stating. `readonly` and `disabled` are unchanged.
+
+A named file that does not exist on the host is skipped in silence, exactly as the host's own git skips it. A
+file the sandbox itself can write - one inside the project directory, the shared `$TMPDIR`, or the sandbox
+home - is refused instead of mounted, since the sandbox would otherwise get to choose which host file the next
+launch carries in. Both of those are silent, because the alternative to refusing is mounting nothing, which is
+what git already does with the value. A value spelled `~user/...` - the form git resolves from the password
+database - cannot be resolved by devsandbox: that one *is* reported, because you set it and are getting less
+than the config says. Spell it `~/` or absolutely.
+
+##### Conditional includes on Docker and krun
+
+An `[includeIf "gitdir:~/work/"]` condition is evaluated by git *inside* the sandbox, where `~` expands
+against the sandbox `$HOME`. The `docker` and `krun` backends mount the sandbox home at `/home/sandboxuser`
+while the project keeps its host path, so a condition written with `~` matches on the host and stops matching
+in the guest. The include file is mounted, but git never reads it: the identity **falls back to whatever the
+outer config sets**, and commits land with the wrong `user.email` - in the one mode where commits land at all.
+
+Spell such a condition with an absolute path (`gitdir:/home/you/work/`) to keep it matching, or use the
+`bwrap` backend, which mounts the sandbox home at the host home path and is unaffected.
+
+Two narrower spellings hit the same `$HOME`-differs-per-backend limit, and `bwrap` is unaffected by both:
+
+- **The same file included twice under two spellings.** `path = ~/inc.gitconfig` and
+  `path = /home/you/inc.gitconfig` name one host file but two guest paths, and only the first spelling is
+  mounted - the two would collide into one mount on `bwrap`, where they are the same path. The second
+  inclusion is skipped in the guest, which matters only if a setting between the two includes overrides
+  something the included file sets. Use one spelling for one file.
+- **A `~/` value that climbs back out of `$HOME`**, such as `core.excludesFile = ~/../shared/ignore`. It is
+  mounted at the path it resolves to on the host, while git inside the sandbox resolves it against
+  `/home/sandboxuser`. Those still agree whenever the host home and the guest home share a parent - the usual
+  Linux `/home/<user>` case, where both land on `/home/shared/ignore` - and diverge only when they do not, as
+  with a macOS `/Users/<user>` home, where git then looks somewhere nothing is mounted. Spelling it absolutely
+  makes it backend-independent.
 
 #### disabled
 

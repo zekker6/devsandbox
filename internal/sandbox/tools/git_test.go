@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -229,7 +230,18 @@ func TestGit_Bindings_ReadWrite(t *testing.T) {
 			t.Errorf("binding %s: expected optional=true", b.Source)
 		}
 
-		// ReadOnly is not set by the tool — the builder resolves it via mount mode
+		// The builder resolves ReadOnly via mount mode for the credentials this
+		// mode shares. ~/.gitconfig is the exception and must stay one: it is
+		// the root of the config devsandbox parses to pick which host files to
+		// mount, so a mount mode that made it writable would let the sandbox
+		// rewrite it between launches and choose them.
+		if b.Source == "/home/user/.gitconfig" {
+			if b.Type != MountBind || !b.ReadOnly {
+				t.Errorf("binding %s: Type = %q ReadOnly = %v, want a pinned read-only bind - "+
+					"the resolved config decides what gets mounted", b.Source, b.Type, b.ReadOnly)
+			}
+			continue
+		}
 		if b.ReadOnly {
 			t.Errorf("binding %s: ReadOnly should not be set by tool (builder resolves it)", b.Source)
 		}
@@ -333,8 +345,15 @@ func TestGit_Setup_ReadWriteMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Setup in readwrite mode resolves the host config for real, so this needs
+	// the same isolation every other readwrite test has: without it the
+	// resolver reads the developer's own $XDG_CONFIG_HOME and runs git in the
+	// package directory, and any notice it raises reaches the real stderr.
+	isolateGitEnv(t, homeDir)
+	captureNotices(t)
+
 	g := &Git{}
-	g.Configure(GlobalConfig{}, map[string]any{"mode": "readwrite"})
+	g.Configure(GlobalConfig{ProjectDir: filepath.Join(tmpDir, "project")}, map[string]any{"mode": "readwrite"})
 
 	if err := g.Setup(homeDir, sandboxHome); err != nil {
 		t.Errorf("Setup failed: %v", err)
@@ -459,6 +478,25 @@ func TestGit_Setup_ReadOnlyMode_GeneratesSafeConfig(t *testing.T) {
 	}
 }
 
+// parsedValues collapses a parseGitconfig entry stream the way fallbackValues
+// does, so a test that only cares about the winning value per key can say so.
+func parsedValues(entries []gitConfigEntry) map[string]string {
+	values, _ := fallbackValues(entries)
+	return values
+}
+
+// parsedIncludes lists the unexpanded include spellings in the order the file
+// declared them.
+func parsedIncludes(entries []gitConfigEntry) []string {
+	var out []string
+	for _, e := range entries {
+		if e.key == gitIncludeKey {
+			out = append(out, e.value)
+		}
+	}
+	return out
+}
+
 func TestParseGitconfig(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -540,7 +578,11 @@ func TestParseGitconfig(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			got := parseGitconfig(tmpFile)
+			entries, _, err := parseGitconfig(tmpFile)
+			if err != nil {
+				t.Fatalf("parseGitconfig: %v", err)
+			}
+			got := parsedValues(entries)
 
 			if got["user.name"] != tt.expectedName {
 				t.Errorf("expected name %q, got %q", tt.expectedName, got["user.name"])
@@ -553,8 +595,14 @@ func TestParseGitconfig(t *testing.T) {
 }
 
 func TestParseGitconfig_NonExistent(t *testing.T) {
-	if got := parseGitconfig("/nonexistent/path/.gitconfig"); len(got) != 0 {
+	got, _, err := parseGitconfig("/nonexistent/path/.gitconfig")
+	if len(got) != 0 {
 		t.Errorf("expected no keys for non-existent file, got %v", got)
+	}
+	// The error is what stops the degraded path from reading "could not open"
+	// as "declares no includes" and going silent about the loss.
+	if err == nil {
+		t.Error("parseGitconfig() on a missing file must report the error")
 	}
 }
 
@@ -607,6 +655,17 @@ func TestParseGitconfig_ValueForm(t *testing.T) {
 			want:    map[string]string{},
 		},
 		{
+			// Git takes a key written on its section header's own line.
+			name:    "a key on the header line belongs to that section",
+			content: "[user] name = Ada\n\temail = ada@corp\n",
+			want:    map[string]string{"user.name": "Ada", "user.email": "ada@corp"},
+		},
+		{
+			name:    "a key on a subsectioned header line is still not a top-level key",
+			content: "[remote \"user\"] name = nope\n",
+			want:    map[string]string{},
+		},
+		{
 			name:    "a key that merely starts with an allowlisted name is not one",
 			content: "[user]\n\tnameOfThing = nope\n\temailAlias = nope\n",
 			want:    map[string]string{},
@@ -623,7 +682,11 @@ func TestParseGitconfig_ValueForm(t *testing.T) {
 			path := filepath.Join(t.TempDir(), ".gitconfig")
 			writeFile(t, path, tt.content)
 
-			got := parseGitconfig(path)
+			entries, _, err := parseGitconfig(path)
+			if err != nil {
+				t.Fatalf("parseGitconfig: %v", err)
+			}
+			got := parsedValues(entries)
 			if len(got) == 0 && len(tt.want) == 0 {
 				return
 			}
@@ -631,6 +694,110 @@ func TestParseGitconfig_ValueForm(t *testing.T) {
 				t.Errorf("parseGitconfig() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseGitconfig_Includes pins what the fallback path can see of a config's
+// include directives. The spelling is returned unexpanded because the spelling
+// is what decides where the target has to be mounted inside the sandbox.
+func TestParseGitconfig_Includes(t *testing.T) {
+	tests := []struct {
+		name            string
+		content         string
+		wantIncludes    []string
+		wantConditional bool
+	}{
+		{
+			name:         "a top-level include is reported with its spelling intact",
+			content:      "[include]\n\tpath = ~/inc.gitconfig\n",
+			wantIncludes: []string{"~/inc.gitconfig"},
+		},
+		{
+			name:         "every include survives, in file order",
+			content:      "[include]\n\tpath = ~/one\n\tpath = /abs/two\n[include]\n\tpath = three\n",
+			wantIncludes: []string{"~/one", "/abs/two", "three"},
+		},
+		{
+			// The condition needs a repository to evaluate, which the fallback
+			// path does not have. Reporting the path would invite carrying it.
+			name:            "a conditional include is reported without its path",
+			content:         "[includeIf \"gitdir:~/work/\"]\n\tpath = ~/work.gitconfig\n",
+			wantConditional: true,
+		},
+		{
+			name:    "an include with no path names no file",
+			content: "[include]\n\tpath =\n",
+		},
+		{
+			name:         "a quoted include is unquoted like any other value",
+			content:      "[include]\n\tpath = \"~/my inc.gitconfig\" # work\n",
+			wantIncludes: []string{"~/my inc.gitconfig"},
+		},
+		{
+			name:    "a commented-out include is not one",
+			content: "[include]\n\t# path = ~/inc.gitconfig\n",
+		},
+		{
+			name:    "no include at all",
+			content: "[user]\n\tname = Ada\n",
+		},
+		{
+			// Git acts on a key written on the header's own line. Dropping the
+			// remainder made this read as "declares no includes", which on the
+			// degraded path loses the target and the report about it together.
+			name:         "an include written on the header line is reported",
+			content:      "[include] path = ~/inc.gitconfig\n",
+			wantIncludes: []string{"~/inc.gitconfig"},
+		},
+		{
+			name:            "a conditional include on the header line reports the condition only",
+			content:         "[includeIf \"gitdir:~/work/\"] path = ~/work.gitconfig\n",
+			wantConditional: true,
+		},
+		{
+			name:    "a bare header followed by a comment is still a bare header",
+			content: "[include] # nothing here\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".gitconfig")
+			writeFile(t, path, tt.content)
+
+			entries, conditional, err := parseGitconfig(path)
+			if err != nil {
+				t.Fatalf("parseGitconfig: %v", err)
+			}
+			values, includes := parsedValues(entries), parsedIncludes(entries)
+			if !slices.Equal(includes, tt.wantIncludes) {
+				t.Errorf("includes = %v, want %v", includes, tt.wantIncludes)
+			}
+			if conditional != tt.wantConditional {
+				t.Errorf("conditional = %v, want %v", conditional, tt.wantConditional)
+			}
+			// The directive is not a value: generateSafeGitconfig emits an
+			// allowlist, and an include path is not on it.
+			if _, ok := values[gitIncludeKey]; ok {
+				t.Errorf("values = %v, want no include entry", values)
+			}
+		})
+	}
+}
+
+func TestIsIncludeIfHeader(t *testing.T) {
+	tests := map[string]bool{
+		`[includeIf "gitdir:~/work/"]`: true,
+		`[includeif "gitdir:/w/"]`:     true,
+		`[ includeIf "gitdir:/w/"]`:    true,
+		`[include]`:                    false,
+		`[remote "origin"]`:            false,
+		`[user]`:                       false,
+	}
+	for line, want := range tests {
+		if got := isIncludeIfHeader(line); got != want {
+			t.Errorf("isIncludeIfHeader(%q) = %v, want %v", line, got, want)
+		}
 	}
 }
 
@@ -1145,6 +1312,11 @@ func TestGitReadWriteBindingsWorktreeMountsMainGitDir(t *testing.T) {
 			if b.ReadOnly {
 				t.Errorf("readwrite worktree .git binding should be writable, got ReadOnly=true")
 			}
+			// An unset Type resolves to MountTmpOverlay under the split
+			// policy, which sends every commit to a discarded upper layer.
+			if b.Type != MountBind {
+				t.Errorf("readwrite worktree .git binding must pin Type=%q so commits land, got %q", MountBind, b.Type)
+			}
 			found = true
 		}
 	}
@@ -1317,6 +1489,10 @@ func TestParseGitConfigList(t *testing.T) {
 	}
 }
 
+// TestGlobalConfigMap covers the collapse to a value map. Scope is not its
+// concern - every caller is handed globalScopeEntries' output, and
+// TestGlobalScopeEntries pins that filter - so these entries are already
+// global, exactly as production's are.
 func TestGlobalConfigMap(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1324,18 +1500,6 @@ func TestGlobalConfigMap(t *testing.T) {
 		want        map[string]string
 		wantOrigins map[string]string
 	}{
-		{
-			name: "keeps only global scope",
-			entries: []gitConfigEntry{
-				{scope: "system", origin: "file:/etc/gitconfig", key: "core.editor", value: "vi"},
-				{scope: "global", origin: "file:/home/u/.gitconfig", key: "user.name", value: "Ada"},
-				{scope: "local", origin: "file:.git/config", key: "user.email", value: "ada@local"},
-				{scope: "worktree", origin: "file:.git/config.worktree", key: "core.bare", value: ""},
-				{scope: "command", origin: "command line:", key: "user.name", value: "Override"},
-			},
-			want:        map[string]string{"user.name": "Ada"},
-			wantOrigins: map[string]string{"user.name": "file:/home/u/.gitconfig"},
-		},
 		{
 			name: "last wins so an include overrides the outer file",
 			entries: []gitConfigEntry{
@@ -1346,13 +1510,16 @@ func TestGlobalConfigMap(t *testing.T) {
 			wantOrigins: map[string]string{"user.email": "file:/home/u/.gitconfig-work"},
 		},
 		{
-			name: "non-global entry does not override a global one",
+			name: "each key keeps the origin of the value that won",
 			entries: []gitConfigEntry{
-				{scope: "global", origin: "file:/home/u/.gitconfig", key: "user.email", value: "ada@corp"},
-				{scope: "local", origin: "file:.git/config", key: "user.email", value: "ada@local"},
+				{scope: "global", origin: "file:/home/u/.gitconfig", key: "user.name", value: "Ada"},
+				{scope: "global", origin: "file:/home/u/inc.gitconfig", key: "user.email", value: "ada@corp"},
 			},
-			want:        map[string]string{"user.email": "ada@corp"},
-			wantOrigins: map[string]string{"user.email": "file:/home/u/.gitconfig"},
+			want: map[string]string{"user.name": "Ada", "user.email": "ada@corp"},
+			wantOrigins: map[string]string{
+				"user.name":  "file:/home/u/.gitconfig",
+				"user.email": "file:/home/u/inc.gitconfig",
+			},
 		},
 		{
 			name: "valueless boolean key is retained with an empty value",
@@ -1368,14 +1535,6 @@ func TestGlobalConfigMap(t *testing.T) {
 			want:        map[string]string{},
 			wantOrigins: map[string]string{},
 		},
-		{
-			name: "no global entries",
-			entries: []gitConfigEntry{
-				{scope: "local", origin: "file:.git/config", key: "user.name", value: "Ada"},
-			},
-			want:        map[string]string{},
-			wantOrigins: map[string]string{},
-		},
 	}
 
 	for _, tt := range tests {
@@ -1388,6 +1547,111 @@ func TestGlobalConfigMap(t *testing.T) {
 				t.Errorf("globalConfigMap() origins = %v, want %v", gotOrigins, tt.wantOrigins)
 			}
 		})
+	}
+}
+
+func TestGlobalScopeEntries(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []gitConfigEntry
+		want    []gitConfigEntry
+	}{
+		{
+			name: "drops every scope but global",
+			entries: []gitConfigEntry{
+				{scope: "system", origin: "file:/etc/gitconfig", key: "core.editor", value: "vi"},
+				{scope: "global", origin: "file:/home/u/.gitconfig", key: "user.name", value: "Ada"},
+				{scope: "local", origin: "file:.git/config", key: "user.email", value: "ada@local"},
+				{scope: "worktree", origin: "file:.git/config.worktree", key: "core.bare", value: ""},
+				{scope: "command", origin: "command line:", key: "user.name", value: "Override"},
+			},
+			want: []gitConfigEntry{
+				{scope: "global", origin: "file:/home/u/.gitconfig", key: "user.name", value: "Ada"},
+			},
+		},
+		{
+			// The map form keys on include.path and keeps one of these; the
+			// entry form is what carries both, which is the whole reason the
+			// resolver returns entries.
+			name: "keeps every include directive rather than collapsing them",
+			entries: []gitConfigEntry{
+				{scope: "global", origin: "file:/home/u/.gitconfig", key: "include.path", value: "~/a.gitconfig"},
+				{scope: "global", origin: "file:/home/u/.gitconfig", key: "include.path", value: "~/b.gitconfig"},
+			},
+			want: []gitConfigEntry{
+				{scope: "global", origin: "file:/home/u/.gitconfig", key: "include.path", value: "~/a.gitconfig"},
+				{scope: "global", origin: "file:/home/u/.gitconfig", key: "include.path", value: "~/b.gitconfig"},
+			},
+		},
+		{name: "no entries", entries: nil, want: nil},
+		{
+			name: "no global entries",
+			entries: []gitConfigEntry{
+				{scope: "local", origin: "file:.git/config", key: "user.name", value: "Ada"},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := globalScopeEntries(tt.entries)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("globalScopeEntries() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGit_ResolveGlobalConfig_KeepsEveryIncludeEntry drives the resolver over a
+// stubbed --show-scope stream, because the property under test - that a nested
+// include chain survives as distinct entries - is exactly what the map form
+// destroys and so cannot be asserted through values/origins.
+func TestGit_ResolveGlobalConfig_KeepsEveryIncludeEntry(t *testing.T) {
+	homeDir := t.TempDir()
+	isolateGitEnv(t, homeDir)
+
+	rec := func(scope, origin, key, value string) string {
+		return scope + "\x00" + origin + "\x00" + key + "\n" + value + "\x00"
+	}
+	stream := rec("global", "file:"+homeDir+"/.gitconfig", "include.path", "~/.gitconfig-work") +
+		rec("global", "file:"+homeDir+"/.gitconfig-work", "include.path", "~/.gitconfig-deep") +
+		rec("global", "file:"+homeDir+"/.gitconfig-deep", "user.email", "deep@corp") +
+		rec("local", "file:.git/config", "user.email", "local@corp") +
+		rec("system", "file:/etc/gitconfig", "core.editor", "vi")
+
+	fixture := filepath.Join(t.TempDir(), "config-list")
+	if err := os.WriteFile(fixture, []byte(stream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubGit(t, "cat '"+fixture+"'")
+
+	g := &Git{mode: GitModeReadWrite}
+	entries, retried, err := g.resolveGlobalConfig(homeDir)
+	if err != nil {
+		t.Fatalf("resolveGlobalConfig: %v", err)
+	}
+	if retried != nil {
+		t.Errorf("retriedOutsideRepo = %v, want nil", retried)
+	}
+
+	want := []gitConfigEntry{
+		{scope: "global", origin: "file:" + homeDir + "/.gitconfig", key: "include.path", value: "~/.gitconfig-work"},
+		{scope: "global", origin: "file:" + homeDir + "/.gitconfig-work", key: "include.path", value: "~/.gitconfig-deep"},
+		{scope: "global", origin: "file:" + homeDir + "/.gitconfig-deep", key: "user.email", value: "deep@corp"},
+	}
+	if !reflect.DeepEqual(entries, want) {
+		t.Fatalf("resolveGlobalConfig() = %+v, want %+v", entries, want)
+	}
+
+	// The collapse the entry form exists to avoid: one include.path key, so the
+	// outer file's target is gone and the chain cannot be walked.
+	values, _ := globalConfigMap(entries)
+	if values["include.path"] != "~/.gitconfig-deep" {
+		t.Errorf("globalConfigMap() include.path = %q, want the last-wins value", values["include.path"])
+	}
+	if values["user.email"] != "deep@corp" {
+		t.Errorf("globalConfigMap() user.email = %q, want %q", values["user.email"], "deep@corp")
 	}
 }
 
@@ -1411,6 +1675,39 @@ func TestGitCommandEnv(t *testing.T) {
 	want = []string{"LANG=de_DE.UTF-8", "HOME=/new", "LC_ALL=C"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("gitCommandEnv() with a host locale = %v, want %v", got, want)
+	}
+
+	// GIT_CONFIG_GLOBAL replaces the whole global scope, so a resolver that
+	// inherits it reports a file the sandbox never reads - builder.go clears the
+	// environment and does not re-add it, leaving in-sandbox git on the bound
+	// ~/.gitconfig. The values this tool acts on have to come from the config
+	// that will actually apply.
+	got = gitCommandEnv([]string{"PATH=/bin", "GIT_CONFIG_GLOBAL=/opt/mycfg"}, "/new")
+	want = []string{"PATH=/bin", "HOME=/new", "LC_ALL=C"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("gitCommandEnv() with GIT_CONFIG_GLOBAL = %v, want %v", got, want)
+	}
+
+	// The rest of git's config environment is reported outside the global scope
+	// and dropped by globalScopeEntries, so it passes through untouched.
+	// XDG_CONFIG_HOME is deliberately kept: hostGitXDGDir reads the same
+	// variable, and the two must agree on where the XDG config lives.
+	got = gitCommandEnv([]string{
+		"GIT_CONFIG_SYSTEM=/opt/sys",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"XDG_CONFIG_HOME=/opt/xdg",
+	}, "/new")
+	want = []string{
+		"GIT_CONFIG_SYSTEM=/opt/sys",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"XDG_CONFIG_HOME=/opt/xdg",
+		"HOME=/new",
+		"LC_ALL=C",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("gitCommandEnv() with the rest of git's config env = %v, want %v", got, want)
 	}
 }
 
@@ -1467,10 +1764,11 @@ func TestGit_ResolveGlobalConfig_IncludeIfGitdir(t *testing.T) {
 
 	t.Run("include resolves against the project dir", func(t *testing.T) {
 		g := &Git{mode: GitModeReadOnly, projectDir: workRepo}
-		values, origins, _, err := g.resolveGlobalConfig(homeDir)
+		entries, _, err := g.resolveGlobalConfig(homeDir)
 		if err != nil {
 			t.Fatalf("resolveGlobalConfig: %v", err)
 		}
+		values, origins := globalConfigMap(entries)
 		// The origin is what tells an included file apart from the outer one,
 		// and it is what copyAuxFile anchors its trust decision on.
 		if got, want := origins["user.email"], "file:"+workConfig; got != want {
@@ -1493,10 +1791,11 @@ func TestGit_ResolveGlobalConfig_IncludeIfGitdir(t *testing.T) {
 
 	t.Run("non-matching project dir keeps the outer identity", func(t *testing.T) {
 		g := &Git{mode: GitModeReadOnly, projectDir: otherRepo}
-		values, _, _, err := g.resolveGlobalConfig(homeDir)
+		entries, _, err := g.resolveGlobalConfig(homeDir)
 		if err != nil {
 			t.Fatalf("resolveGlobalConfig: %v", err)
 		}
+		values, _ := globalConfigMap(entries)
 		if values["user.email"] != "ada@personal" {
 			t.Errorf("user.email = %q, want %q", values["user.email"], "ada@personal")
 		}
@@ -1504,10 +1803,11 @@ func TestGit_ResolveGlobalConfig_IncludeIfGitdir(t *testing.T) {
 
 	t.Run("empty project dir does not match the include", func(t *testing.T) {
 		g := &Git{mode: GitModeReadOnly}
-		values, _, _, err := g.resolveGlobalConfig(homeDir)
+		entries, _, err := g.resolveGlobalConfig(homeDir)
 		if err != nil {
 			t.Fatalf("resolveGlobalConfig: %v", err)
 		}
+		values, _ := globalConfigMap(entries)
 		if values["user.email"] != "ada@personal" {
 			t.Errorf("user.email = %q, want %q", values["user.email"], "ada@personal")
 		}
@@ -1544,10 +1844,11 @@ func TestGit_ResolveGlobalConfig_BrokenLocalConfig(t *testing.T) {
 	writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[user]\n\tname = Ada\n\temail = ada@corp\n")
 
 	g := &Git{mode: GitModeReadOnly, projectDir: projectDir}
-	values, origins, retried, err := g.resolveGlobalConfig(homeDir)
+	entries, retried, err := g.resolveGlobalConfig(homeDir)
 	if err != nil {
 		t.Fatalf("resolveGlobalConfig: %v", err)
 	}
+	values, origins := globalConfigMap(entries)
 	if retried == nil {
 		t.Fatal("retried = nil, want the first attempt's error")
 	}
@@ -1565,10 +1866,11 @@ func TestGit_ResolveGlobalConfig_BrokenLocalConfig(t *testing.T) {
 			"[user]\n\tname = Ada\n"+
 			"[include]\n\tpath = "+included+"\n")
 
-		values, _, retried, err := g.resolveGlobalConfig(homeDir)
+		entries, retried, err := g.resolveGlobalConfig(homeDir)
 		if err != nil {
 			t.Fatalf("resolveGlobalConfig: %v", err)
 		}
+		values, _ := globalConfigMap(entries)
 		if retried == nil {
 			t.Fatal("retried = nil, want the first attempt's error")
 		}
@@ -1587,7 +1889,7 @@ func TestGit_ResolveGlobalConfig_BrokenLocalConfig(t *testing.T) {
 	t.Run("both attempts failing reports the original error", func(t *testing.T) {
 		stubGit(t, "exit 128")
 
-		if _, _, _, err := g.resolveGlobalConfig(homeDir); err == nil {
+		if _, _, err := g.resolveGlobalConfig(homeDir); err == nil {
 			t.Error("resolveGlobalConfig() = nil error, want the failure from both attempts")
 		}
 	})
@@ -1911,7 +2213,7 @@ func TestFallbackValues(t *testing.T) {
 	writeFile(t, gitconfig, "[user]\n\temail = home@example.com\n")
 
 	// Later file wins per key, and a key it does not set is left standing.
-	got, gotOrigins := fallbackValues([]string{xdgConfig, gitconfig})
+	got, gotOrigins := fallbackValues(fallbackFileEntries([]string{xdgConfig, gitconfig}))
 	want := map[string]string{"user.name": "XDG Name", "user.email": "home@example.com"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("fallbackValues() = %v, want %v", got, want)
@@ -1935,7 +2237,7 @@ func TestFallbackValues(t *testing.T) {
 	// downgrade the notice warns about, not a bug in the fallback.
 	includeOnly := filepath.Join(dir, "include-only")
 	writeFile(t, includeOnly, "[includeIf \"gitdir:/work/\"]\n\tpath = /nowhere\n")
-	if got, _ := fallbackValues([]string{includeOnly}); len(got) != 0 {
+	if got, _ := fallbackValues(fallbackFileEntries([]string{includeOnly})); len(got) != 0 {
 		t.Errorf("fallbackValues() = %v, want empty for an include-only config", got)
 	}
 
@@ -1944,7 +2246,7 @@ func TestFallbackValues(t *testing.T) {
 	// instead - a file the host does not use, in place of the one it does.
 	auxConfig := filepath.Join(dir, "aux-config")
 	writeFile(t, auxConfig, "[core]\n\texcludesFile = ~/.gitignore_global\n")
-	gotAux, gotAuxOrigins := fallbackValues([]string{auxConfig})
+	gotAux, gotAuxOrigins := fallbackValues(fallbackFileEntries([]string{auxConfig}))
 	if gotAux["core.excludesfile"] != "~/.gitignore_global" {
 		t.Errorf("core.excludesfile = %q, want %q", gotAux["core.excludesfile"], "~/.gitignore_global")
 	}
@@ -2353,6 +2655,64 @@ func TestExpandGitPath(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("expandGitPath(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExpandGitPathRel(t *testing.T) {
+	const homeDir = "/home/u"
+
+	tests := []struct {
+		name        string
+		value       string
+		want        string
+		wantHomeRel bool
+		wantErr     bool
+	}{
+		{name: "tilde slash is home relative", value: "~/.config/git/ignore", want: "/home/u/.config/git/ignore", wantHomeRel: true},
+		{name: "tilde slash with a bare name", value: "~/ignore", want: "/home/u/ignore", wantHomeRel: true},
+		{name: "tilde slash is cleaned", value: "~/sub/../sub/ignore", want: "/home/u/sub/ignore", wantHomeRel: true},
+		{name: "absolute path is verbatim", value: "/etc/gitignore", want: "/etc/gitignore"},
+		{name: "absolute path is cleaned", value: "/etc/../etc/gitignore", want: "/etc/gitignore"},
+		// An absolute path that happens to sit under the host home is still
+		// verbatim: the spelling decides, not the location. Marking it home
+		// relative would rewrite it to /home/sandboxuser on Docker and krun,
+		// where git was never told to look.
+		{name: "absolute path under the home dir stays verbatim", value: "/home/u/ignore", want: "/home/u/ignore"},
+		{name: "tilde user form is rejected", value: "~other/ignore", wantErr: true},
+		{name: "bare tilde is rejected", value: "~", wantErr: true},
+		{name: "relative path is rejected", value: "ignore", wantErr: true},
+		{name: "empty value is rejected", value: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, homeRel, err := expandGitPathRel(tt.value, homeDir)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expandGitPathRel(%q) = %q, want an error", tt.value, got)
+				}
+				if homeRel {
+					t.Errorf("expandGitPathRel(%q) homeRelative = true on an error", tt.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expandGitPathRel(%q): %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("expandGitPathRel(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+			if homeRel != tt.wantHomeRel {
+				t.Errorf("expandGitPathRel(%q) homeRelative = %v, want %v", tt.value, homeRel, tt.wantHomeRel)
+			}
+
+			// The wrapper must stay a pure projection, or the two callers
+			// disagree about the same value.
+			wrapped, wrappedErr := expandGitPath(tt.value, homeDir)
+			if wrappedErr != nil || wrapped != got {
+				t.Errorf("expandGitPath(%q) = (%q, %v), want (%q, nil)", tt.value, wrapped, wrappedErr, got)
 			}
 		})
 	}
@@ -2835,6 +3195,741 @@ func TestGit_CopyAuxFiles(t *testing.T) {
 	})
 }
 
+// TestGit_AuxFileBindings covers the readwrite half of the file-valued keys.
+// readwrite mounts the host ~/.gitconfig verbatim, so nothing rewrites these
+// values and the binding has to land where the *spelling* resolves inside the
+// sandbox.
+//
+// Every case asserts HomeRelativeDest as a struct field rather than a rendered
+// path. bwrap binds the sandbox home at the host home path, so the
+// home-relative and verbatim spellings of Dest collapse to the same string
+// there and an assertion on the string alone passes whether or not the flag is
+// right - with the bug then appearing only on Docker and krun.
+func TestGit_AuxFileBindings(t *testing.T) {
+	type fixture struct {
+		homeDir     string
+		sandboxHome string
+		projectDir  string
+	}
+
+	setup := func(t *testing.T) fixture {
+		t.Helper()
+		tmpDir := t.TempDir()
+		f := fixture{
+			homeDir:     filepath.Join(tmpDir, "home"),
+			sandboxHome: filepath.Join(tmpDir, "sandbox"),
+			projectDir:  filepath.Join(tmpDir, "project"),
+		}
+		for _, d := range []string{f.homeDir, f.sandboxHome, f.projectDir, filepath.Join(f.homeDir, ".config", "git")} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		isolateGitEnv(t, f.homeDir)
+		return f
+	}
+
+	findBinding := func(t *testing.T, bindings []Binding, source string) Binding {
+		t.Helper()
+		for _, b := range bindings {
+			if b.Source == source {
+				return b
+			}
+		}
+		t.Fatalf("no binding with Source %q, got %+v", source, bindings)
+		return Binding{}
+	}
+
+	t.Run("tilde-spelled excludesFile binds home-relative", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		src := filepath.Join(f.homeDir, "tilde-ignore")
+		writeFile(t, src, "build/\n")
+
+		values := map[string]string{"core.excludesfile": "~/tilde-ignore"}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		b := findBinding(t, bindings, src)
+		if b.Dest != src {
+			t.Errorf("Dest = %q, want %q", b.Dest, src)
+		}
+		if !b.HomeRelativeDest {
+			t.Error("a ~/-spelled value is re-expanded against the sandbox $HOME, so its Dest must be home-relative")
+		}
+		if b.Category != CategoryConfig {
+			t.Errorf("Category = %q, want %q", b.Category, CategoryConfig)
+		}
+		if b.Type != "" || b.ReadOnly {
+			t.Errorf("Type = %q, ReadOnly = %v; both must stay unset so ResolveBindingType applies the ~/.gitconfig policy",
+				b.Type, b.ReadOnly)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("a usable configured value must be silent, got: %s", stderr)
+		}
+	})
+
+	t.Run("absolute-spelled excludesFile binds verbatim", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		// Outside the home dir, so the value cannot be read as ~/-relative by
+		// accident.
+		src := filepath.Join(t.TempDir(), "abs-ignore")
+		writeFile(t, src, "*.log\n")
+
+		values := map[string]string{"core.excludesfile": src}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		b := findBinding(t, bindings, src)
+		if b.Dest != src {
+			t.Errorf("Dest = %q, want %q", b.Dest, src)
+		}
+		if b.HomeRelativeDest {
+			t.Error("an absolute value names the same path on every backend and must be bound verbatim")
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("a usable configured value must be silent, got: %s", stderr)
+		}
+	})
+
+	t.Run("attributesFile is carried alongside excludesFile", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		ignore := filepath.Join(f.homeDir, "my-ignore")
+		attributes := filepath.Join(f.homeDir, "my-attributes")
+		writeFile(t, ignore, "*.log\n")
+		writeFile(t, attributes, "*.bin binary\n")
+
+		values := map[string]string{
+			"core.excludesfile":   "~/my-ignore",
+			"core.attributesfile": "~/my-attributes",
+		}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 2 {
+			t.Fatalf("got %d bindings, want one per configured key: %+v", len(bindings), bindings)
+		}
+		for _, src := range []string{ignore, attributes} {
+			b := findBinding(t, bindings, src)
+			if b.Dest != src || !b.HomeRelativeDest {
+				t.Errorf("binding for %q = {Dest: %q, HomeRelativeDest: %v}", src, b.Dest, b.HomeRelativeDest)
+			}
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("two usable configured values must be silent, got: %s", stderr)
+		}
+	})
+
+	t.Run("unset key falls back to the XDG default", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		src := filepath.Join(f.homeDir, ".config", "git", "ignore")
+		writeFile(t, src, "xdg-ignored\n")
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(map[string]string{}, nil, f.homeDir, f.sandboxHome)
+
+		b := findBinding(t, bindings, src)
+		want := filepath.Join(f.homeDir, ".config", "git", "ignore")
+		if b.Dest != want {
+			t.Errorf("Dest = %q, want %q", b.Dest, want)
+		}
+		if !b.HomeRelativeDest {
+			t.Error("git reads the XDG default from the in-sandbox $HOME/.config, so the Dest must be home-relative")
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("carrying the XDG default must be silent, got: %s", stderr)
+		}
+	})
+
+	t.Run("XDG_CONFIG_HOME outside the home dir keeps the Dest under the home dir", func(t *testing.T) {
+		f := setup(t)
+		// builder.go pins XDG_CONFIG_HOME to $HOME/.config inside the sandbox
+		// unconditionally, so the host's own setting picks the Source and says
+		// nothing about the Dest. Deriving the Dest from hostGitXDGDir would
+		// mount the file where in-sandbox git never looks.
+		xdgDir := filepath.Join(t.TempDir(), "xdg")
+		if err := os.MkdirAll(filepath.Join(xdgDir, "git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", xdgDir)
+		src := filepath.Join(xdgDir, "git", "ignore")
+		writeFile(t, src, "xdg-ignored\n")
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(map[string]string{}, nil, f.homeDir, f.sandboxHome)
+
+		b := findBinding(t, bindings, src)
+		want := filepath.Join(f.homeDir, ".config", "git", "ignore")
+		if b.Dest != want {
+			t.Errorf("Dest = %q, want %q - the in-sandbox XDG dir, not the host's", b.Dest, want)
+		}
+		if !b.HomeRelativeDest {
+			t.Error("the in-sandbox XDG dir is inside the sandbox home, so the Dest must be home-relative")
+		}
+	})
+
+	t.Run("nonexistent target is skipped silently", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+
+		// Git ignores a missing excludesFile on the host too, so nothing is
+		// lost by not binding it and there is nothing to report.
+		values := map[string]string{"core.excludesfile": "~/gone"}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want no binding for a file the host does not have", bindings)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("a file the host itself ignores is not a warning, got: %s", stderr)
+		}
+	})
+
+	t.Run("a directory target is skipped", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		dir := filepath.Join(f.homeDir, "ignore-dir")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		values := map[string]string{"core.excludesfile": dir}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want no binding for a non-regular target", bindings)
+		}
+	})
+
+	t.Run("an empty value binds nothing and does not fall back", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		writeFile(t, filepath.Join(f.homeDir, ".config", "git", "ignore"), "xdg-ignored\n")
+
+		values := map[string]string{"core.excludesfile": "   "}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want the emptied key to bind nothing rather than the default it was written over", bindings)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("an emptied key is not a warning, got: %s", stderr)
+		}
+	})
+
+	t.Run("an unexpandable value alerts and binds nothing", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+
+		values := map[string]string{"core.excludesfile": "~someone/ignore"}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want nothing bound for a value devsandbox cannot resolve", bindings)
+		}
+		if !strings.Contains(stderr.String(), "~someone/ignore") {
+			t.Errorf("alert must name the value, got: %s", stderr)
+		}
+		if !strings.Contains(stderr.String(), "excludesFile") {
+			t.Errorf("alert must name the key, got: %s", stderr)
+		}
+	})
+
+	t.Run("a key set from a file in the shared temp dir is refused", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		src := filepath.Join(f.homeDir, "id_ed25519")
+		writeFile(t, src, "PRIVATE KEY\n")
+
+		// The shared temp directory is bind-mounted read-write at an identical
+		// path on host and sandbox, so a config file there is the sandbox's
+		// word about which host file devsandbox should mount.
+		sharedTmp := SharedTmpPath(f.homeDir, f.sandboxHome)
+		if err := os.MkdirAll(sharedTmp, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		values := map[string]string{"core.excludesfile": src}
+		origins := map[string]string{"core.excludesfile": "file:" + filepath.Join(sharedTmp, "planted.gitconfig")}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, origins, f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want no host file bound on the strength of a sandbox-supplied path", bindings)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("a refused origin is a silent skip, got: %s", stderr)
+		}
+	})
+
+	t.Run("a target named through a symlinked project dir is refused", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		// os.Getwd returns $PWD verbatim, so a shell that cd'd through a
+		// symlink hands devsandbox the link's name while the bind mount uses
+		// the target's inode. Either spelling reaches the same read-write tree.
+		link := filepath.Join(filepath.Dir(f.projectDir), "project-link")
+		if err := os.Symlink(f.projectDir, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		writeFile(t, filepath.Join(f.projectDir, "shared-ignore"), "*.tmp\n")
+
+		viaLink := filepath.Join(link, "shared-ignore")
+		values := map[string]string{"core.excludesfile": viaLink}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want the project tree refused in both spellings", bindings)
+		}
+	})
+
+	t.Run("a target inside the sandbox home is refused", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		secret := filepath.Join(f.homeDir, "id_ed25519")
+		writeFile(t, secret, "PRIVATE KEY\n")
+
+		// The sandbox home is mounted read-write as the sandbox's $HOME, so a
+		// link planted there would otherwise have this host file bound where
+		// the sandbox reads it.
+		planted := filepath.Join(f.sandboxHome, "planted-ignore")
+		if err := os.Symlink(secret, planted); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		values := map[string]string{"core.excludesfile": planted}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, hostOrigins(f.homeDir, values), f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want no binding for a path inside the sandbox home", bindings)
+		}
+	})
+
+	t.Run("an origin git did not report as a file is refused", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		src := filepath.Join(f.homeDir, "my-ignore")
+		writeFile(t, src, "*.log\n")
+
+		values := map[string]string{"core.excludesfile": src}
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		bindings := g.auxFileBindings(values, map[string]string{"core.excludesfile": ""}, f.homeDir, f.sandboxHome)
+
+		if len(bindings) != 0 {
+			t.Errorf("got %+v, want an unresolvable origin to deny rather than default to trusted", bindings)
+		}
+	})
+}
+
+// TestGit_IncludeOriginBindings covers the correlation walk: every config file
+// the host's global scope is assembled from has to be bound where the
+// *spelling* that named it resolves inside the sandbox.
+//
+// Entries are hand-built rather than shelled out to git, so the assertions do
+// not depend on the host having any particular include chain. Every case
+// asserts HomeRelativeDest as a struct field: bwrap binds the sandbox home at
+// the host home path, so the home-relative and verbatim spellings of Dest
+// collapse to the same string there and a string-only assertion passes whether
+// or not the flag is right - with the bug then appearing only on Docker and
+// krun.
+func TestGit_IncludeOriginBindings(t *testing.T) {
+	type fixture struct {
+		tmpDir      string
+		homeDir     string
+		sandboxHome string
+		projectDir  string
+	}
+
+	setup := func(t *testing.T) fixture {
+		t.Helper()
+		tmpDir := t.TempDir()
+		f := fixture{
+			tmpDir:      tmpDir,
+			homeDir:     filepath.Join(tmpDir, "home"),
+			sandboxHome: filepath.Join(tmpDir, "sandbox"),
+			projectDir:  filepath.Join(tmpDir, "project"),
+		}
+		for _, d := range []string{f.homeDir, f.sandboxHome, f.projectDir} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		isolateGitEnv(t, f.homeDir)
+		return f
+	}
+
+	entry := func(origin, key, value string) gitConfigEntry {
+		return gitConfigEntry{scope: "global", origin: gitOriginFilePrefix + origin, key: key, value: value}
+	}
+
+	type wantBinding struct {
+		source       string
+		dest         string
+		homeRelative bool
+	}
+
+	check := func(t *testing.T, bindings []Binding, want []wantBinding) {
+		t.Helper()
+		if len(bindings) != len(want) {
+			t.Fatalf("got %d bindings %+v, want %d", len(bindings), bindings, len(want))
+		}
+		for i, w := range want {
+			b := bindings[i]
+			if b.Source != w.source {
+				t.Errorf("binding %d: Source = %q, want %q", i, b.Source, w.source)
+			}
+			if b.Dest != w.dest {
+				t.Errorf("binding %d: Dest = %q, want %q", i, b.Dest, w.dest)
+			}
+			if b.HomeRelativeDest != w.homeRelative {
+				t.Errorf("binding %d (%s): HomeRelativeDest = %v, want %v",
+					i, b.Source, b.HomeRelativeDest, w.homeRelative)
+			}
+			if b.Category != CategoryConfig {
+				t.Errorf("binding %d: Category = %q, want %q", i, b.Category, CategoryConfig)
+			}
+			// Pinned read-only, exactly like the ~/.gitconfig binding these
+			// sit beside. Every file here is one devsandbox resolves keys
+			// out of in order to decide what to mount, so leaving it to
+			// ResolveBindingType let mount_mode = "readwrite" hand the
+			// sandbox a writable host config it could name any host file
+			// from on the next launch.
+			if b.Type != MountBind || !b.ReadOnly {
+				t.Errorf("binding %d: Type = %q ReadOnly = %v, want a pinned read-only bind", i, b.Type, b.ReadOnly)
+			}
+			if !b.Optional {
+				t.Errorf("binding %d: Optional = false, want true", i)
+			}
+		}
+	}
+
+	spellings := []struct {
+		name  string
+		build func(f fixture) (entries []gitConfigEntry, want []wantBinding)
+	}{
+		{
+			name: "a tilde-spelled include binds home-relative",
+			build: func(f fixture) ([]gitConfigEntry, []wantBinding) {
+				root := filepath.Join(f.homeDir, ".gitconfig")
+				inc := filepath.Join(f.homeDir, "inc.gitconfig")
+				return []gitConfigEntry{
+					entry(root, "include.path", "~/inc.gitconfig"),
+					entry(inc, "user.email", "ada@corp"),
+				}, []wantBinding{
+					{source: root, dest: root, homeRelative: true},
+					{source: inc, dest: inc, homeRelative: true},
+				}
+			},
+		},
+		{
+			name: "an absolute-spelled include binds verbatim",
+			build: func(f fixture) ([]gitConfigEntry, []wantBinding) {
+				root := filepath.Join(f.homeDir, ".gitconfig")
+				inc := filepath.Join(f.tmpDir, "shared", "team.gitconfig")
+				return []gitConfigEntry{
+					entry(root, "include.path", inc),
+					entry(inc, "user.email", "ada@corp"),
+				}, []wantBinding{
+					{source: root, dest: root, homeRelative: true},
+					{source: inc, dest: inc, homeRelative: false},
+				}
+			},
+		},
+		{
+			name: "a relative include inherits its parent's flag",
+			build: func(f fixture) ([]gitConfigEntry, []wantBinding) {
+				root := filepath.Join(f.homeDir, ".gitconfig")
+				inc := filepath.Join(f.homeDir, "inc-rel.gitconfig")
+				return []gitConfigEntry{
+					entry(root, "include.path", "inc-rel.gitconfig"),
+					entry(inc, "user.email", "ada@corp"),
+				}, []wantBinding{
+					{source: root, dest: root, homeRelative: true},
+					{source: inc, dest: inc, homeRelative: true},
+				}
+			},
+		},
+		{
+			name: "a two-level nested chain binds every file in it",
+			build: func(f fixture) ([]gitConfigEntry, []wantBinding) {
+				root := filepath.Join(f.homeDir, ".gitconfig")
+				mid := filepath.Join(f.homeDir, "mid.gitconfig")
+				leaf := filepath.Join(f.homeDir, "leaf.gitconfig")
+				// The intermediate file appears as an origin in its own right,
+				// because declaring include.path is a contributed key.
+				return []gitConfigEntry{
+					entry(root, "include.path", "~/mid.gitconfig"),
+					entry(mid, "include.path", "leaf.gitconfig"),
+					entry(leaf, "user.email", "ada@corp"),
+				}, []wantBinding{
+					{source: root, dest: root, homeRelative: true},
+					{source: mid, dest: mid, homeRelative: true},
+					{source: leaf, dest: leaf, homeRelative: true},
+				}
+			},
+		},
+		{
+			name: "a spelling with a dot-dot segment matches its uncleaned origin",
+			build: func(f fixture) ([]gitConfigEntry, []wantBinding) {
+				root := filepath.Join(f.homeDir, ".gitconfig")
+				// git reports the origin exactly as the spelling produced it,
+				// without cleaning, while filepath.Join collapses the segment.
+				uncleaned := f.homeDir + "/sub/../sub/inc.gitconfig"
+				cleaned := filepath.Join(f.homeDir, "sub", "inc.gitconfig")
+				return []gitConfigEntry{
+					entry(root, "include.path", "~/sub/../sub/inc.gitconfig"),
+					entry(uncleaned, "user.email", "ada@corp"),
+				}, []wantBinding{
+					{source: root, dest: root, homeRelative: true},
+					{source: cleaned, dest: cleaned, homeRelative: true},
+				}
+			},
+		},
+	}
+
+	for _, tc := range spellings {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setup(t)
+			stderr := captureNotices(t)
+			entries, want := tc.build(f)
+
+			g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+			check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), want)
+
+			if stderr.Len() != 0 {
+				t.Errorf("a resolvable include chain must be silent, got: %s", stderr)
+			}
+		})
+	}
+
+	t.Run("a relative include from an out-of-home XDG config keeps the home-relative destination", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		// hostGitXDGDir is the right Source and the wrong Dest: builder.go
+		// pins XDG_CONFIG_HOME to $HOME/.config inside the sandbox whatever
+		// the host's own setting is, so in-sandbox git reads the chain from
+		// under $HOME regardless.
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(f.tmpDir, "xdg"))
+		root := filepath.Join(f.tmpDir, "xdg", "git", "config")
+		inc := filepath.Join(f.tmpDir, "xdg", "git", "inc.gitconfig")
+
+		entries := []gitConfigEntry{
+			entry(root, "include.path", "inc.gitconfig"),
+			entry(inc, "user.email", "ada@corp"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: filepath.Join(f.homeDir, ".config", "git", "config"), homeRelative: true},
+			{source: inc, dest: filepath.Join(f.homeDir, ".config", "git", "inc.gitconfig"), homeRelative: true},
+		})
+	})
+
+	t.Run("a matching includeIf target is bound", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+		work := filepath.Join(f.homeDir, "work.gitconfig")
+
+		// The condition is a subsection carrying dots and slashes of its own,
+		// so the key is matched as a prefix plus a .path suffix.
+		entries := []gitConfigEntry{
+			entry(root, "includeif.gitdir:~/work/.path", "~/work.gitconfig"),
+			entry(work, "user.email", "ada@work"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+			{source: work, dest: work, homeRelative: true},
+		})
+	})
+
+	t.Run("a non-matching includeIf target is absent", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+
+		// git reports the directive whether or not the condition matched, but
+		// a target it did not read contributes no origin - which keeps a
+		// work-identity file out of a personal project's sandbox for free.
+		entries := []gitConfigEntry{
+			entry(root, "includeif.gitdir:~/work/.path", "~/work.gitconfig"),
+			entry(root, "user.email", "ada@home"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+	})
+
+	t.Run("an empty include target is absent", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+
+		entries := []gitConfigEntry{
+			entry(root, "include.path", ""),
+			entry(root, "user.email", "ada@home"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+	})
+
+	t.Run("a bare includeif.path is not an include directive", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+		inc := filepath.Join(f.homeDir, "inc.gitconfig")
+
+		// No condition, so git never acts on it either.
+		entries := []gitConfigEntry{
+			entry(root, "includeif.path", "~/inc.gitconfig"),
+			entry(inc, "user.email", "ada@corp"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+	})
+
+	t.Run("an origin git did not report as a file is skipped silently", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+
+		entries := []gitConfigEntry{
+			entry(root, "user.email", "ada@home"),
+			{scope: "global", origin: "command line:", key: "user.name", value: "Ada"},
+			{scope: "global", origin: "", key: "user.name", value: "Ada"},
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+		if stderr.Len() != 0 {
+			t.Errorf("a non-file origin cannot occur for the global scope; alerting would be noise, got: %s", stderr)
+		}
+	})
+
+	t.Run("an origin under the project tree is refused, and so is what it declares", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+		planted := filepath.Join(f.projectDir, "planted.gitconfig")
+
+		// The project tree is bind-mounted read-write, so a config file there
+		// is the sandbox's word about which host file devsandbox should mount
+		// on the next launch - including the ones that file includes.
+		entries := []gitConfigEntry{
+			entry(root, "include.path", planted),
+			entry(planted, "include.path", filepath.Join(f.homeDir, ".ssh", "id_ed25519")),
+			entry(filepath.Join(f.homeDir, ".ssh", "id_ed25519"), "user.email", "ada@corp"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+		if stderr.Len() != 0 {
+			t.Errorf("a refused origin is a silent skip, got: %s", stderr)
+		}
+	})
+
+	t.Run("an origin in the shared temp dir is refused", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+		sharedTmp := SharedTmpPath(f.homeDir, f.sandboxHome)
+		if err := os.MkdirAll(sharedTmp, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		planted := filepath.Join(sharedTmp, "planted.gitconfig")
+
+		entries := []gitConfigEntry{
+			entry(root, "include.path", planted),
+			entry(planted, "user.email", "ada@corp"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+	})
+
+	t.Run("an origin named through a symlinked project dir is refused", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		link := filepath.Join(f.tmpDir, "project-link")
+		if err := os.Symlink(f.projectDir, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		root := filepath.Join(f.homeDir, ".gitconfig")
+		viaLink := filepath.Join(link, "planted.gitconfig")
+
+		entries := []gitConfigEntry{
+			entry(root, "include.path", viaLink),
+			entry(viaLink, "user.email", "ada@corp"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+	})
+
+	t.Run("a tilde-user include alerts and binds nothing", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+
+		entries := []gitConfigEntry{
+			entry(root, "include.path", "~build/shared.gitconfig"),
+			entry(root, "user.email", "ada@home"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+		if !strings.Contains(stderr.String(), "include.path") {
+			t.Errorf("the alert must name the key that will not apply, got: %s", stderr)
+		}
+	})
+
+	t.Run("a file contributing more than one key is bound once", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		root := filepath.Join(f.homeDir, ".gitconfig")
+
+		entries := []gitConfigEntry{
+			entry(root, "user.name", "Ada"),
+			entry(root, "user.email", "ada@home"),
+			entry(root, "core.excludesfile", "~/.gitignore"),
+		}
+
+		g := &Git{mode: GitModeReadWrite, projectDir: f.projectDir}
+		check(t, g.includeOriginBindings(entries, f.homeDir, f.sandboxHome), []wantBinding{
+			{source: root, dest: root, homeRelative: true},
+		})
+	})
+}
+
 // TestGit_Setup_EmptyPathsWriteNothing pins the guard on Setup's inputs. Every
 // destination is built with filepath.Join(sandboxHome, ...), which yields a
 // *relative* path for an empty sandboxHome - so without the guard the copies
@@ -3268,22 +4363,20 @@ func TestGit_Check_ConfigPaths(t *testing.T) {
 		}
 	})
 
-	// Only readonly mode carries the ignore and attributes files in, and
-	// resolving where they live costs a git subprocess. Reporting them in the
-	// other two modes would name files that are deliberately not carried.
-	for _, mode := range []GitMode{GitModeReadWrite, GitModeDisabled} {
-		t.Run("aux files are not reported in "+string(mode)+" mode", func(t *testing.T) {
-			homeDir := newHome(t)
-			ignore := filepath.Join(homeDir, ".config", "git", "ignore")
-			writeFile(t, ignore, "*.log\n")
+	// disabled is the one mode that carries nothing, and resolving where the
+	// aux files live costs a git subprocess. Reporting them there would name
+	// files that are deliberately not carried.
+	t.Run("aux files are not reported in disabled mode", func(t *testing.T) {
+		homeDir := newHome(t)
+		ignore := filepath.Join(homeDir, ".config", "git", "ignore")
+		writeFile(t, ignore, "*.log\n")
 
-			result := (&Git{mode: mode}).Check(homeDir)
+		result := (&Git{mode: GitModeDisabled}).Check(homeDir)
 
-			if hasPath(result, ignore) {
-				t.Errorf("%s mode reported %q, which it does not carry", mode, ignore)
-			}
-		})
-	}
+		if hasPath(result, ignore) {
+			t.Errorf("disabled mode reported %q, which it does not carry", ignore)
+		}
+	})
 
 	// The shape the CLI actually reaches Check with. `tools check` and `tools
 	// info` call Check on the registry singleton and never call Configure, so
@@ -3410,6 +4503,1192 @@ func TestGit_Check_ConfigPaths(t *testing.T) {
 			}
 		}
 	})
+
+	// readwrite mounts the aux files at the paths the host config already
+	// names, so the check has to report them there too - a mode that carries
+	// them and says nothing is the gap this closes.
+	t.Run("readwrite reports the aux files alongside ssh and gnupg", func(t *testing.T) {
+		homeDir := newHome(t)
+		for _, name := range []string{".ssh", ".gnupg"} {
+			if err := os.MkdirAll(filepath.Join(homeDir, name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ignore := filepath.Join(homeDir, ".config", "git", "ignore")
+		attributes := filepath.Join(homeDir, ".config", "git", "attributes")
+		writeFile(t, ignore, "*.log\n")
+		writeFile(t, attributes, "*.bin binary\n")
+
+		result := (&Git{mode: GitModeReadWrite}).Check(homeDir)
+
+		for _, want := range []string{
+			ignore,
+			attributes,
+			filepath.Join(homeDir, ".ssh"),
+			filepath.Join(homeDir, ".gnupg"),
+		} {
+			if !hasPath(result, want) {
+				t.Errorf("ConfigPaths = %v, want it to include %q", result.ConfigPaths, want)
+			}
+		}
+	})
+
+	// Same sharpness as the readonly case above: the value only the resolver
+	// sees is the one readwrite binds, so it is the one to report.
+	t.Run("readwrite reports core.excludesFile from an included file", func(t *testing.T) {
+		homeDir := newHome(t)
+		custom := filepath.Join(homeDir, "work-ignore")
+		writeFile(t, custom, "*.tmp\n")
+		writeFile(t, filepath.Join(homeDir, ".config", "git", "ignore"), "*.log\n")
+
+		included := filepath.Join(homeDir, ".gitconfig-work")
+		writeFile(t, included, "[core]\n\texcludesFile = "+custom+"\n")
+		writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[include]\n\tpath = "+included+"\n")
+
+		result := (&Git{mode: GitModeReadWrite}).Check(homeDir)
+
+		if !hasPath(result, custom) {
+			t.Errorf("ConfigPaths = %v, want the included value %q", result.ConfigPaths, custom)
+		}
+		if hasPath(result, filepath.Join(homeDir, ".config", "git", "ignore")) {
+			t.Errorf("ConfigPaths = %v, want the configured file to replace the XDG default", result.ConfigPaths)
+		}
+	})
+
+	// The refusals auxFileBindings applies have to hold here too, or readwrite
+	// `tools check` names a file the launch declines to bind.
+	t.Run("readwrite does not report a file inside the working directory", func(t *testing.T) {
+		homeDir := newHome(t)
+		workDir := t.TempDir()
+		t.Chdir(workDir)
+
+		projectIgnore := filepath.Join(workDir, "ignore")
+		writeFile(t, projectIgnore, "*.tmp\n")
+		writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[core]\n\texcludesFile = "+projectIgnore+"\n")
+
+		result := (&Git{mode: GitModeReadWrite}).Check(homeDir)
+
+		if hasPath(result, projectIgnore) {
+			t.Errorf("ConfigPaths = %v, want no entry for %q, which the launch refuses to bind",
+				result.ConfigPaths, projectIgnore)
+		}
+	})
+
+	t.Run("readwrite does not report a value set from inside the working directory", func(t *testing.T) {
+		homeDir := newHome(t)
+		workDir := t.TempDir()
+		t.Chdir(workDir)
+
+		custom := filepath.Join(homeDir, "work-ignore")
+		writeFile(t, custom, "*.tmp\n")
+		included := filepath.Join(workDir, ".gitconfig-project")
+		writeFile(t, included, "[core]\n\texcludesFile = "+custom+"\n")
+		writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[include]\n\tpath = "+included+"\n")
+
+		result := (&Git{mode: GitModeReadWrite}).Check(homeDir)
+
+		if hasPath(result, custom) {
+			t.Errorf("ConfigPaths = %v, want no entry for a value set from %q, which the sandbox can write",
+				result.ConfigPaths, included)
+		}
+	})
+}
+
+// TestGit_Setup_ReadWriteRefBindings covers the wiring between Setup and
+// Bindings in readwrite mode: Setup resolves the host config, and Bindings
+// emits the fixed set plus whatever that config references.
+//
+// The whole point is that a value arrives inside the sandbox spelled exactly as
+// the host wrote it, so the file it names has to be mounted where that spelling
+// resolves. Every case asserts HomeRelativeDest as a struct field: bwrap binds
+// the sandbox home at the host home path, so the two Dest spellings collapse to
+// one string there and a string assertion passes either way.
+func TestGit_Setup_ReadWriteRefBindings(t *testing.T) {
+	// Every subtest here asserts the resolver path, several by requiring
+	// silence. Without a git that has --show-scope, Setup takes the degraded
+	// fallback instead and raises its own alert, so the failure would name the
+	// wrong thing.
+	requireResolvableGit(t)
+
+	setup := newReadWriteRefFixture
+	newGit := newReadWriteRefGit
+	dests := bindingDests
+	findBinding := findBindingBySource
+
+	t.Run("a referenced excludesFile reaches Bindings", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		src := filepath.Join(f.homeDir, "my-ignore")
+		writeFile(t, src, "build/\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[core]\n\texcludesfile = ~/my-ignore\n")
+
+		g := newGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		bindings := g.Bindings(f.homeDir, f.sandboxHome)
+		b := findBinding(t, bindings, src)
+		if b.Dest != src {
+			t.Errorf("Dest = %q, want %q", b.Dest, src)
+		}
+		if !b.HomeRelativeDest {
+			t.Error("a ~/-spelled value is re-expanded against the sandbox $HOME, so its Dest must be home-relative")
+		}
+
+		// The fixed set is an addition, never a replacement.
+		for _, name := range []string{".gitconfig", ".git-credentials", ".ssh", ".gnupg"} {
+			findBinding(t, bindings, filepath.Join(f.homeDir, name))
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("carrying a resolvable file must be silent, got: %s", stderr)
+		}
+	})
+
+	// Overview loss 3: an identity-per-directory setup loses its identity in
+	// the one mode where commits land, because the include target is a host
+	// file nothing mounts and git ignores a missing one silently.
+	t.Run("an included config reaches Bindings", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		inc := filepath.Join(f.homeDir, "inc.gitconfig")
+		writeFile(t, inc, "[user]\n\temail = ada@corp\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[include]\n\tpath = ~/inc.gitconfig\n")
+
+		g := newGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		b := findBinding(t, g.Bindings(f.homeDir, f.sandboxHome), inc)
+		if b.Dest != inc {
+			t.Errorf("Dest = %q, want %q", b.Dest, inc)
+		}
+		if !b.HomeRelativeDest {
+			t.Error("a ~/-spelled include is re-expanded against the sandbox $HOME, so its Dest must be home-relative")
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("carrying a resolvable include must be silent, got: %s", stderr)
+		}
+	})
+
+	// Overview loss 2: builder.go repoints XDG_CONFIG_HOME into the sandbox
+	// unconditionally, so a host whose global config lives only at
+	// $XDG/git/config loses the whole file - identity included - unless it is
+	// bound. It is carried as an origin rather than by binding the XDG
+	// directory: binding the directory would put every file in it into the
+	// sandbox, including ones no config names.
+	t.Run("an XDG-only global config keeps its identity", func(t *testing.T) {
+		f := setup(t)
+		stderr := captureNotices(t)
+		xdgConfig := filepath.Join(f.homeDir, ".config", "git", "config")
+		if err := os.MkdirAll(filepath.Dir(xdgConfig), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, xdgConfig, "[user]\n\temail = ada@corp\n")
+		// Deliberately no ~/.gitconfig: this host has one global config file
+		// and it is not the one the static bindings already mount.
+
+		g := newGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		b := findBinding(t, g.Bindings(f.homeDir, f.sandboxHome), xdgConfig)
+		if b.Dest != xdgConfig {
+			t.Errorf("Dest = %q, want %q", b.Dest, xdgConfig)
+		}
+		// In-sandbox git reads $HOME/.config/git/config however the host's own
+		// XDG_CONFIG_HOME is set, so the destination follows the sandbox home.
+		if !b.HomeRelativeDest {
+			t.Error("the XDG global config is read at $HOME/.config/git/config in the sandbox, so its Dest must be home-relative")
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("carrying the XDG global config must be silent, got: %s", stderr)
+		}
+	})
+
+	// git expands ~/ by concatenation and leaves the .. for the kernel, so a
+	// spelling that climbs back out of $HOME names a path outside it.
+	// HomeRelativeDest means "inside the sandbox home", and docker.go rewrites
+	// only a Dest still carrying the host home prefix - which filepath.Join has
+	// cleaned away here. Flagging it anyway is a no-op that reads as applied,
+	// the exact silent nothing the flag exists to remove.
+	t.Run("a ~/ spelling that escapes $HOME is not home-relative", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		shared := filepath.Join(filepath.Dir(f.homeDir), "shared")
+		if err := os.MkdirAll(shared, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ignore := filepath.Join(shared, "ignore")
+		writeFile(t, ignore, "build/\n")
+		inc := filepath.Join(shared, "team.gitconfig")
+		writeFile(t, inc, "[user]\n\tname = Ada\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[core]\n\texcludesfile = ~/../shared/ignore\n[include]\n\tpath = ~/../shared/team.gitconfig\n")
+
+		g := newGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		bindings := g.Bindings(f.homeDir, f.sandboxHome)
+
+		for _, src := range []string{ignore, inc} {
+			b := findBinding(t, bindings, src)
+			if b.Dest != src {
+				t.Errorf("Dest = %q, want %q", b.Dest, src)
+			}
+			if b.HomeRelativeDest {
+				t.Errorf("%q is outside the sandbox home, so HomeRelativeDest would be a no-op that reads as applied", src)
+			}
+		}
+	})
+
+	// An include target inside the project tree is chosen by a directory the
+	// sandbox writes, so the next launch would bind whatever last session's
+	// code pointed it at. Refused silently, because the alternative is mounting
+	// nothing - which is what git already does with a missing include.
+	t.Run("an include under a trust-denied root is not carried", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		inc := filepath.Join(f.projectDir, "inc.gitconfig")
+		writeFile(t, inc, "[user]\n\temail = attacker@corp\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[include]\n\tpath = "+inc+"\n")
+
+		g := newGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		for _, b := range g.Bindings(f.homeDir, f.sandboxHome) {
+			if b.Source == inc {
+				t.Errorf("an include target under the project dir was carried: %+v", b)
+			}
+		}
+	})
+
+	// The worktree main repo's .git is the fourth sandbox-writable root, and the
+	// one this mode creates: readwrite binds it read-write so commits can land,
+	// and in worktree mode it sits outside projectDir, the shared temp dir and
+	// the sandbox home alike. Left off the deny list, a global include pointing
+	// into it let the sandbox rewrite that file between launches and name any
+	// host file it liked for core.excludesFile - which devsandbox would then
+	// bind in, both trust checks having passed.
+	t.Run("an include under the worktree main repo .git is not carried", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+
+		repo := filepath.Join(t.TempDir(), "main-repo")
+		gitDir := filepath.Join(repo, ".git")
+		if err := os.MkdirAll(gitDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		secret := filepath.Join(f.homeDir, "secret")
+		writeFile(t, secret, "hunter2\n")
+		inc := filepath.Join(gitDir, "mygitconfig")
+		writeFile(t, inc, "[core]\n\texcludesfile = "+secret+"\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[include]\n\tpath = "+inc+"\n")
+
+		g := &Git{}
+		g.Configure(GlobalConfig{ProjectDir: f.projectDir, GitRepoRoot: repo},
+			map[string]any{"mode": "readwrite"})
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		for _, b := range g.Bindings(f.homeDir, f.sandboxHome) {
+			if b.Source == inc {
+				t.Errorf("an include under the worktree main repo .git was carried: %+v", b)
+			}
+			if b.Source == secret {
+				t.Errorf("a sandbox-writable include chose which host file to mount: %+v", b)
+			}
+		}
+	})
+
+	// The mirror case, and the reason the deny root is derived from the binding
+	// rather than from gitRepoRoot alone: mount_mode = "readonly" makes that
+	// same tree a read-only bind, so nothing in it is the sandbox's word and
+	// refusing a host-owned config there would drop a setting for no reason.
+	t.Run("a readonly mount_mode leaves the main repo .git trusted", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+
+		repo := filepath.Join(t.TempDir(), "main-repo")
+		gitDir := filepath.Join(repo, ".git")
+		if err := os.MkdirAll(gitDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ignore := filepath.Join(f.homeDir, "my-ignore")
+		writeFile(t, ignore, "build/\n")
+		inc := filepath.Join(gitDir, "mygitconfig")
+		writeFile(t, inc, "[core]\n\texcludesfile = "+ignore+"\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[include]\n\tpath = "+inc+"\n")
+
+		g := &Git{}
+		g.Configure(GlobalConfig{ProjectDir: f.projectDir, GitRepoRoot: repo},
+			map[string]any{"mode": "readwrite", "mount_mode": "readonly"})
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		findBinding(t, g.Bindings(f.homeDir, f.sandboxHome), ignore)
+	})
+
+	// docker.go calls getToolBindings twice per launch and tools.Register hands
+	// out singletons, so Setup runs more than once against this same struct.
+	// Appending instead of assigning emits every resolved binding twice, which
+	// is a trackMount panic on bwrap and a "Duplicate mount point" on Docker.
+	t.Run("Setup twice yields each destination once", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		writeFile(t, filepath.Join(f.homeDir, "my-ignore"), "build/\n")
+		writeFile(t, filepath.Join(f.homeDir, "my-attrs"), "*.bin binary\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[core]\n\texcludesfile = ~/my-ignore\n\tattributesfile = ~/my-attrs\n")
+
+		g := newGit(f)
+		for i := range 2 {
+			if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+				t.Fatalf("Setup #%d: %v", i+1, err)
+			}
+		}
+
+		seen := map[string]int{}
+		for _, d := range dests(g.Bindings(f.homeDir, f.sandboxHome)) {
+			seen[d]++
+		}
+		for dest, n := range seen {
+			if n != 1 {
+				t.Errorf("destination %s emitted %d times, want 1", dest, n)
+			}
+		}
+		if len(seen) != 6 {
+			t.Errorf("got %d distinct destinations, want 6 (4 static + 2 referenced): %v", len(seen), seen)
+		}
+	})
+
+	// The static bindings leave Dest empty and are mounted at their Source, so
+	// a collision with them is only visible once the effective destination is
+	// compared. Comparing the Dest fields finds nothing and the duplicate
+	// reaches the backend.
+	t.Run("a reference colliding with a static binding is dropped", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		// Contrived, but it is the shape that matters: a resolved reference
+		// whose destination is one the fixed set already mounts.
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[core]\n\texcludesfile = ~/.gitconfig\n")
+
+		g := newGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		bindings := g.Bindings(f.homeDir, f.sandboxHome)
+		if len(bindings) != 4 {
+			t.Fatalf("got %d bindings, want the 4 static ones: %v", len(bindings), dests(bindings))
+		}
+		var n int
+		for _, d := range dests(bindings) {
+			if d == filepath.Join(f.homeDir, ".gitconfig") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("~/.gitconfig mounted %d times, want 1", n)
+		}
+	})
+
+	// `tools info` builds a registry and calls Bindings straight out.
+	t.Run("Bindings without Setup is the static set", func(t *testing.T) {
+		f := setup(t)
+		writeFile(t, filepath.Join(f.homeDir, "my-ignore"), "build/\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[core]\n\texcludesfile = ~/my-ignore\n")
+
+		bindings := newGit(f).Bindings(f.homeDir, f.sandboxHome)
+		if len(bindings) != 4 {
+			t.Fatalf("got %d bindings without Setup, want 4: %v", len(bindings), dests(bindings))
+		}
+	})
+
+	// builder.go aborts the launch on a Setup error while docker.go only warns,
+	// so a host condition the user should merely be told about must never be
+	// returned as one - the same condition would be fatal on one backend and
+	// cosmetic on the other.
+	t.Run("an unresolvable config is not a Setup error", func(t *testing.T) {
+		f := setup(t)
+		captureNotices(t)
+		stubGit(t, "exit 128")
+
+		g := newGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup must not fail the launch over an unreadable host config, got: %v", err)
+		}
+		if bindings := g.Bindings(f.homeDir, f.sandboxHome); len(bindings) != 4 {
+			t.Errorf("got %d bindings, want the 4 static ones: %v", len(bindings), dests(bindings))
+		}
+	})
+
+	// readonly and disabled must be untouched by this change: neither consults
+	// refBindings, so Setup must leave their binding sets exactly as a
+	// Setup-less instance produces them.
+	for _, mode := range []string{"readonly", "disabled"} {
+		t.Run(mode+" bindings are unchanged by Setup", func(t *testing.T) {
+			f := setup(t)
+			captureNotices(t)
+			writeFile(t, filepath.Join(f.homeDir, "my-ignore"), "build/\n")
+			writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+				"[core]\n\texcludesfile = ~/my-ignore\n")
+
+			fresh := &Git{}
+			fresh.Configure(GlobalConfig{ProjectDir: f.projectDir}, map[string]any{"mode": mode})
+			want := fresh.Bindings(f.homeDir, f.sandboxHome)
+
+			g := &Git{}
+			g.Configure(GlobalConfig{ProjectDir: f.projectDir}, map[string]any{"mode": mode})
+			if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			if g.refBindings != nil {
+				t.Errorf("%s mode must resolve no references, got %v", mode, dests(g.refBindings))
+			}
+			if got := g.Bindings(f.homeDir, f.sandboxHome); !reflect.DeepEqual(got, want) {
+				t.Errorf("%s bindings changed after Setup:\ngot  %+v\nwant %+v", mode, got, want)
+			}
+		})
+	}
+}
+
+// readWriteRefFixture is the host/sandbox/project triple the readwrite
+// reference tests resolve a host config against.
+type readWriteRefFixture struct {
+	homeDir     string
+	sandboxHome string
+	projectDir  string
+}
+
+// newReadWriteRefFixture builds the three directories and points
+// XDG_CONFIG_HOME inside the fixture home, so nothing here can reach the
+// developer's own git configuration.
+func newReadWriteRefFixture(t *testing.T) readWriteRefFixture {
+	t.Helper()
+	tmpDir := t.TempDir()
+	f := readWriteRefFixture{
+		homeDir:     filepath.Join(tmpDir, "home"),
+		sandboxHome: filepath.Join(tmpDir, "sandbox"),
+		projectDir:  filepath.Join(tmpDir, "project"),
+	}
+	for _, d := range []string{f.homeDir, f.sandboxHome, f.projectDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isolateGitEnv(t, f.homeDir)
+	return f
+}
+
+// requireResolvableGit skips when the host has no git, or a git too old for
+// `config --list --show-scope`, which is what the readwrite resolver needs. The
+// version gate is applied by running the real command rather than parsing
+// `git --version`, so it tracks what resolveGlobalConfig actually requires.
+//
+// The probe runs through Output(), not Run(), because that is the only way the
+// gate can fire: os/exec fills ExitError.Stderr from Cmd.Output alone, so under
+// Run it is nil, isUnsupportedShowScope sees "" and the skip is unreachable.
+// runGitConfigList reads the field the same way and already calls Output.
+func requireResolvableGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if _, err := exec.Command("git", "config", "--list", "--show-scope").Output(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && isUnsupportedShowScope(exitErr.Stderr) {
+			t.Skip("git predates --show-scope (2.26)")
+		}
+	}
+}
+
+func newReadWriteRefGit(f readWriteRefFixture) *Git {
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: f.projectDir}, map[string]any{"mode": "readwrite"})
+	return g
+}
+
+// bindingDests reports the path each binding actually lands on, which is Source
+// whenever Dest is empty - the four static readwrite bindings all leave it so.
+func bindingDests(bindings []Binding) []string {
+	out := make([]string, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, bindingDest(b))
+	}
+	return out
+}
+
+// TestGit_ConfigChainIsNeverSandboxWritable pins the line between the two
+// classes of readwrite binding, under every mount mode, in both directions.
+//
+// A file devsandbox *parses* - ~/.gitconfig, an XDG root, an [include] target -
+// is a read-only bind whatever the mount mode says. auxFileBindings and
+// includeOriginBindings decide which host files to mount by resolving these and
+// anchoring on the origin path, so a config the sandbox can write is a config
+// the sandbox can choose from: append core.excludesFile = ~/.aws/credentials to
+// a writable host ~/.gitconfig on one launch and devsandbox binds that file in
+// on the next, both trust checks satisfied. The deny list cannot close it -
+// the origin is the user's own ~/.gitconfig.
+//
+// A file devsandbox only *names* - the ignore and attributes files - must keep
+// following the mount mode. Pinning those would break the documented
+// mount_mode = "readwrite" behavior for no gain, since nothing in an ignore file
+// decides what the next launch mounts.
+func TestGit_ConfigChainIsNeverSandboxWritable(t *testing.T) {
+	requireResolvableGit(t)
+
+	for _, mountMode := range []string{"", "split", "overlay", "tmpoverlay", "readonly", "readwrite"} {
+		t.Run("mount_mode="+mountMode, func(t *testing.T) {
+			f := newReadWriteRefFixture(t)
+			captureNotices(t)
+
+			ignore := filepath.Join(f.homeDir, "my-ignore")
+			writeFile(t, ignore, "build/\n")
+			inc := filepath.Join(f.homeDir, "work.gitconfig")
+			writeFile(t, inc, "[user]\n\temail = ada@corp\n")
+			root := filepath.Join(f.homeDir, ".gitconfig")
+			writeFile(t, root,
+				"[core]\n\texcludesfile = "+ignore+"\n[include]\n\tpath = "+inc+"\n")
+
+			toolCfg := map[string]any{"mode": "readwrite"}
+			if mountMode != "" {
+				toolCfg["mount_mode"] = mountMode
+			}
+			g := &Git{}
+			g.Configure(GlobalConfig{ProjectDir: f.projectDir}, toolCfg)
+			if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			bindings := g.Bindings(f.homeDir, f.sandboxHome)
+
+			for _, src := range []string{root, inc} {
+				b := findBindingBySource(t, bindings, src)
+				if b.Type != MountBind || !b.ReadOnly {
+					t.Errorf("%s: Type = %q ReadOnly = %v, want a pinned read-only bind - "+
+						"devsandbox resolves this file to decide which host files to mount",
+						src, b.Type, b.ReadOnly)
+				}
+			}
+
+			b := findBindingBySource(t, bindings, ignore)
+			if b.Type != "" || b.ReadOnly {
+				t.Errorf("%s: Type = %q ReadOnly = %v, want both unset so the mount mode applies - "+
+					"devsandbox never parses this file", ignore, b.Type, b.ReadOnly)
+			}
+		})
+	}
+}
+
+// TestGit_XDGConfigUnderWritableMountIsRefused is the end-to-end case that
+// showed the deny list was still being written from the instance in hand.
+//
+// A read-only pin on the config file does not make it unwritable when the same
+// inode is reachable through a writable directory bind beside it: with
+// XDG_CONFIG_HOME under ~/.ssh, mount_mode = "readwrite" mounts ~/.ssh writable
+// and the sandbox edits ~/.ssh/git/config through it. The root has to be
+// refused as a config source, which is what walking the tool's own writable
+// bindings achieves.
+func TestGit_XDGConfigUnderWritableMountIsRefused(t *testing.T) {
+	requireResolvableGit(t)
+
+	f := newReadWriteRefFixture(t)
+	captureNotices(t)
+
+	xdg := filepath.Join(f.homeDir, ".ssh")
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	secret := filepath.Join(f.homeDir, "secret")
+	writeFile(t, secret, "hunter2\n")
+	// Stands in for what the sandbox wrote through the ~/.ssh mount.
+	writeFile(t, filepath.Join(xdg, "git", "config"),
+		"[core]\n\texcludesfile = "+secret+"\n")
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: f.projectDir},
+		map[string]any{"mode": "readwrite", "mount_mode": "readwrite"})
+	if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	for _, b := range g.Bindings(f.homeDir, f.sandboxHome) {
+		if b.Source == secret {
+			t.Errorf("a config under a writable mount chose which host file to carry in: %+v", b)
+		}
+		if b.Source == filepath.Join(xdg, "git", "config") {
+			t.Errorf("a config under a writable mount was carried as a trusted root: %+v", b)
+		}
+	}
+}
+
+// TestGit_SandboxWritableRoots enumerates the whole input space of the walk
+// that puts this tool's own writable mounts on the deny list, because it is
+// wrong in both directions. Naming a root the tool mounts read-only refuses a
+// host-owned config and alerts about a write that cannot happen; missing one it
+// mounts read-write lets a config the sandbox rewrote pick which host file the
+// next launch carries in.
+//
+// Every writable static binding has to appear, not just the worktree .git:
+// ~/.ssh and ~/.gnupg become writable host binds under mount_mode = "readwrite"
+// too, and an XDG config nested under either is reachable through them
+// whatever the read-only pin on the config file itself says.
+func TestGit_SandboxWritableRoots(t *testing.T) {
+	// A real tree, because the walk stats the worktree .git before binding it.
+	home := t.TempDir()
+	repo := filepath.Join(t.TempDir(), "main-repo")
+	project := filepath.Join(t.TempDir(), "worktree")
+	for _, d := range []string{filepath.Join(repo, ".git"), project, filepath.Join(home, ".ssh"), filepath.Join(home, ".gnupg")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitDir := filepath.Join(repo, ".git")
+	ssh := filepath.Join(home, ".ssh")
+	gnupg := filepath.Join(home, ".gnupg")
+	creds := filepath.Join(home, ".git-credentials")
+
+	tests := []struct {
+		name      string
+		mode      string
+		mountMode string
+		repoRoot  string
+		want      []string
+	}{
+		// An overlay policy keeps the sandbox's writes off the host, so only
+		// the .git pin - which escapes that overlay deliberately - is writable.
+		{name: "unset", mode: "readwrite", repoRoot: repo, want: []string{gitDir}},
+		{name: "split", mode: "readwrite", mountMode: "split", repoRoot: repo, want: []string{gitDir}},
+		{name: "overlay", mode: "readwrite", mountMode: "overlay", repoRoot: repo, want: []string{gitDir}},
+		{name: "tmpoverlay", mode: "readwrite", mountMode: "tmpoverlay", repoRoot: repo, want: []string{gitDir}},
+
+		// Everything the tool mounts becomes a writable host bind, except
+		// ~/.gitconfig, which is pinned read-only because devsandbox parses it.
+		{name: "mount readwrite", mode: "readwrite", mountMode: "readwrite", repoRoot: repo,
+			want: []string{creds, ssh, gnupg, gitDir}},
+		{name: "mount readwrite, no worktree", mode: "readwrite", mountMode: "readwrite",
+			want: []string{creds, ssh, gnupg}},
+
+		// Nothing reaches the host writable.
+		{name: "mount readonly", mode: "readwrite", mountMode: "readonly", repoRoot: repo},
+		{name: "readonly git mode", mode: "readonly", mountMode: "readwrite", repoRoot: repo},
+		{name: "disabled git mode", mode: "disabled", mountMode: "readwrite", repoRoot: repo},
+
+		// Not a worktree: the main repo is the project dir, which
+		// launchBoundsFor already covers.
+		{name: "repo root equals project dir", mode: "readwrite", repoRoot: project},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			toolCfg := map[string]any{"mode": tt.mode}
+			if tt.mountMode != "" {
+				toolCfg["mount_mode"] = tt.mountMode
+			}
+
+			g := &Git{}
+			g.Configure(GlobalConfig{ProjectDir: project, GitRepoRoot: tt.repoRoot}, toolCfg)
+
+			got := g.sandboxWritableRoots(home)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("sandboxWritableRoots() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func findBindingBySource(t *testing.T, bindings []Binding, source string) Binding {
+	t.Helper()
+	for _, b := range bindings {
+		if b.Source == source {
+			return b
+		}
+	}
+	t.Fatalf("no binding with Source %q, got %v", source, bindingDests(bindings))
+	return Binding{}
+}
+
+// assertOneBindingPerDest fails when two bindings land on the same path. Both
+// backends refuse that outright - trackMount panics on bwrap, Docker rejects a
+// duplicate mount point - so a dedup regression is a failed launch, not a
+// cosmetic one.
+func assertOneBindingPerDest(t *testing.T, bindings []Binding) {
+	t.Helper()
+	seen := make(map[string]int, len(bindings))
+	for _, b := range bindings {
+		seen[bindingDest(b)]++
+	}
+	for dest, n := range seen {
+		if n > 1 {
+			t.Errorf("%d bindings land on %q, want one: %v", n, dest, bindingDests(bindings))
+		}
+	}
+}
+
+func hasBindingSource(bindings []Binding, source string) bool {
+	for _, b := range bindings {
+		if b.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGit_Setup_ReadWriteRefsDegradedResolver covers what readwrite still
+// carries when `git config --list` cannot be used at all.
+//
+// The resolver is what expands includes, so without it the only thing left to
+// read is each global config file's own top-level sections. That is strictly
+// less than the host has, and the gap is exactly the kind git keeps quiet
+// about: a missing include target is ignored with exit 0 and no warning. The
+// fallback therefore carries what it can see and says what it cannot.
+func TestGit_Setup_ReadWriteRefsDegradedResolver(t *testing.T) {
+	t.Run("a top-level include is carried and the loss is reported", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		inc := filepath.Join(f.homeDir, "inc.gitconfig")
+		writeFile(t, inc, "[user]\n\temail = ada@corp\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[include]\n\tpath = ~/inc.gitconfig\n")
+		stubGit(t, "exit 128")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup must not fail when the resolver does: %v", err)
+		}
+
+		b := findBindingBySource(t, g.Bindings(f.homeDir, f.sandboxHome), inc)
+		if b.Dest != inc {
+			t.Errorf("Dest = %q, want %q", b.Dest, inc)
+		}
+		if !b.HomeRelativeDest {
+			t.Error("a ~/-spelled include is re-expanded against the sandbox $HOME, so its Dest must be home-relative")
+		}
+		if !strings.Contains(stderr.String(), "could not read the resolved global config") {
+			t.Errorf("a resolver failure must name itself, got: %s", stderr)
+		}
+		if !strings.Contains(stderr.String(), "top-level [include] targets") {
+			t.Errorf("the alert must say what the sandbox is left with, got: %s", stderr)
+		}
+	})
+
+	t.Run("an absolutely spelled include is bound verbatim", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		captureNotices(t)
+		inc := filepath.Join(t.TempDir(), "inc.gitconfig")
+		writeFile(t, inc, "[user]\n\temail = ada@corp\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[include]\n\tpath = "+inc+"\n")
+		stubGit(t, "exit 128")
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		b := findBindingBySource(t, g.Bindings(f.homeDir, f.sandboxHome), inc)
+		if b.Dest != inc {
+			t.Errorf("Dest = %q, want %q", b.Dest, inc)
+		}
+		if b.HomeRelativeDest {
+			t.Error("an absolute include names the same path on every backend, so its Dest must stay verbatim")
+		}
+	})
+
+	// The fallback path re-reads the file-valued keys as well. Leaving them
+	// unset does not make them skipped, it makes a configured
+	// core.excludesFile read as absent and git's XDG default carried instead -
+	// a file the host does not use, in place of the one it does.
+	t.Run("a host with no include is silent and keeps its file-valued keys", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		ignore := filepath.Join(f.homeDir, "my-ignore")
+		writeFile(t, ignore, "build/\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[core]\n\texcludesfile = ~/my-ignore\n")
+		stubGit(t, "exit 128")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		b := findBindingBySource(t, g.Bindings(f.homeDir, f.sandboxHome), ignore)
+		if !b.HomeRelativeDest {
+			t.Error("a ~/-spelled excludesFile must still be home-relative on the fallback path")
+		}
+		// Nothing was lost, so nothing is reported: an alert on every launch of
+		// a host with no includes is one the user learns to answer unread.
+		if stderr.Len() != 0 {
+			t.Errorf("a host with no include must be silent, got: %s", stderr)
+		}
+		// The fallback re-emits ~/.gitconfig, which the static set already
+		// mounts. Only dedupBindingDests keeps that from being a duplicate
+		// mount - a trackMount panic on bwrap and a "Duplicate mount point"
+		// error on Docker, i.e. every readwrite launch failing on such a host.
+		assertOneBindingPerDest(t, g.Bindings(f.homeDir, f.sandboxHome))
+	})
+
+	// An old git with nothing to lose must stay silent too: the warning gate
+	// blocks the launch on a confirmation prompt, so an announcement here
+	// trains the user to answer it unread.
+	t.Run("an old git with no include is silent", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[user]\n\tname = Ada\n")
+		stubGit(t, "echo \"error: unknown option \\`show-scope'\" >&2\nexit 129")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if stderr.Len() != 0 {
+			t.Errorf("an old git with no include loses nothing and must be silent, got: %s", stderr)
+		}
+	})
+
+	// A config file that cannot be read tells us nothing about what it
+	// declares, and an unknown is not an absence. Reading it as "no includes"
+	// would mount the parent config naming targets nothing carried, with
+	// nothing on screen - the exact silent loss the alert exists to prevent.
+	t.Run("an unreadable config file is reported as a possible loss", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a 0000 file regardless of its mode")
+		}
+		f := newReadWriteRefFixture(t)
+		gitconfig := filepath.Join(f.homeDir, ".gitconfig")
+		writeFile(t, gitconfig, "[include]\n\tpath = ~/inc.gitconfig\n")
+		if err := os.Chmod(gitconfig, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(gitconfig, 0o644) })
+		stubGit(t, "exit 128")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if !strings.Contains(stderr.String(), "top-level [include] targets") {
+			t.Errorf("an unreadable config must be reported as a possible include loss, got: %s", stderr)
+		}
+	})
+
+	// An include target the host does not have is not a loss - git ignores a
+	// missing one too - but the include directive itself is still a directive
+	// the fallback could not expand, so the alert stands.
+	t.Run("an include naming a missing file binds nothing and still reports", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[include]\n\tpath = ~/absent.gitconfig\n")
+		stubGit(t, "exit 128")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		absent := filepath.Join(f.homeDir, "absent.gitconfig")
+		if hasBindingSource(g.Bindings(f.homeDir, f.sandboxHome), absent) {
+			t.Errorf("a missing include target must not be bound, got a binding for %q", absent)
+		}
+		if !strings.Contains(stderr.String(), "top-level [include] targets") {
+			t.Errorf("the unexpandable include must still be reported, got: %s", stderr)
+		}
+	})
+
+	// --show-scope arrived in git 2.26. An older host is not a setting the user
+	// got wrong, so the version is not named - but the includes it cannot
+	// expand are a real gap and are.
+	t.Run("an old git loses its includes without being named", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		inc := filepath.Join(f.homeDir, "inc.gitconfig")
+		writeFile(t, inc, "[user]\n\temail = ada@corp\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[include]\n\tpath = ~/inc.gitconfig\n")
+		stubGit(t, "echo \"error: unknown option \\`show-scope'\" >&2\n"+
+			"echo \"usage: git config [<options>]\" >&2\n"+
+			"exit 129")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup must not fail on an old git: %v", err)
+		}
+
+		findBindingBySource(t, g.Bindings(f.homeDir, f.sandboxHome), inc)
+		if !strings.Contains(stderr.String(), "top-level [include] targets") {
+			t.Errorf("an old git still loses the nested includes, which must be reported, got: %s", stderr)
+		}
+		for _, naming := range []string{"unknown option", "usage", "exit status"} {
+			if strings.Contains(stderr.String(), naming) {
+				t.Errorf("the alert must not name the git version or its error (%q), got: %s", naming, stderr)
+			}
+		}
+	})
+
+	// The condition cannot be evaluated without the resolver, and binding the
+	// target anyway would carry a work identity into a personal project's
+	// sandbox. It is reported instead of guessed at.
+	t.Run("a conditional include is reported but not carried", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		work := filepath.Join(f.homeDir, "work.gitconfig")
+		writeFile(t, work, "[user]\n\temail = ada@work\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[includeIf \"gitdir:~/work/\"]\n\tpath = ~/work.gitconfig\n")
+		stubGit(t, "exit 128")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if hasBindingSource(g.Bindings(f.homeDir, f.sandboxHome), work) {
+			t.Error("an unevaluated includeIf target must not be carried")
+		}
+		if !strings.Contains(stderr.String(), "includeIf") {
+			t.Errorf("a conditional include the fallback cannot evaluate must be reported, got: %s", stderr)
+		}
+	})
+
+	// The project tree is written by the sandbox, so an include declared to sit
+	// there is the sandbox choosing which host file devsandbox mounts next
+	// launch.
+	t.Run("an include under a trust-denied root is not carried", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		captureNotices(t)
+		inc := filepath.Join(f.projectDir, "inc.gitconfig")
+		writeFile(t, inc, "[user]\n\temail = attacker@corp\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[include]\n\tpath = "+inc+"\n")
+		stubGit(t, "exit 128")
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if hasBindingSource(g.Bindings(f.homeDir, f.sandboxHome), inc) {
+			t.Error("an include target under the project dir was carried")
+		}
+	})
+
+	// Unlike readonly - which generates a config and mounts no include at all -
+	// readwrite mounts the include target, so a core.excludesFile declared
+	// inside it applies in the sandbox. Reading the file-valued keys from the
+	// two root configs alone leaves that value invisible here, so nothing binds
+	// the file it names and git drops the host's ignore rules with exit 0 and
+	// no warning.
+	t.Run("a file-valued key declared inside a carried include is honored", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		captureNotices(t)
+		ignore := filepath.Join(f.homeDir, "my-ignore")
+		writeFile(t, ignore, "build/\n")
+		attrs := filepath.Join(f.homeDir, "my-attrs")
+		writeFile(t, attrs, "*.bin binary\n")
+		writeFile(t, filepath.Join(f.homeDir, "inc.gitconfig"),
+			"[core]\n\texcludesfile = ~/my-ignore\n\tattributesfile = ~/my-attrs\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[include]\n\tpath = ~/inc.gitconfig\n")
+		stubGit(t, "exit 128")
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		bindings := g.Bindings(f.homeDir, f.sandboxHome)
+
+		for _, src := range []string{ignore, attrs} {
+			b := findBindingBySource(t, bindings, src)
+			if b.Dest != src {
+				t.Errorf("Dest = %q, want %q", b.Dest, src)
+			}
+			if !b.HomeRelativeDest {
+				t.Errorf("%q is ~/-spelled, so its Dest must be home-relative", src)
+			}
+		}
+		// The XDG defaults must not be carried in their place: the host does
+		// not read those files, and substituting them is the silent wrong-file
+		// swap fallbackValues exists to avoid.
+		for _, name := range []string{"ignore", "attributes"} {
+			xdg := filepath.Join(f.homeDir, ".config", "git", name)
+			if hasBindingSource(bindings, xdg) {
+				t.Errorf("the XDG default %q was carried over the value the include sets", xdg)
+			}
+		}
+		assertOneBindingPerDest(t, bindings)
+	})
+
+	// The declaring file is read after the file it includes, exactly as git
+	// reads them, so a root that also sets the key wins over its include.
+	t.Run("a root config overrides a file-valued key its include sets", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		captureNotices(t)
+		rootIgnore := filepath.Join(f.homeDir, "root-ignore")
+		writeFile(t, rootIgnore, "root/\n")
+		incIgnore := filepath.Join(f.homeDir, "inc-ignore")
+		writeFile(t, incIgnore, "inc/\n")
+		writeFile(t, filepath.Join(f.homeDir, "inc.gitconfig"), "[core]\n\texcludesfile = ~/inc-ignore\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[include]\n\tpath = ~/inc.gitconfig\n[core]\n\texcludesfile = ~/root-ignore\n")
+		stubGit(t, "exit 128")
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		bindings := g.Bindings(f.homeDir, f.sandboxHome)
+
+		findBindingBySource(t, bindings, rootIgnore)
+		if hasBindingSource(bindings, incIgnore) {
+			t.Error("the include's excludesFile was carried over the declaring file's own value")
+		}
+	})
+
+	// An include the trust check refuses is not readable in the sandbox either,
+	// so its file-valued keys must not decide what devsandbox mounts - that is
+	// the sandbox choosing which host file gets carried in next launch.
+	t.Run("a trust-denied include cannot name the file that gets carried", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		captureNotices(t)
+		secret := filepath.Join(t.TempDir(), "secret")
+		writeFile(t, secret, "x\n")
+		inc := filepath.Join(f.projectDir, "inc.gitconfig")
+		writeFile(t, inc, "[core]\n\texcludesfile = "+secret+"\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"), "[include]\n\tpath = "+inc+"\n")
+		stubGit(t, "exit 128")
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if hasBindingSource(g.Bindings(f.homeDir, f.sandboxHome), secret) {
+			t.Errorf("an include under the project dir named %q and it was carried", secret)
+		}
+	})
+
+	// The XDG config is the file the fixed set does not already mount, and
+	// builder.go repoints XDG_CONFIG_HOME into the sandbox - so on a host that
+	// points its own outside $HOME, the host path is the right Source and the
+	// wrong Dest. A relative include inside it inherits both halves.
+	t.Run("an XDG-only config outside $HOME keeps its identity and its relative include", func(t *testing.T) {
+		f := newReadWriteRefFixture(t)
+		captureNotices(t)
+		xdgHome := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", xdgHome)
+		xdgGit := filepath.Join(xdgHome, "git")
+		if err := os.MkdirAll(xdgGit, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		xdgConfig := filepath.Join(xdgGit, "config")
+		writeFile(t, xdgConfig, "[user]\n\temail = ada@corp\n[include]\n\tpath = inc.gitconfig\n")
+		inc := filepath.Join(xdgGit, "inc.gitconfig")
+		writeFile(t, inc, "[user]\n\tname = Ada\n")
+		// Deliberately no ~/.gitconfig: this host's whole global config is the
+		// one file the fixed set does not mount.
+		stubGit(t, "exit 128")
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		bindings := g.Bindings(f.homeDir, f.sandboxHome)
+
+		root := findBindingBySource(t, bindings, xdgConfig)
+		wantRoot := filepath.Join(f.homeDir, ".config", "git", "config")
+		if root.Dest != wantRoot {
+			t.Errorf("Dest = %q, want %q - in-sandbox git reads $HOME/.config/git/config", root.Dest, wantRoot)
+		}
+		if !root.HomeRelativeDest {
+			t.Error("the XDG global config is read under the sandbox $HOME, so its Dest must be home-relative")
+		}
+
+		target := findBindingBySource(t, bindings, inc)
+		wantTarget := filepath.Join(f.homeDir, ".config", "git", "inc.gitconfig")
+		if target.Dest != wantTarget {
+			t.Errorf("Dest = %q, want %q - a relative include resolves against the declaring file's directory",
+				target.Dest, wantTarget)
+		}
+		if !target.HomeRelativeDest {
+			t.Error("a relative include inherits the declaring file's home-relative flag")
+		}
+	})
+
+	// The retry that keeps a broken repository from costing the user their
+	// identity evaluates no includeIf condition, so the file a matching one
+	// names is never reported as an origin and never carried.
+	t.Run("reading outside the repository reports the unevaluated includeIf", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skip("git not available")
+		}
+		f := newReadWriteRefFixture(t)
+
+		initCmd := exec.Command("git", "init", "-q")
+		initCmd.Dir = f.projectDir
+		initCmd.Env = gitCommandEnv(os.Environ(), f.homeDir)
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v: %s", err, out)
+		}
+		// An unterminated section header: git reports "bad config line" and
+		// exits 128, which takes the global scope down with it.
+		writeFile(t, filepath.Join(f.projectDir, ".git", "config"), "[core\n\trepositoryformatversion = 0\n")
+		writeFile(t, filepath.Join(f.homeDir, ".gitconfig"),
+			"[user]\n\tname = Ada\n[includeIf \"gitdir:~/work/\"]\n\tpath = ~/work.gitconfig\n")
+		stderr := captureNotices(t)
+
+		g := newReadWriteRefGit(f)
+		if err := g.Setup(f.homeDir, f.sandboxHome); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if !strings.Contains(stderr.String(), "no includeIf condition was evaluated") {
+			t.Errorf("a config read outside the repository must report the unevaluated includeIf, got: %s", stderr)
+		}
+	})
+}
+
+// TestDedupBindingDests covers the collision rule directly, including the case
+// that makes it necessary: the static readwrite bindings leave Dest empty and
+// are mounted at their Source by both backends.
+func TestDedupBindingDests(t *testing.T) {
+	existing := []Binding{
+		{Source: "/home/u/.gitconfig"}, // Dest empty - mounted at Source
+		{Source: "/gen/safe", Dest: "/home/u/x"},
+	}
+	candidates := []Binding{
+		{Source: "/host/a", Dest: "/home/u/.gitconfig"}, // collides via the empty Dest above
+		{Source: "/home/u/x"},                           // collides via an explicit Dest
+		{Source: "/host/b", Dest: "/home/u/b"},          // kept
+		{Source: "/host/c", Dest: "/home/u/b"},          // collides with the candidate above
+		{Source: "/home/u/d"},                           // kept, Dest empty
+	}
+
+	got := dedupBindingDests(existing, candidates)
+	want := []Binding{
+		{Source: "/host/b", Dest: "/home/u/b"},
+		{Source: "/home/u/d"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dedupBindingDests:\ngot  %+v\nwant %+v", got, want)
+	}
+
+	if got := dedupBindingDests(existing, nil); got != nil {
+		t.Errorf("no candidates must yield nil, got %+v", got)
+	}
 }
 
 // Disabled mode suppresses git configuration, not git itself - and a

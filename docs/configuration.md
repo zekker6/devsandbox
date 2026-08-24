@@ -756,7 +756,8 @@ Each tool can have its own configuration section under `[tools.<name>]`.
 # Git access mode:
 # - "readonly" (default): safe gitconfig with your identity and global
 #   ignore/attributes rules, no credentials
-# - "readwrite": full access with credentials, SSH keys, GPG keys
+# - "readwrite": full access with credentials, SSH keys, GPG keys; your
+#   ~/.gitconfig is mounted as-is, along with the files it references
 # - "disabled": no git configuration (git commands work without user config)
 mode = "readonly"
 
@@ -770,11 +771,13 @@ mode = "readonly"
 | Mode       | gitconfig                          | Credentials | SSH Keys | GPG Keys | Use Case                    |
 |------------|------------------------------------|-------------|----------|----------|-----------------------------|
 | `readonly` | Safe copy: identity + ignore rules | No          | No       | No       | Default, maximum isolation  |
-| `readwrite`| Full                               | Read-only   | Read-only| Read-only| Trusted projects, push/sign |
+| `readwrite`| Yours, plus referenced files       | Read-only   | Read-only| Read-only| Trusted projects, push/sign |
 | `disabled` | None                               | No          | No       | No       | Fully anonymous git         |
 
 In `readwrite` mode, SSH and GPG directories are mounted read-only to protect private keys
-while still allowing git operations that need them.
+while still allowing git operations that need them, and your `~/.gitconfig` is mounted as it is - along
+with the files it references, so its ignore rules and its includes actually apply. See
+[what readwrite carries](#what-readwrite-carries).
 
 ##### What the safe copy carries
 
@@ -831,6 +834,72 @@ The configuration is read fresh on every launch, so editing an included file tak
 one. Both `~/.gitconfig` and `~/.config/git/config` are honored - the latter spelled
 `$XDG_CONFIG_HOME/git/config` when that variable is set on your host, which is the only one git reads in
 that case; a host that keeps its identity solely in the XDG location is carried in too.
+
+##### What readwrite carries
+
+In `readwrite` mode devsandbox mounts your `~/.gitconfig` rather than generating a copy, so nothing is
+dropped and nothing is rewritten - `credential.helper`, `alias.*`, `user.signingkey` and the rest all apply.
+Because the file is verbatim, every path inside it arrives spelled as the host wrote it, and git resolves that
+spelling against the *sandbox* filesystem. The files those paths name are mounted so they resolve:
+
+| Reference in your config | Carried as |
+|--------------------------|------------|
+| `core.excludesFile`, `core.attributesFile` | The file itself, mounted at the path the value names |
+| Neither key set | git's own defaults, `~/.config/git/ignore` and `~/.config/git/attributes` (read from `$XDG_CONFIG_HOME/git/` when that variable is set on your host) |
+| `[include]` / matching `[includeIf "gitdir:..."]` targets | Each file that contributed a setting, plus the config files declaring them |
+| `~/.config/git/config` (`$XDG_CONFIG_HOME/git/config`) | Mounted whenever it contributes, which is what carries an XDG-only identity |
+
+A value spelled `~/x` is mounted where `$HOME/x` resolves inside the sandbox; an absolute value is mounted at
+that path verbatim. Both are needed, because `$HOME` is the host home path on `bwrap` and `/home/sandboxuser`
+on `docker` and `krun`.
+
+The mounts follow the same policy `~/.gitconfig` itself gets, which under the default `split` mode means
+**read-only** for a single file: `split` asks for a tmpoverlay, overlays need a directory, and a file source
+falls back to a read-only bind on every backend. Under `split` the host file is never touched - but a write
+does not silently vanish either, it fails: `git config --global` inside the sandbox errors with
+`Device or resource busy` once any global config file is mounted, exactly as it already did for a host with a
+`~/.gitconfig`. Use `git -c user.email=...` for one command, or `git config --local`, which writes into the
+project's own `.git/config`. If your identity lives only at `~/.config/git/config`, this is a change: that file
+is now mounted, so `git config --global` writes to it and fails, where before it fell through to a throwaway
+`~/.gitconfig` inside the sandbox - and in exchange the identity in it now applies at all.
+
+Set [`mount_mode`](#per-tool-mount-mode-override) to `readwrite` on `[tools.git]`, or `[overlay] default` to `readwrite`, and
+the **ignore and attributes files** become writable binds at their host paths instead: a write from inside the
+sandbox then edits the real file, as it already does for `~/.ssh` and `~/.gnupg`.
+
+The config files stay read-only under every mount mode - `~/.gitconfig`, `~/.config/git/config` and every
+`[include]` target. devsandbox resolves those to decide which host files to mount, so one the sandbox could
+write between launches would let it name any host file for the next launch to carry in.
+
+The two refusals from `readonly` apply here too: a file the sandbox can write (inside the project directory,
+the shared `$TMPDIR`, or the sandbox home) is not carried in, and neither is an include target sitting in one
+of those places. Unlike `readonly`, they are **silent**. `readonly` names the key it dropped because its
+generated config would otherwise point at a path that does not resolve; `readwrite` rewrites nothing, so the
+only alternative to refusing is mounting nothing - which is exactly what git already does with the value. A
+file that simply does not exist is skipped in silence for the same reason. A value spelled `~user/...` is the
+one case that *is* reported: devsandbox cannot resolve the password-database form, and you set it, so you are
+getting less than the config says. Spell it `~/` or absolutely.
+
+If the resolved configuration cannot be read at all - an unreadable file, or a host git older than 2.26, which
+has no `git config --show-scope` - devsandbox falls back to the top-level `[include]` directives it can parse
+and says so, since a target reachable only through a nested or conditional include is lost in that case. A
+host that declares no include at all reaches exactly what a working resolver would have given it, and stays
+silent. The `core.excludesFile` and `core.attributesFile` of a carried include are honored on that path too,
+in git's own precedence order - a value the declaring file sets *after* its `[include]` still wins.
+
+Evaluating an `[includeIf "gitdir:..."]` condition means reading the configuration from inside the repository.
+If git refuses the repo's own `.git/config` - a malformed file, unreadable permissions, an ownership git
+considers dubious - the configuration is re-read from outside the repository, where no conditional include is
+evaluated. Plain `[include]` targets are still carried; a conditional one is not, so a commit in that sandbox
+lands with the identity the outer config sets. The launch says so, but only when your configuration actually
+has an `includeIf`.
+
+`[includeIf "gitdir:~/..."]` has a residual limitation on the `docker` and `krun` backends: the condition is
+re-evaluated inside the sandbox against a different `$HOME`, so it stops matching and the identity falls back
+to the outer config's. One file included twice under two different spellings hits the same limit. A `~/` value
+that climbs out of `$HOME` (`~/../shared/ignore`) is the narrower case: it is mounted where it resolves on the
+host, which is still where guest git looks whenever the two homes share a parent, and misses only when they do
+not. See [Conditional includes on Docker and krun](tools.md#conditional-includes-on-docker-and-krun).
 
 #### Mise
 
