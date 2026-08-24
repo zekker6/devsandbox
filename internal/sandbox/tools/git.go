@@ -110,6 +110,13 @@ func (g *Git) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 func (g *Git) Bindings(homeDir, sandboxHome string) []Binding {
 	switch g.mode {
 	case GitModeDisabled:
+		// Disabled mode suppresses git *configuration*, not git itself, and
+		// a worktree's metadata lives outside the project mount - so the
+		// shared git directory is still bound, writable, exactly as an
+		// ordinary checkout's .git is by the project binding.
+		if b, ok := g.worktreeGitDirBinding(); ok {
+			return []Binding{b}
+		}
 		return nil
 
 	case GitModeReadWrite:
@@ -120,13 +127,34 @@ func (g *Git) Bindings(homeDir, sandboxHome string) []Binding {
 	}
 }
 
+// isWorktree reports whether the project dir is a linked git worktree, whose
+// .git is a file pointing at a shared git directory elsewhere on the host.
+func (g *Git) isWorktree() bool {
+	return g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir
+}
+
 // gitDirSource returns the directory holding the real .git metadata.
 // In worktree mode that is the main repo; otherwise it is the project dir.
 func (g *Git) gitDirSource() string {
-	if g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir {
+	if g.isWorktree() {
 		return g.gitRepoRoot
 	}
 	return g.projectDir
+}
+
+// worktreeGitDirBinding returns the writable bind for the shared git directory
+// backing a linked worktree. Dest is pinned to the host path so the Docker and
+// krun backends do not remap it under /home/sandboxuser: the worktree's .git
+// file carries an absolute gitdir: pointer that has to resolve unchanged.
+func (g *Git) worktreeGitDirBinding() (Binding, bool) {
+	if !g.isWorktree() {
+		return Binding{}, false
+	}
+	gitDir := filepath.Join(g.gitRepoRoot, ".git")
+	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+		return Binding{}, false
+	}
+	return Binding{Source: gitDir, Dest: gitDir, Category: CategoryConfig}, true
 }
 
 // readOnlyBindings returns bindings for readonly mode (safe gitconfig + read-only .git).
@@ -169,7 +197,7 @@ func (g *Git) readOnlyBindings(homeDir, sandboxHome string) []Binding {
 	// .git/worktrees/<name>; we mount the main repo's .git so the
 	// absolute gitdir: pointer resolves correctly inside the sandbox.
 	gitDirHost := g.gitDirSource()
-	isWorktree := g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir
+	isWorktree := g.isWorktree()
 	if gitDirHost != "" {
 		gitDir := filepath.Join(gitDirHost, ".git")
 		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
@@ -239,17 +267,9 @@ func (g *Git) readWriteBindings(homeDir, _ string) []Binding {
 	// In worktree mode the project mount only contains the worktree
 	// directory. The worktree's .git is a file whose gitdir: pointer
 	// references the main repo's .git — which must also be mounted
-	// (writable, so commits can land). Pin Dest to the host path so
-	// the Docker backend does not remap it under /home/sandboxuser.
-	if g.gitRepoRoot != "" && g.gitRepoRoot != g.projectDir {
-		gitDir := filepath.Join(g.gitRepoRoot, ".git")
-		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
-			bindings = append(bindings, Binding{
-				Source:   gitDir,
-				Dest:     gitDir,
-				Category: CategoryConfig,
-			})
-		}
+	// (writable, so commits can land).
+	if b, ok := g.worktreeGitDirBinding(); ok {
+		bindings = append(bindings, b)
 	}
 
 	return bindings

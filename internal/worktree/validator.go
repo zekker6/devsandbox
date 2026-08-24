@@ -125,3 +125,74 @@ func RepoRoot(dir string) (string, error) {
 	}
 	return resolved, nil
 }
+
+// ErrUnmappableWorktree is returned by LinkedRepoRoot for a linked worktree
+// whose shared git directory is not a repository's ".git" - a submodule's
+// worktree, or a checkout driven by an explicit GIT_DIR. There is no
+// repository root to mount for those, so the caller reports the gap rather
+// than binding a directory that is not one.
+var ErrUnmappableWorktree = errors.New("linked worktree has no mountable repository root")
+
+// LinkedRepoRoot returns the main repository root when dir sits inside a
+// linked git worktree, and "" when it does not (an ordinary checkout, or no
+// repository at all - neither is an error, since every launch calls this).
+//
+// The test is `--git-dir` != `--git-common-dir`. A linked worktree keeps its
+// own HEAD and index under <common>/worktrees/<name> while sharing the object
+// store through the common dir; no other repository shape separates the two.
+// The two are compared symlink-resolved, because git spells them relative
+// whenever it can: from a subdirectory of an ordinary checkout they come back
+// as "/repo/.git" and "../.git", which is one directory written two ways and
+// would otherwise read as a worktree.
+//
+// The root is returned in git's own spelling. It is what gets bind-mounted,
+// and what has to land on it is the `gitdir:` line git wrote into the
+// worktree's .git file - which git derives from this same common dir, so
+// taking it verbatim is what keeps mount and pointer in step. Resolution
+// stays on the comparison, where it is load-bearing.
+func LinkedRepoRoot(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-dir", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		// Not a repository, or no git binary. Both mean "nothing to mount";
+		// a launch outside a repo is ordinary and must not be blocked.
+		return "", nil
+	}
+
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) != 2 {
+		return "", nil
+	}
+
+	gitDir := absGitPath(dir, lines[0])
+	commonDir := absGitPath(dir, lines[1])
+	if evalSymlinks(gitDir) == evalSymlinks(commonDir) {
+		return "", nil
+	}
+
+	// The common dir is what gets mounted, and git.go mounts it as
+	// <root>/.git - so a common dir under any other name has no root to
+	// derive and is reported instead of guessed at.
+	if filepath.Base(commonDir) != ".git" {
+		return "", fmt.Errorf("%w: shared git directory is %s", ErrUnmappableWorktree, commonDir)
+	}
+	return filepath.Dir(commonDir), nil
+}
+
+// absGitPath turns a path git reported relative to dir into an absolute one,
+// leaving any symlinks in it as git spelled them.
+func absGitPath(dir, p string) string {
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	return filepath.Clean(p)
+}
+
+// evalSymlinks resolves p for comparison. Best-effort: a path that cannot be
+// resolved is still comparable in its cleaned form.
+func evalSymlinks(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
+}

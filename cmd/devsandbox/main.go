@@ -398,6 +398,20 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		projectDir = handle.Path
 
 		notice.Info("worktree: %s (branch %s)", handle.Path, handle.Branch)
+	} else if root, err := worktree.LinkedRepoRoot(cfg.ProjectDir); err != nil {
+		// A worktree devsandbox cannot map is still a worktree: git will not
+		// work inside the sandbox, and that has to be said before launch
+		// rather than discovered as "not a git repository".
+		notice.Warn("git: %s is a linked worktree devsandbox cannot map (%v); git commands will fail in the sandbox", cfg.ProjectDir, err)
+	} else if root != "" {
+		// The launch directory is already a worktree someone else created.
+		// Its .git is a file whose gitdir: pointer leaves the project mount,
+		// so the shared git directory has to be mounted too. Sandbox state
+		// stays keyed on the worktree path - unlike --worktree, which
+		// re-keys on the repo root - so existing sandboxes keep their
+		// overlays and the run-agent resume guard is not engaged.
+		cfg.GitRepoRoot = root
+		notice.Info("worktree: %s (repo %s)", cfg.ProjectDir, root)
 	}
 
 	if err := cfg.EnsureSandboxDirs(); err != nil {

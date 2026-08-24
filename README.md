@@ -270,8 +270,20 @@ Worktrees live under the per-project sandbox state dir:
 
 The slug is derived from the main repo root so worktrees of the same repo share sandbox state (overlays, logs). Branch names with slashes are stored as dashes in the filesystem leaf; the git branch name is preserved verbatim.
 
+#### Launching inside an existing worktree
+
+You do not need `--worktree` for a worktree you already have. When the launch directory is a linked worktree - one you created with `git worktree add`, or one a terminal multiplexer set up for you - devsandbox detects it and mounts the repository's shared git directory alongside the project, so git works normally inside the sandbox.
+
+This matters because a worktree's `.git` is not a directory but a one-line file pointing at `<main-repo>/.git/worktrees/<name>`. That target sits outside the project mount, so without the extra mount every git command fails with `fatal: not a git repository`.
+
+The shared git directory follows `--git-mode`: read-only under `readonly` (the default), writable under `readwrite` and `disabled`. Note that it holds the whole repository - every branch, every object, and the metadata of your other worktrees - so a `readwrite` sandbox in a worktree can write all of it, not only the branch checked out.
+
+Sandbox state stays keyed on the worktree path, so each worktree gets its own overlay and logs. This differs from `--worktree`, which keys on the main repo root; the tradeoff is that a worktree you created keeps whatever sandbox state it already had.
+
 Known limitations:
 
+- A worktree of a **submodule** is detected but cannot be mounted - its shared git directory lives under `<super>/.git/modules/<name>`, which is not a repository root. devsandbox warns at launch instead of leaving you to discover a broken git.
+- Launching from a **subdirectory** of a repository or worktree does not mount git metadata at all, because the project mount is the launch directory. Launch from the worktree root.
 - Submodule init inside a readonly sandbox fails - not worked around.
 - If git already has the canonical path registered to a different branch, invocation fails with git's own error plus a hint; run `git worktree list` to investigate.
 - A stale directory at the canonical path (git has no record) causes `devsandbox` to refuse to clobber - remove it manually.

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.20.0...HEAD)
 
+### Fixed
+
+- Git now works when you launch devsandbox from a git worktree you created yourself, rather than one made by `--worktree`. A worktree's `.git` is a file pointing at `<main-repo>/.git/worktrees/<name>`, which sits outside the project mount - so every git command in the sandbox failed with `fatal: not a git repository: (null)`, and so did anything built on git, from `git status` to pre-commit hooks to a test that shells out to `git config`. The shared git directory is now detected and mounted, read-only under the default `readonly` git mode and writable under `readwrite` and `disabled`. Note that it holds the whole repository - every branch and object, plus your other worktrees' metadata - so a `readwrite` sandbox launched in a worktree can write all of it. Sandbox state stays keyed on the worktree path, so an existing worktree sandbox keeps its overlay. A worktree of a *submodule* still cannot be mounted, but now says so in a warning at launch instead of failing silently later. See [Launching inside an existing worktree](https://github.com/zekker6/devsandbox#launching-inside-an-existing-worktree).
+
 ## [v0.20.0](https://github.com/zekker6/devsandbox/releases/tag/v0.20.0) - 2026-08-22
 
 ### Breaking Changes

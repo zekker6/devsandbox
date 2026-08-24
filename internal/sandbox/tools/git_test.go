@@ -3411,3 +3411,55 @@ func TestGit_Check_ConfigPaths(t *testing.T) {
 		}
 	})
 }
+
+// Disabled mode suppresses git configuration, not git itself - and a
+// worktree's metadata is the one part of a repository that does not travel
+// with the project mount. Without this binding `git status` in a worktree
+// fails with "not a git repository" even though disabled mode promises
+// working git commands.
+func TestGitDisabledBindingsWorktreeMountsMainGitDir(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wt := t.TempDir()
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: wt, GitRepoRoot: repo}, map[string]any{"mode": "disabled"})
+	bindings := g.Bindings(t.TempDir(), t.TempDir())
+
+	want := filepath.Join(repo, ".git")
+	if len(bindings) != 1 {
+		t.Fatalf("expected exactly the shared git dir binding, got %d: %+v", len(bindings), bindings)
+	}
+	b := bindings[0]
+	if b.Source != want || b.Dest != want {
+		t.Errorf("binding = %+v, want Source and Dest %s", b, want)
+	}
+	if b.ReadOnly {
+		t.Errorf("disabled mode leaves .git writable, got ReadOnly=true")
+	}
+}
+
+func TestGitDisabledBindingsNoWorktreeStaysEmpty(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: repo, GitRepoRoot: ""}, map[string]any{"mode": "disabled"})
+	if bindings := g.Bindings(t.TempDir(), t.TempDir()); len(bindings) != 0 {
+		t.Errorf("disabled mode outside a worktree must emit no bindings, got %+v", bindings)
+	}
+}
+
+// A GitRepoRoot pointing at a directory with no .git must not produce a
+// binding whose source does not exist.
+func TestGitDisabledBindingsMissingGitDir(t *testing.T) {
+	g := &Git{}
+	g.Configure(GlobalConfig{ProjectDir: t.TempDir(), GitRepoRoot: t.TempDir()}, map[string]any{"mode": "disabled"})
+	if bindings := g.Bindings(t.TempDir(), t.TempDir()); len(bindings) != 0 {
+		t.Errorf("expected no bindings when the shared git dir is absent, got %+v", bindings)
+	}
+}
