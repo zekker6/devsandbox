@@ -23,6 +23,9 @@ vars:
     sh: git describe --tags --exact-match 2>/dev/null || echo "dev"
   BWRAP_REPO: https://github.com/containers/bubblewrap.git
   PASTA_REPO: https://passt.top/passt
+  # bubblewrap 0.12.0 uses PATH_MAX without including limits.h. glibc exposes it
+  # transitively, but musl (the Alpine builder) does not. Force the missing header.
+  BWRAP_CFLAGS: -include limits.h
   # passt 2026_07_28 calls close_range()/CLOSE_RANGE_UNSHARE from isolation.c, which
   # does not include linux_dep.h - upstream's fallback for libcs that lack both (musl
   # 1.2.5, the Alpine builder). Force the header in; drop this once upstream includes it.
@@ -260,7 +263,7 @@ tasks:
         devsandbox-embed-builder:amd64 sh -c '
         git clone --depth 1 --branch {{.BWRAP_TAG}} {{.BWRAP_REPO}} /tmp/build &&
         cd /tmp/build &&
-        LDFLAGS=-static meson setup _build --prefer-static -Ddefault_library=static -Dtests=false &&
+        CFLAGS="{{.BWRAP_CFLAGS}}" LDFLAGS=-static meson setup _build --prefer-static -Ddefault_library=static -Dtests=false &&
         meson compile -C _build &&
         cp _build/bwrap /out/bwrap &&
         strip /out/bwrap
@@ -278,7 +281,7 @@ tasks:
         devsandbox-embed-builder:arm64 sh -c '
         git clone --depth 1 --branch {{.BWRAP_TAG}} {{.BWRAP_REPO}} /tmp/build &&
         cd /tmp/build &&
-        LDFLAGS=-static meson setup _build --prefer-static -Ddefault_library=static -Dtests=false &&
+        CFLAGS="{{.BWRAP_CFLAGS}}" LDFLAGS=-static meson setup _build --prefer-static -Ddefault_library=static -Dtests=false &&
         meson compile -C _build &&
         cp _build/bwrap /out/bwrap &&
         strip /out/bwrap
