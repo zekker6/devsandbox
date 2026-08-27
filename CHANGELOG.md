@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.20.1...HEAD)
 
+### Added
+
+- `devsandbox agent-wrappers activate` now takes `--agents`, so you can wrap only the agents you name and leave the rest running unsandboxed: `--agents claude,codex`, the flag repeated once per agent, or both. Omitting it wraps every supported agent that is installed, exactly as before. An unsupported name or an explicitly empty selection exits non-zero listing the supported agents and writes nothing to stdout, so a startup file never evaluates half a snippet; selecting an agent you have not installed stays a no-op rather than an error. See [Tools: Shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default).
+
 ### Changed
 
 - Updated embedded bubblewrap to 0.12.0.

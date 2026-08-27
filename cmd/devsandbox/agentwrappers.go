@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -23,7 +24,12 @@ type wrapperEnv struct {
 	// devsandboxPath is devsandbox's absolute path, baked into the snippet so a
 	// pane shell with a different PATH still resolves it.
 	devsandboxPath string
-	// agents are the known agents actually installed on this host.
+	// selected are the agents --agents asked for, already validated and in
+	// canonical order; every known agent when the flag was omitted. Kept apart
+	// from agents so the no-wrapper comment names what was asked for rather
+	// than claiming nothing is installed while an unselected agent is.
+	selected []string
+	// agents are the selected agents actually installed on this host.
 	agents []string
 	out    io.Writer
 }
@@ -68,6 +74,8 @@ func activationExamples() string {
 }
 
 func newAgentWrappersActivateCmd() *cobra.Command {
+	var agents []string
+
 	cmd := &cobra.Command{
 		Use:   "activate [shell]",
 		Short: "Print the wrapper definitions for your shell",
@@ -79,10 +87,21 @@ The output is shell code meant to be evaluated, not read:
 on this host are wrapped; with none installed the output is a comment saying so,
 so a startup file that evaluates it keeps working.
 
+--agents narrows what is wrapped to the agents you name, leaving the rest to run
+unsandboxed as usual. Values are given comma-separated, by repeating the flag,
+or both: ` + "`--agents claude,codex`" + ` and ` + "`--agents claude --agents codex`" + ` select the
+same pair. Omit the flag to wrap every supported agent (` + strings.Join(agentid.KnownAgents(), ", ") + `),
+which is what activate did before the flag existed. An unsupported name fails
+before any shell code is written, so a startup file never evaluates half a
+snippet; a selected agent that is merely not installed is not an error, and is
+picked up by the next shell once you install it.
+
 Inside a sandbox the definitions are inert - the whole snippet is guarded on
 DEVSANDBOX - so a wrapper cannot recurse.`,
 		Example: `  devsandbox agent-wrappers activate fish | source
-  eval "$(devsandbox agent-wrappers activate bash)"`,
+  eval "$(devsandbox agent-wrappers activate bash)"
+  devsandbox agent-wrappers activate fish --agents claude,codex | source
+  eval "$(devsandbox agent-wrappers activate bash --agents claude --agents codex)"`,
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -90,18 +109,30 @@ DEVSANDBOX - so a wrapper cannot recurse.`,
 			if len(args) == 1 {
 				shellArg = args[0]
 			}
-			env, err := resolveWrapperEnv(shellArg, cmd.OutOrStdout())
+			// Changed is what separates an omitted flag from an explicitly
+			// empty one; resolved before anything is discovered so a bad
+			// selection cannot reach stdout.
+			selected, err := resolveAgentSelection(agents, cmd.Flags().Changed("agents"))
+			if err != nil {
+				return err
+			}
+			env, err := resolveWrapperEnv(shellArg, selected, exec.LookPath, cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
 			return activateWrappers(env)
 		},
 	}
+	cmd.Flags().StringSliceVar(&agents, "agents", nil,
+		"Agents to wrap, comma-separated or repeated (default: every supported agent - "+
+			strings.Join(agentid.KnownAgents(), ", ")+")")
+
 	return cmd
 }
 
-// resolveWrapperEnv gathers the host facts activate operates on.
-func resolveWrapperEnv(shellArg string, out io.Writer) (wrapperEnv, error) {
+// resolveWrapperEnv gathers the host facts activate operates on, over the
+// already-validated selection.
+func resolveWrapperEnv(shellArg string, selected []string, lookPath func(string) (string, error), out io.Writer) (wrapperEnv, error) {
 	shell, err := detectShell(shellArg, os.Getenv("SHELL"))
 	if err != nil {
 		return wrapperEnv{}, err
@@ -118,7 +149,8 @@ func resolveWrapperEnv(shellArg string, out io.Writer) (wrapperEnv, error) {
 	return wrapperEnv{
 		shell:          shell,
 		devsandboxPath: exe,
-		agents:         installedAgents(agentid.KnownAgents(), exec.LookPath),
+		selected:       selected,
+		agents:         installedAgents(selected, lookPath),
 		out:            out,
 	}, nil
 }
@@ -145,8 +177,8 @@ func detectShell(shellArg, shellEnv string) (string, error) {
 	return name, nil
 }
 
-// installedAgents filters known agents down to the ones present on this host,
-// so a wrapper is never generated for a binary the user does not have.
+// installedAgents filters the selected agents down to the ones present on this
+// host, so a wrapper is never generated for a binary the user does not have.
 func installedAgents(names []string, lookPath func(string) (string, error)) []string {
 	found := make([]string, 0, len(names))
 	for _, n := range names {
@@ -162,9 +194,19 @@ func installedAgents(names []string, lookPath func(string) (string, error)) []st
 // Having no agent installed is not an error: this runs on every shell start,
 // and there is nothing to wrap when none of the binaries exist. It is still
 // said out loud, in the output itself, rather than emitting nothing.
+// The comment names env.selected rather than every known agent: with --agents
+// it would otherwise report on agents the user deliberately left out. Only the
+// full set may be called "supported" - a narrowed selection worded that way
+// asserts devsandbox supports nothing else, which is the opposite of what
+// --agents did - and the flag-omitted wording is unchanged because the two
+// lists are identical then.
 func activateWrappers(env wrapperEnv) error {
-	snippet := fmt.Sprintf("# none of the supported agents (%s) are installed on this host; nothing wrapped\n",
-		strings.Join(agentid.KnownAgents(), ", "))
+	scope := "selected"
+	if slices.Equal(env.selected, agentid.KnownAgents()) {
+		scope = "supported"
+	}
+	snippet := fmt.Sprintf("# none of the %s agents (%s) are installed on this host; nothing wrapped\n",
+		scope, strings.Join(env.selected, ", "))
 	if len(env.agents) > 0 {
 		generated, err := shellwrap.Snippet(env.shell, env.devsandboxPath, env.agents)
 		if err != nil {
@@ -180,4 +222,64 @@ func activateWrappers(env wrapperEnv) error {
 		return fmt.Errorf("write wrapper snippet: %w", err)
 	}
 	return nil
+}
+
+// resolveAgentSelection turns the --agents values into the agents to consider,
+// in the canonical order of agentid.KnownAgents.
+//
+// explicit is whether the flag was given at all, which is what separates an
+// omitted flag - selecting every known agent, the behavior from before the flag
+// existed - from an explicitly empty one. The latter can only ever wrap nothing,
+// so it is an error rather than a startup file that silently stops defining
+// wrappers.
+func resolveAgentSelection(requested []string, explicit bool) ([]string, error) {
+	known := agentid.KnownAgents()
+	if !explicit {
+		return known, nil
+	}
+
+	wanted := make(map[string]bool, len(requested))
+	var unsupported []string
+	for _, name := range requested {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !slices.Contains(known, name) {
+			if !slices.Contains(unsupported, name) {
+				unsupported = append(unsupported, name)
+			}
+			continue
+		}
+		wanted[name] = true
+	}
+
+	// Every unsupported name is reported at once: fixing them one shell start at
+	// a time is the same typo found five times.
+	if len(unsupported) > 0 {
+		noun := "agent"
+		if len(unsupported) > 1 {
+			noun = "agents"
+		}
+		quoted := make([]string, 0, len(unsupported))
+		for _, name := range unsupported {
+			quoted = append(quoted, fmt.Sprintf("%q", name))
+		}
+		return nil, fmt.Errorf("unsupported %s %s: supported agents are %s",
+			noun, strings.Join(quoted, ", "), strings.Join(known, ", "))
+	}
+	if len(wanted) == 0 {
+		return nil, fmt.Errorf("no agents selected: pass at least one of %s, or omit --agents to select them all",
+			strings.Join(known, ", "))
+	}
+
+	// Ordering follows the known-agent list rather than the command line, so the
+	// generated snippet does not change with the order the values were typed.
+	selected := make([]string, 0, len(wanted))
+	for _, name := range known {
+		if wanted[name] {
+			selected = append(selected, name)
+		}
+	}
+	return selected, nil
 }

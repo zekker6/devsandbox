@@ -338,6 +338,20 @@ command claude        # escape hatch: the real binary, unsandboxed
 
 The wrappable agents are `claude`, `pi`, `codex`, `opencode`, and `copilot` (the standalone GitHub Copilot CLI). Only the ones actually installed on your host are wrapped. Because the snippet is regenerated at every shell start, it cannot go stale: install a new agent, or upgrade devsandbox into a new directory, and the next shell picks it up with nothing to re-run. With none of them on the host the output is a comment saying so, which is still valid shell - your startup file keeps working.
 
+**Wrapping only some of them.** `--agents` narrows the set, so the agents you leave out keep running unsandboxed as usual:
+
+| Shell | Line to add |
+|-------|-------------|
+| fish | `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish --agents claude,codex \| source; end` |
+| bash | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash --agents claude,codex)"; fi` |
+| zsh | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh --agents claude,codex)"; fi` |
+
+Values are comma-separated, given by repeating the flag, or both: `--agents claude,codex` and `--agents claude --agents codex` select the same pair. Omitting the flag wraps every supported agent, which is what the lines further up do.
+
+Names are checked strictly. An unsupported name, or an explicitly empty `--agents ''`, exits non-zero listing the supported agents and writes nothing to stdout - so a startup file never evaluates half a snippet. Duplicates collapse to one wrapper, and the order you type the names in does not matter: definitions are emitted in the fixed order `claude`, `pi`, `codex`, `opencode`, `copilot`. Selecting an agent you have not installed is not an error - it is simply not wrapped, and the next shell picks it up once you install it; select only agents you do not have and the output is that same no-wrapper comment, naming just your selection and still valid shell.
+
+If you use [herdr's agent session restore](#agent-session-capture-and-restore), keep `claude`, `pi` and `codex` in the selection. Restore works by herdr typing that agent's own resume command into the pane shell for the wrapper to intercept, so an agent you leave out has its resume run against the host agent instead - it starts fresh rather than reopening the sandboxed session.
+
 **Two guards, and why the line carries one of its own.** The emitted snippet wraps every definition in a `DEVSANDBOX` test, so nothing is wrapped inside a sandbox and a wrapper cannot recurse. The line you paste repeats that test: startup files are mounted into the sandbox while devsandbox itself need not exist in there, so an unguarded line would fail with command-not-found on every in-sandbox shell start.
 
 **Scope, stated exactly.** fish sources `config.fish` for non-interactive `fish -c` invocations too, so a fish script calling `claude` gets the wrapper. bash and zsh only source their rc file for interactive shells, so scripts there are unaffected.
@@ -1043,6 +1057,7 @@ herdr can remember which agent a pane was running and, after the server restarts
 
 - Capture requires a direct `devsandbox <agent>` launch, as above.
 - Interception only works for panes running fish, bash, or zsh. If herdr's `default_shell` is something else, no wrapper runs and herdr types the resume command to the host agent. That fails on functionality, not on isolation: the ID names a session inside the sandbox's overlay that the host agent cannot see, so it errors or starts fresh.
+- An agent left out of the activation line's [`--agents`](#shell-wrappers-run-agents-sandboxed-by-default) selection is not wrapped, so herdr types its resume command to the host agent. Same failure mode as an unsupported `default_shell` above, and equally silent - keep `claude`, `pi` and `codex` selected if you rely on restore.
 - fish's wrapper lives in `conf.d`, which fish also sources for non-interactive `fish -c`. bash and zsh wrap interactive shells only.
 - Sessions launched with `--worktree` **fail closed** on restore, from either directory. Their sandbox state is keyed to the repo root while the session runs in the worktree, so re-entering from the repo root reaches the right state root under the wrong project, and re-entering from the worktree reaches a different state root entirely. Both open a different agent session store, so `run-agent` refuses with a message naming the original invocation to re-run instead.
 - A resume typed from any other directory is refused for the same reason, with the directory to change to named in the error.
