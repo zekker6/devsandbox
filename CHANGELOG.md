@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.20.1...HEAD)
 
+### Changed
+
+- Updated embedded bubblewrap to 0.12.0.
+
 ## [v0.20.1](https://github.com/zekker6/devsandbox/releases/tag/v0.20.1) - 2026-08-25
 
 ### Changed
