@@ -53,6 +53,7 @@ type Builder struct {
 	args           []string
 	overlaySrcSeen bool // tracks if OverlaySrc was called before overlay mount
 	mounts         []mountInfo
+	customMounts   map[string]mounts.Rule
 	err            error // captures errors from build steps (e.g., critical tool setup failures)
 	// warnedHiddenDirs deduplicates the "hidden rule matched a directory" warning
 	// across the three mount passes, keyed by absolute path.
@@ -61,9 +62,10 @@ type Builder struct {
 
 func NewBuilder(cfg *Config) *Builder {
 	return &Builder{
-		cfg:    cfg,
-		args:   make([]string, 0, initialArgsCapacity),
-		mounts: make([]mountInfo, 0, initialMountsCapacity),
+		cfg:          cfg,
+		args:         make([]string, 0, initialArgsCapacity),
+		mounts:       make([]mountInfo, 0, initialMountsCapacity),
+		customMounts: make(map[string]mounts.Rule),
 	}
 }
 
@@ -766,6 +768,23 @@ const (
 	mountSkippedHiddenDir
 )
 
+// resolveMountRulePath returns a non-symlink destination for bwrap mounts.
+func resolveMountRulePath(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve symlink %s: %w", path, err)
+	}
+	return resolved, nil
+}
+
 // applyMountRule applies a single custom mount rule to a path.
 func (b *Builder) applyMountRule(path string, rule mounts.Rule) mountRuleOutcome {
 	info, err := os.Stat(path)
@@ -824,9 +843,28 @@ func (b *Builder) applyMountRuleSet(engine *mounts.Engine, expandedPaths map[str
 
 	for _, path := range sortPaths(paths) {
 		rule := expandedPaths[path]
-		switch b.applyMountRule(path, rule) {
+		mountPath, err := resolveMountRulePath(path)
+		if err != nil {
+			if !os.IsNotExist(err) && b.err == nil {
+				b.err = fmt.Errorf("apply mount rule %q: %w", rule.Pattern, err)
+			}
+			continue
+		}
+
+		if previous, exists := b.customMounts[mountPath]; exists {
+			if previous.Mode != rule.Mode && b.err == nil {
+				b.err = fmt.Errorf(
+					"custom mount rules %q (%s) and %q (%s) resolve to the same destination %s",
+					previous.Pattern, previous.Mode, rule.Pattern, rule.Mode, mountPath,
+				)
+			}
+			continue
+		}
+
+		switch b.applyMountRule(mountPath, rule) {
 		case mountApplied:
-			engine.EmitMountDecision(path, path, rule)
+			b.customMounts[mountPath] = rule
+			engine.EmitMountDecision(path, mountPath, rule)
 			if rule.Mode == mounts.ModeHidden {
 				hiddenFiles = append(hiddenFiles, path)
 			}

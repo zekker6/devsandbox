@@ -1345,6 +1345,93 @@ func TestBuilder_HiddenDirectoryWarnsOnTerminal(t *testing.T) {
 	}
 }
 
+func TestBuilder_HiddenSymlinkUsesResolvedDestination(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home", "test")
+	projectDir := filepath.Join(homeDir, "myproject")
+	target := filepath.Join(projectDir, "secrets", "originals", "argocd-oidc.yaml")
+	link := filepath.Join(projectDir, "manifests", "argocd-oidc.yaml")
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := mounts.NewEngine(config.MountsConfig{
+		Rules: []config.MountRule{{Pattern: "**/argocd-oidc.yaml", Mode: "hidden"}},
+	}, homeDir)
+	b := NewBuilder(&Config{
+		HomeDir:      homeDir,
+		ProjectDir:   projectDir,
+		SandboxHome:  filepath.Join(tmpDir, "sandbox", "home"),
+		MountsConfig: engine,
+	})
+	b.AddProjectBindings()
+	args := b.Build()
+
+	masks := 0
+	for i, arg := range args {
+		if i >= 2 && args[i-2] == "--ro-bind" && args[i-1] == "/dev/null" {
+			if arg == target {
+				masks++
+			}
+			if arg == link {
+				t.Fatalf("hidden rule kept symlink mount destination %q: %v", link, args)
+			}
+		}
+	}
+	if masks != 1 {
+		t.Fatalf("resolved symlink target %q masked %d times, want 1: %v", target, masks, args)
+	}
+}
+
+func TestBuilder_ConflictingSymlinkRulesReturnError(t *testing.T) {
+	projectDir := t.TempDir()
+	target := filepath.Join(projectDir, "secrets", "argocd-oidc.yaml")
+	link := filepath.Join(projectDir, "manifests", "argocd-oidc.yaml")
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := mounts.NewEngine(config.MountsConfig{
+		Rules: []config.MountRule{
+			{Pattern: target, Mode: "hidden"},
+			{Pattern: link, Mode: "readonly"},
+		},
+	}, t.TempDir())
+	b := NewBuilder(&Config{
+		HomeDir:      t.TempDir(),
+		ProjectDir:   projectDir,
+		SandboxHome:  t.TempDir(),
+		MountsConfig: engine,
+	})
+	b.AddProjectBindings()
+
+	if err := b.Err(); err == nil {
+		t.Fatal("conflicting rules resolving to one target returned no error")
+	} else if !strings.Contains(err.Error(), "resolve to the same destination") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // TestBuilder_HiddenFilesInsideDirectoryAreDevNulled asserts the remedy the
 // warning points at actually works: every file under the directory is replaced
 // with /dev/null.

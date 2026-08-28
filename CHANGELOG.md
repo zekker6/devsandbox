@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file.
 
 - Updated embedded bubblewrap to 0.12.0.
 
+### Fixed
+
+- Custom mount rules now mask files reached through symlinks without bubblewrap 0.12.0 aborting with `Can't mount on symlink destination`. See [Custom Mounts](docs/configuration.md#custom-mounts).
+
 ## [v0.20.1](https://github.com/zekker6/devsandbox/releases/tag/v0.20.1) - 2026-08-25
 
 ### Changed

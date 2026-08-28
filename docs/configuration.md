@@ -17,7 +17,7 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 ## Quick Reference
 
 | Section | Key Fields | Details |
-|---|---|---|
+| --- | --- | --- |
 | `[proxy]` | `enabled`, `port`, `mitm`, `max_log_body_bytes`, `extra_env`, `extra_ca_env` | [Proxy Settings](#proxy-settings) |
 | `[proxy.credentials.<name>]` | `enabled`, `source.env/file/value` | [Proxy Credentials](#proxy-credentials) |
 | `[proxy.redaction]` | `enabled`, `default_action`, `max_scan_bytes`, `rules` | [Content Redaction](#content-redaction) |
@@ -179,7 +179,7 @@ value_format = "{token}"
 **Fields under `[proxy.credentials.<name>]`:**
 
 | Field | Type | Default | Required when `enabled = true` |
-|-------|------|---------|--------------------------------|
+| ------- | ------ | --------- | -------------------------------- |
 | `enabled` | bool | `false` | - |
 | `host` | string (exact or glob) | preset value or `""` | yes |
 | `header` | string (canonicalized) | preset value or `""` | yes |
@@ -245,7 +245,7 @@ pattern = "sk-[a-zA-Z0-9]{20,}"
 **Source types:**
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `env` | Host environment variable |
 | `file` | File path (supports `~`, whitespace trimmed) |
 | `env_file_key` | Key in project `.env` file |
@@ -271,7 +271,7 @@ type = "glob"
 **Fields:**
 
 | Field | Description | Default |
-|---|---|---|
+| --- | --- | --- |
 | `pattern` | Pattern to match (exact / glob / regex). Required. | - |
 | `scope` | What to match against: `host`, `path`, or `url`. | `host` |
 | `type` | Pattern type: `exact`, `glob`, or `regex`. Auto-detected as `regex` when the pattern contains regex metacharacters. | `glob` |
@@ -451,7 +451,7 @@ pids = 2048
 All three fields are optional. Defaults differ by backend:
 
 | Backend | Default when unset | `pids` |
-|---|---|---|
+| --- | --- | --- |
 | `bwrap` | **no limits** | enforced |
 | `docker` | **no limits** (the engine default applies) | enforced |
 | `krun` | `memory = "4g"`, `cpus = "2"` | **not enforceable** (see below) |
@@ -464,7 +464,7 @@ to *swap* differs, so on a host with swap the same value is not the same
 guarantee everywhere:
 
 | Backend | What `memory = "4g"` bounds | Runaway allocator on a host with swap |
-|---|---|---|
+| --- | --- | --- |
 | `bwrap` | 4g resident; **swap unbounded** | reclaimed into swap and throttled there, and it can keep growing in swap |
 | `docker`, `krun` | 4g resident **plus at most 4g swap** | killed once resident + swap reaches 8g |
 
@@ -626,6 +626,7 @@ a directory's contents either (`readonly`, `overlay`, and `tmpoverlay` all keep 
 directory's contents out of the sandbox, write a pattern that matches the *files inside* it: `**/secrets/**` above hides
 every file under any `secrets` directory at any depth (the directory entries themselves stay visible). A pattern that
 resolves to the directory alone - `secrets/**`, `~/secrets` - hides nothing, and devsandbox warns at startup when one does.
+When a rule matches a symlink to a file, the mount is applied to the resolved target so current bubblewrap versions do not reject the symlink destination. If the rule matches both the symlink and its target, devsandbox emits the mount once.
 
 ### Port Forwarding
 
@@ -843,7 +844,7 @@ Because the file is verbatim, every path inside it arrives spelled as the host w
 spelling against the *sandbox* filesystem. The files those paths name are mounted so they resolve:
 
 | Reference in your config | Carried as |
-|--------------------------|------------|
+| -------------------------- | ------------ |
 | `core.excludesFile`, `core.attributesFile` | The file itself, mounted at the path the value names |
 | Neither key set | git's own defaults, `~/.config/git/ignore` and `~/.config/git/attributes` (read from `$XDG_CONFIG_HOME/git/` when that variable is set on your host) |
 | `[include]` / matching `[includeIf "gitdir:..."]` targets | Each file that contributed a setting, plus the config files declaring them |
@@ -1176,7 +1177,7 @@ Every dispatched log entry - proxy request logs, isolator (`builder`/`mounts`/`d
 #### Per-entry session fields
 
 | Field | Type | Source |
-|---|---|---|
+| --- | --- | --- |
 | `session_id` | UUIDv7 string | Generated once per `devsandbox claude` invocation. Sortable by time. |
 | `sandbox_name` | string | Auto-resolved when proxy is enabled (e.g., `bold-falcon-12`); may be empty when proxy is disabled and `--name` was not passed. |
 | `sandbox_path` | string | Sandbox root directory under `~/.local/share/devsandbox/`. |
@@ -1194,7 +1195,7 @@ Two synthesized entries bookend each session.
 **`session.start`** (level: `info`, `event=session.start`) is emitted once after the dispatcher and notice sink are wired up. Payload:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `host` | `os.Hostname()` |
 | `host_user` | `user.Current().Username` |
 | `proxy_enabled` | bool |
@@ -1212,7 +1213,7 @@ Two synthesized entries bookend each session.
 **`session.end`** (level: `info`, `event=session.end`) is emitted from a deferred function before the dispatcher is closed. Payload:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `exit_code` | int - 0 on normal exit, the wrapped command's exit code on failure (extracted from `*exec.ExitError`), `-1` on signal-driven shutdown, `1` on generic error |
 | `duration_ms` | int - `time.Since(start).Milliseconds()` |
 | `end_time` | RFC3339 timestamp |
@@ -1223,7 +1224,7 @@ Two synthesized entries bookend each session.
 Each event is dispatched through the same path with `event=<name>` set as a Field. Secret values are deliberately excluded from every event - only metadata (rule names, header names, hosts) appears.
 
 | Event | Level | Trigger | Payload |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `proxy.filter.decision` | `info` (allow) / `warn` (block, ask) | Filter engine evaluates a request | `host`, `method`, `path` (path-only - query string stripped), `rule_action`, `rule_id`, `default_action_used` |
 | `proxy.redaction.applied` | `info` | One event per match when the redaction engine rewrites or blocks | `host`, `secret_kind` (rule name), `location` (`url` / `body` / `header:<name>`), `rule_id` |
 | `proxy.credential.injected` | `info` | Credential injector successfully writes an auth header | `host`, `injector` (name), `header_name` |
