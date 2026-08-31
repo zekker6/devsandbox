@@ -768,21 +768,51 @@ const (
 	mountSkippedHiddenDir
 )
 
-// resolveMountRulePath returns a non-symlink destination for bwrap mounts.
-func resolveMountRulePath(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		return path, nil
-	}
+// maxSymlinkHops bounds resolveMountRulePath's walk so a symlink cycle ends in
+// an error rather than a hang.
+const maxSymlinkHops = 40
 
+// resolveMountRulePath returns a destination whose final component is not a
+// symlink, which is what bubblewrap 0.12.0 rejects. It follows the link chain
+// itself instead of calling filepath.EvalSymlinks, because EvalSymlinks also
+// rewrites the *prefix*: a project reached through a symlinked ancestor is bound
+// into the sandbox under the spelling the rule matched, so the fully resolved
+// spelling names a path the sandbox does not have.
+func resolveMountRulePath(path string) (string, error) {
+	current := path
+	for range maxSymlinkHops {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return current, nil
+		}
+
+		dest, err := os.Readlink(current)
+		if err != nil {
+			return "", fmt.Errorf("resolve symlink %s: %w", current, err)
+		}
+		if filepath.IsAbs(dest) {
+			current = filepath.Clean(dest)
+		} else {
+			current = filepath.Join(filepath.Dir(current), dest)
+		}
+	}
+	return "", fmt.Errorf("resolve symlink %s: too many levels of symbolic links", path)
+}
+
+// canonicalMountPath keys the applied-mount set by identity rather than by
+// spelling: two rules reaching one file through different symlinked ancestors
+// must collide here, or the conflict below goes undetected and the same file is
+// mounted twice. Only the key is fully resolved - the mount destination stays in
+// the spelling resolveMountRulePath produced.
+func canonicalMountPath(path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve symlink %s: %w", path, err)
+		return path
 	}
-	return resolved, nil
+	return resolved
 }
 
 // applyMountRule applies a single custom mount rule to a path.
@@ -851,7 +881,8 @@ func (b *Builder) applyMountRuleSet(engine *mounts.Engine, expandedPaths map[str
 			continue
 		}
 
-		if previous, exists := b.customMounts[mountPath]; exists {
+		mountKey := canonicalMountPath(mountPath)
+		if previous, exists := b.customMounts[mountKey]; exists {
 			if previous.Mode != rule.Mode && b.err == nil {
 				b.err = fmt.Errorf(
 					"custom mount rules %q (%s) and %q (%s) resolve to the same destination %s",
@@ -863,7 +894,7 @@ func (b *Builder) applyMountRuleSet(engine *mounts.Engine, expandedPaths map[str
 
 		switch b.applyMountRule(mountPath, rule) {
 		case mountApplied:
-			b.customMounts[mountPath] = rule
+			b.customMounts[mountKey] = rule
 			engine.EmitMountDecision(path, mountPath, rule)
 			if rule.Mode == mounts.ModeHidden {
 				hiddenFiles = append(hiddenFiles, path)
