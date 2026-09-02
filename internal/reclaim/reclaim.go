@@ -29,8 +29,9 @@
 //
 // # State the host trusts
 //
-// Every location here records the owner of each entry, a pid in the name or a
-// held lock, or is reclaimed by age where no owner can be identified after a
+// Every location here records the owner of each entry - a pid in the name, a
+// held lock, or a reference to state elsewhere whose absence proves the entry
+// abandoned - or is reclaimed by age where no owner can be identified after a
 // hard kill. The pid probe (internal/procstate) answers an uncertain result as
 // alive, so a location keyed on the pid alone needs an age backstop or an
 // accepted leak, named at its registration.
@@ -45,6 +46,7 @@ import (
 	"slices"
 
 	"devsandbox/internal/egress"
+	"devsandbox/internal/herdrstate"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
@@ -127,6 +129,20 @@ var catalogue = []Location{
 		Sweep: func(t Target) (int, error) {
 			return session.NewStore(session.DefaultDir(t.HomeDir)).CleanStaleErr()
 		},
+	},
+	// 3. Herdr pane records: one JSON file per herdr pane an agent was launched
+	// from, naming the sandbox root that launch used, which the resume guard in
+	// run-agent compares against. Nothing removed them before. A record goes
+	// once the root it names no longer exists, and on no other signal: there
+	// is no pid to probe, since the pane outlives the launch by design, and no
+	// age backstop, because panes routinely stay open past any bound and
+	// deleting a live pane's record silently disables that guard, all to save
+	// a few hundred bytes. The launch creates the root before it writes the
+	// record, so a record never names a root that does not exist yet.
+	{
+		Name:  "herdr pane records",
+		Path:  func(t Target) string { return herdrstate.DefaultDir(t.HomeDir) },
+		Sweep: func(t Target) (int, error) { return herdrstate.Prune(herdrstate.DefaultDir(t.HomeDir)) },
 	},
 	// 5. Interrupted removals: sandbox trees a --rm teardown renamed aside
 	// under <SandboxBase>/.removing, named by the teardown's pid, that a kill

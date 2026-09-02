@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -60,30 +61,29 @@ func NewStore(dir string) *Store {
 // Dir returns the directory the store writes to.
 func (s *Store) Dir() string { return s.dir }
 
-// DefaultStore returns a Store rooted at $XDG_STATE_HOME/devsandbox/herdr-panes
-// (falling back to ~/.local/state/devsandbox/herdr-panes), creating it 0700.
+// DefaultStore returns a Store rooted at DefaultDir for the current user,
+// creating the directory 0700.
 func DefaultStore() (*Store, error) {
-	dir, err := DefaultDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not determine home directory: %w", err)
 	}
+	dir := DefaultDir(home)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create herdr pane store directory: %w", err)
 	}
 	return NewStore(dir), nil
 }
 
-// DefaultDir returns the store directory without creating it.
-func DefaultDir() (string, error) {
+// DefaultDir returns the store directory without creating it:
+// $XDG_STATE_HOME/devsandbox/herdr-panes, falling back to
+// <homeDir>/.local/state/devsandbox/herdr-panes when XDG_STATE_HOME is unset.
+func DefaultDir(homeDir string) string {
 	stateHome := os.Getenv("XDG_STATE_HOME")
 	if stateHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("could not determine home directory: %w", err)
-		}
-		stateHome = filepath.Join(home, ".local", "state")
+		stateHome = filepath.Join(homeDir, ".local", "state")
 	}
-	return filepath.Join(stateHome, "devsandbox", "herdr-panes"), nil
+	return filepath.Join(stateHome, "devsandbox", "herdr-panes")
 }
 
 // filePath returns the record path for a pane ID. The ID is hashed so an
@@ -137,23 +137,110 @@ func (s *Store) Load(paneID string) (Record, error) {
 	if paneID == "" {
 		return Record{}, fmt.Errorf("%w: empty pane ID", ErrNotFound)
 	}
-	path := s.filePath(paneID)
+	rec, err := readRecord(s.filePath(paneID))
+	if errors.Is(err, fs.ErrNotExist) {
+		return Record{}, ErrNotFound
+	}
+	return rec, err
+}
+
+// readRecord reads and parses the record at path. A read or parse failure
+// names the path: through Load it fails resume closed for the pane, and
+// deleting the file is the user's only way out, which they cannot find from
+// the pane ID alone; through Prune it is the file the sweep kept. A missing
+// file is reported wrapping fs.ErrNotExist.
+func readRecord(path string) (Record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Record{}, ErrNotFound
-		}
 		return Record{}, fmt.Errorf("herdrstate: read record %s: %w", path, err)
 	}
-
 	var rec Record
 	if err := json.Unmarshal(data, &rec); err != nil {
-		// A read or parse failure fails resume closed for this pane, so the
-		// path is part of the error: deleting the file is the user's only way
-		// out, and they cannot find it from the pane ID alone.
 		return Record{}, fmt.Errorf("herdrstate: parse record %s: %w", path, err)
 	}
 	return rec, nil
+}
+
+// Prune removes the records under dir whose sandbox state root no longer
+// exists and reports how many it removed. A missing dir is not an error: it
+// is the normal state of a host that has never launched an agent from a
+// herdr pane.
+//
+// The root's absence is the only signal. There is no pid to probe - the pane
+// outlives the launch by design - and deliberately no age backstop: a record
+// is a few hundred bytes, herdr panes routinely stay open for weeks, and
+// deleting the record of a live pane silently disables the resume guard in
+// run-agent, which reads a missing record as a pane that never launched a
+// sandboxed agent. The launch creates the sandbox root before it writes the
+// record, so a record never names a root that does not exist yet.
+//
+// A record the sweep cannot interpret - unreadable, not JSON, another schema
+// version, a non-absolute root - is kept and reported with its path, as is
+// one whose root cannot be checked for any reason other than not existing:
+// an unknown answer must never authorize a deletion. A removal failure is
+// reported and the sweep continues, so one stuck entry never hides the rest.
+func Prune(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("herdrstate: read %s: %w", dir, err)
+	}
+	removed := 0
+	var errs []error
+	for _, e := range entries {
+		if !e.Type().IsRegular() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		orphaned, err := recordOrphaned(path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !orphaned {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// Another prune got there first; the record is gone either way.
+				continue
+			}
+			errs = append(errs, fmt.Errorf("herdrstate: remove record %s: %w", path, err))
+			continue
+		}
+		removed++
+	}
+	return removed, errors.Join(errs...)
+}
+
+// recordOrphaned reports whether the record at path may be removed: it is a
+// record of this schema naming an absolute sandbox root, and that root does
+// not exist. A file that vanished since it was listed is neither an error nor
+// an orphan.
+func recordOrphaned(path string) (bool, error) {
+	rec, err := readRecord(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if rec.Version != Version {
+		return false, fmt.Errorf("herdrstate: record %s: version %d, want %d", path, rec.Version, Version)
+	}
+	if !filepath.IsAbs(rec.SandboxRoot) {
+		return false, fmt.Errorf("herdrstate: record %s: sandbox root %q is not absolute", path, rec.SandboxRoot)
+	}
+	_, err = os.Stat(rec.SandboxRoot)
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	return false, fmt.Errorf("herdrstate: record %s: sandbox root %q: %w", path, rec.SandboxRoot, err)
 }
 
 // Validate reports whether rec can be trusted to describe the caller's pane and

@@ -3,6 +3,7 @@ package herdrstate_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"devsandbox/internal/sandbox/tools"
 )
 
+// newRecord names a sandbox root it never creates. A test that needs the
+// root to exist, as Prune's live case does, creates it itself.
 func newRecord(t *testing.T, paneID string) herdrstate.Record {
 	t.Helper()
 	projectDir := t.TempDir()
@@ -25,6 +28,12 @@ func newRecord(t *testing.T, paneID string) herdrstate.Record {
 		ProjectDir:  projectDir,
 		SandboxRoot: filepath.Join(t.TempDir(), sandbox.GenerateSandboxName(projectDir)),
 	}
+}
+
+// recordPath spells the file Save writes for paneID under dir.
+func recordPath(dir, paneID string) string {
+	sum := sha256.Sum256([]byte(paneID))
+	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
 }
 
 func TestDefaultStoreUsesXDGStateHome(t *testing.T) {
@@ -74,8 +83,7 @@ func TestSaveWritesHashedFileWithRestrictivePerms(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	sum := sha256.Sum256([]byte(rec.PaneID))
-	want := filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
+	want := recordPath(dir, rec.PaneID)
 	info, err := os.Stat(want)
 	if err != nil {
 		t.Fatalf("stat record: %v", err)
@@ -352,8 +360,7 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	sum := sha256.Sum256([]byte(rec.PaneID))
-	path := filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
+	path := recordPath(dir, rec.PaneID)
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatalf("corrupt record: %v", err)
 	}
@@ -521,10 +528,7 @@ func TestNoToolBindingExposesStoreDir(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("HOME", home)
 
-	storeDir, err := herdrstate.DefaultDir()
-	if err != nil {
-		t.Fatalf("DefaultDir: %v", err)
-	}
+	storeDir := herdrstate.DefaultDir(home)
 
 	for _, tool := range tools.All() {
 		for _, b := range tool.Bindings(home, sandboxHome) {
@@ -546,4 +550,190 @@ func isAncestorOrEqual(dir, path string) bool {
 		return true
 	}
 	return strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
+func writeJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestPruneRemovesRecordWhoseSandboxRootIsGone(t *testing.T) {
+	dir := t.TempDir()
+	store := herdrstate.NewStore(dir)
+
+	gone := newRecord(t, "w1F:p1C")
+	live := newRecord(t, "w1F:p2D")
+	if err := os.MkdirAll(live.SandboxRoot, 0o755); err != nil {
+		t.Fatalf("create live sandbox root: %v", err)
+	}
+	for _, rec := range []herdrstate.Record{gone, live} {
+		if err := store.Save(rec); err != nil {
+			t.Fatalf("Save(%q): %v", rec.PaneID, err)
+		}
+	}
+
+	n, err := herdrstate.Prune(dir)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := store.Load(gone.PaneID); !errors.Is(err, herdrstate.ErrNotFound) {
+		t.Errorf("record whose sandbox root is gone survived: Load = %v", err)
+	}
+	if _, err := store.Load(live.PaneID); err != nil {
+		t.Errorf("record with a live sandbox root was removed: Load = %v", err)
+	}
+
+	n, err = herdrstate.Prune(dir)
+	if err != nil || n != 0 {
+		t.Errorf("second Prune = (%d, %v), want (0, nil): nothing left to reclaim", n, err)
+	}
+}
+
+// TestPruneKeepsLiveSandboxRootRegardlessOfAge pins the absence of an age
+// backstop: a pane can stay open for months, and deleting its record would
+// silently disable the resume guard, so only the sandbox root going away may
+// remove a record.
+func TestPruneKeepsLiveSandboxRootRegardlessOfAge(t *testing.T) {
+	dir := t.TempDir()
+	store := herdrstate.NewStore(dir)
+	rec := newRecord(t, "w1F:p1C")
+	if err := os.MkdirAll(rec.SandboxRoot, 0o755); err != nil {
+		t.Fatalf("create sandbox root: %v", err)
+	}
+	old := time.Now().Add(-400 * 24 * time.Hour)
+	rec.UpdatedAt = old
+	if err := store.Save(rec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	path := recordPath(dir, rec.PaneID)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("backdate record: %v", err)
+	}
+
+	n, err := herdrstate.Prune(dir)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a record over a year old with a live sandbox root was removed: %v", err)
+	}
+}
+
+// TestPruneKeepsRecordsItCannotInterpret writes files the sweep cannot read
+// as one of its own records, each naming a sandbox root that does not exist,
+// and asserts every one survives and is reported by path - while entries
+// that are not records at all are neither removed nor reported.
+func TestPruneKeepsRecordsItCannotInterpret(t *testing.T) {
+	dir := t.TempDir()
+	store := herdrstate.NewStore(dir)
+	gone := newRecord(t, "w1F:p1C")
+
+	malformed := recordPath(dir, "malformed")
+	if err := os.WriteFile(malformed, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write malformed record: %v", err)
+	}
+	otherVersion := recordPath(dir, "other-version")
+	writeJSON(t, otherVersion, map[string]any{
+		"version": herdrstate.Version + 1, "pane_id": "other-version", "agent": "claude",
+		"project_dir": gone.ProjectDir, "sandbox_root": gone.SandboxRoot,
+	})
+	relativeRoot := recordPath(dir, "relative-root")
+	writeJSON(t, relativeRoot, map[string]any{
+		"version": herdrstate.Version, "pane_id": "relative-root", "agent": "claude",
+		"project_dir": gone.ProjectDir, "sandbox_root": "relative/root",
+	})
+	kept := []string{malformed, otherVersion, relativeRoot}
+
+	if os.Geteuid() != 0 {
+		unreadable := newRecord(t, "unreadable")
+		if err := store.Save(unreadable); err != nil {
+			t.Fatalf("Save unreadable: %v", err)
+		}
+		path := recordPath(dir, unreadable.PaneID)
+		if err := os.Chmod(path, 0o000); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+		kept = append(kept, path)
+	}
+
+	stray := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(stray, []byte("not a record"), 0o600); err != nil {
+		t.Fatalf("write stray file: %v", err)
+	}
+	subdir := filepath.Join(dir, "subdir.json")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	n, err := herdrstate.Prune(dir)
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+	if err == nil {
+		t.Fatal("Prune returned nil, want every uninterpretable record reported")
+	}
+	for _, path := range kept {
+		if _, serr := os.Stat(path); serr != nil {
+			t.Errorf("%s was removed: %v", filepath.Base(path), serr)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("error does not name %s:\n%v", filepath.Base(path), err)
+		}
+	}
+	for _, path := range []string{stray, subdir} {
+		if _, serr := os.Stat(path); serr != nil {
+			t.Errorf("%s, which is not a record, was removed: %v", filepath.Base(path), serr)
+		}
+		if strings.Contains(err.Error(), path) {
+			t.Errorf("error reports %s, which is not a record:\n%v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestPruneReportsRemovalFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	store := herdrstate.NewStore(dir)
+	rec := newRecord(t, "w1F:p1C")
+	if err := store.Save(rec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	path := recordPath(dir, rec.PaneID)
+	n, err := herdrstate.Prune(dir)
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+	if err == nil || !strings.Contains(err.Error(), path) {
+		t.Errorf("Prune = %v, want an error naming %s", err, path)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("record vanished despite the reported failure: %v", serr)
+	}
+}
+
+func TestPruneMissingDirIsNothingToDo(t *testing.T) {
+	n, err := herdrstate.Prune(filepath.Join(t.TempDir(), "never-created"))
+	if err != nil || n != 0 {
+		t.Fatalf("Prune on a missing directory = (%d, %v), want (0, nil)", n, err)
+	}
 }

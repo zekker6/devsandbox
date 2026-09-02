@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"devsandbox/internal/herdrstate"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 	"devsandbox/internal/session"
@@ -450,6 +451,66 @@ func TestLocations_SessionRecords(t *testing.T) {
 	}
 	if _, err := store.Get("live"); err != nil {
 		t.Errorf("record of a live session was removed: %v", err)
+	}
+}
+
+// TestLocations_HerdrPaneRecords runs location 3 against a real store and
+// asserts it sweeps through the owner's function: a host with no store is
+// nothing to do, the record of a pane whose sandbox is gone goes, one whose
+// sandbox still exists stays, and the catalogue's path is the store's own.
+//
+// Sets process environment, so it must not call t.Parallel().
+func TestLocations_HerdrPaneRecords(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	loc := locationNamed(t, "herdr pane records")
+	if loc.PerSandbox {
+		t.Fatal("herdr pane records is registered per sandbox, want host-scoped")
+	}
+	tgt := Target{HomeDir: filepath.Join(t.TempDir(), "home")}
+
+	dir := loc.Path(tgt)
+	if want := filepath.Join(state, "devsandbox", "herdr-panes"); dir != want {
+		t.Fatalf("Path = %q, want %q", dir, want)
+	}
+	n, err := loc.Run(tgt)
+	if err != nil || n != 0 {
+		t.Fatalf("Run on a host with no store = (%d, %v), want (0, nil)", n, err)
+	}
+
+	store := herdrstate.NewStore(dir)
+	if got := store.Dir(); got != dir {
+		t.Errorf("store.Dir() = %q, want the catalogue path %q", got, dir)
+	}
+	projectDir := t.TempDir()
+	base := filepath.Join(t.TempDir(), "sandboxes")
+	liveRoot := filepath.Join(base, "live-0a1b2c3d")
+	if err := os.MkdirAll(liveRoot, 0o755); err != nil {
+		t.Fatalf("create live sandbox root: %v", err)
+	}
+	const gonePane, livePane = "w1F:p1C", "w1F:p2D"
+	for paneID, root := range map[string]string{
+		gonePane: filepath.Join(base, "gone-0a1b2c3d"),
+		livePane: liveRoot,
+	} {
+		rec := herdrstate.Record{PaneID: paneID, Agent: "claude", ProjectDir: projectDir, SandboxRoot: root}
+		if err := store.Save(rec); err != nil {
+			t.Fatalf("Save %s: %v", paneID, err)
+		}
+	}
+
+	n, err = loc.Run(tgt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := store.Load(gonePane); !errors.Is(err, herdrstate.ErrNotFound) {
+		t.Errorf("record of a pane whose sandbox is gone survived: Load = %v", err)
+	}
+	if _, err := store.Load(livePane); err != nil {
+		t.Errorf("record of a pane whose sandbox exists was removed: %v", err)
 	}
 }
 

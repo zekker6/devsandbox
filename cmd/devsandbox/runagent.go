@@ -191,11 +191,11 @@ func checkHerdrWorktreeGuard(agent string, args []string, ctx herdrRestoreContex
 // loadHerdrPaneRecord reads a pane mapping without creating the store, so a
 // plain `run-agent` outside a herdr pane leaves no state behind.
 func loadHerdrPaneRecord(paneID string) (herdrstate.Record, error) {
-	dir, err := herdrstate.DefaultDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return herdrstate.Record{}, err
+		return herdrstate.Record{}, fmt.Errorf("could not determine home directory: %w", err)
 	}
-	return herdrstate.NewStore(dir).Load(paneID)
+	return herdrstate.NewStore(herdrstate.DefaultDir(home)).Load(paneID)
 }
 
 // resolveAgentRun applies the restore routing in order: the worktree guard runs
