@@ -404,6 +404,11 @@ before launching into the same project, or use `--dry-run` first. `--orphaned` n
 set rather than selecting on its own, so it combines with `--keep`, `--older-than` and `--all`; bare
 `prune` already removes only orphaned sandboxes.
 
+`prune` also reclaims a sandbox tree that a `--rm` teardown renamed aside and was then killed before
+deleting. Such a tree is removed once the teardown's process is gone, or once it has been staged for
+30 days when that cannot be confirmed - it is not a sandbox, so `--keep` and `--older-than` do not
+select it, and `sandboxes list` does not show it.
+
 ## Port Forwarding
 
 ### Runtime Port Forwarding

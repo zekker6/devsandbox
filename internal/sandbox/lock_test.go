@@ -272,3 +272,210 @@ func pidAnsweringEPERM(t *testing.T) int {
 	}
 	return 1
 }
+
+// The stamp is what the stagingStaleAge backstop reads, and os.Rename leaves
+// the moved directory's mtime where it was - so without it a sandbox idle for
+// months would read as staged months ago the moment it was staged, and a
+// stranded tree would be judged by how idle the sandbox had been rather than
+// by how long the removal has been stranded. Exercised through the staging
+// half of RemoveSandboxIfIdle, because the whole call deletes the tree it
+// would inspect.
+func TestRemoveSandboxIfIdle_StampsStagedTreeAtStaging(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "proj-a1b2c3d4")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	months := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(root, months, months); err != nil {
+		t.Fatal(err)
+	}
+
+	before := time.Now().Truncate(time.Second)
+	staged, stampErr, err := stageForRemoval(root, nil)
+	if err != nil {
+		t.Fatalf("stageForRemoval failed: %v", err)
+	}
+	if stampErr != nil {
+		t.Fatalf("stamping the staged tree failed: %v", stampErr)
+	}
+	want := filepath.Join(StagingDir(base), fmt.Sprintf("proj-a1b2c3d4-%d", os.Getpid()))
+	if staged != want {
+		t.Fatalf("staged = %q, want %q", staged, want)
+	}
+
+	info, err := os.Stat(staged)
+	if err != nil {
+		t.Fatalf("stat staged tree: %v", err)
+	}
+	if info.ModTime().Before(before) {
+		t.Errorf("staged tree mtime = %v, want stamped at staging (not before %v)", info.ModTime(), before)
+	}
+	if _, err := os.Stat(filepath.Join(staged, "home")); err != nil {
+		t.Errorf("staged tree lost its contents: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Errorf("sandbox root still present after staging: %v", err)
+	}
+}
+
+// stageTree plants a staged tree under base's staging directory as a
+// teardown running as pid would have left it, with a file inside so a
+// removal has something to walk, and returns its path.
+func stageTree(t *testing.T, base, name string, pid int) string {
+	t.Helper()
+	dir := filepath.Join(StagingDir(base), fmt.Sprintf("%s-a1b2c3d4-%d", name, pid))
+	if err := os.MkdirAll(filepath.Join(dir, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "home", "file"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// ageStaged backdates the staged tree's stamp so it reads as staged age ago.
+func ageStaged(t *testing.T, dir string, age time.Duration) {
+	t.Helper()
+	then := time.Now().Add(-age)
+	if err := os.Chtimes(dir, then, then); err != nil {
+		t.Fatalf("Chtimes %s: %v", dir, err)
+	}
+}
+
+// deadPID is a pid above any pid_max, so no process can hold it.
+const deadPID = 4294967
+
+func TestRemoveAbandonedStaging(t *testing.T) {
+	base := t.TempDir()
+	live := stageTree(t, base, "live", os.Getpid())
+	dead := stageTree(t, base, "dead", deadPID)
+	// A real sandbox whose name resembles the old staging spelling lives
+	// outside the staging directory and is not a candidate at all.
+	notStaging := filepath.Join(base, ".removing-demo-33867677")
+	if err := os.MkdirAll(notStaging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file inside the staging directory is not a tree to reclaim.
+	file := filepath.Join(StagingDir(base), fmt.Sprintf("file-a1b2c3d4-%d", deadPID))
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := RemoveAbandonedStaging(base)
+	if err != nil {
+		t.Fatalf("RemoveAbandonedStaging failed: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Errorf("tree of a dead teardown survived: stat = %v", err)
+	}
+	for _, kept := range []string{live, notStaging, file} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s was removed: %v", kept, err)
+		}
+	}
+}
+
+func TestRemoveAbandonedStaging_MissingBaseDir(t *testing.T) {
+	n, err := RemoveAbandonedStaging(filepath.Join(t.TempDir(), "absent"))
+	if err != nil || n != 0 {
+		t.Fatalf("RemoveAbandonedStaging on a missing base dir = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// An empty base would resolve the staging directory against the working
+// directory, which is never a root this may act under.
+func TestRemoveAbandonedStaging_RefusesEmptyBase(t *testing.T) {
+	n, err := RemoveAbandonedStaging("")
+	if err == nil {
+		t.Fatal("RemoveAbandonedStaging(\"\") returned nil, want a refusal")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+}
+
+func TestRemoveAbandonedStaging_ReportsFailedRemoval(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	base := t.TempDir()
+	dead := stageTree(t, base, "dead", deadPID)
+	// Unlinking the staged directory itself needs write permission on the
+	// staging root, which RemoveAllForce restores only inside the tree.
+	if err := os.Chmod(StagingDir(base), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(StagingDir(base), 0o755) })
+
+	n, err := RemoveAbandonedStaging(base)
+	if err == nil {
+		t.Fatal("RemoveAbandonedStaging returned nil for a tree it could not remove")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+	if _, err := os.Stat(dead); err != nil {
+		t.Errorf("the tree reported as unremovable is gone: %v", err)
+	}
+}
+
+// A tree whose pid answers EPERM - one recycled by another user's process -
+// is kept by the probe, so the age backstop is the only thing that reclaims
+// it: kept while staged for less than 30 days, removed once past that.
+func TestRemoveAbandonedStaging_UncertainPIDBackstop(t *testing.T) {
+	base := t.TempDir()
+	held := stageTree(t, base, "held", pidAnsweringEPERM(t))
+
+	ageStaged(t, held, 29*24*time.Hour)
+	n, err := RemoveAbandonedStaging(base)
+	if err != nil {
+		t.Fatalf("RemoveAbandonedStaging failed: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0 for a tree younger than the backstop", n)
+	}
+	if _, err := os.Stat(held); err != nil {
+		t.Fatalf("tree younger than the backstop was removed: %v", err)
+	}
+
+	ageStaged(t, held, 31*24*time.Hour)
+	n, err = RemoveAbandonedStaging(base)
+	if err != nil {
+		t.Fatalf("RemoveAbandonedStaging failed: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1 for a tree past the backstop", n)
+	}
+	if _, err := os.Stat(held); !os.IsNotExist(err) {
+		t.Errorf("tree past the backstop survived: stat = %v", err)
+	}
+}
+
+// The backstop reads the stamp, not the probe's answer, so it is exercised
+// with a pid that is certainly alive too - which is what keeps the rule
+// tested where pid 1 does not answer EPERM and the case above skips.
+func TestRemoveAbandonedStaging_LivePIDBackstop(t *testing.T) {
+	base := t.TempDir()
+	young := stageTree(t, base, "young", os.Getpid())
+	old := stageTree(t, base, "old", os.Getpid())
+	ageStaged(t, young, 29*24*time.Hour)
+	ageStaged(t, old, 31*24*time.Hour)
+
+	n, err := RemoveAbandonedStaging(base)
+	if err != nil {
+		t.Fatalf("RemoveAbandonedStaging failed: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Errorf("tree younger than the backstop was removed: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("tree past the backstop survived: stat = %v", err)
+	}
+}

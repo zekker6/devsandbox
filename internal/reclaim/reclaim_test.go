@@ -447,3 +447,55 @@ func TestLocations_SessionRecords(t *testing.T) {
 		t.Errorf("record of a live session was removed: %v", err)
 	}
 }
+
+// TestLocations_InterruptedRemovals runs location 5 against a real sandbox
+// base and asserts it sweeps through the owner's function: a base with no
+// staging directory is nothing to do, the tree of a dead teardown goes, a live
+// teardown's stays, and an empty SandboxBase is refused rather than resolved
+// against the working directory.
+func TestLocations_InterruptedRemovals(t *testing.T) {
+	loc := locationNamed(t, "interrupted removals")
+	if loc.PerSandbox {
+		t.Fatal("interrupted removals is registered per sandbox, want host-scoped")
+	}
+	base := filepath.Join(t.TempDir(), "sandboxes")
+	tgt := Target{HomeDir: filepath.Join(t.TempDir(), "home"), SandboxBase: base}
+
+	staging := loc.Path(tgt)
+	if want := filepath.Join(base, ".removing"); staging != want {
+		t.Fatalf("Path = %q, want %q", staging, want)
+	}
+	n, err := loc.Run(tgt)
+	if err != nil || n != 0 {
+		t.Fatalf("Run on a base with no staging directory = (%d, %v), want (0, nil)", n, err)
+	}
+
+	dead := filepath.Join(staging, "proj-0a1b2c3d-"+strconv.Itoa(reapedPID(t)))
+	live := filepath.Join(staging, "proj-0a1b2c3d-"+strconv.Itoa(os.Getpid()))
+	writeFile(t, filepath.Join(dead, "home", "file"), 1)
+	writeFile(t, filepath.Join(live, "home", "file"), 1)
+
+	n, err = loc.Run(tgt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(dead); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("tree of a dead teardown survived: stat = %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("tree of a live teardown was removed: stat = %v", err)
+	}
+
+	noBase := tgt
+	noBase.SandboxBase = ""
+	n, err = loc.Run(noBase)
+	if err == nil {
+		t.Fatal("Run with an empty SandboxBase returned nil, want a refusal")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+}

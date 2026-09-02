@@ -128,6 +128,19 @@ var catalogue = []Location{
 			return session.NewStore(session.DefaultDir(t.HomeDir)).CleanStaleErr()
 		},
 	},
+	// 5. Interrupted removals: sandbox trees a --rm teardown renamed aside
+	// under <SandboxBase>/.removing, named by the teardown's pid, that a kill
+	// between the rename and the delete stranded. A tree goes once its pid is
+	// dead, or once it has been staged for 30 days - the backstop for a pid
+	// the probe cannot confirm dead, justified because a staged tree is an
+	// entire sandbox, the largest leak in this list. Needs SandboxBase, which
+	// the owner refuses empty rather than resolving against the working
+	// directory.
+	{
+		Name:  "interrupted removals",
+		Path:  func(t Target) string { return sandbox.StagingDir(t.SandboxBase) },
+		Sweep: func(t Target) (int, error) { return sandbox.RemoveAbandonedStaging(t.SandboxBase) },
+	},
 	// 7. Run directories: one socket directory per running devsandbox process,
 	// named by pid. Swept on every launch by cleanupStaleRunDirs before any
 	// tool creates a socket, so a prune sweep would reclaim nothing a launch
