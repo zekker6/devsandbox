@@ -50,8 +50,8 @@ func TestAlive_PID1AnswersEPERM(t *testing.T) {
 	// EPERM for an unprivileged test run. That must not read as dead. Under
 	// root the probe simply succeeds, so the test would pass without exercising
 	// the EPERM path; skip rather than report a check that did not run.
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: signal 0 to pid 1 succeeds instead of answering EPERM")
+	if err := syscall.Kill(1, 0); !errors.Is(err, syscall.EPERM) {
+		t.Skipf("pid 1 does not answer EPERM here (kill(1, 0) = %v): root, or own pid namespace", err)
 	}
 	if !Alive(1) {
 		t.Error("expected PID 1 to be reported alive")

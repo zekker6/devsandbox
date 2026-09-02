@@ -129,16 +129,29 @@ func TestCheckSocketPath(t *testing.T) {
 	}
 }
 
-func TestProcessAlive(t *testing.T) {
-	if !processAlive(os.Getpid()) {
-		t.Error("expected the test process itself to be alive")
+// .run/ is sandbox-writable, and kill(2) reads pid 0 as this process group and
+// a negative pid as a process group id. A directory planted under either name
+// must be swept as stale, never handed to the probe.
+func TestCleanupStaleRunDirs_NonPositiveNamesAreStale(t *testing.T) {
+	sandboxHome := t.TempDir()
+	root := filepath.Join(sandboxHome, runDirName)
+	planted := []string{"0", "-1"}
+	for _, name := range planted {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if processAlive(reapedPID(t)) {
-		t.Error("expected a reaped process to be reported dead")
+
+	removed, err := cleanupStaleRunDirs(sandboxHome)
+	if err != nil {
+		t.Fatalf("cleanupStaleRunDirs failed: %v", err)
 	}
-	// PID 1 always exists and is owned by root, so the signal-0 probe answers
-	// EPERM for an unprivileged test run. That must not read as dead.
-	if !processAlive(1) {
-		t.Error("expected PID 1 to be reported alive")
+	if removed != len(planted) {
+		t.Errorf("removed = %d, want %d", removed, len(planted))
+	}
+	for _, name := range planted {
+		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+			t.Errorf("dir %q survived, want it removed as stale", name)
+		}
 	}
 }

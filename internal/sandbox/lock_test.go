@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -237,4 +239,36 @@ func TestSameFileAt(t *testing.T) {
 	if !sameFileAt(path, replacement) {
 		t.Error("sameFileAt = false for the descriptor that does hold the path")
 	}
+}
+
+// An abandoned tree is identified by its pid being gone. A pid that answers
+// EPERM - one recycled by another user's process - is not provably gone, so
+// the tree is kept rather than deleted from under a live process.
+func TestListAbandonedStaging_EPERMIsKept(t *testing.T) {
+	baseDir := t.TempDir()
+	held := filepath.Join(baseDir, stagingDirName,
+		fmt.Sprintf("held-a1b2c3d4-%d", pidAnsweringEPERM(t)))
+	if err := os.MkdirAll(held, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	abandoned, err := ListAbandonedStaging(baseDir)
+	if err != nil {
+		t.Fatalf("ListAbandonedStaging failed: %v", err)
+	}
+	if len(abandoned) != 0 {
+		t.Fatalf("got %v, want a tree whose pid answers EPERM to be kept", abandoned)
+	}
+}
+
+// pidAnsweringEPERM returns pid 1 once it has confirmed that a signal-0 probe
+// of it answers EPERM. Gating on the euid alone is not enough: inside a PID
+// namespace pid 1 is the sandbox's own init and the probe succeeds, so the
+// test would pass without exercising the case. Skipping names the reason.
+func pidAnsweringEPERM(t *testing.T) int {
+	t.Helper()
+	if err := syscall.Kill(1, 0); !errors.Is(err, syscall.EPERM) {
+		t.Skipf("pid 1 does not answer EPERM here (kill(1, 0) = %v): root, or own pid namespace", err)
+	}
+	return 1
 }

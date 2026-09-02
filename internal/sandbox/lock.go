@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"devsandbox/internal/procstate"
 )
 
 // LockFileName is the name of the session lock file within a sandbox directory.
@@ -348,7 +350,9 @@ func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) 
 // path deliberately skips. Without this it is invisible to `sandboxes list`, to
 // prune and to `overlay --all-sandboxes` at once, and nothing ever reclaims the
 // disk. The pid in the name is what tells a stranded tree apart from a removal
-// still in flight, which must be left to the process doing it.
+// still in flight, which must be left to the process doing it. A pid the probe
+// cannot inspect reads as alive, so a tree whose remover's pid was recycled to
+// another user's process is kept; see internal/procstate for why.
 func ListAbandonedStaging(baseDir string) ([]string, error) {
 	stagingRoot := filepath.Join(baseDir, stagingDirName)
 	entries, err := os.ReadDir(stagingRoot)
@@ -365,22 +369,12 @@ func ListAbandonedStaging(baseDir string) ([]string, error) {
 			continue
 		}
 		pid, ok := stagedPID(entry.Name())
-		if !ok || processAlive(pid) {
+		if !ok || procstate.Alive(pid) {
 			continue
 		}
 		abandoned = append(abandoned, filepath.Join(stagingRoot, entry.Name()))
 	}
 	return abandoned, nil
-}
-
-// processAlive reports whether a process with the given PID exists. Signal 0
-// performs the permission and existence checks without delivering anything.
-func processAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
 }
 
 // TeardownGracePeriod bounds the work RemoveSandboxIfIdle runs while holding

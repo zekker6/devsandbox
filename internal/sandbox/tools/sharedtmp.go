@@ -13,6 +13,7 @@ import (
 
 	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/fsutil"
+	"devsandbox/internal/procstate"
 )
 
 // sharedTmpRelPath is the root of the per-session directory shared read-write
@@ -219,7 +220,7 @@ func hasLiveSiblingSession(sandboxHome string) bool {
 		if err != nil || pid == self {
 			continue
 		}
-		if processAlive(pid) {
+		if procstate.Alive(pid) {
 			return true
 		}
 	}

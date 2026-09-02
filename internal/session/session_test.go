@@ -1,8 +1,10 @@
 package session_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -451,5 +453,74 @@ func TestStore_RoundTripWorktree(t *testing.T) {
 	}
 	if got.Worktree.Path != sess.Worktree.Path || got.Worktree.RepoRoot != sess.Worktree.RepoRoot {
 		t.Errorf("path/repo mismatch: %+v", got.Worktree)
+	}
+}
+
+// pidAnsweringEPERM returns pid 1 once it has confirmed that a signal-0 probe
+// of it answers EPERM - the uncertain probe result every caller must read as
+// alive. Gating on the euid alone is not enough: inside a PID namespace pid 1
+// is the sandbox's own init and the probe succeeds, so the test would pass
+// without exercising the case. Skipping names the reason.
+func pidAnsweringEPERM(t *testing.T) int {
+	t.Helper()
+	if err := syscall.Kill(1, 0); !errors.Is(err, syscall.EPERM) {
+		t.Skipf("pid 1 does not answer EPERM here (kill(1, 0) = %v): root, or own pid namespace", err)
+	}
+	return 1
+}
+
+func TestStore_Register_UncertainPIDHoldsName(t *testing.T) {
+	store := newTestStore(t)
+	held := makeSession("held")
+	held.PID = pidAnsweringEPERM(t)
+	if err := store.Register(held); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := store.Register(makeSession("held")); err == nil {
+		t.Fatal("expected Register to refuse a name held by a session whose pid answers EPERM")
+	}
+	got, err := store.Get("held")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.PID != held.PID {
+		t.Errorf("record was overwritten: PID = %d, want %d", got.PID, held.PID)
+	}
+}
+
+func TestStore_ListLiveAndAutoName_UncertainPIDIsLive(t *testing.T) {
+	store := newTestStore(t)
+	held := makeSession("myproject")
+	held.PID = pidAnsweringEPERM(t)
+	if err := store.Register(held); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	live, err := store.ListLive()
+	if err != nil {
+		t.Fatalf("ListLive: %v", err)
+	}
+	if len(live) != 1 || live[0].Name != "myproject" {
+		t.Fatalf("ListLive returned %d sessions, want only the one whose pid answers EPERM", len(live))
+	}
+	if name := store.AutoName("/some/path/myproject"); name != "myproject-2" {
+		t.Errorf("AutoName = %q, want %q: the held name must count as taken", name, "myproject-2")
+	}
+}
+
+func TestStore_CleanStale_UncertainPIDIsKept(t *testing.T) {
+	store := newTestStore(t)
+	held := makeSession("held")
+	held.PID = pidAnsweringEPERM(t)
+	if err := store.Register(held); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if removed := store.CleanStale(); removed != 0 {
+		t.Errorf("CleanStale removed %d, want 0", removed)
+	}
+	if _, err := store.Get("held"); err != nil {
+		t.Errorf("expected the record to survive, got %v", err)
 	}
 }

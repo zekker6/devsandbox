@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Custom mount rules now mask files reached through symlinks without bubblewrap 0.12.0 aborting with `Can't mount on symlink destination`. See [Custom Mounts](docs/configuration.md#custom-mounts).
+- A session record or an interrupted-removal staging tree whose recorded process id now belongs to another user's process is no longer treated as dead. The signal-0 probe answers `EPERM` for such a pid, and two of devsandbox's three probes read that as "gone": a launch reusing the session name overwrote the record, `devsandbox sessions` and `devsandbox forward` dropped it as stale, and `sandboxes prune` reclaimed the staged tree on the word of a pid it could not inspect. All three now share one probe with one rule, the one the socket-directory sweep already followed: only a pid the kernel reports as gone counts as dead, and an uncertain answer keeps the entry. A socket directory planted under `.run/0` or a negative name is now swept as stale rather than turning that probe into a process-group signal.
 
 ## [v0.20.1](https://github.com/zekker6/devsandbox/releases/tag/v0.20.1) - 2026-08-25
 

@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"syscall"
+
+	"devsandbox/internal/procstate"
 )
 
 // runDirName is the per-sandbox root holding one socket directory per running
@@ -84,7 +85,7 @@ func cleanupStaleRunDirs(sandboxHome string) (int, error) {
 		}
 		// Our own PID can only be a leftover from a previous run: this runs
 		// before we create anything.
-		if pid != os.Getpid() && processAlive(pid) {
+		if pid != os.Getpid() && procstate.Alive(pid) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
@@ -95,20 +96,4 @@ func cleanupStaleRunDirs(sandboxHome string) (int, error) {
 	}
 
 	return removed, errors.Join(errs...)
-}
-
-// processAlive reports whether a process with the given PID exists. A signal-0
-// probe answers EPERM for a live process owned by another user, which counts as
-// alive; anything else unexpected is also treated as alive so that an uncertain
-// probe never deletes a directory in use.
-func processAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return true
-	}
-	err = p.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-	return !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH)
 }

@@ -9,10 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"devsandbox/internal/fsutil"
+	"devsandbox/internal/procstate"
 )
 
 // Session represents a running sandbox instance.
@@ -86,7 +86,7 @@ func (s *Store) Register(sess *Session) error {
 	existing, err := s.Get(sess.Name)
 	if err == nil {
 		// File exists; reject only if the existing PID is still alive.
-		if isAlive(existing.PID) {
+		if procstate.Alive(existing.PID) {
 			return fmt.Errorf("session %q is already running (PID %d)", sess.Name, existing.PID)
 		}
 		// Stale file — overwrite it below.
@@ -145,7 +145,7 @@ func (s *Store) ListLive() ([]*Session, error) {
 
 	live := make([]*Session, 0, len(all))
 	for _, sess := range all {
-		if isAlive(sess.PID) {
+		if procstate.Alive(sess.PID) {
 			live = append(live, sess)
 		}
 	}
@@ -206,7 +206,7 @@ func (s *Store) CleanStale() int {
 
 	removed := 0
 	for _, sess := range all {
-		if !isAlive(sess.PID) {
+		if !procstate.Alive(sess.PID) {
 			if err := s.Remove(sess.Name); err == nil {
 				removed++
 			}
@@ -310,15 +310,4 @@ func (s *Store) write(sess *Session) error {
 		return fmt.Errorf("write session %q: %w", sess.Name, err)
 	}
 	return nil
-}
-
-// isAlive reports whether the process with the given PID is alive.
-// It uses signal 0 to probe the process without affecting it.
-func isAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
 }
