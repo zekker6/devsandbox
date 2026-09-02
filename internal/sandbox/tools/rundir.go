@@ -15,6 +15,14 @@ import (
 // devsandbox instance.
 const runDirName = ".run"
 
+// RunDirRoot returns the per-sandbox root holding the socket directories. It
+// is the path internal/reclaim reports for the location, taken from here so
+// the catalogue cannot drift from the directory cleanupStaleRunDirs sweeps.
+// root is sandboxHome on the host or homeDir inside the sandbox, as for runDir.
+func RunDirRoot(root string) string {
+	return filepath.Join(root, runDirName)
+}
+
 // runDir returns the socket directory owned by this devsandbox process.
 //
 // Sandbox home is keyed on the project, so concurrent sessions for the same
@@ -26,7 +34,7 @@ const runDirName = ".run"
 // Pass sandboxHome for the host-side path, or homeDir for the same directory as
 // seen from inside the sandbox, where sandboxHome is mounted at homeDir.
 func runDir(root string) string {
-	return filepath.Join(root, runDirName, strconv.Itoa(os.Getpid()))
+	return filepath.Join(RunDirRoot(root), strconv.Itoa(os.Getpid()))
 }
 
 // ensureRunDir creates this process's socket directory under sandboxHome.
@@ -63,7 +71,7 @@ func checkSocketPath(path string) error {
 // previous run reused the PID. It must run before any tool creates its sockets.
 // Returns the number of directories removed.
 func cleanupStaleRunDirs(sandboxHome string) (int, error) {
-	root := filepath.Join(sandboxHome, runDirName)
+	root := RunDirRoot(sandboxHome)
 
 	entries, err := os.ReadDir(root)
 	if err != nil {

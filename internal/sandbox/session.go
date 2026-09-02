@@ -8,13 +8,21 @@ import (
 	"devsandbox/internal/fsutil"
 )
 
+// SessionOverlayDir returns the directory holding one overlay tree per
+// concurrent session. It is the path internal/reclaim reports for the
+// location, taken from here so the catalogue cannot drift from the directory
+// CleanupStaleSessionDirs sweeps.
+func SessionOverlayDir(sandboxHome string) string {
+	return filepath.Join(sandboxHome, "overlay", "sessions")
+}
+
 // CleanupSessionOverlays removes the overlay directories for a specific session.
 //
 // Session overlays may contain read-only directories (e.g. Go module caches
 // created by tooling running inside the sandbox), so removal must use
 // fsutil.RemoveAllForce rather than a plain os.RemoveAll.
 func CleanupSessionOverlays(sandboxHome, sessionID string) error {
-	sessionDir := filepath.Join(sandboxHome, "overlay", "sessions", sessionID)
+	sessionDir := filepath.Join(SessionOverlayDir(sandboxHome), sessionID)
 	if err := fsutil.RemoveAllForce(sessionDir); err != nil {
 		return fmt.Errorf("failed to remove session overlay dir: %w", err)
 	}
@@ -73,7 +81,7 @@ func CleanupLegacyReadonlyBindOverlays(sandboxHome, homeDir string) (int, error)
 // Called by the primary session on startup when no other sessions are active.
 // Returns the number of session dirs removed.
 func CleanupStaleSessionDirs(sandboxHome string) (int, error) {
-	sessionsDir := filepath.Join(sandboxHome, "overlay", "sessions")
+	sessionsDir := SessionOverlayDir(sandboxHome)
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
