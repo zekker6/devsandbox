@@ -361,7 +361,7 @@ func RemoveSandboxByType(m *Metadata, removeVolumes bool) error {
 				containerName = DockerContainerName(m.ProjectDir)
 			} else {
 				// Cannot determine container name; just clean up disk.
-				return RemoveSandbox(diskDir)
+				return RemoveSandboxRoot(diskDir)
 			}
 		}
 
@@ -378,11 +378,11 @@ func RemoveSandboxByType(m *Metadata, removeVolumes bool) error {
 
 		// Clean up on-disk metadata directory if present.
 		if diskDir != "" {
-			return RemoveSandbox(diskDir)
+			return RemoveSandboxRoot(diskDir)
 		}
 		return nil
 	}
-	return RemoveSandbox(m.SandboxRoot)
+	return RemoveSandboxRoot(m.SandboxRoot)
 }
 
 // isContainerNotFound checks whether the error indicates a missing Docker container.

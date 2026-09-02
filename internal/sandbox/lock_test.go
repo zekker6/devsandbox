@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"devsandbox/internal/sandbox/tools"
 )
 
 func TestAcquireSession_CreatesLockFile(t *testing.T) {
@@ -477,5 +479,81 @@ func TestRemoveAbandonedStaging_LivePIDBackstop(t *testing.T) {
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Errorf("tree past the backstop survived: stat = %v", err)
+	}
+}
+
+// TestRemoveSandboxIfIdle_RemovesSharedTmpOfOriginalRoot: the shared temp
+// directory is keyed on a hash of the sandbox home, and the removal deletes
+// the tree under its staged name - so the directory has to be derived from
+// the original root before that name is lost, and only from it. The decoy
+// hashed from the staged path must be untouched: were the removal hashing
+// the name it deletes, it would reclaim nothing and report success.
+//
+// Sets HOME, which os.UserHomeDir reads, so it must not call t.Parallel().
+func TestRemoveSandboxIfIdle_RemovesSharedTmpOfOriginalRoot(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	base := t.TempDir()
+	root := filepath.Join(base, "proj-a1b2c3d4")
+	if err := os.MkdirAll(filepath.Join(root, "home", "overlay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stagedName := filepath.Join(StagingDir(base), fmt.Sprintf("proj-a1b2c3d4-%d", os.Getpid()))
+	own := tools.SharedTmpPath(homeDir, SandboxHomePath(root))
+	decoy := tools.SharedTmpPath(homeDir, SandboxHomePath(stagedName))
+	sibling := tools.SharedTmpPath(homeDir, SandboxHomePath(filepath.Join(base, "other-a1b2c3d4")))
+	for _, dir := range []string{own, decoy, sibling} {
+		if err := os.MkdirAll(filepath.Join(dir, "go-build"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := RemoveSandboxIfIdle(root, nil)
+	if err != nil {
+		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
+	}
+	if !removed {
+		t.Fatal("idle sandbox was not removed")
+	}
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		t.Errorf("shared temp directory of the removed sandbox survived: err=%v", err)
+	}
+	for name, kept := range map[string]string{"decoy hashed from the staged name": decoy, "sibling sandbox's": sibling} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s shared temp directory was removed: %v", name, err)
+		}
+	}
+}
+
+// A sandbox another session holds is kept, and so is its shared temp
+// directory: that session's $TMPDIR points at it.
+//
+// Sets HOME, so it must not call t.Parallel().
+func TestRemoveSandboxIfIdle_KeepsSharedTmpWhileAnotherHolderIsLive(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	root := filepath.Join(t.TempDir(), "proj-a1b2c3d4")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := tools.SharedTmpPath(homeDir, SandboxHomePath(root))
+	if err := os.MkdirAll(filepath.Join(own, "go-build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other, err := AcquireSession(root)
+	if err != nil {
+		t.Fatalf("AcquireSession failed: %v", err)
+	}
+	defer func() { _ = other.Release() }()
+
+	removed, err := RemoveSandboxIfIdle(root, nil)
+	if err != nil {
+		t.Fatalf("RemoveSandboxIfIdle failed: %v", err)
+	}
+	if removed {
+		t.Error("removed sandbox state while another session held it")
+	}
+	if _, err := os.Stat(own); err != nil {
+		t.Errorf("shared temp directory removed under a live session: %v", err)
 	}
 }

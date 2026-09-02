@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"devsandbox/internal/fsutil"
+	"devsandbox/internal/sandbox/tools"
 )
 
 const MetadataFile = "metadata.json"
@@ -335,6 +336,47 @@ func SelectForPruning(sandboxes []*Metadata, opts PruneOptions) []*Metadata {
 // tree first and chmods every directory writable before removal.
 func RemoveSandbox(sandboxRoot string) error {
 	return fsutil.RemoveAllForce(sandboxRoot)
+}
+
+// RemoveSandboxRoot removes a sandbox's shared temp directory and then the
+// sandbox tree itself. It is the removal every path that holds a real sandbox
+// root goes through - prune, RemoveSandboxByType's disk cleanup, scratchpad
+// removal - because nothing else removes the shared temp directory: it lives
+// under the user's cache, not under the root, and a sandbox removed without
+// it leaves an orphan that only the age sweep reclaims a week later.
+//
+// Both removals are attempted whatever the other does. The sandbox tree is
+// what the user asked to remove, so a shared temp directory that cannot be
+// removed does not keep it in place; the failure is reported, and the orphan
+// sweep is the backstop for the directory it left. An empty root is refused:
+// it would hash a home that names nothing and remove nothing, silently.
+func RemoveSandboxRoot(sandboxRoot string) error {
+	if sandboxRoot == "" {
+		return errors.New("failed to remove sandbox: root is empty")
+	}
+	sharedErr := removeSharedTmpFor(sandboxRoot)
+	if err := RemoveSandbox(sandboxRoot); err != nil {
+		return errors.Join(err, sharedErr)
+	}
+	return sharedErr
+}
+
+// removeSharedTmpFor removes the shared temp directory of the sandbox rooted
+// at sandboxRoot. The directory is keyed on a hash of the sandbox home spelled
+// exactly as NewConfig spells it, so this must see the sandbox's original
+// root: a staged or otherwise renamed path hashes to a name nothing created,
+// and the removal succeeds having removed nothing. A directory that does not
+// exist is nothing to remove.
+func removeSharedTmpFor(sandboxRoot string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to locate the shared temp directory of %s: %w", filepath.Base(sandboxRoot), err)
+	}
+	dir := tools.SharedTmpPath(homeDir, SandboxHomePath(sandboxRoot))
+	if err := fsutil.RemoveAllForce(dir); err != nil {
+		return fmt.Errorf("failed to remove shared temp directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 // FormatSize formats bytes as human-readable string

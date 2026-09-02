@@ -215,6 +215,9 @@ func TestRemoveSandboxByType_DockerWithFilesystemPath(t *testing.T) {
 	if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	shared := plantSharedTmp(t, homeDir, sandboxDir)
 
 	m := &Metadata{
 		Isolation:   IsolationDocker,
@@ -231,6 +234,9 @@ func TestRemoveSandboxByType_DockerWithFilesystemPath(t *testing.T) {
 	// Verify the disk directory was removed
 	if _, err := os.Stat(sandboxDir); !os.IsNotExist(err) {
 		t.Error("expected disk directory to be removed")
+	}
+	if _, err := os.Stat(shared); !os.IsNotExist(err) {
+		t.Errorf("shared temp directory survived the disk cleanup: err=%v", err)
 	}
 }
 
@@ -267,5 +273,51 @@ func TestGetContainerVolumes_NonExistent(t *testing.T) {
 	volumes := GetContainerVolumes("nonexistent-container-xyz")
 	if len(volumes) != 0 {
 		t.Errorf("GetContainerVolumes() should return empty for non-existent container, got %v", volumes)
+	}
+}
+
+// TestRemoveSandboxByType_RemovesSharedTmp: every disk-cleanup return goes
+// through RemoveSandboxRoot, so the shared temp directory goes with the
+// sandbox whatever the backend. The docker branch that resolves a container
+// name needs a daemon and is covered by
+// TestRemoveSandboxByType_DockerWithFilesystemPath.
+//
+// Sets HOME, which os.UserHomeDir reads, so it must not call t.Parallel().
+func TestRemoveSandboxByType_RemovesSharedTmp(t *testing.T) {
+	tests := []struct {
+		name       string
+		isolation  IsolationType
+		projectDir string
+	}{
+		{"bwrap", IsolationBwrap, "/tmp/proj"},
+		{"krun", IsolationKrun, "/tmp/proj"},
+		{"docker with unknown project", IsolationDocker, "(unknown)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			t.Setenv("HOME", homeDir)
+			root := filepath.Join(t.TempDir(), "proj-a1b2c3d4")
+			if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			shared := plantSharedTmp(t, homeDir, root)
+			m := &Metadata{
+				Name:        "proj-a1b2c3d4",
+				ProjectDir:  tt.projectDir,
+				Isolation:   tt.isolation,
+				SandboxRoot: root,
+			}
+
+			if err := RemoveSandboxByType(m, false); err != nil {
+				t.Fatalf("RemoveSandboxByType failed: %v", err)
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Errorf("sandbox root still present: err=%v", err)
+			}
+			if _, err := os.Stat(shared); !os.IsNotExist(err) {
+				t.Errorf("shared temp directory survived: err=%v", err)
+			}
+		})
 	}
 }

@@ -323,8 +323,15 @@ func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) 
 		return true, nil
 	}
 
+	// The shared temp directory is keyed on the original root's home, and the
+	// rename has just taken that name away from every launch, so nothing can
+	// be using it. It goes here and not inside RemoveSandbox, which sees only
+	// the staged path: a hash of <staged>/home names nothing. A failure to
+	// remove it is reported after the tree is gone rather than keeping the
+	// tree; the orphan sweep reclaims what it left.
+	sharedErr := removeSharedTmpFor(sandboxRoot)
 	if err := RemoveSandbox(staged); err != nil {
-		return false, errors.Join(err, stampErr)
+		return false, errors.Join(err, stampErr, sharedErr)
 	}
 	// The staging root is deliberately left in place. Removing it when it looks
 	// empty races another teardown for a different project under the same base:
@@ -334,7 +341,7 @@ func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) 
 	// ENOENT, after it has already run beforeRemove and released its lock. It
 	// would report a failed removal having already deleted the worktree. An
 	// empty directory ListSandboxes skips by name is the cheaper outcome.
-	return true, nil
+	return true, sharedErr
 }
 
 // stageForRemoval is the half of RemoveSandboxIfIdle that runs under the

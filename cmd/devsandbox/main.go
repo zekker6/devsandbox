@@ -370,7 +370,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		// repo share overlays/logs/state rather than forking per-branch.
 		cfg.ProjectName = sandbox.GenerateSandboxName(repoRoot)
 		cfg.SandboxRoot = filepath.Join(cfg.SandboxBase, cfg.ProjectName)
-		cfg.SandboxHome = filepath.Join(cfg.SandboxRoot, "home")
+		cfg.SandboxHome = sandbox.SandboxHomePath(cfg.SandboxRoot)
 
 		if err := os.MkdirAll(cfg.SandboxRoot, 0o755); err != nil {
 			return fmt.Errorf("--worktree: create sandbox root: %w", err)

@@ -182,7 +182,8 @@ func prepareSharedTmp(homeDir, sandboxHome string, logger ErrorLogger) error {
 
 	var errs []error
 	if hasLiveSiblingSession(sandboxHome) {
-		errs = append(errs, pruneStaleEntries(dir, time.Now().Add(-sharedTmpStaleAge)))
+		_, err := pruneStaleEntries(dir, time.Now().Add(-sharedTmpStaleAge))
+		errs = append(errs, err)
 	} else {
 		errs = append(errs, removeContents(dir))
 		// The pre-rename directory for this same sandbox home is dead the
@@ -245,12 +246,13 @@ func removeContents(dir string) error {
 }
 
 // pruneStaleEntries removes top-level entries under dir with nothing modified
-// since cutoff.
-func pruneStaleEntries(dir string, cutoff time.Time) error {
+// since cutoff and reports how many it removed.
+func pruneStaleEntries(dir string, cutoff time.Time) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", dir, err)
+		return 0, fmt.Errorf("read %s: %w", dir, err)
 	}
+	removed := 0
 	var errs []error
 	for _, e := range entries {
 		path := filepath.Join(dir, e.Name())
@@ -259,9 +261,11 @@ func pruneStaleEntries(dir string, cutoff time.Time) error {
 		}
 		if err := fsutil.RemoveAllForce(path); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", e.Name(), err))
+			continue
 		}
+		removed++
 	}
-	return errors.Join(errs...)
+	return removed, errors.Join(errs...)
 }
 
 // modifiedSince reports whether path, or anything beneath it, changed after
@@ -318,4 +322,98 @@ func removeEmptyDir(dir string) error {
 		return fmt.Errorf("remove %s: %w", dir, err)
 	}
 	return nil
+}
+
+// PruneSharedTmpStale removes the entries of one sandbox's shared temp
+// directory with nothing modified for sharedTmpStaleAge and reports how many
+// it removed. It is the age branch of prepareSharedTmp and nothing more: it
+// never empties the directory, because a caller that has not registered in
+// the sandbox's run directory cannot tell "no siblings" from "siblings that
+// have not registered yet" - and it does not register, so it never reads as a
+// sibling to a launch either. A directory that does not exist holds nothing
+// and is not an error. Empty arguments are refused rather than resolved
+// against a path built from "".
+func PruneSharedTmpStale(homeDir, sandboxHome string) (int, error) {
+	if homeDir == "" || sandboxHome == "" {
+		return 0, errors.New("shared tmp: prune needs the home directory and the sandbox home")
+	}
+	dir := SharedTmpPath(homeDir, sandboxHome)
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("shared tmp: stat %s: %w", dir, err)
+	}
+	return pruneStaleEntries(dir, time.Now().Add(-sharedTmpStaleAge))
+}
+
+// SweepOrphanSharedTmp removes shared temp directories whose sandbox no longer
+// exists, under both the current root and the legacy revdiff-ipc root, and
+// reports how many it removed.
+//
+// A directory's name is a one-way hash of its sandbox home, so an orphan is
+// found by elimination: liveHomes are the sandbox homes that exist, each is
+// hashed, and a directory whose name is in neither set belongs to no sandbox.
+// Absence alone does not remove it - a launch creating its sandbox home right
+// now has a directory with no sandbox behind it yet - so the directory also
+// has to be untouched for sharedTmpStaleAge, judged over its whole subtree
+// like every other prune here. The age costs nothing and removes the question.
+//
+// The caller decides what is live, and an incomplete list deletes the
+// directories of live sandboxes: a caller that could not enumerate its
+// sandboxes must not call this at all. A missing root holds nothing and is
+// not an error. A directory that cannot be removed is reported and the sweep
+// continues. The legacy root is removed once it is empty; the current root is
+// in use and stays.
+func SweepOrphanSharedTmp(homeDir string, liveHomes []string) (int, error) {
+	if homeDir == "" {
+		return 0, errors.New("shared tmp: orphan sweep needs the home directory")
+	}
+	live := make(map[string]bool, len(liveHomes))
+	for _, home := range liveHomes {
+		live[sharedTmpSessionID(home)] = true
+	}
+	cutoff := time.Now().Add(-sharedTmpStaleAge)
+
+	removed := 0
+	var errs []error
+	legacyRoot := filepath.Join(homeDir, legacySharedTmpRelPath)
+	for _, root := range []string{SharedTmpRoot(homeDir), legacyRoot} {
+		n, err := sweepOrphanRoot(root, live, cutoff)
+		removed += n
+		errs = append(errs, err)
+	}
+	errs = append(errs, removeEmptyDir(legacyRoot))
+	return removed, errors.Join(errs...)
+}
+
+// sweepOrphanRoot removes the directories directly under root whose name is
+// not in live and whose subtree has nothing modified since cutoff. An entry
+// that is not a directory - a symlink included - is not a shared temp
+// directory and is neither followed nor removed.
+func sweepOrphanRoot(root string, live map[string]bool, cutoff time.Time) (int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("shared tmp: read %s: %w", root, err)
+	}
+	removed := 0
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() || live[e.Name()] {
+			continue
+		}
+		path := filepath.Join(root, e.Name())
+		if modifiedSince(path, cutoff) {
+			continue
+		}
+		if err := fsutil.RemoveAllForce(path); err != nil {
+			errs = append(errs, fmt.Errorf("shared tmp: remove orphan %s: %w", path, err))
+			continue
+		}
+		removed++
+	}
+	return removed, errors.Join(errs...)
 }

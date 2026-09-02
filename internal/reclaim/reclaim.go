@@ -141,6 +141,28 @@ var catalogue = []Location{
 		Path:  func(t Target) string { return sandbox.StagingDir(t.SandboxBase) },
 		Sweep: func(t Target) (int, error) { return sandbox.RemoveAbandonedStaging(t.SandboxBase) },
 	},
+	// 6. Orphaned shared temp: one directory per sandbox home under
+	// ~/.cache/devsandbox/tmp, named by a one-way hash of the home, that $TMPDIR
+	// points at inside the sandbox - the largest leak in this list. Removing a
+	// sandbox now removes its directory (RemoveSandboxRoot, RemoveSandboxIfIdle);
+	// this sweep is the backstop for removals that were interrupted and for
+	// orphans that already exist. An orphan is found by elimination against the
+	// sandboxes that exist under SandboxBase, and removed only once nothing in
+	// it has changed for 7 days, so a sandbox being created right now is never
+	// mistaken for one that is gone. The legacy revdiff-ipc root is swept by the
+	// same rule. Needs SandboxBase: a live set built from anywhere else, or from
+	// a listing that failed, would name live sandboxes as orphans.
+	{
+		Name: "orphaned shared temp",
+		Path: func(t Target) string { return tools.SharedTmpRoot(t.HomeDir) },
+		Sweep: func(t Target) (int, error) {
+			live, err := liveSandboxHomes(t.SandboxBase)
+			if err != nil {
+				return 0, err
+			}
+			return tools.SweepOrphanSharedTmp(t.HomeDir, live)
+		},
+	},
 	// 7. Run directories: one socket directory per running devsandbox process,
 	// named by pid. Swept on every launch by cleanupStaleRunDirs before any
 	// tool creates a socket, so a prune sweep would reclaim nothing a launch
@@ -159,6 +181,21 @@ var catalogue = []Location{
 		Name:       "session overlay dirs",
 		PerSandbox: true,
 		Path:       func(t Target) string { return sandbox.SessionOverlayDir(t.SandboxHome) },
+	},
+	// 9. Live shared temp: the contents of one sandbox's shared temp directory.
+	// The launch empties it on a cold start and prunes it by age when a sibling
+	// session is live; from prune only the age branch runs, because a prune
+	// process is not registered in the sandbox's run directory and so cannot
+	// tell "no siblings" from "siblings that have not registered yet". Worth
+	// sweeping all the same: the launch-time cleanup is gated on a tool that
+	// needs the directory being enabled, so a sandbox whose tool was disabled
+	// afterwards keeps its directory until something else reclaims it. Lives
+	// under HomeDir, not SandboxRoot, keyed on the sandbox by hash.
+	{
+		Name:       "live shared temp",
+		PerSandbox: true,
+		Path:       func(t Target) string { return tools.SharedTmpPath(t.HomeDir, t.SandboxHome) },
+		Sweep:      func(t Target) (int, error) { return tools.PruneSharedTmpStale(t.HomeDir, t.SandboxHome) },
 	},
 	// 10. Proxy request logs: bounded by their writer's size and file-count
 	// rotation (internal/proxy.RotatingFileWriter); reported only.
@@ -203,4 +240,25 @@ func Usage(path string) (entries int, size int64, err error) {
 		return 0, 0, fmt.Errorf("size %s: %w", path, err)
 	}
 	return entries, size, nil
+}
+
+// liveSandboxHomes returns the sandbox home of every sandbox on disk under
+// base, spelled exactly as the launch spells it, so the orphan sweep hashes
+// the same string the launch hashed. It reads the disk listing rather than
+// ListAllSandboxes, whose Docker entries carry a container name in
+// SandboxRoot. An empty base is refused: a live set built from anywhere but
+// the configured base names live sandboxes as orphans.
+func liveSandboxHomes(base string) ([]string, error) {
+	if base == "" {
+		return nil, errors.New("reclaim \"orphaned shared temp\": sandbox base is empty")
+	}
+	sandboxes, err := sandbox.ListSandboxes(base)
+	if err != nil {
+		return nil, fmt.Errorf("reclaim \"orphaned shared temp\": list sandboxes: %w", err)
+	}
+	homes := make([]string, 0, len(sandboxes))
+	for _, m := range sandboxes {
+		homes = append(homes, sandbox.SandboxHomePath(m.SandboxRoot))
+	}
+	return homes, nil
 }

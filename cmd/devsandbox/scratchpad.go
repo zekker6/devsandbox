@@ -327,7 +327,7 @@ Refuses to remove scratchpads with an active session.`,
 					m, loadErr := sandbox.LoadMetadata(sandboxRoot)
 					if loadErr != nil {
 						// Fall back to plain directory removal if metadata is missing.
-						if rmErr := sandbox.RemoveSandbox(sandboxRoot); rmErr != nil {
+						if rmErr := sandbox.RemoveSandboxRoot(sandboxRoot); rmErr != nil {
 							notice.Error("Failed to remove sandbox state for %q: %v", t.Name, rmErr)
 							failed++
 							continue

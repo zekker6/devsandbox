@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"devsandbox/internal/sandbox"
+	"devsandbox/internal/sandbox/tools"
 	"devsandbox/internal/session"
 )
 
@@ -241,16 +243,19 @@ func TestLocations_Invariants(t *testing.T) {
 			continue
 		}
 
-		// A per-sandbox path must be rooted in the sandbox it was given, a
-		// host path in the home or the configured base: a path that lands
-		// elsewhere was built from the wrong Target field.
+		// A per-sandbox path must be rooted in the sandbox it was given - or,
+		// for the one location that lives under the home and keys the sandbox
+		// by hash (live shared temp, pinned to its exact path by
+		// TestLocations_LiveSharedTmp), in HomeDir - and a host path in the
+		// home or the configured base: a path that lands elsewhere was built
+		// from the wrong Target field.
 		path := loc.Path(full)
 		if !filepath.IsAbs(path) {
 			t.Errorf("%q: Path %q is not absolute", loc.Name, path)
 		}
 		if loc.PerSandbox {
-			if !within(path, full.SandboxRoot) {
-				t.Errorf("%q: per-sandbox Path %q is outside SandboxRoot %q", loc.Name, path, full.SandboxRoot)
+			if !within(path, full.SandboxRoot) && !within(path, full.HomeDir) {
+				t.Errorf("%q: per-sandbox Path %q is outside SandboxRoot %q and HomeDir %q", loc.Name, path, full.SandboxRoot, full.HomeDir)
 			}
 		} else if !within(path, full.HomeDir) && !within(path, full.SandboxBase) {
 			t.Errorf("%q: host Path %q is outside HomeDir %q and SandboxBase %q", loc.Name, path, full.HomeDir, full.SandboxBase)
@@ -494,6 +499,153 @@ func TestLocations_InterruptedRemovals(t *testing.T) {
 	n, err = loc.Run(noBase)
 	if err == nil {
 		t.Fatal("Run with an empty SandboxBase returned nil, want a refusal")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+}
+
+// backdate sets every entry under root to when, so a sweep reads it as stale.
+func backdate(t *testing.T, root string, when time.Time) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(p string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(p, when, when)
+	})
+	if err != nil {
+		t.Fatalf("backdate %s: %v", root, err)
+	}
+}
+
+// TestLocations_OrphanedSharedTmp runs location 6 against a real sandbox
+// base and asserts the live set is built from Target.SandboxBase with each
+// home spelled as the launch spells it: the directory of a sandbox that
+// exists is kept however old, the directory of one that does not goes once
+// stale, a recent orphan stays, the catalogue names the root the launch
+// binds under, and an empty base is refused rather than naming every
+// directory an orphan.
+func TestLocations_OrphanedSharedTmp(t *testing.T) {
+	loc := locationNamed(t, "orphaned shared temp")
+	if loc.PerSandbox {
+		t.Fatal("orphaned shared temp is registered per sandbox, want host-scoped")
+	}
+	homeDir := filepath.Join(t.TempDir(), "home")
+	base := filepath.Join(t.TempDir(), "sandboxes")
+	tgt := Target{HomeDir: homeDir, SandboxBase: base}
+	if got, want := loc.Path(tgt), tools.SharedTmpRoot(homeDir); got != want {
+		t.Fatalf("Path = %q, want %q", got, want)
+	}
+	n, err := loc.Run(tgt)
+	if err != nil || n != 0 {
+		t.Fatalf("Run on a host with no shared temp = (%d, %v), want (0, nil)", n, err)
+	}
+
+	// A sandbox on disk with no metadata file: the disk listing is what
+	// decides, and it lists every directory under the base.
+	liveRoot := filepath.Join(base, "live-0a1b2c3d")
+	if err := os.MkdirAll(sandbox.SandboxHomePath(liveRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	live := tools.SharedTmpPath(homeDir, sandbox.SandboxHomePath(liveRoot))
+	orphan := tools.SharedTmpPath(homeDir, sandbox.SandboxHomePath(filepath.Join(base, "gone-0a1b2c3d")))
+	recent := tools.SharedTmpPath(homeDir, sandbox.SandboxHomePath(filepath.Join(base, "new-0a1b2c3d")))
+	for _, dir := range []string{live, orphan, recent} {
+		writeFile(t, filepath.Join(dir, "go-build", "a.o"), 1)
+	}
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	backdate(t, live, old)
+	backdate(t, orphan, old)
+
+	n, err = loc.Run(tgt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("shared temp directory of a removed sandbox survived: stat = %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("shared temp directory of a live sandbox was removed as an orphan: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("recent shared temp directory was removed: %v", err)
+	}
+
+	noBase := tgt
+	noBase.SandboxBase = ""
+	backdate(t, recent, old)
+	n, err = loc.Run(noBase)
+	if err == nil {
+		t.Fatal("Run with an empty SandboxBase returned nil, want a refusal")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("a refused run removed a directory: %v", err)
+	}
+}
+
+// TestLocations_LiveSharedTmp runs location 9 against a real directory and
+// asserts the catalogue names the directory the launch binds - hashed from
+// SandboxHome, under HomeDir - and sweeps by age alone: a stale entry goes, a
+// fresh one stays with no sibling registered, the directory itself stays, and
+// a target without HomeDir is refused by the owner, since Run checks only the
+// sandbox roots for a per-sandbox location.
+func TestLocations_LiveSharedTmp(t *testing.T) {
+	loc := locationNamed(t, "live shared temp")
+	if !loc.PerSandbox {
+		t.Fatal("live shared temp is registered host-scoped, want per sandbox")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "sandboxes", "proj-0a1b2c3d")
+	tgt := Target{
+		HomeDir:     filepath.Join(base, "home"),
+		SandboxBase: filepath.Join(base, "sandboxes"),
+		SandboxRoot: root,
+		SandboxHome: sandbox.SandboxHomePath(root),
+	}
+	dir := loc.Path(tgt)
+	if want := tools.SharedTmpPath(tgt.HomeDir, tgt.SandboxHome); dir != want {
+		t.Fatalf("Path = %q, want %q", dir, want)
+	}
+	n, err := loc.Run(tgt)
+	if err != nil || n != 0 {
+		t.Fatalf("Run on a sandbox with no shared temp = (%d, %v), want (0, nil)", n, err)
+	}
+
+	stale := filepath.Join(dir, "go-build-old")
+	fresh := filepath.Join(dir, "go-build-new")
+	writeFile(t, filepath.Join(stale, "a.o"), 1)
+	writeFile(t, filepath.Join(fresh, "a.o"), 1)
+	backdate(t, stale, time.Now().Add(-8*24*time.Hour))
+
+	n, err = loc.Run(tgt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale entry survived: stat = %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh entry removed with no sibling registered: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the directory itself was removed: %v", err)
+	}
+
+	noHome := tgt
+	noHome.HomeDir = ""
+	n, err = loc.Run(noHome)
+	if err == nil {
+		t.Fatal("Run with an empty HomeDir returned nil, want a refusal")
 	}
 	if n != 0 {
 		t.Errorf("removed = %d, want 0", n)

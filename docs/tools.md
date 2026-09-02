@@ -825,6 +825,8 @@ Left alone, the directory grows without bound - build caches, test scratch trees
 
 A directory belonging to a different project is never touched, and the previous location (`~/.cache/devsandbox/revdiff-ipc/`) is reclaimed the first time the project launches.
 
+Removing the sandbox removes the directory with it: `--rm`, `devsandbox sandboxes prune` and `devsandbox scratchpad rm` all delete it alongside the sandbox state. A directory whose sandbox is already gone - left by a removal that was interrupted, or by a version before this one - is reclaimed by `devsandbox sandboxes prune` once nothing in it has changed for 7 days, under the previous location as well.
+
 Because the sandbox can write here, nothing the host has to trust may live in this directory - host-owned records go under `$XDG_STATE_HOME/devsandbox/` instead.
 
 ## Kitty Terminal

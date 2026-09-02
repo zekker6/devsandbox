@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -439,5 +440,240 @@ func TestRevdiff_DeclaresSharedTmp(t *testing.T) {
 	}
 	if envs := (&Revdiff{}).Environment("/home/alice", "/host/sessions/abc"); envs != nil {
 		t.Errorf("Environment must stay empty, got %v", envs)
+	}
+}
+
+// TestPruneSharedTmpStale_NeverEmpties pins what separates the exported prune
+// from the launch's cold-start wipe: a caller that has not registered in the
+// run directory cannot conclude it is alone, so fresh entries survive whether
+// or not a sibling is registered, only stale ones go, the count says how
+// many, and the sweep leaves no registration of its own behind.
+func TestPruneSharedTmpStale_NeverEmpties(t *testing.T) {
+	for _, sibling := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sibling=%v", sibling), func(t *testing.T) {
+			homeDir := t.TempDir()
+			sandboxHome := t.TempDir()
+			if sibling {
+				registerSibling(t, sandboxHome, os.Getppid())
+			}
+			dir := SharedTmpPath(homeDir, sandboxHome)
+			staleA := filepath.Join(dir, "go-build-old")
+			staleB := filepath.Join(dir, "claude-old")
+			fresh := filepath.Join(dir, "go-build-new")
+			writeFileAt(t, filepath.Join(staleA, "a.o"), "junk", time.Time{})
+			writeFileAt(t, filepath.Join(staleB, "scratch"), "junk", time.Time{})
+			writeFileAt(t, filepath.Join(fresh, "a.o"), "junk", time.Time{})
+			old := time.Now().Add(-sharedTmpStaleAge - time.Hour)
+			ageTree(t, staleA, old)
+			ageTree(t, staleB, old)
+
+			n, err := PruneSharedTmpStale(homeDir, sandboxHome)
+			if err != nil {
+				t.Fatalf("PruneSharedTmpStale: %v", err)
+			}
+			if n != 2 {
+				t.Errorf("removed = %d, want 2", n)
+			}
+			for _, gone := range []string{staleA, staleB} {
+				if _, err := os.Stat(gone); !os.IsNotExist(err) {
+					t.Errorf("stale entry %s survived: err=%v", filepath.Base(gone), err)
+				}
+			}
+			if _, err := os.Stat(fresh); err != nil {
+				t.Errorf("fresh entry removed (sibling registered: %v): %v", sibling, err)
+			}
+			if _, err := os.Stat(dir); err != nil {
+				t.Errorf("the directory itself was removed: %v", err)
+			}
+			self := filepath.Join(sandboxHome, runDirName, strconv.Itoa(os.Getpid()))
+			if _, err := os.Stat(self); !os.IsNotExist(err) {
+				t.Errorf("prune registered itself in the run directory: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestPruneSharedTmpStale_MissingDirIsNothing(t *testing.T) {
+	n, err := PruneSharedTmpStale(t.TempDir(), t.TempDir())
+	if err != nil || n != 0 {
+		t.Fatalf("PruneSharedTmpStale on a missing directory = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+func TestPruneSharedTmpStale_RefusesEmptyArgs(t *testing.T) {
+	for _, args := range [][2]string{{"", "/host"}, {"/home/alice", ""}} {
+		n, err := PruneSharedTmpStale(args[0], args[1])
+		if err == nil {
+			t.Errorf("PruneSharedTmpStale(%q, %q) returned nil, want a refusal", args[0], args[1])
+		}
+		if n != 0 {
+			t.Errorf("PruneSharedTmpStale(%q, %q) removed = %d, want 0", args[0], args[1], n)
+		}
+	}
+}
+
+// TestSweepOrphanSharedTmp covers the rule an orphan is judged by: absent
+// from the live set AND untouched for the stale age. Each other combination
+// is kept - a live sandbox's directory however old, and a recent orphan,
+// because a launch may be creating that sandbox right now. An entry that is
+// not a directory is not a shared temp directory at all.
+func TestSweepOrphanSharedTmp(t *testing.T) {
+	homeDir := t.TempDir()
+	liveHome := "/srv/sandboxes/live-0a1b2c3d/home"
+	old := time.Now().Add(-sharedTmpStaleAge - time.Hour)
+
+	live := SharedTmpPath(homeDir, liveHome)
+	orphan := SharedTmpPath(homeDir, "/srv/sandboxes/gone-0a1b2c3d/home")
+	recent := SharedTmpPath(homeDir, "/srv/sandboxes/new-0a1b2c3d/home")
+	for _, dir := range []string{live, orphan, recent} {
+		writeFileAt(t, filepath.Join(dir, "go-build", "a.o"), "junk", time.Time{})
+	}
+	ageTree(t, live, old)
+	ageTree(t, orphan, old)
+	stray := filepath.Join(SharedTmpRoot(homeDir), "stray")
+	writeFileAt(t, stray, "x", old)
+
+	n, err := SweepOrphanSharedTmp(homeDir, []string{liveHome})
+	if err != nil {
+		t.Fatalf("SweepOrphanSharedTmp: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("stale orphan survived: err=%v", err)
+	}
+	for name, kept := range map[string]string{"live sandbox's": live, "recent orphan": recent, "stray file": stray} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s entry was removed: %v", name, err)
+		}
+	}
+}
+
+// TestSweepOrphanSharedTmp_UnknownAgeIsKept: an orphan whose subtree cannot
+// be read has an unknown age, and unknown must not authorize deletion.
+func TestSweepOrphanSharedTmp_UnknownAgeIsKept(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	homeDir := t.TempDir()
+	unreadable := SharedTmpPath(homeDir, "/srv/sandboxes/locked-0a1b2c3d/home")
+	writeFileAt(t, filepath.Join(unreadable, "go-build", "a.o"), "junk", time.Time{})
+	ageTree(t, unreadable, time.Now().Add(-sharedTmpStaleAge-time.Hour))
+	if err := os.Chmod(unreadable, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
+
+	n, err := SweepOrphanSharedTmp(homeDir, nil)
+	if err != nil {
+		t.Fatalf("SweepOrphanSharedTmp: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+	if _, err := os.Stat(unreadable); err != nil {
+		t.Errorf("orphan of unknown age was removed: %v", err)
+	}
+}
+
+// TestSweepOrphanSharedTmp_LegacyRoot: a sandbox removed before the rename
+// has no launch left to reclaim its legacy directory, so the sweep covers
+// that root by the same rule - and removes the root once nothing is left in
+// it, as the launch does.
+func TestSweepOrphanSharedTmp_LegacyRoot(t *testing.T) {
+	homeDir := t.TempDir()
+	liveHome := "/srv/sandboxes/live-0a1b2c3d/home"
+	old := time.Now().Add(-sharedTmpStaleAge - time.Hour)
+	legacyRoot := filepath.Join(homeDir, legacySharedTmpRelPath)
+	live := legacySharedTmpPath(homeDir, liveHome)
+	orphan := legacySharedTmpPath(homeDir, "/srv/sandboxes/gone-0a1b2c3d/home")
+	writeFileAt(t, filepath.Join(live, "sentinel"), "x", time.Time{})
+	writeFileAt(t, filepath.Join(orphan, "sentinel"), "x", time.Time{})
+	ageTree(t, live, old)
+	ageTree(t, orphan, old)
+
+	n, err := SweepOrphanSharedTmp(homeDir, []string{liveHome})
+	if err != nil {
+		t.Fatalf("SweepOrphanSharedTmp: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("stale legacy orphan survived: err=%v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("live sandbox's legacy directory was removed: %v", err)
+	}
+	if _, err := os.Stat(legacyRoot); err != nil {
+		t.Errorf("legacy root removed while it still held an entry: %v", err)
+	}
+
+	// Once the last entry is an orphan too, the root goes with it.
+	n, err = SweepOrphanSharedTmp(homeDir, nil)
+	if err != nil {
+		t.Fatalf("SweepOrphanSharedTmp: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(legacyRoot); !os.IsNotExist(err) {
+		t.Errorf("emptied legacy root survived: err=%v", err)
+	}
+	if _, err := os.Stat(SharedTmpRoot(homeDir)); err == nil {
+		// The current root was never created here; the point is only that
+		// the sweep does not create it either.
+		t.Error("sweep created the current root")
+	}
+}
+
+func TestSweepOrphanSharedTmp_MissingRootsAreNothing(t *testing.T) {
+	n, err := SweepOrphanSharedTmp(t.TempDir(), []string{"/srv/sandboxes/x/home"})
+	if err != nil || n != 0 {
+		t.Fatalf("SweepOrphanSharedTmp with no roots = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+func TestSweepOrphanSharedTmp_RefusesEmptyHome(t *testing.T) {
+	n, err := SweepOrphanSharedTmp("", nil)
+	if err == nil {
+		t.Fatal("SweepOrphanSharedTmp(\"\") returned nil, want a refusal")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+}
+
+// TestSweepOrphanSharedTmp_ReportsFailedRemoval: an orphan that cannot be
+// removed is reported, and does not stop the rest of the sweep.
+func TestSweepOrphanSharedTmp_ReportsFailedRemoval(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	homeDir := t.TempDir()
+	old := time.Now().Add(-sharedTmpStaleAge - time.Hour)
+	stuck := SharedTmpPath(homeDir, "/srv/sandboxes/stuck-0a1b2c3d/home")
+	writeFileAt(t, filepath.Join(stuck, "a"), "x", time.Time{})
+	ageTree(t, stuck, old)
+	legacyOrphan := legacySharedTmpPath(homeDir, "/srv/sandboxes/gone-0a1b2c3d/home")
+	writeFileAt(t, filepath.Join(legacyOrphan, "a"), "x", time.Time{})
+	ageTree(t, legacyOrphan, old)
+	// Unlinking the orphan itself needs write permission on the root, which
+	// RemoveAllForce restores only inside the tree it removes.
+	if err := os.Chmod(SharedTmpRoot(homeDir), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(SharedTmpRoot(homeDir), 0o700) })
+
+	n, err := SweepOrphanSharedTmp(homeDir, nil)
+	if err == nil {
+		t.Fatal("SweepOrphanSharedTmp returned nil for an orphan it could not remove")
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1: the legacy orphan after the failure", n)
+	}
+	if _, err := os.Stat(legacyOrphan); !os.IsNotExist(err) {
+		t.Errorf("sweep stopped at the failure; legacy orphan survived: err=%v", err)
 	}
 }

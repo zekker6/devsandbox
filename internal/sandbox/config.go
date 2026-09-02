@@ -140,7 +140,7 @@ func NewConfig(opts *Options) (*Config, error) {
 	projectName := GenerateSandboxName(projectDir)
 
 	sandboxRoot := filepath.Join(baseDir, projectName)
-	sandboxHome := filepath.Join(sandboxRoot, "home")
+	sandboxHome := SandboxHomePath(sandboxRoot)
 
 	xdgRuntime := os.Getenv("XDG_RUNTIME_DIR")
 	if xdgRuntime == "" {
@@ -250,6 +250,15 @@ func GenerateSessionID() (string, error) {
 // SandboxBasePath returns the base path for all sandboxes given a home directory
 func SandboxBasePath(homeDir string) string {
 	return filepath.Join(homeDir, ".local", "share", SandboxBaseDir)
+}
+
+// SandboxHomePath returns the sandbox home of the sandbox rooted at
+// sandboxRoot. It is the one spelling of that path: the shared temp directory
+// is keyed on a hash of it, so a caller that spells it differently - through a
+// symlink, with a trailing slash, from a staged copy of the root - derives a
+// name nothing ever created and removes nothing, silently.
+func SandboxHomePath(sandboxRoot string) string {
+	return filepath.Join(sandboxRoot, "home")
 }
 
 // Scratchpad directory layout.

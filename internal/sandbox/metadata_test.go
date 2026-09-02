@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"devsandbox/internal/sandbox/tools"
 )
 
 func TestSaveAndLoadMetadata(t *testing.T) {
@@ -641,5 +643,104 @@ func TestSaveMetadataLeavesNoPartialFile(t *testing.T) {
 	}
 	if _, err := LoadMetadata(root); err != nil {
 		t.Errorf("LoadMetadata after RecordOOM failed: %v", err)
+	}
+}
+
+// plantSharedTmp creates the shared temp directory of the sandbox rooted at
+// root under homeDir, with an entry inside so the removal has something to
+// walk, and returns its path.
+func plantSharedTmp(t *testing.T, homeDir, root string) string {
+	t.Helper()
+	dir := tools.SharedTmpPath(homeDir, SandboxHomePath(root))
+	if err := os.MkdirAll(filepath.Join(dir, "go-build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestRemoveSandboxRoot: the shared temp directory lives under the user's
+// cache, not under the sandbox root, so removing the root alone orphans it.
+// It is found by hashing the sandbox home spelled as NewConfig spells it, and
+// only this sandbox's directory goes.
+//
+// Sets HOME, which os.UserHomeDir reads, so it must not call t.Parallel().
+func TestRemoveSandboxRoot(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	base := t.TempDir()
+	root := filepath.Join(base, "proj-a1b2c3d4")
+	if err := os.MkdirAll(filepath.Join(root, "home", "overlay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := plantSharedTmp(t, homeDir, root)
+	sibling := plantSharedTmp(t, homeDir, filepath.Join(base, "other-a1b2c3d4"))
+
+	if err := RemoveSandboxRoot(root); err != nil {
+		t.Fatalf("RemoveSandboxRoot failed: %v", err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("sandbox root still present: err=%v", err)
+	}
+	if _, err := os.Stat(own); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("shared temp directory still present: err=%v", err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Errorf("sibling sandbox's shared temp directory was removed: %v", err)
+	}
+}
+
+// A sandbox that never had a shared temp directory - one whose tools do not
+// need it - is removed without complaint.
+func TestRemoveSandboxRoot_NoSharedTmpIsNotAnError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := filepath.Join(t.TempDir(), "proj-a1b2c3d4")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveSandboxRoot(root); err != nil {
+		t.Fatalf("RemoveSandboxRoot failed: %v", err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("sandbox root still present: err=%v", err)
+	}
+}
+
+// An empty root would hash a home that names nothing and remove nothing.
+func TestRemoveSandboxRoot_RefusesEmptyRoot(t *testing.T) {
+	if err := RemoveSandboxRoot(""); err == nil {
+		t.Fatal("RemoveSandboxRoot(\"\") returned nil, want a refusal")
+	}
+}
+
+// A shared temp directory that cannot be removed does not keep the sandbox
+// tree in place - the tree is what the user asked to remove, and the orphan
+// sweep is the backstop for the directory - but the failure is reported.
+func TestRemoveSandboxRoot_ReportsSharedTmpFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	root := filepath.Join(t.TempDir(), "proj-a1b2c3d4")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := plantSharedTmp(t, homeDir, root)
+	// Unlinking the directory itself needs write permission on its parent,
+	// which RemoveAllForce restores only inside the tree it removes.
+	if err := os.Chmod(tools.SharedTmpRoot(homeDir), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tools.SharedTmpRoot(homeDir), 0o700) })
+
+	err := RemoveSandboxRoot(root)
+	if err == nil {
+		t.Fatal("RemoveSandboxRoot returned nil for a shared temp directory it could not remove")
+	}
+	if _, statErr := os.Stat(root); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("sandbox root kept because of the shared temp failure: err=%v", statErr)
+	}
+	if _, statErr := os.Stat(own); statErr != nil {
+		t.Errorf("the directory reported as unremovable is gone: %v", statErr)
 	}
 }
