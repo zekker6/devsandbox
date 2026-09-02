@@ -50,29 +50,41 @@ type Store struct {
 	dir string
 }
 
-// NewStore creates a Store rooted at dir. The directory must already exist.
+// NewStore creates a Store rooted at dir. The directory must already exist
+// for records to be written; CleanStaleErr reads a missing one as empty.
 func NewStore(dir string) *Store {
 	return &Store{dir: dir}
 }
 
-// DefaultStore returns a Store rooted at $XDG_STATE_HOME/devsandbox/sessions/
-// (falling back to ~/.local/state/devsandbox/sessions/). The directory is
-// created if it does not exist.
-func DefaultStore() (*Store, error) {
+// DefaultDir returns the session store directory:
+// $XDG_STATE_HOME/devsandbox/sessions, falling back to
+// <homeDir>/.local/state/devsandbox/sessions when XDG_STATE_HOME is unset. It
+// does not create the directory.
+func DefaultDir(homeDir string) string {
 	stateHome := os.Getenv("XDG_STATE_HOME")
 	if stateHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("could not determine home directory: %w", err)
-		}
-		stateHome = filepath.Join(home, ".local", "state")
+		stateHome = filepath.Join(homeDir, ".local", "state")
 	}
+	return filepath.Join(stateHome, "devsandbox", "sessions")
+}
 
-	dir := filepath.Join(stateHome, "devsandbox", "sessions")
+// DefaultStore returns a Store rooted at DefaultDir for the current user. The
+// directory is created if it does not exist.
+func DefaultStore() (*Store, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not determine home directory: %w", err)
+	}
+	dir := DefaultDir(home)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create session store directory: %w", err)
 	}
 	return NewStore(dir), nil
+}
+
+// Dir returns the directory the store reads and writes records in.
+func (s *Store) Dir() string {
+	return s.dir
 }
 
 // filePath returns the JSON file path for a session name.
@@ -196,23 +208,69 @@ func (s *Store) Remove(name string) error {
 	return nil
 }
 
-// CleanStale removes all session files whose PID no longer exists.
-// Returns the number of files removed.
+// sessionStaleAge bounds how long a record survives once nothing has written
+// it. The pid probe answers an uncertain result as alive, so a record whose
+// pid was recycled by another user's process is never reclaimed on the pid
+// alone - and while it survives, Register refuses its name and AutoName counts
+// the name as taken. Thirty days sits far past any plausible session while
+// still bounding that. A live session rewrites its record whenever its state
+// changes, so the clock runs from the last write, not from the start.
+const sessionStaleAge = 30 * 24 * time.Hour
+
+// CleanStale removes stale session files and returns how many it removed. It
+// is CleanStaleErr without the error, for callers that only want the count;
+// a store that cannot be read counts as nothing removed.
 func (s *Store) CleanStale() int {
+	removed, _ := s.CleanStaleErr()
+	return removed
+}
+
+// CleanStaleErr removes every session file whose process is gone, or whose
+// file has not been written for sessionStaleAge, and reports how many it
+// removed. A missing store directory holds nothing and is not an error; a
+// store that cannot be read is. A file that cannot be removed is reported and
+// the sweep continues, so one stuck record never hides the rest.
+func (s *Store) CleanStaleErr() (int, error) {
 	all, err := s.List()
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
 	if err != nil {
-		return 0
+		return 0, err
 	}
 
+	cutoff := time.Now().Add(-sessionStaleAge)
 	removed := 0
+	var errs []error
 	for _, sess := range all {
-		if !procstate.Alive(sess.PID) {
-			if err := s.Remove(sess.Name); err == nil {
-				removed++
-			}
+		if !s.stale(sess, cutoff) {
+			continue
 		}
+		if err := s.Remove(sess.Name); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// Another cleanup got there first; the record is gone either way.
+				continue
+			}
+			errs = append(errs, err)
+			continue
+		}
+		removed++
 	}
-	return removed
+	return removed, errors.Join(errs...)
+}
+
+// stale reports whether sess's record may be removed: its pid is gone, or the
+// file has not been written since cutoff. A file whose age cannot be read is
+// kept, because an unknown age must not authorize a deletion.
+func (s *Store) stale(sess *Session, cutoff time.Time) bool {
+	if !procstate.Alive(sess.PID) {
+		return true
+	}
+	info, err := os.Stat(s.filePath(sess.Name))
+	if err != nil {
+		return false
+	}
+	return info.ModTime().Before(cutoff)
 }
 
 // AutoName generates a unique session name derived from the basename of workDir.

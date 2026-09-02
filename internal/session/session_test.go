@@ -524,3 +524,189 @@ func TestStore_CleanStale_UncertainPIDIsKept(t *testing.T) {
 		t.Errorf("expected the record to survive, got %v", err)
 	}
 }
+
+// ageRecord backdates the record file for name so the store reads it as
+// untouched since age ago.
+func ageRecord(t *testing.T, store *session.Store, name string, age time.Duration) {
+	t.Helper()
+	path := filepath.Join(store.Dir(), name+".json")
+	then := time.Now().Add(-age)
+	if err := os.Chtimes(path, then, then); err != nil {
+		t.Fatalf("Chtimes %s: %v", path, err)
+	}
+}
+
+func TestStore_CleanStaleErr_SurfacesListFailure(t *testing.T) {
+	// A regular file in place of a path component makes ReadDir fail with
+	// ENOTDIR, which is a real failure to read the store rather than the
+	// missing directory of a host that has never run a session.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	store := session.NewStore(filepath.Join(blocker, "sessions"))
+
+	n, err := store.CleanStaleErr()
+	if err == nil {
+		t.Fatal("CleanStaleErr returned nil error for an unreadable store, want the List failure")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+	if got := store.CleanStale(); got != 0 {
+		t.Errorf("CleanStale = %d, want 0 on the same failure", got)
+	}
+}
+
+func TestStore_CleanStaleErr_MissingDirIsEmpty(t *testing.T) {
+	store := session.NewStore(filepath.Join(t.TempDir(), "never", "created"))
+
+	n, err := store.CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr on a missing store: %v, want nil", err)
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+}
+
+func TestStore_CleanStaleErr_DeadPIDGoesRegardlessOfAge(t *testing.T) {
+	store := newTestStore(t)
+	dead := makeSession("dead")
+	dead.PID = 999999999
+	if err := store.Register(dead); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := store.Register(makeSession("live")); err != nil {
+		t.Fatalf("Register live: %v", err)
+	}
+
+	n, err := store.CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := store.Get("dead"); err == nil {
+		t.Error("record of a dead pid survived")
+	}
+	if _, err := store.Get("live"); err != nil {
+		t.Errorf("record of a live pid was removed: %v", err)
+	}
+}
+
+// A record whose pid answers EPERM - one recycled by another user's process -
+// is kept by the probe, so the age backstop is the only thing that reclaims
+// it: kept while the file is younger than 30 days, removed once it is older.
+func TestStore_CleanStaleErr_UncertainPIDBackstop(t *testing.T) {
+	store := newTestStore(t)
+	held := makeSession("held")
+	held.PID = pidAnsweringEPERM(t)
+	if err := store.Register(held); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	ageRecord(t, store, "held", 29*24*time.Hour)
+	n, err := store.CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0 for a record younger than the backstop", n)
+	}
+	if _, err := store.Get("held"); err != nil {
+		t.Fatalf("record younger than the backstop was removed: %v", err)
+	}
+
+	ageRecord(t, store, "held", 31*24*time.Hour)
+	n, err = store.CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1 for a record past the backstop", n)
+	}
+	if _, err := store.Get("held"); err == nil {
+		t.Error("record past the backstop survived")
+	}
+}
+
+// The backstop reads the file's age, not the probe's answer, so it is
+// exercised with a pid that is certainly alive too - which is what keeps the
+// rule tested where pid 1 does not answer EPERM and the case above skips.
+func TestStore_CleanStaleErr_LivePIDBackstop(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.Register(makeSession("young")); err != nil {
+		t.Fatalf("Register young: %v", err)
+	}
+	if err := store.Register(makeSession("old")); err != nil {
+		t.Fatalf("Register old: %v", err)
+	}
+	ageRecord(t, store, "young", 29*24*time.Hour)
+	ageRecord(t, store, "old", 31*24*time.Hour)
+
+	n, err := store.CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := store.Get("young"); err != nil {
+		t.Errorf("record younger than the backstop was removed: %v", err)
+	}
+	if _, err := store.Get("old"); err == nil {
+		t.Error("record past the backstop survived")
+	}
+}
+
+func TestStore_CleanStaleErr_ReportsFailedRemoval(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	store := newTestStore(t)
+	dead := makeSession("dead")
+	dead.PID = 999999999
+	if err := store.Register(dead); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := os.Chmod(store.Dir(), 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(store.Dir(), 0o700) })
+
+	n, err := store.CleanStaleErr()
+	if err == nil {
+		t.Fatal("CleanStaleErr returned nil error for a record it could not remove")
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0", n)
+	}
+}
+
+func TestStore_Dir(t *testing.T) {
+	dir := t.TempDir()
+	if got := session.NewStore(dir).Dir(); got != dir {
+		t.Errorf("Dir = %q, want %q", got, dir)
+	}
+}
+
+// Sets process environment, so it must not call t.Parallel().
+func TestDefaultDir(t *testing.T) {
+	home := filepath.Join(string(filepath.Separator), "home", "user")
+
+	t.Setenv("XDG_STATE_HOME", "")
+	if got, want := session.DefaultDir(home), filepath.Join(home, ".local", "state", "devsandbox", "sessions"); got != want {
+		t.Errorf("DefaultDir with XDG_STATE_HOME unset = %q, want %q", got, want)
+	}
+
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	if got, want := session.DefaultDir(home), filepath.Join(state, "devsandbox", "sessions"); got != want {
+		t.Errorf("DefaultDir with XDG_STATE_HOME set = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(state, "devsandbox")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("DefaultDir created something under the state home: stat = %v", err)
+	}
+}

@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"devsandbox/internal/session"
 )
 
 func writeFile(t *testing.T, path string, size int) {
@@ -390,4 +393,57 @@ func within(path, dir string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// TestLocations_SessionRecords runs location 2 against a real store and
+// asserts it sweeps through the owner's function: a host with no store is
+// nothing to do, the record of a dead session goes, a live one stays, and the
+// catalogue's path is the store's own.
+//
+// Sets process environment, so it must not call t.Parallel().
+func TestLocations_SessionRecords(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	loc := locationNamed(t, "session records")
+	if loc.PerSandbox {
+		t.Fatal("session records is registered per sandbox, want host-scoped")
+	}
+	tgt := Target{HomeDir: filepath.Join(t.TempDir(), "home")}
+
+	dir := loc.Path(tgt)
+	if want := filepath.Join(state, "devsandbox", "sessions"); dir != want {
+		t.Fatalf("Path = %q, want %q", dir, want)
+	}
+	n, err := loc.Run(tgt)
+	if err != nil || n != 0 {
+		t.Fatalf("Run on a host with no store = (%d, %v), want (0, nil)", n, err)
+	}
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store := session.NewStore(dir)
+	if got := store.Dir(); got != dir {
+		t.Errorf("store.Dir() = %q, want the catalogue path %q", got, dir)
+	}
+	for name, pid := range map[string]int{"dead": reapedPID(t), "live": os.Getpid()} {
+		sess := &session.Session{Name: name, PID: pid, StartedAt: time.Now(), WorkDir: t.TempDir()}
+		if err := store.Register(sess); err != nil {
+			t.Fatalf("Register %s: %v", name, err)
+		}
+	}
+
+	n, err = loc.Run(tgt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := store.Get("dead"); err == nil {
+		t.Error("record of a dead session survived")
+	}
+	if _, err := store.Get("live"); err != nil {
+		t.Errorf("record of a live session was removed: %v", err)
+	}
 }

@@ -48,6 +48,7 @@ import (
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
+	"devsandbox/internal/session"
 )
 
 // Target names the roots a sweep runs against.
@@ -114,6 +115,18 @@ var catalogue = []Location{
 		Name:  "egress markers",
 		Path:  func(t Target) string { return egress.MarkerRoot(t.HomeDir) },
 		Sweep: func(t Target) (int, error) { return egress.SweepMarkers(egress.MarkerRoot(t.HomeDir)) },
+	},
+	// 2. Session records: one JSON file per proxy-mode session, carrying the
+	// owning pid. A record goes once its pid is dead, or once nothing has
+	// written it for 30 days - the backstop for a pid the probe cannot confirm
+	// dead, because while the record survives it holds its session name
+	// against every later launch.
+	{
+		Name: "session records",
+		Path: func(t Target) string { return session.DefaultDir(t.HomeDir) },
+		Sweep: func(t Target) (int, error) {
+			return session.NewStore(session.DefaultDir(t.HomeDir)).CleanStaleErr()
+		},
 	},
 	// 7. Run directories: one socket directory per running devsandbox process,
 	// named by pid. Swept on every launch by cleanupStaleRunDirs before any

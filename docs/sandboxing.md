@@ -459,6 +459,8 @@ devsandbox --proxy --name myapp
 
 If omitted, the name is auto-generated from the working directory basename.
 
+Each session is recorded as a JSON file under `$XDG_STATE_HOME/devsandbox/sessions/` (`~/.local/state/devsandbox/sessions/` when unset). The record is removed once its process is gone. A record whose process cannot be confirmed gone - a process id since reused by another user - is kept until nothing has written it for 30 days, and holds its session name for that long.
+
 **List running sessions:**
 
 ```bash
