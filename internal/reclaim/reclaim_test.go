@@ -3,7 +3,9 @@ package reclaim
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -208,7 +210,13 @@ func TestLocationRun_CompleteTarget(t *testing.T) {
 	})
 }
 
+// Sets process environment, so it must not call t.Parallel().
 func TestLocations_Invariants(t *testing.T) {
+	// Locations rooted in the state directory honor $XDG_STATE_HOME, which
+	// can point anywhere; with it unset they fall back under the home the
+	// Target names, which is what the containment check below assumes.
+	t.Setenv("XDG_STATE_HOME", "")
+
 	locs := Locations()
 	if len(locs) == 0 {
 		t.Fatal("Locations() is empty")
@@ -300,6 +308,70 @@ func TestLocations_ReportedOnlyRunTouchesNothing(t *testing.T) {
 		if entries != 1 || size != 9 {
 			t.Errorf("%q: after Run, Usage = (%d, %d), want (1, 9): a reported-only location acted", loc.Name, entries, size)
 		}
+	}
+}
+
+// reapedPID returns the pid of a process that has exited and been waited for,
+// so the kernel no longer knows it.
+func reapedPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait for helper process: %v", err)
+	}
+	return pid
+}
+
+func locationNamed(t *testing.T, name string) Location {
+	t.Helper()
+	for _, loc := range Locations() {
+		if loc.Name == name {
+			return loc
+		}
+	}
+	t.Fatalf("no location named %q in %v", name, names(Locations()))
+	return Location{}
+}
+
+// TestLocations_EgressMarkers runs location 1 against a real marker root and
+// asserts it sweeps through the owner's function: the marker of a dead launch
+// goes, a live launch's stays, and the count reports what went.
+//
+// Sets process environment, so it must not call t.Parallel().
+func TestLocations_EgressMarkers(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	loc := locationNamed(t, "egress markers")
+	if loc.PerSandbox {
+		t.Fatal("egress markers is registered per sandbox, want host-scoped")
+	}
+	tgt := Target{HomeDir: filepath.Join(t.TempDir(), "home")}
+
+	root := loc.Path(tgt)
+	if want := filepath.Join(state, "devsandbox", "egress"); root != want {
+		t.Fatalf("Path = %q, want %q", root, want)
+	}
+	dead := filepath.Join(root, strconv.Itoa(reapedPID(t)))
+	live := filepath.Join(root, strconv.Itoa(os.Getpid()))
+	writeFile(t, filepath.Join(dead, "applied"), 0)
+	writeFile(t, filepath.Join(live, "applied"), 0)
+
+	n, err := loc.Run(tgt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(dead); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("marker of a dead launch survived: stat = %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("marker of a live launch was removed: stat = %v", err)
 	}
 }
 

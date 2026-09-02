@@ -44,6 +44,7 @@ import (
 	"path/filepath"
 	"slices"
 
+	"devsandbox/internal/egress"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
@@ -102,6 +103,18 @@ func (l Location) Run(target Target) (int, error) {
 // each carries in the plan's discovery table so a reviewer can tie a row to
 // its entry; host-scoped locations come first, then per-sandbox ones.
 var catalogue = []Location{
+	// 1. Egress markers: one directory per proxy-mode bwrap launch, named by
+	// pid, holding the file the lockdown prologue creates right before it execs
+	// the workload. The launch removes its own at exit; a kill leaves it. A
+	// marker whose pid is dead goes on sight, a pre-pid lockdown-* name by age.
+	// A pid answering EPERM is kept with no backstop: sweeping a live session's
+	// marker makes its own exit 78 read as an aborted lockdown, and the leak is
+	// one empty directory.
+	{
+		Name:  "egress markers",
+		Path:  func(t Target) string { return egress.MarkerRoot(t.HomeDir) },
+		Sweep: func(t Target) (int, error) { return egress.SweepMarkers(egress.MarkerRoot(t.HomeDir)) },
+	},
 	// 7. Run directories: one socket directory per running devsandbox process,
 	// named by pid. Swept on every launch by cleanupStaleRunDirs before any
 	// tool creates a socket, so a prune sweep would reclaim nothing a launch

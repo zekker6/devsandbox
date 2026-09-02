@@ -241,34 +241,27 @@ func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, shellCmd, portForwardA
 }
 
 // egressMarkerDir creates the host directory the lockdown marker is written in,
-// rooted at $XDG_STATE_HOME/devsandbox (falling back to ~/.local/state/devsandbox)
-// the way every other host-owned record in this project is.
+// under egress.MarkerRoot: $XDG_STATE_HOME/devsandbox/egress, falling back to
+// ~/.local/state/devsandbox/egress, the way every other host-owned record in
+// this project is rooted - and deliberately not $TMPDIR, for the reason
+// MarkerRoot gives.
 //
-// Not $TMPDIR, which is what os.MkdirTemp("", ...) resolves against: $TMPDIR is
-// whatever the invoking user set, so it can name a directory bound read-write
-// into the sandbox - and a workload that can delete the marker can make its own
-// exit code 78 read as an aborted lockdown, which is exactly the signal the
-// marker exists to give. The sandbox repoints XDG_STATE_HOME at its synthetic
-// home, so this path is unreachable from inside no matter how the host is
-// configured.
+// The launch removes its own marker when it returns, but a kill skips that, so
+// the root is swept first: a marker whose recorded pid is dead, or one from
+// before markers recorded a pid that is old enough for no launch to be using
+// it, is removed. The sweep is best effort. A launch must never fail because
+// an old marker could not be removed, so a failure is reported and the launch
+// goes on with its own fresh marker.
 func egressMarkerDir() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve the home directory for the egress lockdown marker: %w", err)
-		}
-		base = filepath.Join(home, ".local", "state")
-	}
-	base = filepath.Join(base, "devsandbox", "egress")
-	if err := os.MkdirAll(base, 0o700); err != nil {
-		return "", fmt.Errorf("create the egress lockdown marker directory %s: %w", base, err)
-	}
-	dir, err := os.MkdirTemp(base, "lockdown-")
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("create the egress lockdown marker directory: %w", err)
+		return "", fmt.Errorf("resolve the home directory for the egress lockdown marker: %w", err)
 	}
-	return dir, nil
+	root := egress.MarkerRoot(home)
+	if _, err := egress.SweepMarkers(root); err != nil {
+		notice.Info("egress lockdown markers: not every stale entry under %s could be reclaimed: %v", root, err)
+	}
+	return egress.NewMarkerDir(root)
 }
 
 // egressLockdown describes the proxy-only egress restriction the pasta wrapper

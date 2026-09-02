@@ -1,22 +1,27 @@
 package isolator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"devsandbox/internal/bwrap"
 	"devsandbox/internal/cgroups"
 	"devsandbox/internal/config"
 	"devsandbox/internal/egress"
 	"devsandbox/internal/network"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
 )
 
@@ -189,6 +194,9 @@ func startedSandboxProcess(t *testing.T, code, namespacePID int) *bwrap.SandboxP
 // refuse.
 func stubEgressPreflight(t *testing.T) {
 	t.Helper()
+	// The launch sweeps the marker root before it creates its own marker, so
+	// point it at a throwaway root rather than the host's real state directory.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	prevResolve, prevProbe := resolveEgressTools, probeEgressLockdown
 	resolveEgressTools = func() (egress.Tools, error) {
 		return egress.Tools{IP: "/usr/bin/ip", Firewall: "/usr/sbin/nft", Backend: egress.BackendNft}, nil
@@ -625,11 +633,113 @@ func TestEgressMarkerDirIgnoresTMPDIR(t *testing.T) {
 	if strings.HasPrefix(dir, tmp) {
 		t.Errorf("egressMarkerDir() = %s, must not live under TMPDIR %s", dir, tmp)
 	}
-	want := filepath.Join(state, "devsandbox", "egress")
-	if !strings.HasPrefix(dir, want+string(os.PathSeparator)) {
-		t.Errorf("egressMarkerDir() = %s, want a directory under %s", dir, want)
+	want := filepath.Join(state, "devsandbox", "egress", strconv.Itoa(os.Getpid()))
+	if dir != want {
+		t.Errorf("egressMarkerDir() = %s, want the pid-named directory %s", dir, want)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("egressMarkerDir() did not create the directory: %v", err)
+	}
+}
+
+// reapedPID returns the pid of a process that has exited and been waited for,
+// so the kernel no longer knows it.
+func reapedPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait for helper process: %v", err)
+	}
+	return pid
+}
+
+// TestEgressMarkerDirSweepsStaleMarkers asserts a launch reclaims the markers a
+// killed launch left behind before it writes its own, and leaves a live
+// launch's marker alone.
+//
+// Sets process environment, so it must not call t.Parallel().
+func TestEgressMarkerDirSweepsStaleMarkers(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	root := filepath.Join(state, "devsandbox", "egress")
+	dead := filepath.Join(root, strconv.Itoa(reapedPID(t)))
+	live := filepath.Join(root, "lockdown-live")
+	for _, dir := range []string{dead, live} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	dir, err := egressMarkerDir()
+	if err != nil {
+		t.Fatalf("egressMarkerDir() error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	if _, err := os.Stat(dead); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("marker of a dead launch survived: stat = %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("a recent pre-pid marker was removed: stat = %v", err)
+	}
+}
+
+// TestEgressMarkerDirReportsSweepFailure asserts the sweep is best effort: a
+// marker that cannot be removed is reported at Info, never as a warning that
+// would gate the launch, and the launch still gets a usable marker directory.
+//
+// Sets process environment and the notice sink, so it must not call
+// t.Parallel().
+func TestEgressMarkerDirReportsSweepFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	root := filepath.Join(state, "devsandbox", "egress")
+	stuck := filepath.Join(root, "lockdown-stuck")
+	applied := filepath.Join(stuck, "applied")
+	if err := os.MkdirAll(stuck, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(applied, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Old enough to be reclaimed, in a directory whose entry cannot be unlinked.
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	for _, p := range []string{applied, stuck} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+	if err := os.Chmod(stuck, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stuck, 0o700) })
+
+	var stderr bytes.Buffer
+	if err := notice.Setup("", false, &stderr); err != nil {
+		t.Fatalf("notice.Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = notice.Setup("", false, io.Discard) })
+
+	dir, err := egressMarkerDir()
+	if err != nil {
+		t.Fatalf("egressMarkerDir() error = %v; a failed sweep must not fail the launch", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	if err := os.WriteFile(filepath.Join(dir, "applied"), nil, 0o600); err != nil {
+		t.Errorf("the returned marker directory is not writable: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "lockdown-stuck") {
+		t.Errorf("the failed removal was not reported; stderr:\n%s", stderr.String())
+	}
+	if raised, _ := notice.Raised(); len(raised) != 0 {
+		t.Errorf("the sweep failure was raised as a warning, which would gate every launch on a prompt: %+v", raised)
 	}
 }
