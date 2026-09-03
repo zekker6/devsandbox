@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"devsandbox/internal/config"
+	"devsandbox/internal/fsutil"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 )
@@ -115,7 +116,7 @@ func runProxyMonitorServer(sandboxBase string) error {
 	}
 
 	lockPath := proxy.AskLockPath(sandboxBase)
-	lock, err := proxy.TryFileLock(lockPath)
+	lock, err := fsutil.TryFileLock(lockPath)
 	if err != nil {
 		return fmt.Errorf("another monitor already owns this socket: %w", err)
 	}

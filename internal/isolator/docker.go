@@ -17,6 +17,7 @@ import (
 
 	"devsandbox/internal/config"
 	"devsandbox/internal/egress"
+	"devsandbox/internal/fsutil"
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
@@ -1034,9 +1035,9 @@ func (d *DockerIsolator) microVMSessionActiveError(containerName string) error {
 // never unlinked) is simply re-locked. The lock lives in the host temp dir, not
 // the guest-visible sandbox home, so untrusted guest code cannot remove it to
 // defeat the exclusion.
-func acquireMicroVMSessionLock(containerName string) (*proxy.FileLock, error) {
+func acquireMicroVMSessionLock(containerName string) (*fsutil.FileLock, error) {
 	lockPath := filepath.Join(os.TempDir(), containerName+".krun.lock")
-	lock, err := proxy.TryFileLock(lockPath)
+	lock, err := fsutil.TryFileLock(lockPath)
 	if err != nil {
 		return nil, fmt.Errorf("acquire krun session lock for container %q (a session may already be active; stop it before starting another): %w", containerName, err)
 	}
