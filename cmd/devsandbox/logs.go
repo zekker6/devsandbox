@@ -24,6 +24,7 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 
+	"devsandbox/internal/logrotate"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
@@ -1147,8 +1148,8 @@ func viewInternalLogs(logDir, logType string, last int, since time.Time) error {
 	// Collect lines from relevant log files
 	switch logType {
 	case "logging":
-		l, err := readLoggingErrorsLog(filepath.Join(logDir, "logging-errors.log"), since)
-		if err != nil && !os.IsNotExist(err) {
+		l, err := readLoggingErrorsLogs(filepath.Join(logDir, "logging-errors.log"), since)
+		if err != nil {
 			return err
 		}
 		lines = append(lines, l...)
@@ -1162,8 +1163,8 @@ func viewInternalLogs(logDir, logType string, last int, since time.Time) error {
 
 	default: // "all"
 		// Read logging errors
-		l1, err := readLoggingErrorsLog(filepath.Join(logDir, "logging-errors.log"), since)
-		if err != nil && !os.IsNotExist(err) {
+		l1, err := readLoggingErrorsLogs(filepath.Join(logDir, "logging-errors.log"), since)
+		if err != nil {
 			notice.Warn("%v", err)
 		}
 		lines = append(lines, l1...)
@@ -1194,6 +1195,29 @@ func viewInternalLogs(logDir, logType string, last int, since time.Time) error {
 	}
 
 	return nil
+}
+
+// readLoggingErrorsLogs reads the logging error log together with the backups
+// rotation left beside it, oldest first. Reading only the live path reports no
+// logging errors in exactly the window where there are most of them: a
+// rotation moves every existing entry into logging-errors.log.1 and leaves the
+// name this command reads holding nothing.
+//
+// A path that is not there is not an error - a sandbox that never logged one
+// has no live file, and a log that has not rotated yet has no backups.
+func readLoggingErrorsLogs(path string, since time.Time) ([]string, error) {
+	var lines []string
+	for _, p := range append(logrotate.BackupPaths(path), path) {
+		l, err := readLoggingErrorsLog(p, since)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return lines, err
+		}
+		lines = append(lines, l...)
+	}
+	return lines, nil
 }
 
 func readLoggingErrorsLog(path string, since time.Time) ([]string, error) {
@@ -1375,6 +1399,14 @@ func tailFile(path string, offset int64) ([]string, int64, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, offset, err
+	}
+
+	// A rotation replaces the log with an empty file, so the offset held from
+	// the previous inode is past the end of the file this path names now.
+	// Without the reset the follow waits for the new log to grow past a size
+	// it no longer has, which is a tail that goes silent for good.
+	if info.Size() < offset {
+		offset = 0
 	}
 
 	if info.Size() <= offset {

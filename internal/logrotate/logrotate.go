@@ -107,6 +107,22 @@ func BackupPath(path string, n int) string {
 	return path + "." + strconv.Itoa(n)
 }
 
+// BackupPaths names every backup slot of path, oldest first, whether or not
+// the file is there.
+//
+// A reader of a rotated log has to look where the rotation put the bytes, the
+// same reason BackupPath is exported: the live path holds only what was
+// written since the last rotation, and right after one it holds nothing at
+// all. Oldest first, so a caller that reads each file in turn keeps the log in
+// the order it was written.
+func BackupPaths(path string) []string {
+	paths := make([]string, 0, DefaultMaxFiles-1)
+	for i := DefaultMaxFiles - 1; i >= 1; i-- {
+		paths = append(paths, BackupPath(path, i))
+	}
+	return paths
+}
+
 func overLimit(path string, maxSize int64) bool {
 	// Lstat, not Stat: a symlink at the log path is not something to rename
 	// aside, and following it would rotate a file the path does not own.

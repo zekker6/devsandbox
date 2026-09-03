@@ -305,8 +305,7 @@ func Usage(path string) (entries int, size int64, err error) {
 	if err == nil {
 		entries, size = 1, info.Size()
 	}
-	for i := 1; i < logrotate.DefaultMaxFiles; i++ {
-		backup := logrotate.BackupPath(path, i)
+	for _, backup := range logrotate.BackupPaths(path) {
 		bi, err := os.Stat(backup)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {

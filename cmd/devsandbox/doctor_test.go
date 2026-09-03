@@ -11,6 +11,7 @@ import (
 
 	"devsandbox/internal/egress"
 	"devsandbox/internal/isolator"
+	"devsandbox/internal/logrotate"
 	"devsandbox/internal/sandbox"
 )
 
@@ -338,5 +339,100 @@ func TestCheckRecentLogsStaysAdvisory(t *testing.T) {
 	}
 	if !strings.Contains(r.hint, "devsandbox logs internal") {
 		t.Errorf("hint = %q, want it to name the logs command", r.hint)
+	}
+}
+
+// TestCheckRecentLogsReadsRotatedBackups pins the scan to the files rotation
+// left the entries in. Right after a rotation the live log is empty and every
+// entry from the last 24h sits in the backup beside it, so a scan filtered on
+// the .log suffix alone reports a clean host precisely when it is not one.
+func TestCheckRecentLogsReadsRotatedBackups(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	logDir := filepath.Join(home, ".local", "share", sandbox.SandboxBaseDir, "proj", "logs", "internal")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	live := filepath.Join(logDir, "logging-errors.log")
+	if err := os.WriteFile(live, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var b strings.Builder
+	now := time.Now()
+	for i := range 3 {
+		fmt.Fprintf(&b, "%s [logging] boom\n", now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339))
+	}
+	if err := os.WriteFile(logrotate.BackupPath(live, 1), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := checkRecentLogs()
+	if !strings.Contains(r.message, "3 errors in last 24h") {
+		t.Errorf("message = %q, want it to count the errors in the rotated backup", r.message)
+	}
+	if !strings.Contains(r.message, "logging:3") {
+		t.Errorf("message = %q, want the component breakdown from the backup", r.message)
+	}
+}
+
+// TestCheckRecentLogsReadsBackupWithoutLiveFile pins discovery to the backups
+// themselves. logrotate.Rotate renames the live file aside before its caller
+// recreates it, so a process killed between the two leaves logging-errors.log.1
+// alone in the directory - and a scan that only ever starts from a .log entry
+// reports a clean host while every recent error sits right there.
+func TestCheckRecentLogsReadsBackupWithoutLiveFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	logDir := filepath.Join(home, ".local", "share", sandbox.SandboxBaseDir, "proj", "logs", "internal")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	live := filepath.Join(logDir, "logging-errors.log")
+
+	var b strings.Builder
+	now := time.Now()
+	for i := range 2 {
+		fmt.Fprintf(&b, "%s [logging] boom\n", now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339))
+	}
+	if err := os.WriteFile(logrotate.BackupPath(live, 1), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(live); !os.IsNotExist(err) {
+		t.Fatalf("live log must not exist for this case, Lstat err = %v", err)
+	}
+
+	r := checkRecentLogs()
+	if !strings.Contains(r.message, "2 errors in last 24h") {
+		t.Errorf("message = %q, want it to count the errors in the orphaned backup", r.message)
+	}
+	if !strings.Contains(r.message, "logging:2") {
+		t.Errorf("message = %q, want the component breakdown from the backup", r.message)
+	}
+}
+
+func TestLiveLogName(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "sandbox.log", want: "sandbox.log"},
+		{name: "sandbox.log.1", want: "sandbox.log"},
+		{name: "sandbox.log.2", want: "sandbox.log"},
+		// One past the last slot rotation uses, derived so a change to the file
+		// limit moves the case rather than breaking it.
+		{name: fmt.Sprintf("sandbox.log.%d", logrotate.DefaultMaxFiles), want: ""},
+		{name: "sandbox.log.lock", want: ""},
+		{name: "sandbox.txt", want: ""},
+		{name: "sandbox", want: ""},
+	}
+	for _, tt := range tests {
+		if got := liveLogName(tt.name); got != tt.want {
+			t.Errorf("liveLogName(%q) = %q, want %q", tt.name, got, tt.want)
+		}
 	}
 }

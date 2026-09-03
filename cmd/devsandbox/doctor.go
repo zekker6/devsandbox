@@ -17,6 +17,7 @@ import (
 	"devsandbox/internal/egress"
 	"devsandbox/internal/embed"
 	"devsandbox/internal/isolator"
+	"devsandbox/internal/logrotate"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 )
@@ -704,15 +705,7 @@ func checkRecentLogs() checkResult {
 			filepath.Join(projectDir, "logs", "internal"),
 			filepath.Join(projectDir, "home", "logs", "internal"),
 		} {
-			files, err := os.ReadDir(sub)
-			if err != nil {
-				continue
-			}
-			for _, f := range files {
-				if !f.IsDir() && strings.HasSuffix(f.Name(), ".log") {
-					logFiles = append(logFiles, filepath.Join(sub, f.Name()))
-				}
-			}
+			logFiles = append(logFiles, internalLogFiles(sub)...)
 		}
 	}
 
@@ -766,6 +759,72 @@ func checkRecentLogs() checkResult {
 			"The count spans every project; inspect one at a time with:\n" +
 			"  devsandbox logs internal [sandbox-name] --since 24h",
 	}
+}
+
+// internalLogFiles names every internal log file in dir that exists, the
+// backups rotation left beside each live log first.
+//
+// The backups hold the entries written before the rotation, which right after
+// one is every entry there is, so scanning the live names alone reports a
+// clean last 24h in the one window where it is least true. A backup also has
+// to be able to seed a log name on its own: logrotate.Rotate renames the live
+// file aside before its caller recreates it, so a process killed between the
+// two leaves logging-errors.log.1 with no logging-errors.log beside it, and a
+// scan that only ever starts from a .log entry would not look at it at all.
+func internalLogFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var names []string
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		live := liveLogName(e.Name())
+		if live == "" || seen[live] {
+			continue
+		}
+		seen[live] = true
+		names = append(names, live)
+	}
+
+	var files []string
+	for _, name := range names {
+		live := filepath.Join(dir, name)
+		for _, p := range append(logrotate.BackupPaths(live), live) {
+			if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() {
+				files = append(files, p)
+			}
+		}
+	}
+	return files
+}
+
+// liveLogName maps a log directory entry to the live log it belongs to,
+// answering "" for a name that is neither a log nor one of its backups.
+// The backup spellings come from logrotate rather than being reproduced here,
+// so a name outside the slots rotation actually uses cannot seed a log.
+func liveLogName(name string) string {
+	if strings.HasSuffix(name, ".log") {
+		return name
+	}
+	dot := strings.LastIndex(name, ".")
+	if dot < 0 {
+		return ""
+	}
+	live := name[:dot]
+	if !strings.HasSuffix(live, ".log") {
+		return ""
+	}
+	for _, backup := range logrotate.BackupPaths(live) {
+		if backup == name {
+			return live
+		}
+	}
+	return ""
 }
 
 // scanLogFile reads a log file and counts recent errors after cutoff.
