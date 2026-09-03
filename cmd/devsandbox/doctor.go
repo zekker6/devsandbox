@@ -691,9 +691,9 @@ func checkRecentLogs() checkResult {
 	}
 
 	// Collect all internal log directories across projects.
-	// Logs live in two places per project:
-	//   {project}/logs/internal/         (proxy internal errors)
-	//   {project}/home/logs/internal/    (sandbox/main errors)
+	// Every host-written log now lives in {project}/logs/internal/. The
+	// home-side directory is still read because sandboxes created before that
+	// move keep their sandbox.log, tools-errors.log and <engine>.log there.
 	var logFiles []string
 	for _, e := range entries {
 		if !e.IsDir() {

@@ -47,6 +47,8 @@ import (
 
 	"devsandbox/internal/egress"
 	"devsandbox/internal/herdrstate"
+	"devsandbox/internal/logrotate"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
@@ -144,6 +146,20 @@ var catalogue = []Location{
 		Path:  func(t Target) string { return herdrstate.DefaultDir(t.HomeDir) },
 		Sweep: func(t Target) (int, error) { return herdrstate.Prune(herdrstate.DefaultDir(t.HomeDir)) },
 	},
+	// 4. Wrapper log: one append-only file carrying every wrapper diagnostic
+	// from every devsandbox invocation on this host. Nothing removed anything
+	// from it before; it is bounded now by a rotation that runs before each
+	// invocation's append handle opens, and the sweep is that same rotation,
+	// so what it reclaims is the backups past the file limit. It has no owner
+	// to record because it has no per-entry owner: it is one file, shared by
+	// every launch and outliving all of them.
+	{
+		Name: "wrapper log",
+		Path: func(t Target) string { return notice.DefaultLogPath(t.HomeDir) },
+		Sweep: func(t Target) (int, error) {
+			return logrotate.Rotate(notice.DefaultLogPath(t.HomeDir), logrotate.Options{})
+		},
+	},
 	// 5. Interrupted removals: sandbox trees a --rm teardown renamed aside
 	// under <SandboxBase>/.removing, named by the teardown's pid, that a kill
 	// between the rename and the delete stranded. A tree goes once its pid is
@@ -220,6 +236,21 @@ var catalogue = []Location{
 		PerSandbox: true,
 		Path: func(t Target) string {
 			return filepath.Join(t.SandboxRoot, proxy.LogBaseDirName, proxy.ProxyLogDirName)
+		},
+	},
+	// 11. Internal error logs: sandbox.log, tools-errors.log, <engine>.log and
+	// logging-errors.log, all opened O_APPEND by the host once per launch of
+	// this sandbox. Each is rotated by internal/logging when it opens, which
+	// bounds every one of them at the moment they are next written; reported
+	// only, because a sweep here would rotate a log no process holds open and
+	// reclaim nothing the next launch does not. Under SandboxRoot: SandboxHome
+	// is bound read-write into the sandbox, so a host-written log there is on a
+	// path sandboxed code can replace.
+	{
+		Name:       "internal error logs",
+		PerSandbox: true,
+		Path: func(t Target) string {
+			return filepath.Join(t.SandboxRoot, proxy.LogBaseDirName, proxy.InternalLogDirName)
 		},
 	},
 }

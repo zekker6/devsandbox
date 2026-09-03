@@ -111,3 +111,31 @@ func overLimit(path string, maxSize int64) bool {
 	}
 	return info.Size() >= maxSize
 }
+
+// ReopenIfRotated returns a handle on path when f no longer names the file
+// path currently names, and f itself otherwise.
+//
+// A process that holds a log open while another process rotates it keeps
+// appending to the renamed inode: its lines land in the backup, which grows
+// unbounded because only the live path is ever size-checked. Every appender
+// therefore looks before it writes and migrates to the new inode.
+//
+// A failed stat or a failed open returns f unchanged, so the caller keeps a
+// working handle and never drops the write - the same file the previous
+// behavior would have used.
+func ReopenIfRotated(f *os.File, path string, perm os.FileMode) *os.File {
+	if f == nil || path == "" {
+		return f
+	}
+	onDisk, err := os.Stat(path)
+	fromFD, ferr := f.Stat()
+	if err == nil && ferr == nil && os.SameFile(onDisk, fromFD) {
+		return f
+	}
+	reopened, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, perm)
+	if err != nil {
+		return f
+	}
+	_ = f.Close()
+	return reopened
+}

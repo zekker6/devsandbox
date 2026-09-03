@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"devsandbox/internal/logrotate"
 )
 
 type captured struct {
@@ -455,4 +457,175 @@ func TestRaisedSnapshotIsIndependent(t *testing.T) {
 	if entries[0].Msg != "first" {
 		t.Fatalf("retained entry = %q, want %q", entries[0].Msg, "first")
 	}
+}
+
+// oversizedLog creates a log file at path that is at the rotation limit, using
+// a sparse truncate so the test does not write eight megabytes.
+func oversizedLog(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Truncate(logrotate.DefaultMaxSize); err != nil {
+		t.Fatalf("truncate %s: %v", path, err)
+	}
+}
+
+func TestSetupRotatesWrapperLog(t *testing.T) {
+	resetForTest(t)
+	logPath := filepath.Join(t.TempDir(), "wrapper.log")
+	oversizedLog(t, logPath)
+
+	var buf bytes.Buffer
+	if err := Setup(logPath, false, &buf); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	if _, err := os.Stat(logPath + ".1"); err != nil {
+		t.Fatalf("stat backup: %v - the oversized log was not rotated aside", err)
+	}
+	Info("after rotation")
+	live, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read live log: %v", err)
+	}
+	if !strings.Contains(string(live), "after rotation") {
+		t.Errorf("live log = %q, want the notice written after rotation", live)
+	}
+	if int64(len(live)) >= logrotate.DefaultMaxSize {
+		t.Errorf("live log is %d bytes: the append landed in the old file, not a fresh one", len(live))
+	}
+}
+
+// TestSetupReportsRotationFailureAfterUnlock pins where the failure is
+// reported, not just that it is. Setup holds state.mu for its whole body and
+// every notice takes that same mutex, so an emission from inside it would
+// deadlock this goroutine and the test would fail by timeout rather than by
+// assertion.
+func TestSetupReportsRotationFailureAfterUnlock(t *testing.T) {
+	resetForTest(t)
+	logPath := filepath.Join(t.TempDir(), "wrapper.log")
+	oversizedLog(t, logPath)
+	// A directory where the lock file goes: the lock cannot be taken, so the
+	// rotation fails with the log still in place.
+	if err := os.Mkdir(logPath+".lock", 0o755); err != nil {
+		t.Fatalf("mkdir lock: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := Setup(logPath, false, &buf); err != nil {
+		t.Fatalf("Setup = %v, want the setup to succeed despite the rotation failure", err)
+	}
+
+	if _, err := os.Stat(logPath + ".1"); err == nil {
+		t.Error("a backup exists: the rotation was expected to fail")
+	}
+	if !strings.Contains(buf.String(), "not rotated") {
+		t.Errorf("stderr = %q, want the rotation failure reported", buf.String())
+	}
+	entries, _ := Raised()
+	if len(entries) != 0 {
+		t.Errorf("Raised() = %v, want empty: a rotation failure is Info, and a warning at startup gates every launch on the confirmation prompt", entries)
+	}
+
+	// The log still opened: the append has to keep working.
+	before, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat log: %v", err)
+	}
+	Info("after failed rotation")
+	after, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat log: %v", err)
+	}
+	if after.Size() <= before.Size() {
+		t.Error("the log did not grow: the append handle was not opened")
+	}
+}
+
+func TestWriteReopensAfterRotation(t *testing.T) {
+	resetForTest(t)
+	logPath := filepath.Join(t.TempDir(), "wrapper.log")
+	var buf bytes.Buffer
+	if err := Setup(logPath, false, &buf); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	Info("before rotation")
+	// Another process rotates the log out from under this handle.
+	if err := os.Rename(logPath, logPath+".1"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	Info("after rotation")
+
+	live, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read live log: %v - the writer did not reopen the rotated path", err)
+	}
+	if !strings.Contains(string(live), "after rotation") {
+		t.Errorf("live log = %q, want the notice written after the rotation", live)
+	}
+	rotated, err := os.ReadFile(logPath + ".1")
+	if err != nil {
+		t.Fatalf("read rotated log: %v", err)
+	}
+	if strings.Contains(string(rotated), "after rotation") {
+		t.Error("the rotated file kept growing: the writer followed the rename instead of reopening")
+	}
+}
+
+func TestWriteKeepsOldHandleWhenReopenFails(t *testing.T) {
+	resetForTest(t)
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "state")
+	logPath := filepath.Join(logDir, "wrapper.log")
+	var buf bytes.Buffer
+	if err := Setup(logPath, false, &buf); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	Info("before rotation")
+
+	// Move the log aside and remove its directory, so the path names nothing
+	// and cannot be recreated: the reopen has to fail.
+	moved := filepath.Join(dir, "moved.log")
+	if err := os.Rename(logPath, moved); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.Remove(logDir); err != nil {
+		t.Fatalf("remove log dir: %v", err)
+	}
+
+	Info("after failed reopen")
+
+	got, err := os.ReadFile(moved)
+	if err != nil {
+		t.Fatalf("read moved log: %v", err)
+	}
+	if !strings.Contains(string(got), "after failed reopen") {
+		t.Errorf("moved log = %q, want the write kept on the old handle rather than dropped", got)
+	}
+}
+
+func TestDefaultLogPath(t *testing.T) {
+	t.Run("honors XDG_STATE_HOME", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", filepath.Join("/state", "home"))
+		want := filepath.Join("/state", "home", "devsandbox", "wrapper.log")
+		if got := DefaultLogPath("/home/user"); got != want {
+			t.Errorf("DefaultLogPath = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("falls back under the home", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", "")
+		want := filepath.Join("/home", "user", ".local", "state", "devsandbox", "wrapper.log")
+		if got := DefaultLogPath(filepath.Join("/home", "user")); got != want {
+			t.Errorf("DefaultLogPath = %q, want %q", got, want)
+		}
+	})
 }

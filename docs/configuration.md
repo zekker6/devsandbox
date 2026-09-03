@@ -1164,6 +1164,12 @@ If remote logging fails (network issues, authentication errors, etc.), errors ar
 ~/.local/share/devsandbox/<project>/logs/internal/logging-errors.log
 ```
 
+That directory holds every log devsandbox writes on the host for this sandbox - `logging-errors.log`,
+`sandbox.log`, `tools-errors.log` and, on the `docker` and `krun` backends, `<engine>.log`. It sits
+beside the sandbox home rather than inside it, because the home is bound read-write into the sandbox.
+Each file is rotated when it reaches 8 MiB, at the point the launch opens it, and three files are kept
+per log.
+
 View logging errors:
 
 ```bash

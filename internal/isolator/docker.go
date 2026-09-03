@@ -316,8 +316,9 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		return err
 	}
 
-	// Set up logger for Docker isolator
-	logDir := filepath.Join(sandboxCfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
+	// Set up logger for Docker isolator. Under SandboxRoot: SandboxHome is
+	// mounted into the guest, so a host-written log there is guest-writable.
+	logDir := filepath.Join(sandboxCfg.SandboxRoot, proxy.LogBaseDirName, proxy.InternalLogDirName)
 	engineName := string(d.engine.backend)
 	dockerLogger, _ := logging.NewErrorLogger(filepath.Join(logDir, engineName+".log"))
 	d.SetLogger(logging.NewComponentLogger(engineName, dockerLogger, cfg.LogDispatcher))

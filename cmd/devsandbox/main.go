@@ -533,8 +533,12 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	defer func() { _ = iso.Cleanup() }()
 
-	// Set up logging infrastructure (shared between proxy and sandbox)
-	logDir := filepath.Join(cfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
+	// Set up logging infrastructure (shared between proxy and sandbox).
+	// Under SandboxRoot, not SandboxHome: the home is bound read-write into the
+	// sandbox at the host home path, so a log the host appends to there sits on
+	// a path sandboxed code can replace between launches - and rotation adds
+	// rename and unlink on that same path. The root is not bound.
+	logDir := filepath.Join(cfg.SandboxRoot, proxy.LogBaseDirName, proxy.InternalLogDirName)
 	sandboxLogger, err := logging.NewErrorLogger(filepath.Join(logDir, "sandbox.log"))
 	if err != nil {
 		sandboxLogger = nil
@@ -1205,16 +1209,15 @@ func ensureMiseTrust(projectDir string) error {
 // wrapperLogPath returns the path to the current wrapper log file, creating
 // parent directories on demand. Honors XDG_STATE_HOME, falls back to
 // ~/.local/state/devsandbox/wrapper.log.
+//
+// The path is spelled by internal/notice, which owns the log, so the reclaim
+// catalogue reports the file this process actually writes.
 func wrapperLogPath() string {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Join(os.TempDir(), "devsandbox-wrapper.log")
-		}
-		base = filepath.Join(home, ".local", "state")
+	home, err := os.UserHomeDir()
+	if err != nil && os.Getenv("XDG_STATE_HOME") == "" {
+		return filepath.Join(os.TempDir(), "devsandbox-wrapper.log")
 	}
-	return filepath.Join(base, "devsandbox", "wrapper.log")
+	return notice.DefaultLogPath(home)
 }
 
 // herdrPaneRecord returns the pane mapping to write for this launch, and false
@@ -1264,8 +1267,9 @@ func recordHerdrPaneMapping(cfg *sandbox.Config) error {
 // behavior on which agent is running must take it from there, never from
 // anything reported by the sandbox.
 func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Context) (bool, error), cleanup func()) {
-	// Create error logger for active tools
-	logDir := filepath.Join(cfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
+	// Create error logger for active tools. Under SandboxRoot for the reason
+	// runSandbox spells out: SandboxHome is sandbox-writable.
+	logDir := filepath.Join(cfg.SandboxRoot, proxy.LogBaseDirName, proxy.InternalLogDirName)
 	errorLogger, err := logging.NewErrorLogger(filepath.Join(logDir, "tools-errors.log"))
 	if err != nil {
 		// If we can't create the logger, return a no-op runner

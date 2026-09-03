@@ -772,7 +772,8 @@ socket = "/path/to/docker.sock"
 
 ### Error Logging
 
-Proxy errors are logged to `~/.local/share/devsandbox/<project>/logs/internal/tools-errors.log`
+Proxy errors are logged to `~/.local/share/devsandbox/<project>/logs/internal/tools-errors.log`, which is
+rotated at 8 MiB with three files kept.
 
 ### Checking Docker Status
 

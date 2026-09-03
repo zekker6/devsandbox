@@ -9,6 +9,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"devsandbox/internal/logrotate"
 )
 
 // Level mirrors the logging package's level strings without importing it
@@ -63,10 +65,43 @@ type noticeState struct {
 
 var state = &noticeState{stderr: os.Stderr}
 
+// DefaultLogPath returns the wrapper log path for homeDir. It honors
+// $XDG_STATE_HOME and falls back to
+// <homeDir>/.local/state/devsandbox/wrapper.log, so the log is host-owned:
+// $XDG_STATE_HOME is repointed at the synthetic home inside the sandbox.
+func DefaultLogPath(homeDir string) string {
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	if stateHome == "" {
+		stateHome = filepath.Join(homeDir, ".local", "state")
+	}
+	return filepath.Join(stateHome, "devsandbox", "wrapper.log")
+}
+
 // Setup initializes the notice package. logPath is where the wrapper log will
 // be written; verbose forces all messages to real stderr regardless of phase;
 // stderrOverride is used in tests (pass nil to use os.Stderr).
 func Setup(logPath string, verbose bool, stderrOverride io.Writer) error {
+	rotateErr, err := setupLocked(logPath, verbose, stderrOverride)
+	if err != nil {
+		return err
+	}
+	// Emitted here, after setupLocked released state.mu: every notice takes
+	// that same mutex, so emitting from inside it deadlocks the launch.
+	//
+	// Info, not Warn: the log opened either way, so there is nothing the user
+	// must act on, and a warning raised at PhaseStartup gates every launch on
+	// the warning confirmation prompt - on a condition that persists, that is
+	// a prompt on every launch.
+	if rotateErr != nil {
+		Info("Wrapper log was not rotated: %v", rotateErr)
+	}
+	return nil
+}
+
+// setupLocked performs the setup under state.mu and reports a rotation failure
+// separately from a setup failure: rotation is best-effort, so its error is
+// returned for the caller to emit rather than failing Setup.
+func setupLocked(logPath string, verbose bool, stderrOverride io.Writer) (rotateErr error, err error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
@@ -90,15 +125,19 @@ func Setup(logPath string, verbose bool, stderrOverride io.Writer) error {
 
 	if logPath != "" {
 		if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-			return fmt.Errorf("notice: mkdir log dir: %w", err)
+			return nil, fmt.Errorf("notice: mkdir log dir: %w", err)
 		}
+		// Rotate before the append handle opens, so this process never holds
+		// the inode being renamed aside. Nothing else bounds this file: it is
+		// appended to by every devsandbox invocation and removed by none.
+		_, rotateErr = logrotate.Rotate(logPath, logrotate.Options{})
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
-			return fmt.Errorf("notice: open log: %w", err)
+			return rotateErr, fmt.Errorf("notice: open log: %w", err)
 		}
 		state.logFile = f
 	}
-	return nil
+	return rotateErr, nil
 }
 
 // LogPath returns the current wrapper log path (empty if not configured).
@@ -120,6 +159,7 @@ func writeMessagePhase(level string, always bool, format string, args ...any) {
 	defer state.mu.Unlock()
 
 	// Always write to log file if configured.
+	state.reopenIfRotatedLocked()
 	if state.logFile != nil {
 		fmt.Fprintf(state.logFile, "[%s] %s", level, msg) //nolint:errcheck
 		if len(msg) == 0 || msg[len(msg)-1] != '\n' {
@@ -237,6 +277,16 @@ func (s *noticeState) recordRaisedLocked(lvl Level, msg string) {
 		s.raisedLost++
 	}
 	s.raised = append(s.raised, Entry{Level: lvl, Msg: msg})
+}
+
+// reopenIfRotatedLocked points the log handle back at logPath once the file it
+// holds is no longer the file that path names - which is what another process
+// rotating the log does to it. Following the rename would keep this process
+// appending into wrapper.log.1, which grows while the fresh wrapper.log stays
+// small and never trips the size check again, leaving the total unbounded.
+// Caller holds state.mu.
+func (s *noticeState) reopenIfRotatedLocked() {
+	s.logFile = logrotate.ReopenIfRotated(s.logFile, s.logPath, 0o644)
 }
 
 // bufferLocked appends a captured entry to the ring; oldest is dropped on

@@ -511,7 +511,9 @@ Wrapper diagnostics (port-forward notices, proxy setup info, container progress)
 is unset). They also reach stderr during startup and teardown, but
 not while the child process owns the terminal - there they would corrupt a full-screen TUI, so a
 one-line banner on exit points at the log instead. `--verbose` writes them to stderr in every phase,
-so you can watch a running sandbox without tailing the log. `DEVSANDBOX_DEBUG=1` implies it and adds
+so you can watch a running sandbox without tailing the log. The log is rotated when it reaches
+8 MiB and three files are kept (`wrapper.log`, `wrapper.log.1`, `wrapper.log.2`), so it is
+bounded without you having to clear it. `DEVSANDBOX_DEBUG=1` implies it and adds
 the bwrap arguments and a
 [per-request proxy trace](proxy.md#debugging-the-requestresponse-lifecycle).
 

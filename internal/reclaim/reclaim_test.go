@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"devsandbox/internal/herdrstate"
+	"devsandbox/internal/logrotate"
+	"devsandbox/internal/notice"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 	"devsandbox/internal/session"
@@ -710,5 +712,90 @@ func TestLocations_LiveSharedTmp(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("removed = %d, want 0", n)
+	}
+}
+
+// TestLocations_WrapperLog runs location 4 against a real wrapper log and
+// asserts the sweep is the rotation that bounds it: a log under the limit is
+// left alone, one at the limit is rotated aside, and the backups past the file
+// limit are what the sweep reports removing.
+//
+// Sets process environment, so it must not call t.Parallel().
+func TestLocations_WrapperLog(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	loc := locationNamed(t, "wrapper log")
+	if loc.PerSandbox {
+		t.Fatal("wrapper log is registered per sandbox, want host-scoped")
+	}
+	tgt := Target{HomeDir: filepath.Join(t.TempDir(), "home")}
+
+	path := loc.Path(tgt)
+	if want := filepath.Join(state, "devsandbox", "wrapper.log"); path != want {
+		t.Fatalf("Path = %q, want %q", path, want)
+	}
+	if got := notice.DefaultLogPath(tgt.HomeDir); got != path {
+		t.Errorf("notice.DefaultLogPath = %q, want the catalogue path %q", got, path)
+	}
+
+	n, err := loc.Run(tgt)
+	if err != nil || n != 0 {
+		t.Fatalf("Run on a host with no wrapper log = (%d, %v), want (0, nil)", n, err)
+	}
+
+	writeFile(t, path, 16)
+	if n, err = loc.Run(tgt); err != nil || n != 0 {
+		t.Fatalf("Run on a log under the limit = (%d, %v), want (0, nil)", n, err)
+	}
+	if _, err := os.Stat(path + ".1"); err == nil {
+		t.Error("a log under the limit was rotated")
+	}
+
+	// At the limit, with every backup slot already taken: the rotation shifts
+	// them up and the oldest is the entry the sweep reclaims.
+	if err := os.Truncate(path, logrotate.DefaultMaxSize); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	writeFile(t, path+".1", 1)
+	writeFile(t, path+".2", 2)
+	n, err = loc.Run(tgt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1 (the backup past the file limit)", n)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Error("the oversized log is still in place: it was not rotated aside")
+	}
+	backup, err := os.Stat(path + ".1")
+	if err != nil {
+		t.Fatalf("stat backup: %v", err)
+	}
+	if backup.Size() != logrotate.DefaultMaxSize {
+		t.Errorf("backup size = %d, want the rotated log's %d", backup.Size(), logrotate.DefaultMaxSize)
+	}
+}
+
+// TestLocations_InternalErrorLogs pins location 11 to the directory the host
+// actually writes - under SandboxRoot, which the sandbox cannot write, rather
+// than under SandboxHome, which it can - and to being reported only: the logs
+// are bounded by the rotation internal/logging runs when it opens them.
+func TestLocations_InternalErrorLogs(t *testing.T) {
+	loc := locationNamed(t, "internal error logs")
+	if !loc.PerSandbox {
+		t.Fatal("internal error logs is registered host-scoped, want per sandbox")
+	}
+	if loc.Sweep != nil {
+		t.Error("internal error logs has a Sweep: the logs rotate at open, and a sweep here would rotate a log no process holds")
+	}
+
+	full := fullTarget()
+	path := loc.Path(full)
+	if want := filepath.Join(full.SandboxRoot, "logs", "internal"); path != want {
+		t.Fatalf("Path = %q, want %q", path, want)
+	}
+	if within(path, full.SandboxHome) {
+		t.Errorf("Path %q is under SandboxHome %q, which is bound read-write into the sandbox", path, full.SandboxHome)
 	}
 }

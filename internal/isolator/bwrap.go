@@ -85,8 +85,10 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 
 	sandboxCfg := cfg.SandboxCfg
 
-	// Set up structured logging
-	logDir := filepath.Join(sandboxCfg.SandboxHome, proxy.LogBaseDirName, proxy.InternalLogDirName)
+	// Set up structured logging. Under SandboxRoot: SandboxHome is bound
+	// read-write into the sandbox, so a host-written log there is on a path
+	// sandboxed code can replace.
+	logDir := filepath.Join(sandboxCfg.SandboxRoot, proxy.LogBaseDirName, proxy.InternalLogDirName)
 	sandboxLogger := cfg.SandboxLogger
 	if sandboxLogger == nil {
 		sandboxLogger, _ = logging.NewErrorLogger(filepath.Join(logDir, "sandbox.log"))

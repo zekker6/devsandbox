@@ -6,73 +6,75 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"devsandbox/internal/logrotate"
 )
 
 // ErrorLogger logs errors from the logging subsystem to a local file.
 // This prevents silent failures when remote logging destinations are unreachable.
 type ErrorLogger struct {
 	file *os.File
+	path string
 	mu   sync.Mutex
 }
 
 // NewErrorLogger creates an error logger that writes to the specified file.
 // The file is created if it doesn't exist, and appended to if it does.
+//
+// The log is rotated before the append handle opens, so a long-lived host
+// keeps a bounded number of bounded files rather than one that only grows.
+// A rotation failure never fails the open: the log still receives its entries,
+// and the failure is recorded in the log itself, which is the only place this
+// package can report anything (it must not import internal/notice - notice is
+// imported by internal/config, which this package imports).
 func NewErrorLogger(path string) (*ErrorLogger, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
+	_, rotateErr := logrotate.Rotate(path, logrotate.Options{})
+
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open error log: %w", err)
 	}
 
-	return &ErrorLogger{file: file}, nil
+	l := &ErrorLogger{file: file, path: path}
+	if rotateErr != nil {
+		l.LogErrorf("logrotate", "failed to rotate %s: %v", path, rotateErr)
+	}
+	return l, nil
+}
+
+// write appends one entry, reopening the log first when another process
+// rotated the file out from under this handle. Without the reopen this process
+// would keep appending to the renamed backup, which nothing size-checks again.
+func (l *ErrorLogger) write(line string) {
+	if l == nil || l.file == nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.file = logrotate.ReopenIfRotated(l.file, l.path, 0o600)
+	_, _ = l.file.WriteString(line)
 }
 
 // LogError writes an error entry to the log file.
 func (l *ErrorLogger) LogError(component, operation string, err error) {
-	if l == nil || l.file == nil {
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	timestamp := time.Now().Format(time.RFC3339)
-	line := fmt.Sprintf("%s [%s] %s: %v\n", timestamp, component, operation, err)
-	_, _ = l.file.WriteString(line)
+	l.write(fmt.Sprintf("%s [%s] %s: %v\n", time.Now().Format(time.RFC3339), component, operation, err))
 }
 
 // LogErrorf writes a formatted error entry to the log file.
 func (l *ErrorLogger) LogErrorf(component, format string, args ...any) {
-	if l == nil || l.file == nil {
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	timestamp := time.Now().Format(time.RFC3339)
-	msg := fmt.Sprintf(format, args...)
-	line := fmt.Sprintf("%s [%s] ERROR %s\n", timestamp, component, msg)
-	_, _ = l.file.WriteString(line)
+	l.write(fmt.Sprintf("%s [%s] ERROR %s\n", time.Now().Format(time.RFC3339), component, fmt.Sprintf(format, args...)))
 }
 
 // LogInfof writes a formatted info entry to the log file.
 func (l *ErrorLogger) LogInfof(component, format string, args ...any) {
-	if l == nil || l.file == nil {
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	timestamp := time.Now().Format(time.RFC3339)
-	msg := fmt.Sprintf(format, args...)
-	line := fmt.Sprintf("%s [%s] INFO %s\n", timestamp, component, msg)
-	_, _ = l.file.WriteString(line)
+	l.write(fmt.Sprintf("%s [%s] INFO %s\n", time.Now().Format(time.RFC3339), component, fmt.Sprintf(format, args...)))
 }
 
 // Close closes the error log file.
