@@ -48,12 +48,18 @@ type ForwardedPort struct {
 // Store manages session files in a directory.
 type Store struct {
 	dir string
+	// probe answers what the kernel says about a record's pid. It is a field
+	// so a test can pin the uncertain answer: no pid produces it reliably on
+	// every host - inside a PID namespace pid 1 is the runner's own init and
+	// answers Live - and the uncertain answer is the only one the age backstop
+	// acts on.
+	probe func(int) procstate.State
 }
 
 // NewStore creates a Store rooted at dir. The directory must already exist
 // for records to be written; CleanStaleErr reads a missing one as empty.
 func NewStore(dir string) *Store {
-	return &Store{dir: dir}
+	return &Store{dir: dir, probe: procstate.Probe}
 }
 
 // DefaultDir returns the session store directory:
@@ -165,14 +171,25 @@ func (s *Store) ListLive() ([]*Session, error) {
 }
 
 // ListForSandbox returns sessions whose WorkDir or registered worktree path
-// is inside sandboxRoot. Used by `sandboxes prune` to find worktrees to
-// remove alongside sandbox state. Paths are symlink-resolved before comparison
-// so /tmp/x and /private/tmp/x match on macOS.
+// is inside sandboxRoot.
 func (s *Store) ListForSandbox(sandboxRoot string) ([]*Session, error) {
 	all, err := s.List()
 	if err != nil {
 		return nil, err
 	}
+	return FilterForSandbox(all, sandboxRoot), nil
+}
+
+// FilterForSandbox returns the sessions in all whose WorkDir or registered
+// worktree path is inside sandboxRoot. Paths are symlink-resolved before
+// comparison so /tmp/x and /private/tmp/x match on macOS.
+//
+// It takes a snapshot rather than reading the store because `sandboxes prune`
+// has to read the records before it sweeps them: the sweep removes every
+// record whose pid is dead, and the sandboxes prune selects are inactive by
+// definition, so a store read afterwards finds none of the worktrees it is
+// looking for.
+func FilterForSandbox(all []*Session, sandboxRoot string) []*Session {
 	normRoot := resolvePath(sandboxRoot)
 	prefix := normRoot + string(os.PathSeparator)
 	var out []*Session
@@ -189,7 +206,7 @@ func (s *Store) ListForSandbox(sandboxRoot string) ([]*Session, error) {
 			}
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Update overwrites the session file with the provided data.
@@ -230,23 +247,42 @@ func (s *Store) CleanStale() int {
 // removed. A missing store directory holds nothing and is not an error; a
 // store that cannot be read is. A file that cannot be removed is reported and
 // the sweep continues, so one stuck record never hides the rest.
+//
+// It enumerates the directory itself rather than going through List, which
+// skips a record it cannot read or parse. Such a record has no identifiable
+// owner, so it is kept - but it is reported, because nothing else would ever
+// reclaim it and this location is catalogued as one that is swept.
 func (s *Store) CleanStaleErr() (int, error) {
-	all, err := s.List()
+	entries, err := os.ReadDir(s.dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read session store: %w", err)
 	}
 
 	cutoff := time.Now().Add(-sessionStaleAge)
 	removed := 0
 	var errs []error
-	for _, sess := range all {
-		if !s.stale(sess, cutoff) {
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		if err := s.Remove(sess.Name); err != nil {
+		// The name comes from the file, never from the record inside it: the
+		// two are written together but nothing enforces that they still agree,
+		// and acting on the record's own name would stat and remove a
+		// different session's file - reporting it removed while leaving this
+		// one to be found again by every later sweep.
+		name := strings.TrimSuffix(e.Name(), ".json")
+		sess, err := s.Get(name)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !s.stale(name, sess, cutoff) {
+			continue
+		}
+		if err := s.Remove(name); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				// Another cleanup got there first; the record is gone either way.
 				continue
@@ -259,14 +295,26 @@ func (s *Store) CleanStaleErr() (int, error) {
 	return removed, errors.Join(errs...)
 }
 
-// stale reports whether sess's record may be removed: its pid is gone, or the
-// file has not been written since cutoff. A file whose age cannot be read is
-// kept, because an unknown age must not authorize a deletion.
-func (s *Store) stale(sess *Session, cutoff time.Time) bool {
-	if !procstate.Alive(sess.PID) {
+// stale reports whether the record stored under name may be removed: its pid
+// is gone, or the pid cannot be inspected and the file has not been written
+// since cutoff. A file whose age cannot be read is kept, because an unknown
+// age must not authorize a deletion.
+//
+// The age rule is reached only for a pid the probe cannot resolve - one now
+// belonging to another user's process, which is kept forever on the pid alone
+// and is the leak the backstop exists for. A pid the kernel confirms is
+// running keeps its record whatever its age: the record is rewritten only when
+// the session's forwarded ports change, so age says nothing about whether the
+// session is still there, and removing it frees the name of a running session
+// for the next launch to take.
+func (s *Store) stale(name string, sess *Session, cutoff time.Time) bool {
+	switch s.probe(sess.PID) {
+	case procstate.Dead:
 		return true
+	case procstate.Live:
+		return false
 	}
-	info, err := os.Stat(s.filePath(sess.Name))
+	info, err := os.Stat(s.filePath(name))
 	if err != nil {
 		return false
 	}

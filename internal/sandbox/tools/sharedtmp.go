@@ -256,7 +256,7 @@ func pruneStaleEntries(dir string, cutoff time.Time) (int, error) {
 	var errs []error
 	for _, e := range entries {
 		path := filepath.Join(dir, e.Name())
-		if modifiedSince(path, cutoff) {
+		if fsutil.ModifiedSince(path, cutoff) {
 			continue
 		}
 		if err := fsutil.RemoveAllForce(path); err != nil {
@@ -266,41 +266,6 @@ func pruneStaleEntries(dir string, cutoff time.Time) (int, error) {
 		removed++
 	}
 	return removed, errors.Join(errs...)
-}
-
-// modifiedSince reports whether path, or anything beneath it, changed after
-// cutoff.
-//
-// The whole subtree has to be considered. A directory's own mtime moves only
-// when its direct children change, so a tenant writing deep inside a tree it
-// created days ago looks stale to a shallow check — and that tenant may belong
-// to the very sibling session this prune exists to protect.
-//
-// Walk errors are treated as "modified": an entry that cannot be read is an
-// entry whose age is unknown, and unknown must not mean deletable.
-func modifiedSince(path string, cutoff time.Time) bool {
-	recent := false
-	err := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil {
-			recent = true
-			return filepath.SkipAll
-		}
-		info, err := d.Info()
-		if err != nil {
-			// The entry vanished mid-walk; whoever removed it did our job.
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			recent = true
-			return filepath.SkipAll
-		}
-		if info.ModTime().After(cutoff) {
-			recent = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return recent || err != nil
 }
 
 // removeEmptyDir removes dir only when it holds nothing, so a root left over
@@ -345,6 +310,35 @@ func PruneSharedTmpStale(homeDir, sandboxHome string) (int, error) {
 		return 0, fmt.Errorf("shared tmp: stat %s: %w", dir, err)
 	}
 	return pruneStaleEntries(dir, time.Now().Add(-sharedTmpStaleAge))
+}
+
+// StageSharedTmpForRemoval renames the shared temp directory of sandboxHome
+// aside and returns the staged path, or "" when there was nothing to stage.
+// The rename is what a caller holding a sandbox's exclusive lock needs: the
+// directory is keyed on a hash of the sandbox home path and not on its inode,
+// so the name has to be taken away before the lock is released or the launch
+// that takes the sandbox's place recreates the home at the same path, hashes
+// to this same directory and has its $TMPDIR deleted underneath it. The delete
+// itself is a chmod walk over whatever the sandbox left in $TMPDIR - build
+// temporaries, test scratch trees - which is unbounded, and holding the lock
+// across it exhausts the retry budget of a launch racing the teardown.
+//
+// The staged name is not a session hash, so the orphan sweep reclaims one a
+// kill strands between the rename and the delete, once it has been untouched
+// for sharedTmpStaleAge like any other orphan.
+func StageSharedTmpForRemoval(homeDir, sandboxHome string) (string, error) {
+	if homeDir == "" || sandboxHome == "" {
+		return "", errors.New("shared tmp: staging for removal needs the home directory and the sandbox home")
+	}
+	dir := SharedTmpPath(homeDir, sandboxHome)
+	staged := fmt.Sprintf("%s.removing-%d-%d", dir, os.Getpid(), time.Now().UnixNano())
+	if err := os.Rename(dir, staged); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("shared tmp: stage %s for removal: %w", dir, err)
+	}
+	return staged, nil
 }
 
 // SweepOrphanSharedTmp removes shared temp directories whose sandbox no longer
@@ -406,7 +400,7 @@ func sweepOrphanRoot(root string, live map[string]bool, cutoff time.Time) (int, 
 			continue
 		}
 		path := filepath.Join(root, e.Name())
-		if modifiedSince(path, cutoff) {
+		if fsutil.ModifiedSince(path, cutoff) {
 			continue
 		}
 		if err := fsutil.RemoveAllForce(path); err != nil {

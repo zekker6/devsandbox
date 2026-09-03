@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"devsandbox/internal/procstate"
 	"devsandbox/internal/sandbox/tools"
 )
 
@@ -294,13 +295,17 @@ func TestRemoveSandboxIfIdle_StampsStagedTreeAtStaging(t *testing.T) {
 	}
 
 	before := time.Now().Truncate(time.Second)
-	staged, stampErr, err := stageForRemoval(root, nil)
+	res, err := stageForRemoval(root, nil)
 	if err != nil {
 		t.Fatalf("stageForRemoval failed: %v", err)
 	}
-	if stampErr != nil {
-		t.Fatalf("stamping the staged tree failed: %v", stampErr)
+	if res.stampErr != nil {
+		t.Fatalf("stamping the staged tree failed: %v", res.stampErr)
 	}
+	if res.sharedErr != nil {
+		t.Fatalf("removing the shared temp directory failed: %v", res.sharedErr)
+	}
+	staged := res.path
 	want := filepath.Join(StagingDir(base), fmt.Sprintf("proj-a1b2c3d4-%d", os.Getpid()))
 	if staged != want {
 		t.Fatalf("staged = %q, want %q", staged, want)
@@ -318,6 +323,57 @@ func TestRemoveSandboxIfIdle_StampsStagedTreeAtStaging(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Errorf("sandbox root still present after staging: %v", err)
+	}
+}
+
+// The shared temp directory is keyed on a hash of the sandbox home's *path*,
+// not its inode, so staging the tree aside does not take the name away from
+// anyone: acquireSharedLock reads a missing root as "the sandbox is gone" and
+// recreates it at the same path, which hashes to the same directory. Removing
+// it after the exclusive lock is released therefore deletes the $TMPDIR of the
+// launch that just took the sandbox's place. Its name has to be gone by the
+// time stageForRemoval returns, which is the last moment the lock is still
+// held - and only the name: the delete is an unbounded chmod walk, and the
+// lock's grace period is already spent in full by beforeRemove.
+func TestStageForRemoval_RemovesSharedTmpUnderTheLock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	base := filepath.Join(home, "sandboxes")
+	root := filepath.Join(base, "proj-a1b2c3d4")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	shared := tools.SharedTmpPath(home, SandboxHomePath(root))
+	if err := os.MkdirAll(filepath.Join(shared, "go-build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := stageForRemoval(root, nil)
+	if err != nil {
+		t.Fatalf("stageForRemoval failed: %v", err)
+	}
+	if res.sharedErr != nil {
+		t.Fatalf("removing the shared temp directory failed: %v", res.sharedErr)
+	}
+	if _, err := os.Stat(shared); !os.IsNotExist(err) {
+		t.Errorf("shared temp directory outlived stageForRemoval, stat err = %v; a removal after the lock is released races the next launch", err)
+	}
+	// Renamed aside, not deleted: the caller deletes it once the lock is
+	// released. A staging that left nothing to delete would mean the walk ran
+	// under the lock after all.
+	if res.sharedPath == "" {
+		t.Fatal("stageForRemoval reported no staged shared temp directory to remove")
+	}
+	if _, err := os.Stat(filepath.Join(res.sharedPath, "go-build")); err != nil {
+		t.Errorf("staged shared temp contents were deleted under the lock: %v", err)
+	}
+	// The staged tree is still there: both renames happen under the lock, and
+	// the slow deletes run afterwards off it.
+	if _, err := os.Stat(res.path); err != nil {
+		t.Errorf("staged tree is gone before RemoveSandbox ran: %v", err)
 	}
 }
 
@@ -457,19 +513,20 @@ func TestRemoveAbandonedStaging_UncertainPIDBackstop(t *testing.T) {
 	}
 }
 
-// The backstop reads the stamp, not the probe's answer, so it is exercised
-// with a pid that is certainly alive too - which is what keeps the rule
-// tested where pid 1 does not answer EPERM and the case above skips.
-func TestRemoveAbandonedStaging_LivePIDBackstop(t *testing.T) {
+// The same rule with the probe injected, so the backstop stays covered where
+// pid 1 does not answer EPERM and the case above skips - inside a PID
+// namespace, which is how the sandboxed test runner runs.
+func TestRemoveAbandonedStaging_UncertainPIDBackstop_Injected(t *testing.T) {
 	base := t.TempDir()
 	young := stageTree(t, base, "young", os.Getpid())
 	old := stageTree(t, base, "old", os.Getpid())
 	ageStaged(t, young, 29*24*time.Hour)
 	ageStaged(t, old, 31*24*time.Hour)
 
-	n, err := RemoveAbandonedStaging(base)
+	uncertain := func(int) procstate.State { return procstate.Unknown }
+	n, err := removeAbandonedStaging(base, uncertain)
 	if err != nil {
-		t.Fatalf("RemoveAbandonedStaging failed: %v", err)
+		t.Fatalf("removeAbandonedStaging failed: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("removed = %d, want 1", n)
@@ -479,6 +536,27 @@ func TestRemoveAbandonedStaging_LivePIDBackstop(t *testing.T) {
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Errorf("tree past the backstop survived: stat = %v", err)
+	}
+}
+
+// The backstop is for a pid the probe cannot resolve, and only for that: a
+// teardown the kernel confirms is running keeps its staged tree however long
+// it has been staged, because that tree is what the process is deleting.
+// Reclaiming it by age deletes a live teardown's tree out from under it.
+func TestRemoveAbandonedStaging_LivePIDIsNeverAgedOut(t *testing.T) {
+	base := t.TempDir()
+	ancient := stageTree(t, base, "ancient", os.Getpid())
+	ageStaged(t, ancient, 365*24*time.Hour)
+
+	n, err := RemoveAbandonedStaging(base)
+	if err != nil {
+		t.Fatalf("RemoveAbandonedStaging failed: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0: the staging pid is the test process itself", n)
+	}
+	if _, err := os.Stat(ancient); err != nil {
+		t.Errorf("tree of a running teardown was reclaimed by age: %v", err)
 	}
 }
 
@@ -522,6 +600,20 @@ func TestRemoveSandboxIfIdle_RemovesSharedTmpOfOriginalRoot(t *testing.T) {
 		if _, err := os.Stat(kept); err != nil {
 			t.Errorf("%s shared temp directory was removed: %v", name, err)
 		}
+	}
+	// The directory is renamed aside under the lock and deleted after it, so a
+	// completed removal leaves nothing staged: the two kept directories are all
+	// that may remain.
+	entries, err := os.ReadDir(tools.SharedTmpRoot(homeDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("shared temp root holds %v, want only the decoy and the sibling: a staged directory was left behind", names)
 	}
 }
 

@@ -12,10 +12,11 @@
 //
 // This package imports the owning packages (internal/sandbox,
 // internal/sandbox/tools, internal/session, internal/egress,
-// internal/herdrstate, internal/logrotate, internal/proxy). The owners must
-// never import internal/reclaim: every Sweep is a plain function with plain
-// arguments, so no owner needs the Location type, and that is what keeps the
-// catalogue free of cycles. Nothing outside cmd/ should import this package.
+// internal/herdrstate, internal/logrotate, internal/notice, internal/proxy).
+// The owners must never import internal/reclaim: every Sweep is a plain
+// function with plain arguments, so no owner needs the Location type, and that
+// is what keeps the catalogue free of cycles. Nothing outside cmd/ imports
+// this package, which TestNoInternalPackageImportsReclaim pins.
 // If an owner ever needs Location, split the catalogue into
 // internal/reclaim/catalog at that point rather than reaching in.
 //

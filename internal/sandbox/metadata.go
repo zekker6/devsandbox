@@ -379,6 +379,34 @@ func removeSharedTmpFor(sandboxRoot string) error {
 	return nil
 }
 
+// stageSharedTmpFor renames the shared temp directory of the sandbox rooted at
+// sandboxRoot aside and returns the staged path, or "" when there was nothing
+// to stage. It is removeSharedTmpFor split in two for the caller that holds the
+// sandbox's exclusive lock: the rename is what has to happen under the lock,
+// the delete is what must not. It reads the original root for the same reason
+// removeSharedTmpFor does - a staged or renamed path hashes to a name nothing
+// created.
+func stageSharedTmpFor(sandboxRoot string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to locate the shared temp directory of %s: %w", filepath.Base(sandboxRoot), err)
+	}
+	return tools.StageSharedTmpForRemoval(homeDir, SandboxHomePath(sandboxRoot))
+}
+
+// removeStagedSharedTmp deletes a directory stageSharedTmpFor renamed aside.
+// An empty path is nothing to remove: either there was no shared temp
+// directory, or the staging never got that far.
+func removeStagedSharedTmp(staged string) error {
+	if staged == "" {
+		return nil
+	}
+	if err := fsutil.RemoveAllForce(staged); err != nil {
+		return fmt.Errorf("failed to remove staged shared temp directory %s: %w", staged, err)
+	}
+	return nil
+}
+
 // FormatSize formats bytes as human-readable string
 func FormatSize(bytes int64) string {
 	const (

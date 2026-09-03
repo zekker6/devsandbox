@@ -312,24 +312,22 @@ func stagedPID(name string) (int, bool) {
 // between the liveness answer and the work that depends on it, and it is not
 // reached at all when the sandbox is busy or already gone.
 func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) {
-	staged, stampErr, err := stageForRemoval(sandboxRoot, beforeRemove)
+	res, err := stageForRemoval(sandboxRoot, beforeRemove)
+	// Both trees are deleted off the lock, and whatever stageForRemoval
+	// returned: a staging that got as far as renaming the shared temp
+	// directory aside and then failed still has that directory to take away.
+	sharedErr := errors.Join(res.sharedErr, removeStagedSharedTmp(res.sharedPath))
 	if err != nil {
 		if errors.Is(err, ErrSandboxBusy) {
 			return false, nil
 		}
-		return false, err
+		return false, errors.Join(err, sharedErr)
 	}
-	if staged == "" {
-		return true, nil
+	if res.path == "" {
+		return true, sharedErr
 	}
 
-	// The shared temp directory is keyed on the original root's home, and the
-	// rename has just taken that name away from every launch, so nothing can
-	// be using it. It goes here and not inside RemoveSandbox, which sees only
-	// the staged path: a hash of <staged>/home names nothing. A failure to
-	// remove it is reported after the tree is gone rather than keeping the
-	// tree; the orphan sweep reclaims what it left.
-	sharedErr := removeSharedTmpFor(sandboxRoot)
+	staged, stampErr := res.path, res.stampErr
 	if err := RemoveSandbox(staged); err != nil {
 		return false, errors.Join(err, stampErr, sharedErr)
 	}
@@ -344,59 +342,96 @@ func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) 
 	return true, sharedErr
 }
 
-// stageForRemoval is the half of RemoveSandboxIfIdle that runs under the
-// exclusive lock: it confirms the sandbox is idle, runs beforeRemove, renames
-// the root aside under StagingDir and stamps the staged tree. It returns the
-// staged path, "" with a nil error when the root is already gone, and an
-// error wrapping ErrSandboxBusy when another holder has the sandbox. Split out
-// so the stamp can be observed in a test; the delete that follows would take
-// the tree with it.
+// stagedRemoval reports what stageForRemoval did under the exclusive lock.
+//
+// path is the staged tree, or "" when the root was already gone.
 //
 // stampErr is the failure of the mtime stamp, which is not a reason to leave
 // the tree in place: the stamp only matters if the delete that follows is
 // interrupted, so the caller folds it into a failed delete's error and drops
 // it after a successful one.
-func stageForRemoval(sandboxRoot string, beforeRemove func()) (staged string, stampErr, err error) {
+//
+// sharedPath is the shared temp directory renamed aside under the lock, for
+// the caller to delete once the lock is released, or "" when there was none.
+//
+// sharedErr is the failure to stage the shared temp directory, which the
+// caller reports whether the tree delete succeeds or not: the sandbox is what
+// the user asked to remove, and the orphan sweep is the backstop for a
+// directory left behind.
+type stagedRemoval struct {
+	path       string
+	sharedPath string
+	stampErr   error
+	sharedErr  error
+}
+
+// stageForRemoval is the half of RemoveSandboxIfIdle that runs under the
+// exclusive lock: it confirms the sandbox is idle, runs beforeRemove, renames
+// the shared temp directory aside, renames the root aside under StagingDir and
+// stamps the staged tree. It returns an error wrapping ErrSandboxBusy when
+// another holder has the sandbox. Split out so the stamp can be observed in a
+// test; the delete that follows would take the tree with it.
+//
+// Every path out of it returns what it staged, error or not, so the caller
+// deletes both renamed trees whatever went wrong in between.
+func stageForRemoval(sandboxRoot string, beforeRemove func()) (stagedRemoval, error) {
 	if _, err := os.Stat(sandboxRoot); err != nil {
 		if os.IsNotExist(err) {
-			return "", nil, nil
+			return stagedRemoval{}, nil
 		}
-		return "", nil, fmt.Errorf("failed to stat sandbox root: %w", err)
+		return stagedRemoval{}, fmt.Errorf("failed to stat sandbox root: %w", err)
 	}
 
 	lock, err := acquireExclusiveLock(filepath.Join(sandboxRoot, LockFileName))
 	if err != nil {
-		return "", nil, err
+		return stagedRemoval{}, err
 	}
 
 	if beforeRemove != nil {
 		beforeRemove()
 	}
 
+	// The shared temp directory is keyed on a hash of the *path* of the
+	// sandbox home, not on its inode, so staging the tree aside does not take
+	// the name away from anyone: a launch waiting on this lock recreates the
+	// root under the same path the moment the rename lands (acquireSharedLock
+	// treats a missing root as "the sandbox is gone" and rebuilds it), hashes
+	// to this same directory, and would have its $TMPDIR deleted underneath it
+	// by a removal running outside the lock. Its name is therefore taken away
+	// here, still holding the lock, where the sandbox is provably idle - and
+	// not inside RemoveSandbox, which sees only the staged path, whose hash
+	// names nothing. Only the rename runs under the lock: the delete is a chmod
+	// walk over everything the sandbox put in $TMPDIR, and TeardownGracePeriod
+	// is already spent in full by beforeRemove, so anything unbounded added
+	// here aborts the launch acquireSharedLock's budget exists to hold on.
+	sharedPath, sharedErr := stageSharedTmpFor(sandboxRoot)
+	res := stagedRemoval{sharedPath: sharedPath, sharedErr: sharedErr}
+
 	stagingRoot := StagingDir(filepath.Dir(sandboxRoot))
 	if err := os.MkdirAll(stagingRoot, 0o755); err != nil {
 		_ = lock.Close()
-		return "", nil, fmt.Errorf("failed to create removal staging directory: %w", err)
+		return res, fmt.Errorf("failed to create removal staging directory: %w", err)
 	}
 
-	staged = filepath.Join(stagingRoot,
+	staged := filepath.Join(stagingRoot,
 		fmt.Sprintf("%s-%d", filepath.Base(sandboxRoot), os.Getpid()))
 	renameErr := os.Rename(sandboxRoot, staged)
 	// Released before the removal: the name it guards no longer exists, and
 	// holding it across the walk only lengthens the window nothing is watching.
 	_ = lock.Close()
 	if renameErr != nil {
-		return "", nil, fmt.Errorf("failed to stage sandbox root for removal: %w", renameErr)
+		return res, fmt.Errorf("failed to stage sandbox root for removal: %w", renameErr)
 	}
 
+	res.path = staged
 	// The stamp is what the stagingStaleAge backstop reads. It goes on before
 	// the delete starts, not after, because it is for the tree a kill leaves
 	// behind and a kill can land anywhere in the walk.
 	now := time.Now()
 	if err := os.Chtimes(staged, now, now); err != nil {
-		stampErr = fmt.Errorf("failed to stamp staged tree %s: %w", filepath.Base(staged), err)
+		res.stampErr = fmt.Errorf("failed to stamp staged tree %s: %w", filepath.Base(staged), err)
 	}
-	return staged, stampErr, nil
+	return res, nil
 }
 
 // ListAbandonedStaging returns the removal staging trees under baseDir whose
@@ -411,7 +446,18 @@ func stageForRemoval(sandboxRoot string, beforeRemove func()) (staged string, st
 // cannot inspect reads as alive, so a tree whose remover's pid was recycled to
 // another user's process is kept on the pid alone - see internal/procstate for
 // why - and is reclaimed instead once it has been staged for stagingStaleAge.
+// That age rule applies to the uncertain answer alone: a teardown the kernel
+// confirms is still running keeps its tree however long it has been staged,
+// because the tree is what that process is deleting.
 func ListAbandonedStaging(baseDir string) ([]string, error) {
+	return listAbandonedStaging(baseDir, procstate.Probe)
+}
+
+// listAbandonedStaging is the seam ListAbandonedStaging delegates to, with the
+// probe injected: the uncertain answer is the only one the backstop acts on
+// and no pid produces it reliably on every host - inside a PID namespace pid 1
+// is the runner's own init and answers Live.
+func listAbandonedStaging(baseDir string, probe func(int) procstate.State) ([]string, error) {
 	stagingRoot := StagingDir(baseDir)
 	entries, err := os.ReadDir(stagingRoot)
 	if err != nil {
@@ -431,8 +477,13 @@ func ListAbandonedStaging(baseDir string) ([]string, error) {
 		if !ok {
 			continue
 		}
-		if procstate.Alive(pid) && !stagedBefore(entry, cutoff) {
+		switch probe(pid) {
+		case procstate.Live:
 			continue
+		case procstate.Unknown:
+			if !stagedBefore(entry, cutoff) {
+				continue
+			}
 		}
 		abandoned = append(abandoned, filepath.Join(stagingRoot, entry.Name()))
 	}
@@ -466,10 +517,16 @@ func stagedBefore(entry fs.DirEntry, cutoff time.Time) bool {
 // temp directory in particular - may be derived from a staged name; the
 // orphan sweep for that directory reclaims whatever a stranded tree left.
 func RemoveAbandonedStaging(baseDir string) (int, error) {
+	return removeAbandonedStaging(baseDir, procstate.Probe)
+}
+
+// removeAbandonedStaging is the seam RemoveAbandonedStaging delegates to; see
+// listAbandonedStaging for why the probe is injectable.
+func removeAbandonedStaging(baseDir string, probe func(int) procstate.State) (int, error) {
 	if baseDir == "" {
 		return 0, errors.New("failed to reclaim interrupted removals: sandbox base is empty")
 	}
-	abandoned, err := ListAbandonedStaging(baseDir)
+	abandoned, err := listAbandonedStaging(baseDir, probe)
 	if err != nil {
 		return 0, err
 	}

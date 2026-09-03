@@ -402,7 +402,7 @@ devsandbox config init              # Generate config file
 devsandbox config show              # Print the resolved configuration
 devsandbox config path              # Print the config file location
 devsandbox sandboxes list           # List all sandboxes
-devsandbox sandboxes prune          # Remove stale sandboxes
+devsandbox sandboxes prune          # Remove stale sandboxes, reclaim host state
 devsandbox sessions                 # List running sandbox sessions
 devsandbox forward 3000             # Forward a host port into a running sandbox
 devsandbox logs proxy               # View proxy logs

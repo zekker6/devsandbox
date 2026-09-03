@@ -216,6 +216,30 @@ func TestSweepMarkers_LegacyAgeCoversTheReadyFile(t *testing.T) {
 	}
 }
 
+// A legacy marker whose subtree cannot be read has an unknown age, and unknown
+// must not authorize a deletion: reclaiming a live launch's marker makes that
+// launch's own exit 78 read as an aborted lockdown.
+func TestSweepMarkers_UnknownAgeIsKept(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	old := time.Now().Add(-markerStaleAge - time.Hour)
+	root := t.TempDir()
+	dir := writeMarker(t, root, "lockdown-9876", old)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	n, err := SweepMarkers(root)
+	if err != nil {
+		t.Fatalf("SweepMarkers: %v", err)
+	}
+	if n != 0 || !exists(dir) {
+		t.Errorf("removed = %d, exists = %v; a marker of unknown age must be kept", n, exists(dir))
+	}
+}
+
 // A pid-named marker whose pid answers EPERM - one recycled by another user's
 // process - is not provably dead and is kept, with no age backstop: sweeping it
 // under a live session makes that session's own exit 78 read as an aborted

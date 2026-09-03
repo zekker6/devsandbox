@@ -1,13 +1,16 @@
 package session_test
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"devsandbox/internal/procstate"
 	"devsandbox/internal/session"
 )
 
@@ -536,6 +539,41 @@ func ageRecord(t *testing.T, store *session.Store, name string, age time.Duratio
 	}
 }
 
+// TestStore_CleanStaleErr_ReportsUnparseableRecord: a record the store cannot
+// parse has no identifiable owner, so it is kept - but it must be reported.
+// List skips such a file silently, and going through List left a record
+// nothing would ever reclaim in a location the reclaim catalogue reports as
+// swept: never removed, never counted, never named in an error.
+func TestStore_CleanStaleErr_ReportsUnparseableRecord(t *testing.T) {
+	store := newTestStore(t)
+
+	// One record that is genuinely stale, so the sweep has work to do, and one
+	// that is corrupt: the corrupt one must not hide the other.
+	dead := makeSession("dead")
+	dead.PID = 999999999 // unlikely to be a live PID
+	if err := store.Register(dead); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	corrupt := filepath.Join(store.Dir(), "corrupt.json")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt record: %v", err)
+	}
+
+	removed, err := store.CleanStaleErr()
+	if err == nil {
+		t.Fatalf("CleanStaleErr returned no error, want the corrupt record reported")
+	}
+	if !strings.Contains(err.Error(), "corrupt") {
+		t.Errorf("error = %v, want it to name the corrupt record", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1: the corrupt record must not stop the sweep", removed)
+	}
+	if _, err := os.Stat(corrupt); err != nil {
+		t.Errorf("the corrupt record was removed; an unknown owner must not authorize a deletion: %v", err)
+	}
+}
+
 func TestStore_CleanStaleErr_SurfacesListFailure(t *testing.T) {
 	// A regular file in place of a path component makes ReadDir fail with
 	// ENOTDIR, which is a real failure to read the store rather than the
@@ -632,10 +670,10 @@ func TestStore_CleanStaleErr_UncertainPIDBackstop(t *testing.T) {
 	}
 }
 
-// The backstop reads the file's age, not the probe's answer, so it is
-// exercised with a pid that is certainly alive too - which is what keeps the
-// rule tested where pid 1 does not answer EPERM and the case above skips.
-func TestStore_CleanStaleErr_LivePIDBackstop(t *testing.T) {
+// The same rule with the probe injected, so the backstop stays covered where
+// pid 1 does not answer EPERM and the case above skips - inside a PID
+// namespace, which is how the sandboxed test runner runs.
+func TestStore_CleanStaleErr_UncertainPIDBackstop_Injected(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Register(makeSession("young")); err != nil {
 		t.Fatalf("Register young: %v", err)
@@ -643,6 +681,7 @@ func TestStore_CleanStaleErr_LivePIDBackstop(t *testing.T) {
 	if err := store.Register(makeSession("old")); err != nil {
 		t.Fatalf("Register old: %v", err)
 	}
+	store.SetProbe(func(int) procstate.State { return procstate.Unknown })
 	ageRecord(t, store, "young", 29*24*time.Hour)
 	ageRecord(t, store, "old", 31*24*time.Hour)
 
@@ -658,6 +697,69 @@ func TestStore_CleanStaleErr_LivePIDBackstop(t *testing.T) {
 	}
 	if _, err := store.Get("old"); err == nil {
 		t.Error("record past the backstop survived")
+	}
+}
+
+// The backstop is for a pid the probe cannot resolve, and only for that. A pid
+// the kernel confirms is running keeps its record however old the file is: the
+// record is rewritten only when the session's forwarded ports change, so age
+// says nothing about whether the session is still there - and removing it
+// drops a running session from `devsandbox sessions`, makes `devsandbox
+// forward` unable to resolve it, and frees its name for the next launch to
+// register while it is still holding it.
+func TestStore_CleanStaleErr_LivePIDIsNeverAgedOut(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.Register(makeSession("ancient")); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	ageRecord(t, store, "ancient", 365*24*time.Hour)
+
+	n, err := store.CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("removed = %d, want 0: the pid is the test process itself", n)
+	}
+	if _, err := store.Get("ancient"); err != nil {
+		t.Errorf("record of a running session was reclaimed by age: %v", err)
+	}
+}
+
+// The sweep acts on the name it enumerated, never on the one inside the file.
+// Reading the record's own name had it stat and remove a different session's
+// file - counting that as reclaimed while leaving the record it was looking at
+// in place, to be found again by every later sweep.
+func TestStore_CleanStaleErr_ActsOnTheEnumeratedName(t *testing.T) {
+	store := newTestStore(t)
+	live := makeSession("live")
+	if err := store.Register(live); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// A record filed under one name whose body claims another, with a pid
+	// nothing owns: the sweep must take this file and leave "live" alone.
+	impostor := makeSession("live")
+	impostor.PID = 999999999
+	data, err := json.Marshal(impostor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.Dir(), "impostor.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := store.CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir(), "impostor.json")); !os.IsNotExist(err) {
+		t.Errorf("the stale record was left in place: stat = %v", err)
+	}
+	if _, err := store.Get("live"); err != nil {
+		t.Errorf("the live session's record was removed in its place: %v", err)
 	}
 }
 

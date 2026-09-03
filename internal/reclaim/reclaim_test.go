@@ -2,6 +2,10 @@ package reclaim
 
 import (
 	"errors"
+	"fmt"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -806,23 +810,88 @@ func TestLocations_InternalErrorLogs(t *testing.T) {
 // here leaves it growing unreported, and dropping one silently retires a
 // sweep. The names are the report's own words, so a rename is a user-visible
 // change and belongs in the same edit as this list.
+//
+// The scope and the reported-only decision are pinned with the name. Giving
+// "run directories" or "session overlay dirs" a Sweep is the regression the
+// catalogue exists to catch - prune establishes neither the run-dir
+// registration nor the sole occupancy those sweeps need - and it would
+// otherwise fail nothing, because TestLocations_ReportedOnlyRunTouchesNothing
+// iterates whatever happens to have a nil Sweep.
 func TestLocations_CatalogueIsComplete(t *testing.T) {
-	want := []string{
-		"egress markers",
-		"session records",
-		"herdr pane records",
-		"wrapper log",
-		"interrupted removals",
-		"orphaned shared temp",
-		"run directories",
-		"session overlay dirs",
-		"live shared temp",
-		"proxy request logs",
-		"internal error logs",
+	want := []struct {
+		name         string
+		perSandbox   bool
+		reportedOnly bool
+	}{
+		{name: "egress markers"},
+		{name: "session records"},
+		{name: "herdr pane records"},
+		{name: "wrapper log"},
+		{name: "interrupted removals"},
+		{name: "orphaned shared temp"},
+		{name: "run directories", perSandbox: true, reportedOnly: true},
+		{name: "session overlay dirs", perSandbox: true, reportedOnly: true},
+		{name: "live shared temp", perSandbox: true},
+		{name: "proxy request logs", perSandbox: true, reportedOnly: true},
+		{name: "internal error logs", perSandbox: true, reportedOnly: true},
 	}
 
-	got := names(Locations())
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("catalogue is\n  %v\nwant\n  %v", got, want)
+	got := Locations()
+	gotNames, wantNames := names(got), make([]string, 0, len(want))
+	for _, w := range want {
+		wantNames = append(wantNames, w.name)
+	}
+	if strings.Join(gotNames, "\n") != strings.Join(wantNames, "\n") {
+		t.Fatalf("catalogue is\n  %v\nwant\n  %v", gotNames, wantNames)
+	}
+
+	for i, w := range want {
+		loc := got[i]
+		if loc.PerSandbox != w.perSandbox {
+			t.Errorf("%s: PerSandbox = %v, want %v", w.name, loc.PerSandbox, w.perSandbox)
+		}
+		if (loc.Sweep == nil) != w.reportedOnly {
+			t.Errorf("%s: reported-only = %v, want %v", w.name, loc.Sweep == nil, w.reportedOnly)
+		}
+	}
+}
+
+// TestNoInternalPackageImportsReclaim pins the import direction the package doc
+// states: every Sweep is a plain function over plain arguments so no owner
+// needs the Location type, and an owner importing this package is the cycle
+// the split exists to avoid. Only cmd/ may import it.
+func TestNoInternalPackageImportsReclaim(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("locate repository root: %v", err)
+	}
+	internalDir := filepath.Join(root, "internal")
+	selfDir := filepath.Join(internalDir, "reclaim")
+
+	fset := token.NewFileSet()
+	err = filepath.WalkDir(internalDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if filepath.Dir(path) == selfDir {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+		for _, imp := range f.Imports {
+			if imp.Path.Value == `"devsandbox/internal/reclaim"` {
+				rel, _ := filepath.Rel(root, path)
+				t.Errorf("%s imports internal/reclaim; the catalogue may only be imported from cmd/", rel)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", internalDir, err)
 	}
 }

@@ -137,28 +137,70 @@ func newPruneCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "prune",
-		Short: "Remove stale sandboxes",
+		Short: "Remove stale sandboxes and reclaim host-owned state",
 		Long: `Remove sandbox instances based on various criteria.
 
 Without any flags, only orphaned sandboxes (where the original project
 directory no longer exists) are removed. Pass --orphaned to restrict any
-other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
+other selector (--keep, --older-than, --all) to orphaned sandboxes only.
+
+prune also reports every location devsandbox writes state to on the host -
+egress markers, session records, herdr pane records, the wrapper log,
+interrupted removals, orphaned shared temp directories - and reclaims the ones
+whose owner is gone, plus the shared temp directory of each sandbox that
+remains. Those sweeps run even when there is nothing to prune, and are not
+behind the confirmation prompt, which gates removing sandboxes only. --keep and
+--older-than select sandboxes; they do not change any location's own rule.`,
 		Example: `  devsandbox sandboxes prune                       # Remove orphaned only
   devsandbox sandboxes prune --orphaned             # Same, explicit
   devsandbox sandboxes prune --all --volumes        # Remove all sandboxes and volumes
   devsandbox sandboxes prune --keep 5               # Keep 5 most recently used
   devsandbox sandboxes prune --older-than 30d       # Remove unused for 30 days
   devsandbox sandboxes prune --orphaned --older-than 30d  # Orphaned and unused for 30d
-  devsandbox sandboxes prune --dry-run              # Show what would be removed`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+  devsandbox sandboxes prune --dry-run              # Report every location, remove nothing`,
+		RunE: func(cmd *cobra.Command, args []string) (retErr error) {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
 				return err
 			}
 
-			baseDir := configuredSandboxBase(homeDir)
+			baseDir, err := configuredSandboxBase(homeDir)
+			if err != nil {
+				return err
+			}
+
+			// Every flag is validated before the first sweep runs. The sweeps
+			// below delete state and reach every return past them, so parsing
+			// this where it is used would have a mistyped duration reclaim
+			// every location and then report the command as failed.
+			var duration time.Duration
+			if olderThan != "" {
+				duration, err = parseDuration(olderThan)
+				if err != nil {
+					return fmt.Errorf("invalid duration %q: %w", olderThan, err)
+				}
+			}
+
 			out := cmd.OutOrStdout()
 			locations := reclaim.Locations()
+
+			// The worktrees registered under the sandboxes about to be removed,
+			// read before the host-scoped sweep below. That sweep reclaims the
+			// session records, and a sandbox selected for pruning is inactive by
+			// definition - so its records name dead pids and the sweep takes
+			// every one of them. Reading the store afterwards finds nothing and
+			// the worktrees stay registered in their repository.
+			sessionStore, sessErr := session.DefaultStore()
+			if sessErr != nil {
+				notice.Warn("session store unavailable; worktree cleanup skipped: %v", sessErr)
+			}
+			var sessionSnapshot []*session.Session
+			if sessionStore != nil {
+				sessionSnapshot, err = sessionStore.List()
+				if err != nil {
+					notice.Warn("list sessions; worktree cleanup skipped: %v", err)
+				}
+			}
 
 			// Host-scoped locations first, and whatever the sandbox selection
 			// turns out to be: they have no sandbox to depend on, and on a host
@@ -185,29 +227,30 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				return errors.Join(errs...)
 			}
 
+			// Both sweeps reach every return below, rather than each return
+			// remembering to join them: the host-scoped one already ran, and
+			// the per-sandbox one is not something the confirmation prompt
+			// gates - the prompt asks about removing sandboxes. reclaimSkip is
+			// the set this run takes away, empty until that is decided, so an
+			// aborted run still reports every sandbox that is left.
+			var reclaimSkip []*sandbox.Metadata
+			defer func() {
+				retErr = errors.Join(reclaimErr, retErr, reclaimRemaining(reclaimSkip))
+			}()
+
 			sandboxes, err := sandbox.ListAllSandboxes(baseDir)
 			if err != nil {
-				return errors.Join(reclaimErr, err)
+				return err
 			}
 
 			if len(sandboxes) == 0 {
 				fmt.Println("No sandboxes found.")
-				return reclaimErr
+				return nil
 			}
 
 			// Check active status for each sandbox
 			for _, s := range sandboxes {
 				s.Active = sandbox.IsSessionActive(s.SandboxRoot)
-			}
-
-			// Parse duration for pruning
-			var duration time.Duration
-			if olderThan != "" {
-				var err error
-				duration, err = parseDuration(olderThan)
-				if err != nil {
-					return fmt.Errorf("invalid duration %q: %w", olderThan, err)
-				}
 			}
 
 			opts := sandbox.PruneOptions{
@@ -222,7 +265,7 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 
 			if len(toPrune) == 0 {
 				fmt.Println("No sandboxes to prune.")
-				return errors.Join(reclaimErr, reclaimRemaining(nil))
+				return nil
 			}
 
 			// Calculate sizes for display
@@ -285,7 +328,8 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 
 			if dryRun {
 				fmt.Println("Dry run - no sandboxes were removed.")
-				return errors.Join(reclaimErr, reclaimRemaining(toPrune))
+				reclaimSkip = toPrune
+				return nil
 			}
 
 			// Confirm unless --force
@@ -294,41 +338,33 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				reader := bufio.NewReader(os.Stdin)
 				response, err := reader.ReadString('\n')
 				if err != nil {
-					return errors.Join(reclaimErr, err)
+					return err
 				}
 				response = strings.TrimSpace(strings.ToLower(response))
 				if response != "y" && response != "yes" {
 					fmt.Println("Aborted.")
-					return reclaimErr
+					return nil
 				}
 			}
 
 			// Remove sandboxes (handles both bwrap and docker)
+			reclaimSkip = toPrune
 			var removed, failed int
-			sessionStore, sessErr := session.DefaultStore()
-			if sessErr != nil {
-				notice.Warn("session store unavailable; worktree cleanup skipped: %v", sessErr)
-			}
 			wtMgr := worktree.NewManager()
 			for _, s := range toPrune {
 				// Remove any worktrees registered under this sandbox root before
 				// wiping its on-disk state. Best-effort: warnings only.
-				if sessionStore != nil {
-					sessions, err := sessionStore.ListForSandbox(s.SandboxRoot)
-					if err != nil {
-						notice.Warn("list sessions for %s: %v", s.Name, err)
+				for _, sess := range session.FilterForSandbox(sessionSnapshot, s.SandboxRoot) {
+					if sess.Worktree != nil && sess.Worktree.RepoRoot != "" {
+						if err := wtMgr.Remove(cmd.Context(), sess.Worktree.RepoRoot, sess.Worktree.Path); err != nil {
+							notice.Warn("worktree cleanup for %s: %v", sess.Name, err)
+						}
 					}
-					for _, sess := range sessions {
-						if sess.Worktree != nil && sess.Worktree.RepoRoot != "" {
-							if err := wtMgr.Remove(cmd.Context(), sess.Worktree.RepoRoot, sess.Worktree.Path); err != nil {
-								notice.Warn("worktree cleanup for %s: %v", sess.Name, err)
-							}
-						}
-						// Remove the session file — the sandbox state dir it
-						// references is about to be deleted.
-						if err := sessionStore.Remove(sess.Name); err != nil {
-							notice.Warn("session cleanup for %s: %v", sess.Name, err)
-						}
+					// Remove the session file - the sandbox state dir it
+					// references is about to be deleted. The host-scoped sweep
+					// has usually taken it already, which is not a failure.
+					if err := sessionStore.Remove(sess.Name); err != nil && !errors.Is(err, os.ErrNotExist) {
+						notice.Warn("session cleanup for %s: %v", sess.Name, err)
 					}
 				}
 				if err := sandbox.RemoveSandboxByType(s, volumes); err != nil {
@@ -345,7 +381,7 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 			}
 			fmt.Println()
 
-			return errors.Join(reclaimErr, reclaimRemaining(toPrune))
+			return nil
 		},
 	}
 
@@ -354,7 +390,7 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 	cmd.Flags().IntVar(&keep, "keep", 0, "Keep N most recently used sandboxes")
 	cmd.Flags().StringVar(&olderThan, "older-than", "", "Remove sandboxes not used in duration (e.g., 30d, 2w)")
 	cmd.Flags().BoolVar(&orphaned, "orphaned", false, "Restrict pruning to orphaned sandboxes only")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be removed without removing")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what would be removed, and every state location, without removing anything")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
 
 	return cmd
@@ -364,19 +400,28 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 // honoring sandbox.base_path the way a launch does (main.go's
 // sandbox.NewConfig). A prune that assumed the default base never saw the
 // sandboxes of a user who set the key, and would name every one of them an
-// orphan to the shared-temp sweep. A config that cannot be read degrades to the
-// default rather than failing the command: the key is usually unset, and prune
-// is how a host reclaims state.
-func configuredSandboxBase(homeDir string) string {
-	appCfg, _, _, err := config.LoadConfig()
+// orphan to the shared-temp sweep.
+//
+// A config that cannot be read fails the command rather than degrading to the
+// default base, for the same reason: the "orphaned shared temp" sweep finds an
+// orphan by elimination against the sandboxes under this base, so a base that
+// is merely plausible has it delete the shared temp of every sandbox that
+// really exists - and prune would print "No sandboxes found." while doing it.
+//
+// The project-local .devsandbox.toml is skipped. The base is a host-level
+// setting and prune is a host-level command: reading the working directory's
+// config would let one project's override decide which sandboxes the whole
+// host is judged against, and would put a trust prompt in front of a prune run
+// from a project whose config is untrusted.
+func configuredSandboxBase(homeDir string) (string, error) {
+	appCfg, _, _, err := config.LoadConfigWithOptions(&config.LoadOptions{SkipLocalConfig: true})
 	if err != nil {
-		notice.Warn("failed to load config, using the default sandbox base: %v", err)
-		return sandbox.SandboxBasePath(homeDir)
+		return "", fmt.Errorf("failed to load config: %w", err)
 	}
 	if appCfg.Sandbox.BasePath != "" {
-		return appCfg.Sandbox.BasePath
+		return appCfg.Sandbox.BasePath, nil
 	}
-	return sandbox.SandboxBasePath(homeDir)
+	return sandbox.SandboxBasePath(homeDir), nil
 }
 
 // runReclaim sweeps every location in locs that target can address and reports

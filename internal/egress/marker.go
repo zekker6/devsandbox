@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"devsandbox/internal/fsutil"
 	"devsandbox/internal/procstate"
 )
 
@@ -118,7 +119,7 @@ func markerStale(path, name string, cutoff time.Time) bool {
 		return !procstate.Alive(pid)
 	}
 	if strings.HasPrefix(name, legacyMarkerPrefix) {
-		return !modifiedSince(path, cutoff)
+		return !fsutil.ModifiedSince(path, cutoff)
 	}
 	return false
 }
@@ -132,39 +133,4 @@ func markerPID(name string) (int, bool) {
 		return 0, false
 	}
 	return pid, true
-}
-
-// modifiedSince reports whether path, or anything beneath it, changed after
-// cutoff. The whole subtree is judged, not the directory alone: a directory's
-// mtime moves only when a direct child is added or removed, and the ready
-// file is written after the directory is. An entry that cannot be read has
-// an unknown age, and unknown must not authorize a deletion, so a walk error
-// answers "modified".
-//
-// internal/sandbox/tools carries the same walk for the shared temp directory;
-// it is not shared because this package imports nothing internal beyond the
-// pid probe, so the bwrap isolator's darwin build stays free of Linux-only
-// packages.
-func modifiedSince(path string, cutoff time.Time) bool {
-	recent := false
-	err := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil {
-			recent = true
-			return filepath.SkipAll
-		}
-		info, err := d.Info()
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			recent = true
-			return filepath.SkipAll
-		}
-		if info.ModTime().After(cutoff) {
-			recent = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return recent || err != nil
 }

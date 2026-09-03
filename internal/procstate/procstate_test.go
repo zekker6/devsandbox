@@ -58,45 +58,67 @@ func TestAlive_PID1AnswersEPERM(t *testing.T) {
 	}
 }
 
-func TestAliveSeam(t *testing.T) {
+func TestProbeSeam(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
-		want bool
+		want State
 	}{
-		{name: "no error", err: nil, want: true},
-		{name: "EPERM", err: syscall.EPERM, want: true},
-		{name: "ESRCH", err: syscall.ESRCH, want: false},
-		{name: "ErrProcessDone", err: os.ErrProcessDone, want: false},
-		{name: "wrapped ESRCH", err: fmt.Errorf("probe: %w", syscall.ESRCH), want: false},
-		{name: "wrapped ErrProcessDone", err: fmt.Errorf("probe: %w", os.ErrProcessDone), want: false},
-		{name: "arbitrary error", err: errors.New("something unexpected"), want: true},
+		{name: "no error", err: nil, want: Live},
+		{name: "EPERM", err: syscall.EPERM, want: Unknown},
+		{name: "ESRCH", err: syscall.ESRCH, want: Dead},
+		{name: "ErrProcessDone", err: os.ErrProcessDone, want: Dead},
+		{name: "wrapped ESRCH", err: fmt.Errorf("probe: %w", syscall.ESRCH), want: Dead},
+		{name: "wrapped ErrProcessDone", err: fmt.Errorf("probe: %w", os.ErrProcessDone), want: Dead},
+		{name: "arbitrary error", err: errors.New("something unexpected"), want: Unknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var probed int
-			got := alive(42, func(pid int) error {
+			got := probe(42, func(pid int) error {
 				probed = pid
 				return tt.err
 			})
 			if got != tt.want {
-				t.Errorf("alive = %v, want %v", got, tt.want)
+				t.Errorf("probe = %v, want %v", got, tt.want)
 			}
 			if probed != 42 {
 				t.Errorf("probe received pid %d, want 42", probed)
+			}
+			// Alive folds Live and Unknown together; only Dead is dead.
+			if wantAlive := tt.want != Dead; (got != Dead) != wantAlive {
+				t.Errorf("alive = %v, want %v", got != Dead, wantAlive)
 			}
 		})
 	}
 }
 
-func TestAliveSeam_NonPositiveNeverProbes(t *testing.T) {
+func TestProbeSeam_NonPositiveNeverProbes(t *testing.T) {
 	for _, pid := range []int{0, -1, math.MinInt} {
-		got := alive(pid, func(probed int) error {
-			t.Errorf("alive(%d) probed pid %d; a non-positive pid must be dead before any signal", pid, probed)
+		got := probe(pid, func(probed int) error {
+			t.Errorf("probe(%d) signalled pid %d; a non-positive pid must be dead before any signal", pid, probed)
 			return nil
 		})
-		if got {
-			t.Errorf("alive(%d) = true, want false", pid)
+		if got != Dead {
+			t.Errorf("probe(%d) = %v, want Dead", pid, got)
 		}
+	}
+}
+
+// The tri-state answer is what the age backstops key on: a pid that answers
+// EPERM is Unknown, not Live, so a location may reclaim it by age without
+// reclaiming state whose owner is provably running.
+func TestProbe_SelfIsLiveAndPID1IsUnknown(t *testing.T) {
+	if got := Probe(os.Getpid()); got != Live {
+		t.Errorf("Probe(self) = %v, want Live", got)
+	}
+	if got := Probe(reapedPID(t)); got != Dead {
+		t.Errorf("Probe(reaped) = %v, want Dead", got)
+	}
+	if err := syscall.Kill(1, 0); !errors.Is(err, syscall.EPERM) {
+		t.Skipf("pid 1 does not answer EPERM here (kill(1, 0) = %v): root, or own pid namespace", err)
+	}
+	if got := Probe(1); got != Unknown {
+		t.Errorf("Probe(1) = %v, want Unknown", got)
 	}
 }

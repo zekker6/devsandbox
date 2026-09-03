@@ -50,14 +50,21 @@ func NewErrorLogger(path string) (*ErrorLogger, error) {
 // write appends one entry, reopening the log first when another process
 // rotated the file out from under this handle. Without the reopen this process
 // would keep appending to the renamed backup, which nothing size-checks again.
+//
+// The handle is read and written under the mutex, never outside it: the reopen
+// reassigns l.file, and these loggers are shared by the socket proxies, which
+// write from a goroutine per connection.
 func (l *ErrorLogger) write(line string) {
-	if l == nil || l.file == nil {
+	if l == nil {
 		return
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if l.file == nil {
+		return
+	}
 	l.file = logrotate.ReopenIfRotated(l.file, l.path, 0o600)
 	_, _ = l.file.WriteString(line)
 }
@@ -77,14 +84,22 @@ func (l *ErrorLogger) LogInfof(component, format string, args ...any) {
 	l.write(fmt.Sprintf("%s [%s] INFO %s\n", time.Now().Format(time.RFC3339), component, fmt.Sprintf(format, args...)))
 }
 
-// Close closes the error log file.
+// Close closes the error log file. The handle is dropped as well as closed: a
+// write that arrived afterwards would otherwise find ReopenIfRotated unable to
+// stat the closed descriptor, reopen the path, and resurrect a logger the
+// caller has already shut down.
 func (l *ErrorLogger) Close() error {
-	if l == nil || l.file == nil {
+	if l == nil {
 		return nil
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	return l.file.Close()
+	if l.file == nil {
+		return nil
+	}
+	err := l.file.Close()
+	l.file = nil
+	return err
 }

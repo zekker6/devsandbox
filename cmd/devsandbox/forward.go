@@ -15,6 +15,7 @@ import (
 
 	"devsandbox/internal/notice"
 	"devsandbox/internal/portforward"
+	"devsandbox/internal/procstate"
 	"devsandbox/internal/session"
 )
 
@@ -218,11 +219,11 @@ func runForward(_ context.Context, name, bind string, portSpecs []string) error 
 		for {
 			select {
 			case <-ticker.C:
-				proc, e := os.FindProcess(sess.PID)
-				if e != nil {
-					return
-				}
-				if proc.Signal(syscall.Signal(0)) != nil {
+				// The shared probe, not a fourth copy of the signal-0 call:
+				// its rule is that only a pid the kernel reports as gone
+				// counts as gone, so an unreadable answer does not tear down
+				// the forwards of a session that is still running.
+				if !procstate.Alive(sess.PID) {
 					return
 				}
 			case <-ctx.Done():

@@ -27,13 +27,10 @@ const (
 type Options struct {
 	// MaxSize is the size in bytes at which the live log is rotated.
 	MaxSize int64
-	// MaxFiles is the total number of files kept for the path - the live log
-	// plus its backups - so the bytes on disk are bounded by MaxFiles*MaxSize.
-	MaxFiles int
 }
 
 // Rotate renames path to path.1 when it has reached the size limit, shifting the
-// existing backups up and deleting the ones beyond the file limit. It returns
+// existing backups up and deleting the ones beyond DefaultMaxFiles. It returns
 // the number of files deleted. The caller opens its append handle afterwards; a
 // path that does not exist, is not a regular file, or is under the limit is left
 // alone and reported as zero removals.
@@ -42,14 +39,15 @@ func Rotate(path string, opts Options) (int, error) {
 	if maxSize <= 0 {
 		maxSize = DefaultMaxSize
 	}
-	maxFiles := opts.MaxFiles
-	if maxFiles <= 0 {
-		maxFiles = DefaultMaxFiles
-	}
 
 	if !overLimit(path, maxSize) {
 		return 0, nil
 	}
+
+	// A test interleaves a competing rotation here, between the unlocked size
+	// check and the lock, so the re-check below is exercised deterministically
+	// rather than by winning a race. A no-op in production.
+	afterSizeCheck()
 
 	lock, err := fsutil.AcquireFileLock(path + ".lock")
 	if err != nil {
@@ -65,13 +63,10 @@ func Rotate(path string, opts Options) (int, error) {
 		return 0, nil
 	}
 
-	backups := maxFiles - 1
-	if backups <= 0 {
-		if err := os.Remove(path); err != nil {
-			return 0, fmt.Errorf("remove log %s: %w", path, err)
-		}
-		return 1, nil
-	}
+	// DefaultMaxFiles is at least 2, so there is always at least one backup
+	// slot: a file limit that leaves none would make "rotation" mean deleting
+	// the live log, which no caller wants and nothing here offers.
+	backups := DefaultMaxFiles - 1
 
 	deleted := 0
 	for i := backups; ; i++ {
@@ -97,6 +92,10 @@ func Rotate(path string, opts Options) (int, error) {
 	}
 	return deleted, nil
 }
+
+// afterSizeCheck runs between the unlocked size check and the lock
+// acquisition. Only a test replaces it.
+var afterSizeCheck = func() {}
 
 func backupPath(path string, n int) string {
 	return path + "." + strconv.Itoa(n)

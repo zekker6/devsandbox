@@ -677,3 +677,81 @@ func TestSweepOrphanSharedTmp_ReportsFailedRemoval(t *testing.T) {
 		t.Errorf("sweep stopped at the failure; legacy orphan survived: err=%v", err)
 	}
 }
+
+// StageSharedTmpForRemoval takes the directory's name away without touching
+// its contents: the name is what a caller holding the sandbox's exclusive lock
+// has to remove before releasing it, and the delete is what must not run
+// there.
+func TestStageSharedTmpForRemoval(t *testing.T) {
+	homeDir := t.TempDir()
+	sandboxHome := "/srv/sandboxes/proj-0a1b2c3d/home"
+	dir := SharedTmpPath(homeDir, sandboxHome)
+	writeFileAt(t, filepath.Join(dir, "go-build", "a.o"), "junk", time.Time{})
+
+	staged, err := StageSharedTmpForRemoval(homeDir, sandboxHome)
+	if err != nil {
+		t.Fatalf("StageSharedTmpForRemoval: %v", err)
+	}
+	if staged == "" {
+		t.Fatal("staged path is empty for a directory that existed")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the sandbox's shared temp name survived staging: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(staged, "go-build", "a.o")); err != nil {
+		t.Errorf("staging deleted the contents instead of renaming them: %v", err)
+	}
+	// A launch taking the sandbox's place recreates the home at the same path
+	// and hashes to the same name, which staging has freed.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("the staged name was not freed: %v", err)
+	}
+}
+
+// A staged directory a kill strands between the rename and the delete is
+// reclaimed by the orphan sweep like any other orphan: its name is not a
+// session hash, so it belongs to no live sandbox.
+func TestStageSharedTmpForRemoval_StrandedIsSweptAsOrphan(t *testing.T) {
+	homeDir := t.TempDir()
+	sandboxHome := "/srv/sandboxes/proj-0a1b2c3d/home"
+	writeFileAt(t, filepath.Join(SharedTmpPath(homeDir, sandboxHome), "a.o"), "junk", time.Time{})
+
+	staged, err := StageSharedTmpForRemoval(homeDir, sandboxHome)
+	if err != nil {
+		t.Fatalf("StageSharedTmpForRemoval: %v", err)
+	}
+	ageTree(t, staged, time.Now().Add(-sharedTmpStaleAge-time.Hour))
+
+	n, err := SweepOrphanSharedTmp(homeDir, []string{sandboxHome})
+	if err != nil {
+		t.Fatalf("SweepOrphanSharedTmp: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1: a stranded staged directory is an orphan", n)
+	}
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Errorf("stranded staged directory survived: err=%v", err)
+	}
+}
+
+func TestStageSharedTmpForRemoval_MissingIsNothing(t *testing.T) {
+	homeDir := t.TempDir()
+	staged, err := StageSharedTmpForRemoval(homeDir, "/srv/sandboxes/gone-0a1b2c3d/home")
+	if err != nil {
+		t.Fatalf("StageSharedTmpForRemoval: %v", err)
+	}
+	if staged != "" {
+		t.Errorf("staged = %q, want empty for a directory that does not exist", staged)
+	}
+}
+
+func TestStageSharedTmpForRemoval_RefusesEmptyArguments(t *testing.T) {
+	for _, tc := range []struct{ home, sandboxHome string }{
+		{"", "/srv/sandboxes/proj-0a1b2c3d/home"},
+		{"/home/u", ""},
+	} {
+		if _, err := StageSharedTmpForRemoval(tc.home, tc.sandboxHome); err == nil {
+			t.Errorf("StageSharedTmpForRemoval(%q, %q) = nil error, want a refusal", tc.home, tc.sandboxHome)
+		}
+	}
+}
