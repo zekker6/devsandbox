@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +14,9 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/notice"
+	"devsandbox/internal/reclaim"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/session"
 	"devsandbox/internal/worktree"
@@ -152,24 +156,43 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				return err
 			}
 
-			baseDir := sandbox.SandboxBasePath(homeDir)
+			baseDir := configuredSandboxBase(homeDir)
+			out := cmd.OutOrStdout()
+			locations := reclaim.Locations()
+
+			// Host-scoped locations first, and whatever the sandbox selection
+			// turns out to be: they have no sandbox to depend on, and on a host
+			// with nothing to prune - the common case - a sweep placed after the
+			// early returns below would never run.
+			hostTarget := reclaim.Target{HomeDir: homeDir, SandboxBase: baseDir}
+			reclaimErr := runReclaim(out, hostTarget, locations, dryRun)
+
+			reclaimRemaining := func(skip []*sandbox.Metadata) error {
+				roots, err := remainingSandboxRoots(baseDir, skip)
+				if err != nil {
+					return err
+				}
+				var errs []error
+				for _, root := range roots {
+					target := reclaim.Target{
+						HomeDir:     homeDir,
+						SandboxBase: baseDir,
+						SandboxRoot: root,
+						SandboxHome: sandbox.SandboxHomePath(root),
+					}
+					errs = append(errs, runReclaim(out, target, locations, dryRun))
+				}
+				return errors.Join(errs...)
+			}
+
 			sandboxes, err := sandbox.ListAllSandboxes(baseDir)
 			if err != nil {
-				return err
+				return errors.Join(reclaimErr, err)
 			}
 
-			// Trees a killed teardown stranded between the rename and the
-			// delete. Every listing path skips them by design, so prune is the
-			// only thing that can reclaim them - and they are reclaimable even
-			// when no sandbox is left to prune.
-			stranded, err := sandbox.ListAbandonedStaging(baseDir)
-			if err != nil {
-				notice.Warn("failed to scan for interrupted removals: %v", err)
-			}
-
-			if len(sandboxes) == 0 && len(stranded) == 0 {
+			if len(sandboxes) == 0 {
 				fmt.Println("No sandboxes found.")
-				return nil
+				return reclaimErr
 			}
 
 			// Check active status for each sandbox
@@ -197,9 +220,9 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 
 			toPrune := sandbox.SelectForPruning(sandboxes, opts)
 
-			if len(toPrune) == 0 && len(stranded) == 0 {
+			if len(toPrune) == 0 {
 				fmt.Println("No sandboxes to prune.")
-				return nil
+				return errors.Join(reclaimErr, reclaimRemaining(nil))
 			}
 
 			// Calculate sizes for display
@@ -234,20 +257,8 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				totalSize += s.SizeBytes
 			}
 
-			strandedSizes := make([]int64, len(stranded))
-			for i, path := range stranded {
-				size, err := sandbox.GetSandboxSize(path)
-				if err != nil {
-					notice.Warn("failed to calculate size for %s: %v", filepath.Base(path), err)
-				}
-				strandedSizes[i] = size
-				totalSize += size
-			}
-
 			// Show what will be removed
-			if len(toPrune) > 0 {
-				fmt.Printf("Sandboxes to remove (%d):\n\n", len(toPrune))
-			}
+			fmt.Printf("Sandboxes to remove (%d):\n\n", len(toPrune))
 			for _, s := range toPrune {
 				status := ""
 				if s.Orphaned {
@@ -268,23 +279,13 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				}
 				fmt.Println()
 			}
-			if len(stranded) > 0 {
-				fmt.Printf("Interrupted removals to reclaim (%d):\n\n", len(stranded))
-				for i, path := range stranded {
-					fmt.Printf("  %s\n", filepath.Base(path))
-					if strandedSizes[i] > 0 {
-						fmt.Printf("    Size: %s\n", sandbox.FormatSize(strandedSizes[i]))
-					}
-					fmt.Println()
-				}
-			}
 			if totalSize > 0 {
 				fmt.Printf("Total: %s\n\n", sandbox.FormatSize(totalSize))
 			}
 
 			if dryRun {
 				fmt.Println("Dry run - no sandboxes were removed.")
-				return nil
+				return errors.Join(reclaimErr, reclaimRemaining(toPrune))
 			}
 
 			// Confirm unless --force
@@ -293,12 +294,12 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				reader := bufio.NewReader(os.Stdin)
 				response, err := reader.ReadString('\n')
 				if err != nil {
-					return err
+					return errors.Join(reclaimErr, err)
 				}
 				response = strings.TrimSpace(strings.ToLower(response))
 				if response != "y" && response != "yes" {
 					fmt.Println("Aborted.")
-					return nil
+					return reclaimErr
 				}
 			}
 
@@ -338,26 +339,13 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 				}
 			}
 
-			var reclaimed int
-			for _, path := range stranded {
-				if err := sandbox.RemoveSandbox(path); err != nil {
-					notice.Error("Failed to reclaim %s: %v", filepath.Base(path), err)
-					failed++
-				} else {
-					reclaimed++
-				}
-			}
-
 			fmt.Printf("Removed %d sandbox(es)", removed)
-			if reclaimed > 0 {
-				fmt.Printf(", reclaimed %d interrupted removal(s)", reclaimed)
-			}
 			if failed > 0 {
 				fmt.Printf(", %d failed", failed)
 			}
 			fmt.Println()
 
-			return nil
+			return errors.Join(reclaimErr, reclaimRemaining(toPrune))
 		},
 	}
 
@@ -370,6 +358,123 @@ other selector (--keep, --older-than, --all) to orphaned sandboxes only.`,
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
 
 	return cmd
+}
+
+// configuredSandboxBase returns the base directory sandboxes live under,
+// honoring sandbox.base_path the way a launch does (main.go's
+// sandbox.NewConfig). A prune that assumed the default base never saw the
+// sandboxes of a user who set the key, and would name every one of them an
+// orphan to the shared-temp sweep. A config that cannot be read degrades to the
+// default rather than failing the command: the key is usually unset, and prune
+// is how a host reclaims state.
+func configuredSandboxBase(homeDir string) string {
+	appCfg, _, _, err := config.LoadConfig()
+	if err != nil {
+		notice.Warn("failed to load config, using the default sandbox base: %v", err)
+		return sandbox.SandboxBasePath(homeDir)
+	}
+	if appCfg.Sandbox.BasePath != "" {
+		return appCfg.Sandbox.BasePath
+	}
+	return sandbox.SandboxBasePath(homeDir)
+}
+
+// runReclaim sweeps every location in locs that target can address and reports
+// what each one holds afterwards.
+//
+// The target decides which half of the catalogue runs: one naming a sandbox
+// selects the per-sandbox locations, one naming none selects the host-scoped
+// ones. The caller passes the whole catalogue either way, so a location can
+// never be paired with a target that cannot address it.
+//
+// A location that fails is named in the report and in the returned error, and
+// the remaining ones still run: each location is independent, and a prune that
+// stopped at the first failure would leave the rest of the host unreclaimed.
+func runReclaim(w io.Writer, target reclaim.Target, locs []reclaim.Location, dryRun bool) error {
+	perSandbox := target.SandboxRoot != ""
+	header := "Host-owned state:"
+	if perSandbox {
+		header = fmt.Sprintf("Sandbox state (%s):", filepath.Base(target.SandboxRoot))
+	}
+
+	var (
+		printed bool
+		errs    []error
+	)
+	for _, loc := range locs {
+		if loc.PerSandbox != perSandbox {
+			continue
+		}
+		if !printed {
+			_, _ = fmt.Fprintf(w, "%s\n", header)
+			printed = true
+		}
+
+		reclaimed := 0
+		if !dryRun {
+			n, err := loc.Run(target)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("reclaim %s: %w", loc.Name, err))
+				_, _ = fmt.Fprintf(w, "  %s: not reclaimed: %v\n", loc.Name, err)
+				continue
+			}
+			reclaimed = n
+		}
+
+		path := loc.Path(target)
+		entries, size, err := reclaim.Usage(path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reclaim %s: %w", loc.Name, err))
+			_, _ = fmt.Fprintf(w, "  %s: %v\n", loc.Name, err)
+			continue
+		}
+
+		detail := fmt.Sprintf("%d %s, %s", entries, pluralEntries(entries), sandbox.FormatSize(size))
+		if reclaimed > 0 {
+			detail += fmt.Sprintf(", reclaimed %d", reclaimed)
+		}
+		_, _ = fmt.Fprintf(w, "  %s: %s (%s)\n", loc.Name, detail, path)
+	}
+	if printed {
+		_, _ = fmt.Fprintln(w)
+	}
+
+	return errors.Join(errs...)
+}
+
+func pluralEntries(n int) string {
+	if n == 1 {
+		return "entry"
+	}
+	return "entries"
+}
+
+// remainingSandboxRoots lists the state roots of the sandboxes left under
+// baseDir, skipping the ones this run selected for removal - a removal that
+// failed leaves its sandbox on disk, and reporting a sandbox prune just failed
+// to remove says nothing useful.
+//
+// The listing comes from disk rather than ListAllSandboxes: that one carries a
+// container name in SandboxRoot for Docker sandboxes, which is not a path, so
+// every per-sandbox location built from it would name a directory that does not
+// exist.
+func remainingSandboxRoots(baseDir string, skip []*sandbox.Metadata) ([]string, error) {
+	onDisk, err := sandbox.ListSandboxes(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	skipped := make(map[string]bool, len(skip))
+	for _, s := range skip {
+		skipped[s.SandboxRoot] = true
+	}
+	roots := make([]string, 0, len(onDisk))
+	for _, s := range onDisk {
+		if skipped[s.SandboxRoot] {
+			continue
+		}
+		roots = append(roots, s.SandboxRoot)
+	}
+	return roots, nil
 }
 
 // formatSandboxStatus renders the status column: the sandbox's lifecycle state

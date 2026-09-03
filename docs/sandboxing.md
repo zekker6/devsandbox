@@ -404,8 +404,26 @@ before launching into the same project, or use `--dry-run` first. `--orphaned` n
 set rather than selecting on its own, so it combines with `--keep`, `--older-than` and `--all`; bare
 `prune` already removes only orphaned sandboxes.
 
-`prune` also reclaims a sandbox tree that a `--rm` teardown renamed aside and was then killed before
-deleting. Such a tree is removed once the teardown's process is gone, or once it has been staged for
+`prune` is also where devsandbox reclaims the state it keeps outside the sandboxes themselves. It
+sweeps every location it writes on the host - the egress markers, session records and herdr pane
+records under `~/.local/state/devsandbox/`, the wrapper log, the sandbox trees a killed `--rm`
+teardown stranded, and the shared `$TMPDIR` directories under `~/.cache/devsandbox/tmp/` whose
+sandbox is gone - and then, for each sandbox that is left, the shared temp directory that sandbox
+still owns. Each location is reported with what it holds and how much it reclaimed; the locations
+bounded by their own writer, such as the proxy request logs and the internal error logs, are
+reported without being swept.
+
+Those sweeps are not behind the confirmation prompt, which stays what it is: a gate on removing
+sandboxes. They delete only state whose owner is provably gone - a dead process id, a sandbox that
+no longer exists - or that has aged past the location's own limit, and the launch path already
+performs the equivalent sweeps without asking. They also run before the `No sandboxes found.` and
+`No sandboxes to prune.` returns, so a host with nothing to prune still gets its state reclaimed.
+`--keep` and `--older-than` select **sandboxes** only: each location's rule is a correctness
+constraint rather than a preference, so neither flag overrides it. Under `--dry-run` every location
+is reported with its current entry count and size and nothing is swept.
+
+A sandbox tree that a `--rm` teardown renamed aside and was then killed before deleting is one of
+those locations. It is removed once the teardown's process is gone, or once it has been staged for
 30 days when that cannot be confirmed - it is not a sandbox, so `--keep` and `--older-than` do not
 select it, and `sandboxes list` does not show it.
 
