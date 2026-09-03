@@ -799,3 +799,30 @@ func TestLocations_InternalErrorLogs(t *testing.T) {
 		t.Errorf("Path %q is under SandboxHome %q, which is bound read-write into the sandbox", path, full.SandboxHome)
 	}
 }
+
+// TestLocations_CatalogueIsComplete pins the catalogue to the eleven locations
+// the discovery table enumerates, in order. It is the check a reviewer runs a
+// new host-owned state directory against: adding one without registering it
+// here leaves it growing unreported, and dropping one silently retires a
+// sweep. The names are the report's own words, so a rename is a user-visible
+// change and belongs in the same edit as this list.
+func TestLocations_CatalogueIsComplete(t *testing.T) {
+	want := []string{
+		"egress markers",
+		"session records",
+		"herdr pane records",
+		"wrapper log",
+		"interrupted removals",
+		"orphaned shared temp",
+		"run directories",
+		"session overlay dirs",
+		"live shared temp",
+		"proxy request logs",
+		"internal error logs",
+	}
+
+	got := names(Locations())
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("catalogue is\n  %v\nwant\n  %v", got, want)
+	}
+}

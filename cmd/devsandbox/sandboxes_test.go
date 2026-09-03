@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"devsandbox/internal/reclaim"
 	"devsandbox/internal/sandbox"
@@ -265,5 +266,58 @@ func TestPruneReportsHostLocationsWithNoSandboxes(t *testing.T) {
 		if !strings.Contains(out, loc.Name) {
 			t.Errorf("prune output is missing host location %q:\n%s", loc.Name, out)
 		}
+	}
+}
+
+// TestPruneReportsPerSandboxLocationsForRemainingSandboxes covers the other
+// half of the catalogue against the real command. A sandbox that survives the
+// selection still holds run directories, overlay dirs, a shared temp directory
+// and two log trees, and those are only reachable through a target naming that
+// sandbox - so a prune that reported the host set alone would leave every
+// per-sandbox location unreported on every host. The sandbox here is not
+// orphaned, which is the common case for a bare `prune`: nothing is selected,
+// and the per-sandbox set has to run on that path too.
+func TestPruneReportsPerSandboxLocationsForRemainingSandboxes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	projectDir := filepath.Join(home, "project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	sandboxRoot := filepath.Join(sandbox.SandboxBasePath(home), "project-0a1b2c3d")
+	if err := os.MkdirAll(sandbox.SandboxHomePath(sandboxRoot), 0o755); err != nil {
+		t.Fatalf("mkdir sandbox: %v", err)
+	}
+	meta := &sandbox.Metadata{
+		Name:       "project-0a1b2c3d",
+		ProjectDir: projectDir,
+		CreatedAt:  time.Now(),
+		LastUsed:   time.Now(),
+	}
+	if err := sandbox.SaveMetadata(meta, sandboxRoot); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	cmd := newPruneCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--dry-run"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("prune --dry-run = %v, want nil", err)
+	}
+
+	out := buf.String()
+	for _, loc := range reclaim.Locations() {
+		if !strings.Contains(out, loc.Name) {
+			t.Errorf("prune output is missing location %q:\n%s", loc.Name, out)
+		}
+	}
+	if !strings.Contains(out, "Sandbox state (project-0a1b2c3d)") {
+		t.Errorf("prune output does not name the remaining sandbox:\n%s", out)
 	}
 }
