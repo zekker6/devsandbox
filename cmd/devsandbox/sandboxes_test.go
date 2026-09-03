@@ -172,6 +172,40 @@ func TestRunReclaimReportsFailureAndContinues(t *testing.T) {
 	}
 }
 
+// Every sweep in the catalogue removes what it can and joins the errors, so a
+// failing sweep almost always removed something. The count and the location's
+// remaining size are what the report exists to give, and they must survive the
+// failure rather than the whole line being replaced by the error.
+func TestRunReclaimReportsPartialSweep(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "left-behind"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	locs := []reclaim.Location{
+		{
+			Name:  "partly broken",
+			Path:  func(t reclaim.Target) string { return t.HomeDir },
+			Sweep: func(reclaim.Target) (int, error) { return 20, errors.New("one entry is stuck") },
+		},
+	}
+
+	var buf bytes.Buffer
+	err := runReclaim(&buf, reclaim.Target{HomeDir: home}, locs, false)
+	if err == nil {
+		t.Fatal("runReclaim() = nil, want the partial failure reported as an error")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "reclaimed 20") {
+		t.Errorf("report drops the entries the sweep did reclaim:\n%s", out)
+	}
+	if !strings.Contains(out, "1 entry") || !strings.Contains(out, home) {
+		t.Errorf("report drops what the location still holds and where it is:\n%s", out)
+	}
+	if !strings.Contains(out, "one entry is stuck") {
+		t.Errorf("report does not name the failure:\n%s", out)
+	}
+}
+
 // --dry-run is the one way to see what a location holds without touching it,
 // so it has to report every location and sweep none of them.
 func TestRunReclaimDryRunSweepsNothing(t *testing.T) {

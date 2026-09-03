@@ -254,14 +254,22 @@ func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, shellCmd, portForwardA
 // it, is removed. The sweep is best effort. A launch must never fail because
 // an old marker could not be removed, so a failure is reported and the launch
 // goes on with its own fresh marker.
+//
+// Alert, not Info: a cleanup that did not run is something the user has to act
+// on, and this runs in PhaseRunning, where an ordinary warning is diverted to
+// the log file. It cannot gate the launch on the warning prompt either -
+// confirmWarningsStdio has already run by the time Run is called.
 func egressMarkerDir() (string, error) {
+	// The home is only needed when XDG_STATE_HOME is unset, which is the same
+	// guard wrapperLogPath uses. Demanding it either way fails a launch that
+	// has a perfectly good state root.
 	home, err := os.UserHomeDir()
-	if err != nil {
+	if err != nil && os.Getenv("XDG_STATE_HOME") == "" {
 		return "", fmt.Errorf("resolve the home directory for the egress lockdown marker: %w", err)
 	}
 	root := egress.MarkerRoot(home)
 	if _, err := egress.SweepMarkers(root); err != nil {
-		notice.Info("egress lockdown markers: not every stale entry under %s could be reclaimed: %v", root, err)
+		notice.Alert("egress lockdown markers: not every stale entry under %s could be reclaimed: %v", root, err)
 	}
 	return egress.NewMarkerDir(root)
 }

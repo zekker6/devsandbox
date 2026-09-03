@@ -689,11 +689,14 @@ func TestEgressMarkerDirSweepsStaleMarkers(t *testing.T) {
 }
 
 // TestEgressMarkerDirReportsSweepFailure asserts the sweep is best effort: a
-// marker that cannot be removed is reported at Info, never as a warning that
-// would gate the launch, and the launch still gets a usable marker directory.
+// marker that cannot be removed is reported and the launch still gets a usable
+// marker directory. The report has to reach the terminal, which is why the
+// phase is set to running first - egressMarkerDir is called from Run, where an
+// ordinary notice write is diverted to the log file, so the test would pass on
+// a level that no user ever sees.
 //
-// Sets process environment and the notice sink, so it must not call
-// t.Parallel().
+// Sets process environment, the notice phase and the notice sink, so it must
+// not call t.Parallel().
 func TestEgressMarkerDirReportsSweepFailure(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
@@ -725,7 +728,11 @@ func TestEgressMarkerDirReportsSweepFailure(t *testing.T) {
 	if err := notice.Setup("", false, &stderr); err != nil {
 		t.Fatalf("notice.Setup: %v", err)
 	}
-	t.Cleanup(func() { _ = notice.Setup("", false, io.Discard) })
+	notice.SetRunning()
+	t.Cleanup(func() {
+		notice.SetStartup()
+		_ = notice.Setup("", false, io.Discard)
+	})
 
 	dir, err := egressMarkerDir()
 	if err != nil {
@@ -739,7 +746,26 @@ func TestEgressMarkerDirReportsSweepFailure(t *testing.T) {
 	if !strings.Contains(stderr.String(), "lockdown-stuck") {
 		t.Errorf("the failed removal was not reported; stderr:\n%s", stderr.String())
 	}
-	if raised, _ := notice.Raised(); len(raised) != 0 {
-		t.Errorf("the sweep failure was raised as a warning, which would gate every launch on a prompt: %+v", raised)
+}
+
+// A state root given by XDG_STATE_HOME is enough on its own: the home is only
+// read to build the fallback, so a host that cannot resolve one still gets a
+// marker rather than a failed launch.
+//
+// Sets process environment, so it must not call t.Parallel().
+func TestEgressMarkerDirWithoutResolvableHome(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("HOME", "")
+
+	dir, err := egressMarkerDir()
+	if err != nil {
+		t.Fatalf("egressMarkerDir() error = %v; XDG_STATE_HOME is set, so no home is needed", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	want := filepath.Join(state, "devsandbox", "egress", strconv.Itoa(os.Getpid()))
+	if dir != want {
+		t.Errorf("egressMarkerDir() = %s, want %s", dir, want)
 	}
 }

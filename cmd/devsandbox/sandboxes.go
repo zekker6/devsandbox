@@ -56,7 +56,13 @@ func newListCmd() *cobra.Command {
 				return err
 			}
 
-			baseDir := sandbox.SandboxBasePath(homeDir)
+			// The same base prune works from: a listing that reads the default
+			// base while prune reads the configured one tells the user a
+			// sandbox does not exist and then removes it.
+			baseDir, err := configuredSandboxBase(homeDir)
+			if err != nil {
+				return err
+			}
 			sandboxes, err := sandbox.ListAllSandboxes(baseDir)
 			if err != nil {
 				return err
@@ -434,7 +440,9 @@ func configuredSandboxBase(homeDir string) (string, error) {
 //
 // A location that fails is named in the report and in the returned error, and
 // the remaining ones still run: each location is independent, and a prune that
-// stopped at the first failure would leave the rest of the host unreclaimed.
+// stopped at the first failure would leave the rest of the host unreclaimed. It
+// is still reported with what it reclaimed and what it holds, because a sweep
+// that fails has usually failed on one entry out of many.
 func runReclaim(w io.Writer, target reclaim.Target, locs []reclaim.Location, dryRun bool) error {
 	perSandbox := target.SandboxRoot != ""
 	header := "Host-owned state:"
@@ -455,15 +463,20 @@ func runReclaim(w io.Writer, target reclaim.Target, locs []reclaim.Location, dry
 			printed = true
 		}
 
+		// Every sweep in the catalogue reports the entries it removed
+		// alongside a joined error, so a failure is nearly always partial: the
+		// count and the location's remaining size are what the report exists
+		// to give, and dropping them for one stuck entry says the sweep took
+		// nothing when it took all but one.
 		reclaimed := 0
+		var sweepErr error
 		if !dryRun {
 			n, err := loc.Run(target)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("reclaim %s: %w", loc.Name, err))
-				_, _ = fmt.Fprintf(w, "  %s: not reclaimed: %v\n", loc.Name, err)
-				continue
-			}
 			reclaimed = n
+			if err != nil {
+				sweepErr = err
+				errs = append(errs, fmt.Errorf("reclaim %s: %w", loc.Name, err))
+			}
 		}
 
 		path := loc.Path(target)
@@ -477,6 +490,9 @@ func runReclaim(w io.Writer, target reclaim.Target, locs []reclaim.Location, dry
 		detail := fmt.Sprintf("%d %s, %s", entries, pluralEntries(entries), sandbox.FormatSize(size))
 		if reclaimed > 0 {
 			detail += fmt.Sprintf(", reclaimed %d", reclaimed)
+		}
+		if sweepErr != nil {
+			detail += fmt.Sprintf(", not fully reclaimed: %v", sweepErr)
 		}
 		_, _ = fmt.Fprintf(w, "  %s: %s (%s)\n", loc.Name, detail, path)
 	}
