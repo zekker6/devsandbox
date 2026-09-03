@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,18 +210,26 @@ func TestErrorLogger_ConcurrentWritesUnderRotation(t *testing.T) {
 			}
 		}()
 	}
-	// A competing process rotating the log underneath every writer.
+	// A competing process rotating the log underneath every writer. Each
+	// rotation takes its own backup name: renaming onto one name repeatedly
+	// unlinks the backup the previous rotation made, so the test would destroy
+	// lines the logger wrote correctly and count them as dropped.
+	const rotations = 5
 	go func() {
 		defer wg.Done()
-		for range 5 {
-			_ = os.Rename(path, path+".1")
+		for i := range rotations {
+			_ = os.Rename(path, fmt.Sprintf("%s.%d", path, i+1))
 		}
 	}()
 	wg.Wait()
 
-	// Every line landed in one file or the other; none was dropped.
+	// Every line landed in the live log or one of the backups; none was dropped.
+	paths := []string{path}
+	for i := range rotations {
+		paths = append(paths, fmt.Sprintf("%s.%d", path, i+1))
+	}
 	var lines int
-	for _, p := range []string{path, path + ".1"} {
+	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -231,7 +240,7 @@ func TestErrorLogger_ConcurrentWritesUnderRotation(t *testing.T) {
 		lines += strings.Count(string(data), "\n")
 	}
 	if lines != writers*perWriter {
-		t.Errorf("wrote %d lines across the live log and its backup, want %d", lines, writers*perWriter)
+		t.Errorf("wrote %d lines across the live log and its backups, want %d", lines, writers*perWriter)
 	}
 }
 

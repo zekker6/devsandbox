@@ -191,6 +191,15 @@ var catalogue = []Location{
 		Sweep: func(t Target) (int, error) {
 			live, err := liveSandboxHomes(t.SandboxBase)
 			if err != nil {
+				// A base that is not on disk fails the sweep rather than
+				// running it against an empty live set, but only once there is
+				// something the sweep could have removed: on a host that has
+				// never launched devsandbox both the base and the shared temp
+				// root are absent, and telling that user their prune failed
+				// reports a missing directory as a fault.
+				if errors.Is(err, errSandboxBaseAbsent) && isEmptyDir(tools.SharedTmpRoot(t.HomeDir)) {
+					return 0, nil
+				}
 				return 0, err
 			}
 			return tools.SweepOrphanSharedTmp(t.HomeDir, live)
@@ -265,30 +274,55 @@ func Locations() []Location {
 // Usage reports how many direct entries a location holds and how many bytes
 // they occupy. A path that does not exist reports (0, 0, nil): that is the
 // normal case for a location on a host that has never used the feature. A
-// path naming a single file reports one entry. The byte count is delegated to
-// sandbox.GetSandboxSize rather than walking the tree a second time.
+// path naming a single file reports one entry, plus one for each rotated
+// backup beside it. The byte count is delegated to sandbox.GetSandboxSize
+// rather than walking the tree a second time.
 func Usage(path string) (entries int, size int64, err error) {
 	info, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return 0, 0, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return 0, 0, fmt.Errorf("stat %s: %w", path, err)
 	}
-	entries = 1
-	if info.IsDir() {
+	if err == nil && info.IsDir() {
 		list, err := os.ReadDir(path)
 		if err != nil {
 			return 0, 0, fmt.Errorf("read %s: %w", path, err)
 		}
-		entries = len(list)
+		size, err := sandbox.GetSandboxSize(path)
+		if err != nil {
+			return 0, 0, fmt.Errorf("size %s: %w", path, err)
+		}
+		return len(list), size, nil
 	}
-	size, err = sandbox.GetSandboxSize(path)
-	if err != nil {
-		return 0, 0, fmt.Errorf("size %s: %w", path, err)
+
+	// A file location may be a rotated log, whose backups sit beside it as
+	// path.1 ... path.N and hold the same location's bytes. They are counted
+	// with the live file, because the sweep for such a location is the
+	// rotation itself: it renames the live file away and creates nothing, so a
+	// report that stats only path says the location holds nothing in the one
+	// moment it has just reclaimed the most - and under-reports it by a whole
+	// backup set at every other moment. A directory cannot have them: its
+	// entries are already counted above.
+	if err == nil {
+		entries, size = 1, info.Size()
+	}
+	for i := 1; i < logrotate.DefaultMaxFiles; i++ {
+		backup := logrotate.BackupPath(path, i)
+		bi, err := os.Stat(backup)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return 0, 0, fmt.Errorf("stat %s: %w", backup, err)
+		}
+		entries++
+		size += bi.Size()
 	}
 	return entries, size, nil
 }
+
+// errSandboxBaseAbsent reports a base directory that is not there to be
+// listed, which is not the same answer as a base holding no sandboxes.
+var errSandboxBaseAbsent = errors.New("sandbox base does not exist")
 
 // liveSandboxHomes returns the sandbox home of every sandbox on disk under
 // base, spelled exactly as the launch spells it, so the orphan sweep hashes
@@ -296,9 +330,23 @@ func Usage(path string) (entries int, size int64, err error) {
 // ListAllSandboxes, whose Docker entries carry a container name in
 // SandboxRoot. An empty base is refused: a live set built from anywhere but
 // the configured base names live sandboxes as orphans.
+//
+// A base that is not on disk is refused for the same reason, and it has to be
+// checked here because ListSandboxes reads it as "no sandboxes yet" and
+// answers (nil, nil). That answer is indistinguishable from a base sitting on
+// a volume that is not mounted right now - and the shared temp directories
+// live under the home, never under the base, so they are all present while
+// every sandbox that owns one is invisible. Eliminating against that empty
+// listing names every one of them an orphan.
 func liveSandboxHomes(base string) ([]string, error) {
 	if base == "" {
 		return nil, errors.New("reclaim \"orphaned shared temp\": sandbox base is empty")
+	}
+	if _, err := os.Stat(base); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("reclaim %q: %w: %s", "orphaned shared temp", errSandboxBaseAbsent, base)
+		}
+		return nil, fmt.Errorf("reclaim \"orphaned shared temp\": stat sandbox base: %w", err)
 	}
 	sandboxes, err := sandbox.ListSandboxes(base)
 	if err != nil {
@@ -309,4 +357,16 @@ func liveSandboxHomes(base string) ([]string, error) {
 		homes = append(homes, sandbox.SandboxHomePath(m.SandboxRoot))
 	}
 	return homes, nil
+}
+
+// isEmptyDir reports whether path holds no entries. A path that cannot be read
+// - including one that exists but is unreadable - answers false, so an unknown
+// directory never stands in for an empty one when the answer decides whether a
+// refused sweep is a fault worth reporting.
+func isEmptyDir(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return len(entries) == 0
 }

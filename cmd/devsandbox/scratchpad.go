@@ -126,7 +126,12 @@ func newScratchpadListCmd() *cobra.Command {
 				return err
 			}
 
-			scratchpads, err := collectScratchpads(homeDir)
+			sandboxBase, err := configuredSandboxBase(homeDir)
+			if err != nil {
+				return err
+			}
+
+			scratchpads, err := collectScratchpads(homeDir, sandboxBase)
 			if err != nil {
 				return err
 			}
@@ -164,7 +169,13 @@ func newScratchpadListCmd() *cobra.Command {
 
 // collectScratchpads enumerates scratchpad working directories and
 // cross-references sandbox state. Missing base dir is not an error.
-func collectScratchpads(homeDir string) ([]ScratchpadInfo, error) {
+//
+// sandboxBase is passed in rather than derived from homeDir: a scratchpad
+// launch builds its sandbox under the configured base (sandbox.base_path), so
+// deriving the default here reports every scratchpad on such a host as having
+// no state - which leaves its sandbox tree and shared temp behind on `rm` and
+// skips the active-session guard that HasState gates.
+func collectScratchpads(homeDir, sandboxBase string) ([]ScratchpadInfo, error) {
 	baseDir := sandbox.ScratchpadBasePath(homeDir)
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
@@ -173,8 +184,6 @@ func collectScratchpads(homeDir string) ([]ScratchpadInfo, error) {
 		}
 		return nil, fmt.Errorf("failed to read scratchpad base dir: %w", err)
 	}
-
-	sandboxBase := sandbox.SandboxBasePath(homeDir)
 
 	var result []ScratchpadInfo
 	for _, entry := range entries {
@@ -242,9 +251,14 @@ Refuses to remove scratchpads with an active session.`,
 				return err
 			}
 
+			sandboxBase, err := configuredSandboxBase(homeDir)
+			if err != nil {
+				return err
+			}
+
 			var targets []ScratchpadInfo
 			if all {
-				targets, err = collectScratchpads(homeDir)
+				targets, err = collectScratchpads(homeDir, sandboxBase)
 				if err != nil {
 					return err
 				}
@@ -255,7 +269,7 @@ Refuses to remove scratchpads with an active session.`,
 				}
 				workDir := sandbox.ScratchpadDir(homeDir, name)
 				sandboxName := sandbox.GenerateSandboxName(workDir)
-				sandboxRoot := filepath.Join(sandbox.SandboxBasePath(homeDir), sandboxName)
+				sandboxRoot := filepath.Join(sandboxBase, sandboxName)
 				hasWork := false
 				if info, err := os.Stat(workDir); err == nil && info.IsDir() {
 					hasWork = true
@@ -313,7 +327,7 @@ Refuses to remove scratchpads with an active session.`,
 
 			var removed, failed, skipped int
 			for _, t := range targets {
-				sandboxRoot := filepath.Join(sandbox.SandboxBasePath(homeDir), t.SandboxName)
+				sandboxRoot := filepath.Join(sandboxBase, t.SandboxName)
 
 				// Refuse if the session is active.
 				if t.HasState && sandbox.IsSessionActive(sandboxRoot) {

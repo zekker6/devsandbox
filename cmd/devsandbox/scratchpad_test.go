@@ -103,7 +103,7 @@ func TestCollectScratchpads(t *testing.T) {
 		t.Fatalf("mkdir sandbox state: %v", err)
 	}
 
-	got, err := collectScratchpads(fakeHome)
+	got, err := collectScratchpads(fakeHome, sandbox.SandboxBasePath(fakeHome))
 	if err != nil {
 		t.Fatalf("collectScratchpads: %v", err)
 	}
@@ -126,12 +126,54 @@ func TestCollectScratchpads(t *testing.T) {
 
 func TestCollectScratchpads_MissingBaseDir(t *testing.T) {
 	fakeHome := t.TempDir() // no scratchpad base dir created
-	got, err := collectScratchpads(fakeHome)
+	got, err := collectScratchpads(fakeHome, sandbox.SandboxBasePath(fakeHome))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("got %d scratchpads, want 0", len(got))
+	}
+}
+
+// A scratchpad launch builds its sandbox under the configured base, so state
+// under a non-default base has to be found. Missing it reports HasState=false,
+// which leaves the sandbox tree and its shared temp behind on `rm` and skips
+// the active-session guard HasState gates.
+func TestCollectScratchpads_HonorsConfiguredBase(t *testing.T) {
+	fakeHome := t.TempDir()
+	baseDir := filepath.Join(fakeHome, ".local", "share", "devsandbox-scratchpads")
+	workDir := filepath.Join(baseDir, "scratchpad-foo")
+	if err := os.MkdirAll(workDir, 0o700); err != nil {
+		t.Fatalf("mkdir scratchpad-foo: %v", err)
+	}
+
+	configuredBase := filepath.Join(fakeHome, "elsewhere", "sandboxes")
+	stateDir := filepath.Join(configuredBase, sandbox.GenerateSandboxName(workDir))
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("mkdir sandbox state: %v", err)
+	}
+
+	got, err := collectScratchpads(fakeHome, configuredBase)
+	if err != nil {
+		t.Fatalf("collectScratchpads: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d scratchpads, want 1: %+v", len(got), got)
+	}
+	if !got[0].HasState {
+		t.Error("HasState = false, want true for state under the configured base")
+	}
+
+	// The default base holds nothing, so it must not report state.
+	got, err = collectScratchpads(fakeHome, sandbox.SandboxBasePath(fakeHome))
+	if err != nil {
+		t.Fatalf("collectScratchpads: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d scratchpads, want 1: %+v", len(got), got)
+	}
+	if got[0].HasState {
+		t.Error("HasState = true under the default base, want false")
 	}
 }
 

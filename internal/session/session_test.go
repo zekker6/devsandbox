@@ -812,3 +812,25 @@ func TestDefaultDir(t *testing.T) {
 		t.Errorf("DefaultDir created something under the state home: stat = %v", err)
 	}
 }
+
+// TestCleanStaleErr_RecordRemovedMidSweep covers the record that disappears
+// between the listing and the read. Every launch, `devsandbox sessions` and
+// `devsandbox forward` sweep this directory too, so a prune running alongside
+// one of them finds a name it can no longer read - which is the outcome this
+// sweep wanted, not a failure to report. A dangling symlink reproduces it
+// without a second process: ReadDir lists the name and ReadFile answers
+// ENOENT, exactly as it does after a concurrent removal.
+func TestCleanStaleErr_RecordRemovedMidSweep(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(dir, "nothing-here"), filepath.Join(dir, "vanished.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	removed, err := session.NewStore(dir).CleanStaleErr()
+	if err != nil {
+		t.Fatalf("CleanStaleErr = %v, want nil: a record another sweep removed is not this sweep's failure", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed = %d, want 0", removed)
+	}
+}

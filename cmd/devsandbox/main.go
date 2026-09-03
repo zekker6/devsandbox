@@ -861,6 +861,12 @@ func removeSandboxOnExit(handle *sandbox.SessionHandle, sandboxRoot string, befo
 
 	removed, err := sandbox.RemoveSandboxIfIdle(sandboxRoot, beforeRemove)
 	switch {
+	case removed && err != nil:
+		// The sandbox tree is gone and something beside it is not - the shared
+		// temp directory is the one case. Reporting that as "failed to remove
+		// sandbox" tells the user the opposite of what happened, and sends
+		// them looking for a sandbox that no longer exists.
+		notice.Warn("sandbox removed, but part of its state could not be: %v", err)
 	case err != nil:
 		notice.Warn("failed to remove sandbox: %v", err)
 	case !removed:

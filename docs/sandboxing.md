@@ -419,8 +419,18 @@ no longer exists - or that has aged past the location's own limit, and the launc
 performs the equivalent sweeps without asking. They also run before the `No sandboxes found.` and
 `No sandboxes to prune.` returns, so a host with nothing to prune still gets its state reclaimed.
 `--keep` and `--older-than` select **sandboxes** only: each location's rule is a correctness
-constraint rather than a preference, so neither flag overrides it. Under `--dry-run` every location
-is reported with its current entry count and size and nothing is swept.
+constraint rather than a preference, so neither flag overrides it. Under `--dry-run` nothing is
+swept and every location is reported with its current entry count and size, except the per-sandbox
+locations of the sandboxes the run is previewing the removal of - the report describes the state a
+real run would leave behind.
+
+`sandbox.base_path` is a host-level setting and is read from the global config only. A project
+`.devsandbox.toml` or an `[[include]]` file that sets it is ignored, with a warning naming the
+file. Both layers are selected by the working directory, and these commands are not run from the
+project's - so a base that varies by directory is one they cannot resolve, and they would judge the
+whole host against whichever value their own directory happens to select. A sandbox they cannot see
+has the shared `$TMPDIR` it is still using at risk of being reclaimed as an orphan, since that
+sweep finds an orphan by elimination against the sandboxes it can see.
 
 A sandbox tree that a `--rm` teardown renamed aside and was then killed before deleting is one of
 those locations. It is removed once the teardown's process is gone, or once it has been staged for

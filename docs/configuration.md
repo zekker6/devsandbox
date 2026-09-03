@@ -547,6 +547,7 @@ as a shell does.
 [sandbox]
 # Base directory for sandbox data
 # Defaults to ~/.local/share/devsandbox
+# Read from this file only - see the note below
 # base_path = "~/.local/share/devsandbox"
 
 # Use embedded bwrap and pasta binaries (Linux only, default: true)
@@ -568,6 +569,15 @@ as a shell does.
 # - "readwrite": config file is visible and writable
 config_visibility = "hidden"
 ```
+
+**`base_path`** is the one key read from `~/.config/devsandbox/config.toml` alone. Setting it in a
+project `.devsandbox.toml` or in an `[[include]]` file is ignored, with a warning naming the file.
+It is a host-level setting: `devsandbox sandboxes list` and `devsandbox sandboxes prune` are host
+commands and are not run from your project directory, so a base that varies by directory is a base
+they cannot resolve. A sandbox they cannot see is not merely missing from the listing - `prune`
+finds an orphaned shared `$TMPDIR` directory by elimination against the sandboxes it can see, and
+those directories live under your home rather than under the base, so such a sandbox could have its
+live `$TMPDIR` reclaimed as an orphan. See [Pruning Sandboxes](sandboxing.md#pruning-sandboxes).
 
 **`hide_env_files`** (default `true`) is the setting behind the [`.env` row of the Security
 Model](sandboxing.md#security-model): files matching `.env` and `.env.*` in the project are overlaid
@@ -1496,6 +1506,12 @@ Settings are merged in this order (later overrides earlier):
 3. Matching includes (in order they appear)
 4. Local config (`.devsandbox.toml`)
 5. Command line flags (highest priority)
+
+Two exceptions to that order, both because the layer above is selected by the working directory:
+`sandbox.base_path` is taken from the global config whatever layers 3 and 4 say (see [Sandbox
+Settings](#sandbox-settings)), and the request-size limits `proxy.max_log_body_bytes` and
+`proxy.redaction.max_scan_bytes` may be tightened but not raised by layer 4 (see
+[Content Redaction](#content-redaction)).
 
 **CLI flag examples:**
 

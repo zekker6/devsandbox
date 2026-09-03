@@ -70,7 +70,7 @@ func Rotate(path string, opts Options) (int, error) {
 
 	deleted := 0
 	for i := backups; ; i++ {
-		old := backupPath(path, i)
+		old := BackupPath(path, i)
 		if err := os.Remove(old); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				break
@@ -81,13 +81,13 @@ func Rotate(path string, opts Options) (int, error) {
 	}
 
 	for i := backups - 1; i >= 1; i-- {
-		from, to := backupPath(path, i), backupPath(path, i+1)
+		from, to := BackupPath(path, i), BackupPath(path, i+1)
 		if err := os.Rename(from, to); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return deleted, fmt.Errorf("shift log %s to %s: %w", from, to, err)
 		}
 	}
 
-	if err := os.Rename(path, backupPath(path, 1)); err != nil {
+	if err := os.Rename(path, BackupPath(path, 1)); err != nil {
 		return deleted, fmt.Errorf("rotate log %s: %w", path, err)
 	}
 	return deleted, nil
@@ -97,7 +97,13 @@ func Rotate(path string, opts Options) (int, error) {
 // acquisition. Only a test replaces it.
 var afterSizeCheck = func() {}
 
-func backupPath(path string, n int) string {
+// BackupPath names the nth backup of path, counting from 1.
+//
+// Exported because a reader that reports what a log occupies has to look
+// where the rotation put the bytes: right after a rotation the live path does
+// not exist and every byte is in path.1, so reclaim.Usage stats the backups
+// beside the live file rather than inventing the naming a second time.
+func BackupPath(path string, n int) string {
 	return path + "." + strconv.Itoa(n)
 }
 

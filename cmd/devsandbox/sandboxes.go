@@ -408,6 +408,16 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 // sandboxes of a user who set the key, and would name every one of them an
 // orphan to the shared-temp sweep.
 //
+// `sandboxes list`, `sandboxes prune`, `scratchpad list` and `scratchpad rm`
+// resolve their base here rather than through sandbox.SandboxBasePath. The two
+// scratchpad commands need it because the default base reported every
+// scratchpad as stateless, so both left its sandbox tree behind and skipped the
+// active-session guard that state gates. The other host-level commands -
+// `doctor`, `logs`, `overlay`, and the proxy and filter helpers - still read
+// the default base and so see nothing on a host that set the key. That is a
+// pre-existing gap this function does not close; do not read the list above as
+// covering them.
+//
 // A config that cannot be read fails the command rather than degrading to the
 // default base, for the same reason: the "orphaned shared temp" sweep finds an
 // orphan by elimination against the sandboxes under this base, so a base that
@@ -418,7 +428,10 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 // setting and prune is a host-level command: reading the working directory's
 // config would let one project's override decide which sandboxes the whole
 // host is judged against, and would put a trust prompt in front of a prune run
-// from a project whose config is untrusted.
+// from a project whose config is untrusted. An `[[include]]` cannot set the
+// key either (config.applyIncludes pins it), which is what makes the answer
+// here independent of the directory prune is run from - an include is selected
+// by the working directory, and this command is not run from the project's.
 func configuredSandboxBase(homeDir string) (string, error) {
 	appCfg, _, _, err := config.LoadConfigWithOptions(&config.LoadOptions{SkipLocalConfig: true})
 	if err != nil {

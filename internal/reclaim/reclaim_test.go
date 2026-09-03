@@ -895,3 +895,94 @@ func TestNoInternalPackageImportsReclaim(t *testing.T) {
 		t.Fatalf("walk %s: %v", internalDir, err)
 	}
 }
+
+// TestLocations_OrphanedSharedTmpAbsentBase covers the base that is not on
+// disk. ListSandboxes reads that as "no sandboxes yet" and answers (nil, nil),
+// which is the same answer a base on an unmounted volume gives - and the
+// shared temp directories live under the home, never under the base, so they
+// are all present while every sandbox that owns one is invisible. Eliminating
+// against that empty listing removes the live $TMPDIR of every one of them, so
+// the sweep has to refuse. It may only refuse loudly when there is something
+// it could have removed: a host that has never launched devsandbox has neither
+// directory and must not be told its prune failed.
+func TestLocations_OrphanedSharedTmpAbsentBase(t *testing.T) {
+	loc := locationNamed(t, "orphaned shared temp")
+
+	t.Run("refuses when the root holds directories", func(t *testing.T) {
+		homeDir := filepath.Join(t.TempDir(), "home")
+		base := filepath.Join(t.TempDir(), "unmounted")
+		hidden := tools.SharedTmpPath(homeDir, sandbox.SandboxHomePath(filepath.Join(base, "live-0a1b2c3d")))
+		writeFile(t, filepath.Join(hidden, "go-build", "a.o"), 1)
+		backdate(t, hidden, time.Now().Add(-8*24*time.Hour))
+
+		n, err := loc.Run(Target{HomeDir: homeDir, SandboxBase: base})
+		if err == nil {
+			t.Fatal("Run against a base that is not on disk returned nil, want a refusal")
+		}
+		if n != 0 {
+			t.Errorf("removed = %d, want 0", n)
+		}
+		if _, statErr := os.Stat(hidden); statErr != nil {
+			t.Errorf("shared temp directory removed against an unlistable base: %v", statErr)
+		}
+	})
+
+	t.Run("stays quiet when there is nothing to remove", func(t *testing.T) {
+		homeDir := filepath.Join(t.TempDir(), "home")
+		if err := os.MkdirAll(tools.SharedTmpRoot(homeDir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		n, err := loc.Run(Target{HomeDir: homeDir, SandboxBase: filepath.Join(t.TempDir(), "absent")})
+		if err != nil || n != 0 {
+			t.Fatalf("Run on a host with an empty shared temp root = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+}
+
+// TestUsage_RotatedBackups covers the file location whose sweep is its own
+// rotation: Rotate renames the live file to path.1 and creates nothing, so a
+// report that stats path alone says the location is empty in the one moment it
+// has just reclaimed the most.
+func TestUsage_RotatedBackups(t *testing.T) {
+	t.Run("counts backups beside the live file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wrapper.log")
+		writeFile(t, path, 10)
+		writeFile(t, logrotate.BackupPath(path, 1), 20)
+		writeFile(t, logrotate.BackupPath(path, 2), 30)
+
+		entries, size, err := Usage(path)
+		if err != nil {
+			t.Fatalf("Usage: %v", err)
+		}
+		if entries != 3 || size != 60 {
+			t.Errorf("Usage = (%d, %d), want (3, 60)", entries, size)
+		}
+	})
+
+	t.Run("reports the backups of a log just rotated away", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wrapper.log")
+		writeFile(t, logrotate.BackupPath(path, 1), 25)
+
+		entries, size, err := Usage(path)
+		if err != nil {
+			t.Fatalf("Usage: %v", err)
+		}
+		if entries != 1 || size != 25 {
+			t.Errorf("Usage = (%d, %d), want (1, 25): the rotation moved every byte into .1", entries, size)
+		}
+	})
+
+	t.Run("a directory has no backups to count", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "markers")
+		writeFile(t, filepath.Join(dir, "a"), 4)
+		writeFile(t, logrotate.BackupPath(dir, 1), 100)
+
+		entries, size, err := Usage(dir)
+		if err != nil {
+			t.Fatalf("Usage: %v", err)
+		}
+		if entries != 1 || size != 4 {
+			t.Errorf("Usage = (%d, %d), want (1, 4)", entries, size)
+		}
+	})
+}

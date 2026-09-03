@@ -276,6 +276,13 @@ func (s *Store) CleanStaleErr() (int, error) {
 		name := strings.TrimSuffix(e.Name(), ".json")
 		sess, err := s.Get(name)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// Removed between the listing and this read - every launch and
+				// every `devsandbox sessions` sweeps this directory too. The
+				// record is gone either way, which is what this sweep wanted,
+				// so reporting it fails a prune for someone else's success.
+				continue
+			}
 			errs = append(errs, err)
 			continue
 		}

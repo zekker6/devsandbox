@@ -1588,11 +1588,23 @@ func warnDeprecatedDockerResources(cfg *Config) {
 }
 
 // applyIncludes processes matching include files and merges them into cfg.
+//
+// sandbox.base_path is pinned to the global config's value across the merge.
+// An include is selected by the working directory, so letting one set the base
+// makes it a per-directory setting - and the host-level commands built on it
+// are not run from the project directory. `sandboxes list` and `sandboxes
+// prune` would then judge the host against whichever base the directory they
+// happen to be run from selects, and prune finds an orphaned shared temp
+// directory by elimination against the sandboxes under that base. Those
+// directories live under the home rather than under the base, so a sandbox the
+// wrong base hides could have its live $TMPDIR reclaimed as an orphan. Same
+// reasoning as mergeProjectConfig's pin, for the same key.
 func applyIncludes(cfg *Config, projectDir string) (*Config, error) {
 	matching, err := getMatchingIncludes(cfg.Include, projectDir)
 	if err != nil {
 		return nil, fmt.Errorf("invalid include configuration: %w", err)
 	}
+	globalBase := cfg.Sandbox.BasePath
 	for _, inc := range matching {
 		includePath := expandHome(inc.Path)
 		includeCfg, err := loadIncludeFile(includePath)
@@ -1603,7 +1615,12 @@ func applyIncludes(cfg *Config, projectDir string) (*Config, error) {
 			}
 			return nil, fmt.Errorf("failed to load include %s: %w", includePath, err)
 		}
+		if includeCfg.Sandbox.BasePath != "" && includeCfg.Sandbox.BasePath != globalBase {
+			notice.Warn("sandbox.base_path in %s is ignored; it is a host-level setting, "+
+				"read from %s only", includePath, ConfigPath())
+		}
 		cfg = mergeConfigs(cfg, includeCfg)
+		cfg.Sandbox.BasePath = globalBase
 	}
 	return cfg, nil
 }

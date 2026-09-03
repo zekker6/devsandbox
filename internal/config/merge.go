@@ -2,8 +2,10 @@
 package config
 
 import (
-	"devsandbox/internal/source"
 	"maps"
+
+	"devsandbox/internal/notice"
+	"devsandbox/internal/source"
 )
 
 // mergeConfigs merges overlay config into base config.
@@ -276,6 +278,27 @@ func mergeProjectConfig(base, local *Config) *Config {
 	if merged.Proxy.Redaction.GetMaxScanBytes() > base.Proxy.Redaction.GetMaxScanBytes() {
 		merged.Proxy.Redaction.MaxScanBytes = base.Proxy.Redaction.MaxScanBytes
 	}
+
+	// The sandbox base is host-level and stays that way. A project that moved
+	// it put its sandboxes somewhere the host-level commands built from the
+	// host config never look: `sandboxes list` and `sandboxes prune` cannot
+	// read this file - doing so would let one project decide which sandboxes
+	// the whole host is judged against, behind a trust prompt - so those
+	// sandboxes are invisible to both. Invisible is not merely incomplete:
+	// prune finds an orphaned shared temp directory by elimination against the
+	// sandboxes it can see, and the directories live under the home rather
+	// than under the base, so a sandbox hidden this way has its live $TMPDIR
+	// reclaimed out from under it.
+	//
+	// The user is told, because the alternative is a launch that silently uses
+	// a different sandbox root than the one their config names - a new empty
+	// sandbox with none of their overlay, home or logs.
+	if local.Sandbox.BasePath != "" && local.Sandbox.BasePath != base.Sandbox.BasePath {
+		notice.Warn("sandbox.base_path in %s is ignored; it is a host-level setting, "+
+			"read from %s only", LocalConfigFile, ConfigPath())
+	}
+	merged.Sandbox.BasePath = base.Sandbox.BasePath
+
 	return merged
 }
 
