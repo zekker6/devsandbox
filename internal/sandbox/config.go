@@ -46,9 +46,12 @@ type Config struct {
 	// Proxy settings
 	ProxyEnabled bool
 	ProxyPort    int
-	ProxyCAPath  string
-	ProxyMITM    bool
-	GatewayIP    string
+	// ProxyAuthToken is the per-session credential the proxy requires; it
+	// rides in the exported proxy URL (proxyenv.URL).
+	ProxyAuthToken string
+	ProxyCAPath    string
+	ProxyMITM      bool
+	GatewayIP      string
 	// ProxyExtraEnv is a list of additional env var names set to the proxy URL.
 	ProxyExtraEnv []string
 	// ProxyExtraCAEnv is a list of additional env var names set to the CA cert path.

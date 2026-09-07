@@ -2,6 +2,7 @@ package isolator
 
 import (
 	"context"
+	"devsandbox/internal/proxyenv"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1933,6 +1934,270 @@ func TestGetToolBindings_ProjectDirEnvNotRemapped(t *testing.T) {
 	}
 }
 
+// proxyEnvOf returns the `-e NAME=VALUE` pairs in args as a map, and the
+// index of the container name so a caller can assert env precedes it.
+// proxyEnvOf collects the `-e` entries of a docker argv as the container will
+// see them: a `-e NAME=VALUE` verbatim, a bare `-e NAME` resolved from cliEnv
+// the way docker and podman resolve it from their own environment. It also
+// returns the index of the container name, or -1.
+func proxyEnvOf(t *testing.T, args, cliEnv []string, containerName string) (map[string]string, int) {
+	t.Helper()
+	env := make(map[string]string)
+	nameIdx := -1
+	for i := 0; i < len(args); i++ {
+		if args[i] == containerName && nameIdx < 0 {
+			nameIdx = i
+		}
+		if args[i] != "-e" || i+1 >= len(args) {
+			continue
+		}
+		name, value, ok := strings.Cut(args[i+1], "=")
+		if !ok {
+			value = resolveBareEnv(t, name, cliEnv)
+		}
+		env[name] = value
+	}
+	return env, nameIdx
+}
+
+// resolveBareEnv returns the value cliEnv holds for name, failing the test
+// when it holds none: a bare `-e NAME` the CLI cannot resolve is passed to
+// the daemon as an unset variable, which for a proxy variable is a workload
+// that bypasses the proxy. Last wins, as exec.Cmd resolves a duplicate key:
+// commandEnv appends the session's value after os.Environ(), so an ambient
+// HTTP_PROXY in the test process must not shadow it here.
+func resolveBareEnv(t *testing.T, name string, cliEnv []string) string {
+	t.Helper()
+	for _, kv := range slices.Backward(cliEnv) {
+		if value, ok := strings.CutPrefix(kv, name+"="); ok {
+			return value
+		}
+	}
+	t.Fatalf("-e %s is bare and the CLI environment %v does not carry it", name, cliEnv)
+	return ""
+}
+
+// TestBuildExecArgs_CarriesCurrentProxyEnv is the keep_container half of the
+// per-session proxy credential: a reused container was created with the env
+// of the session that created it, so an exec into it must hand the workload
+// the current session's URL - token included - and the rest of the proxy set,
+// or every request from the second session is refused with 407.
+func TestBuildExecArgs_CarriesCurrentProxyEnv(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{
+		Shell:           "/bin/bash",
+		ProxyEnabled:    true,
+		ProxyHost:       "host.docker.internal",
+		ProxyPort:       8080,
+		ProxyAuthToken:  "fedcba9876543210",
+		ProxyCAPath:     "/tmp/devsandbox-ca-src.crt",
+		ProxyExtraEnv:   []string{"MY_TOOL_PROXY"},
+		ProxyExtraCAEnv: []string{"MY_TOOL_CA_BUNDLE"},
+	}
+
+	args := iso.buildExecArgs(cfg, "container")
+	env, nameIdx := proxyEnvOf(t, args, iso.commandEnv(cfg), "container")
+	if nameIdx < 0 {
+		t.Fatalf("container name missing from exec args %v", args)
+	}
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-e" && i > nameIdx {
+			t.Errorf("-e %s comes after the container name; docker exec reads it as the command", args[i+1])
+		}
+	}
+
+	want := proxyenv.URL("host.docker.internal", 8080, "fedcba9876543210")
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "YARN_HTTP_PROXY", "YARN_HTTPS_PROXY", "MY_TOOL_PROXY"} {
+		if got := env[name]; got != want {
+			t.Errorf("exec %s = %q, want %q", name, got, want)
+		}
+	}
+	for name, want := range map[string]string{
+		"NO_PROXY":            "localhost,127.0.0.1",
+		"DEVSANDBOX_PROXY":    "1",
+		"SSL_CERT_FILE":       containerCACertPath,
+		"MY_TOOL_CA_BUNDLE":   containerCACertPath,
+		"NODE_EXTRA_CA_CERTS": containerCACertPath,
+	} {
+		if got := env[name]; got != want {
+			t.Errorf("exec %s = %q, want %q", name, got, want)
+		}
+	}
+	// The shim-facing trio and the CA mount are create-time only.
+	for _, name := range []string{"PROXY_MODE", "PROXY_HOST", "PROXY_PORT"} {
+		if _, ok := env[name]; ok {
+			t.Errorf("exec re-injects create-time %s", name)
+		}
+	}
+	if strings.Contains(strings.Join(args, " "), cfg.ProxyCAPath) {
+		t.Errorf("exec args mount the CA certificate; that is create-time: %v", args)
+	}
+	if !slices.Contains(args, "/bin/bash") || args[len(args)-1] != "/bin/bash" {
+		t.Errorf("exec args must end with the shell: %v", args)
+	}
+}
+
+// TestBuildExecArgs_NoProxyEnvWhenProxyOff pins that a non-proxy session exec
+// carries no proxy variables at all.
+func TestBuildExecArgs_NoProxyEnvWhenProxyOff(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{Shell: "/bin/bash", ProxyAuthToken: "tok"}
+	args := iso.buildExecArgs(cfg, "container")
+	if slices.Contains(args, "-e") {
+		t.Errorf("exec args carry -e with the proxy off: %v", args)
+	}
+	if env := iso.commandEnv(cfg); env != nil {
+		t.Errorf("commandEnv = %v with the proxy off, want nil so the CLI inherits unchanged", env)
+	}
+}
+
+// TestProxyEnvArgs_KeepsCredentialOutOfArgv pins where the credential is
+// allowed to appear on the Docker backend: named as a bare `-e NAME` in argv,
+// valued only in the CLI's environment. The CLI is attached for the whole
+// session and its command line is readable by every local user.
+func TestProxyEnvArgs_KeepsCredentialOutOfArgv(t *testing.T) {
+	const token = "fedcba9876543210fedcba9876543210"
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "test:latest"
+	cfg := &Config{
+		ProjectDir:     "/tmp/test-project",
+		SandboxHome:    "/tmp/test-sandbox",
+		HomeDir:        "/home/testuser",
+		Shell:          "/bin/bash",
+		ProxyEnabled:   true,
+		ProxyHost:      "10.0.2.2",
+		ProxyPort:      8081,
+		ProxyAuthToken: token,
+		ProxyCAPath:    "/tmp/devsandbox-ca-src.crt",
+		ProxyExtraEnv:  []string{"MY_TOOL_PROXY"},
+	}
+
+	createArgs, err := iso.buildCommonArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildCommonArgs: %v", err)
+	}
+	for _, argv := range [][]string{createArgs, iso.buildExecArgs(cfg, "container"), iso.miseExecArgs(cfg, "container", "mise", "install", "-y")} {
+		for _, arg := range argv {
+			if strings.Contains(arg, token) {
+				t.Errorf("argv carries the session token in %q", arg)
+			}
+		}
+	}
+
+	want := proxyenv.URL("10.0.2.2", 8081, token)
+	env := iso.commandEnv(cfg)
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "YARN_HTTP_PROXY", "YARN_HTTPS_PROXY", "MY_TOOL_PROXY"} {
+		if !slices.Contains(createArgs, name) {
+			t.Errorf("create argv does not name %s bare", name)
+		}
+		if !slices.Contains(env, name+"="+want) {
+			t.Errorf("CLI environment lacks %s=%s", name, want)
+		}
+	}
+	for _, kv := range env {
+		name, value, _ := strings.Cut(kv, "=")
+		if value == want || kv == "NO_PROXY=*" || kv == "no_proxy=*" {
+			continue
+		}
+		if _, inherited := os.LookupEnv(name); !inherited {
+			t.Errorf("CLI environment carries %s=%q, which is neither inherited nor a credential", name, value)
+		}
+	}
+	if !slices.Contains(createArgs, "NO_PROXY=localhost,127.0.0.1") {
+		t.Errorf("NO_PROXY, which carries no credential, left argv: %v", createArgs)
+	}
+	// The CLI's own daemon transport reads the same HTTP(S)_PROXY on a tcp://
+	// DOCKER_HOST, so the CLI environment must opt it out - last wins under
+	// exec.Cmd - while the container keeps the explicit argv value above.
+	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+		if got := resolveBareEnv(t, name, env); got != "*" {
+			t.Errorf("CLI environment %s = %q, want * so the engine CLI does not dial its daemon through the sandbox proxy", name, got)
+		}
+		if slices.Contains(createArgs, name) {
+			t.Errorf("create argv names %s bare; the CLI's * would reach the container", name)
+		}
+	}
+}
+
+// TestExecCommand_CarriesCurrentProxyEnv is the keep_container half of the
+// per-session credential on the path that actually runs: the exec the
+// workload is attached to must be built from buildExecArgs and carry
+// commandEnv, or a reused container inherits the previous session's
+// credential and every request is refused with 407.
+func TestExecCommand_CarriesCurrentProxyEnv(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{
+		Shell:          "/bin/bash",
+		Interactive:    true,
+		Command:        []string{"claude", "--resume"},
+		ProxyEnabled:   true,
+		ProxyHost:      "host.docker.internal",
+		ProxyPort:      8080,
+		ProxyAuthToken: "fedcba9876543210",
+	}
+
+	cmd := iso.execCommand("/usr/bin/docker", cfg, "container")
+	if cmd.Path != "/usr/bin/docker" {
+		t.Errorf("command path = %q, want /usr/bin/docker", cmd.Path)
+	}
+	if want := append([]string{"/usr/bin/docker"}, iso.buildExecArgs(cfg, "container")...); !slices.Equal(cmd.Args, want) {
+		t.Errorf("exec argv = %v, want buildExecArgs' %v", cmd.Args, want)
+	}
+	env, nameIdx := proxyEnvOf(t, cmd.Args, cmd.Env, "container")
+	if nameIdx < 0 || !slices.Equal(cmd.Args[nameIdx+1:], cfg.Command) {
+		t.Errorf("exec argv = %v, want the container name followed by the workload command", cmd.Args)
+	}
+	if want := proxyenv.URL("host.docker.internal", 8080, "fedcba9876543210"); env["HTTP_PROXY"] != want {
+		t.Errorf("exec HTTP_PROXY = %q, want %q", env["HTTP_PROXY"], want)
+	}
+	if !slices.Equal(cmd.Env, iso.commandEnv(cfg)) {
+		t.Error("exec command does not run with commandEnv")
+	}
+}
+
+// TestMiseExecArgs_CarriesCurrentProxyEnv covers the other exec into a reused
+// container: the boot-time mise install is the one phase that needs the
+// network, so it needs this session's credential just as the workload does.
+func TestMiseExecArgs_CarriesCurrentProxyEnv(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{
+		ProjectDir:     "/tmp/test-project",
+		ProxyEnabled:   true,
+		ProxyHost:      "host.docker.internal",
+		ProxyPort:      8080,
+		ProxyAuthToken: "fedcba9876543210",
+	}
+
+	args := iso.miseExecArgs(cfg, "container", "mise", "install", "-y")
+	env, nameIdx := proxyEnvOf(t, args, iso.commandEnv(cfg), "container")
+	if nameIdx < 0 || !slices.Equal(args[nameIdx+1:], []string{"mise", "install", "-y"}) {
+		t.Fatalf("mise exec argv = %v, want the container name followed by the mise command", args)
+	}
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-e" && i > nameIdx {
+			t.Errorf("-e %s comes after the container name; docker exec reads it as the command", args[i+1])
+		}
+	}
+	if want := proxyenv.URL("host.docker.internal", 8080, "fedcba9876543210"); env["HTTP_PROXY"] != want {
+		t.Errorf("mise exec HTTP_PROXY = %q, want %q", env["HTTP_PROXY"], want)
+	}
+	for name, want := range map[string]string{"MISE_OFFLINE": "0", "MISE_GLOBAL_CONFIG_FILE": "/dev/null"} {
+		if env[name] != want {
+			t.Errorf("mise exec %s = %q, want %q", name, env[name], want)
+		}
+	}
+	if i := slices.Index(args, "--workdir"); i < 0 || args[i+1] != cfg.ProjectDir {
+		t.Errorf("mise exec argv = %v, want --workdir %s", args, cfg.ProjectDir)
+	}
+
+	off := iso.miseExecArgs(&Config{ProjectDir: "/p"}, "container", "mise", "ls", "--missing")
+	for i := 0; i < len(off)-1; i++ {
+		if off[i] == "-e" && strings.Contains(off[i+1], "PROXY") {
+			t.Errorf("mise exec argv carries %s with the proxy off", off[i+1])
+		}
+	}
+}
+
 // TestBuildCommonArgs_TrustsProjectMiseConfigWithoutHostMise pins that the
 // in-sandbox trust for the project's mise configs does not depend on mise
 // being installed on the host: the image carries its own mise and the boot
@@ -1979,4 +2244,73 @@ func TestBuildCommonArgs_TrustsProjectMiseConfigWithoutHostMise(t *testing.T) {
 			t.Errorf("MISE_TRUSTED_CONFIG_PATHS emitted %d times with host mise, want exactly 1", got)
 		}
 	})
+}
+
+// TestBuildCommonArgs_ProxyURLCarriesSessionToken asserts docker create hands
+// the container proxyenv.URL with the configured credential in every proxy
+// address variable, alongside the create-time trio and CA mount.
+func TestBuildCommonArgs_ProxyURLCarriesSessionToken(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "test:latest"
+	cfg := &Config{
+		ProjectDir:     "/tmp/test-project",
+		SandboxHome:    "/tmp/test-sandbox",
+		HomeDir:        "/home/testuser",
+		Shell:          "/bin/bash",
+		ProxyEnabled:   true,
+		ProxyHost:      "10.0.2.2",
+		ProxyPort:      8081,
+		ProxyAuthToken: "fedcba9876543210",
+		ProxyCAPath:    "/tmp/devsandbox-ca-src.crt",
+		ProxyExtraEnv:  []string{"MY_TOOL_PROXY"},
+	}
+
+	args, err := iso.buildCommonArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildCommonArgs: %v", err)
+	}
+	env, _ := proxyEnvOf(t, args, iso.commandEnv(cfg), "")
+
+	want := proxyenv.URL("10.0.2.2", 8081, "fedcba9876543210")
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "YARN_HTTP_PROXY", "YARN_HTTPS_PROXY", "MY_TOOL_PROXY"} {
+		if got := env[name]; got != want {
+			t.Errorf("create %s = %q, want %q", name, got, want)
+		}
+	}
+	for name, want := range map[string]string{
+		"PROXY_MODE": "true",
+		"PROXY_HOST": "10.0.2.2",
+		"PROXY_PORT": "8081",
+	} {
+		if got := env[name]; got != want {
+			t.Errorf("create %s = %q, want %q", name, got, want)
+		}
+	}
+	if !strings.Contains(strings.Join(args, " "), "-v /tmp/devsandbox-ca-src.crt:"+containerCACertPath+":ro") {
+		t.Errorf("create args do not mount the CA certificate: %v", args)
+	}
+
+	// The exec path renders the same proxy set from the same source: every
+	// variable the shared list owns has the same value on both.
+	execEnv, _ := proxyEnvOf(t, iso.buildExecArgs(cfg, "container"), iso.commandEnv(cfg), "container")
+	shared := proxyenv.Vars(want, cfg.ProxyExtraEnv)
+	shared = append(shared, proxyenv.CAVars(containerCACertPath, cfg.ProxyExtraCAEnv)...)
+	for _, v := range shared {
+		if got, ok := execEnv[v.Name]; !ok || got != env[v.Name] {
+			t.Errorf("exec %s = %q ok=%v, want the create-time %q", v.Name, got, ok, env[v.Name])
+		}
+	}
+}
+
+// TestDockerIsolator_ConfigHash_IgnoresAuthToken pins that the per-session
+// credential does not force a container recreate: docker exec re-injects it.
+func TestDockerIsolator_ConfigHash_IgnoresAuthToken(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "devsandbox:local"
+
+	a := &Config{ProxyEnabled: true, ProxyPort: 8080, ProxyAuthToken: "session-one"}
+	b := &Config{ProxyEnabled: true, ProxyPort: 8080, ProxyAuthToken: "session-two"}
+	if iso.configHash(a) != iso.configHash(b) {
+		t.Error("configHash changed with the auth token; a kept container would be recreated every session")
+	}
 }

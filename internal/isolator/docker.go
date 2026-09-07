@@ -65,9 +65,12 @@ const (
 
 // DockerBuildResult contains the command to execute.
 type DockerBuildResult struct {
-	Action               DockerAction
-	BinaryPath           string
-	Args                 []string
+	Action     DockerAction
+	BinaryPath string
+	Args       []string
+	// Env is the environment the engine CLI runs with, or nil to inherit. It
+	// carries the values Args names without spelling out; see commandEnv.
+	Env                  []string
 	ContainerName        string // For create->start flow
 	ContainerJustStarted bool   // True when a stopped container was just started (needs readiness wait)
 }
@@ -336,6 +339,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		Interactive:      cfg.Interactive,
 		ProxyEnabled:     sandboxCfg.ProxyEnabled,
 		ProxyPort:        cfg.ProxyPort,
+		ProxyAuthToken:   cfg.ProxyAuthToken,
 		ProxyExtraEnv:    sandboxCfg.ProxyExtraEnv,
 		ProxyExtraCAEnv:  sandboxCfg.ProxyExtraCAEnv,
 		EnvPassthrough:   sandboxCfg.EnvPassthrough,
@@ -420,6 +424,7 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 	switch result.Action {
 	case DockerActionRun:
 		cmd := exec.Command(result.BinaryPath, result.Args...)
+		cmd.Env = result.Env
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -434,6 +439,7 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 
 	case DockerActionCreate:
 		createCmd := exec.Command(result.BinaryPath, result.Args...)
+		createCmd.Env = result.Env
 		if out, err := createCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to create container: %s", strings.TrimSpace(string(out)))
 		}
@@ -455,7 +461,7 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 			notice.Warn("failed to install tools: %v", err)
 		}
 
-		return d.execIntoContainer(result.BinaryPath, result.ContainerName, isoCfg.Interactive, isoCfg.Shell, cfg.Command)
+		return execIntoContainer(d.execCommand(result.BinaryPath, isoCfg, result.ContainerName))
 
 	case DockerActionExec:
 		if result.ContainerJustStarted {
@@ -470,7 +476,7 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 			notice.Warn("failed to install tools: %v", err)
 		}
 
-		return d.execIntoContainer(result.BinaryPath, result.ContainerName, isoCfg.Interactive, isoCfg.Shell, cfg.Command)
+		return execIntoContainer(d.execCommand(result.BinaryPath, isoCfg, result.ContainerName))
 
 	default:
 		return fmt.Errorf("unexpected docker action: %d", result.Action)
@@ -710,22 +716,19 @@ func containerNetnsPath(pid int) string {
 	return fmt.Sprintf("/proc/%d/ns/net", pid)
 }
 
-// execIntoContainer runs docker exec into a container with the given command.
-func (d *DockerIsolator) execIntoContainer(dockerBinary, containerName string, interactive bool, shell string, userArgs []string) error {
-	execArgs := []string{"exec"}
-	if interactive {
-		execArgs = append(execArgs, "-it")
-	} else {
-		execArgs = append(execArgs, "-i")
-	}
-	execArgs = append(execArgs, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
-	execArgs = append(execArgs, containerName)
-	if len(userArgs) > 0 {
-		execArgs = append(execArgs, userArgs...)
-	} else {
-		execArgs = append(execArgs, shell)
-	}
-	cmd := exec.Command(dockerBinary, execArgs...)
+// execCommand is the `docker exec` that runs the workload in a container,
+// whether the container was just created or reused. It is the one place that
+// argv is assembled, and it goes through buildExecArgs: a second hand-built
+// argv here once dropped the per-session proxy environment, so every reused
+// container answered 407 while the tests over buildExecArgs stayed green.
+func (d *DockerIsolator) execCommand(dockerBinary string, cfg *Config, containerName string) *exec.Cmd {
+	cmd := exec.Command(dockerBinary, d.buildExecArgs(cfg, containerName)...)
+	cmd.Env = d.commandEnv(cfg)
+	return cmd
+}
+
+// execIntoContainer runs the workload exec attached to this terminal.
+func execIntoContainer(cmd *exec.Cmd) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -821,6 +824,25 @@ func (d *DockerIsolator) withStartupDiagnostics(baseErr error, containerName str
 		baseErr, startupLogTailLines, d.engine.binary, containerName, logs)
 }
 
+// miseExecArgs is the `docker exec` argv for a boot-time mise invocation in
+// the project directory. MISE_OFFLINE=0 keeps this phase online regardless of
+// an inherited offline default: installing the project's pinned tools is the
+// one boot phase that legitimately needs the network, which in proxy mode
+// means the current session's proxy environment - a reused container's own
+// env holds the previous session's credential.
+func (d *DockerIsolator) miseExecArgs(cfg *Config, containerName string, command ...string) []string {
+	args := []string{
+		"exec",
+		"-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		"-e", "MISE_GLOBAL_CONFIG_FILE=/dev/null",
+		"-e", "MISE_OFFLINE=0",
+		"--workdir", cfg.ProjectDir,
+	}
+	args = append(args, d.proxyEnvArgs(cfg)...)
+	args = append(args, containerName)
+	return append(args, command...)
+}
+
 // installMiseTools installs mise tools if the project has a mise config file.
 func (d *DockerIsolator) installMiseTools(dockerBinary, containerName string, cfg *Config) error {
 	miseToml := filepath.Join(cfg.ProjectDir, ".mise.toml")
@@ -838,37 +860,16 @@ func (d *DockerIsolator) installMiseTools(dockerBinary, containerName string, cf
 		return nil
 	}
 
-	userSpec := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
-	// MISE_OFFLINE=0 keeps this phase online regardless of an inherited offline
-	// default: installing the project's pinned tools is the one boot phase that
-	// legitimately needs the network (through the proxy when proxy mode is on).
-	checkArgs := []string{
-		"exec",
-		"-u", userSpec,
-		"-e", "MISE_GLOBAL_CONFIG_FILE=/dev/null",
-		"-e", "MISE_OFFLINE=0",
-		"--workdir", cfg.ProjectDir,
-		containerName,
-		"mise", "ls", "--missing",
-	}
-	checkCmd := exec.Command(dockerBinary, checkArgs...)
+	checkCmd := exec.Command(dockerBinary, d.miseExecArgs(cfg, containerName, "mise", "ls", "--missing")...)
+	checkCmd.Env = d.commandEnv(cfg)
 	output, err := checkCmd.Output()
 	if err == nil && len(strings.TrimSpace(string(output))) == 0 {
 		return nil
 	}
 
 	notice.Info("Installing tools")
-	installArgs := []string{
-		"exec",
-		"-u", userSpec,
-		"-e", "MISE_GLOBAL_CONFIG_FILE=/dev/null",
-		"-e", "MISE_OFFLINE=0",
-		"--workdir", cfg.ProjectDir,
-		containerName,
-		"mise", "install", "-y",
-	}
-
-	installCmd := exec.Command(dockerBinary, installArgs...)
+	installCmd := exec.Command(dockerBinary, d.miseExecArgs(cfg, containerName, "mise", "install", "-y")...)
+	installCmd.Env = d.commandEnv(cfg)
 	installCmd.Stdout = os.Stderr
 	installCmd.Stderr = os.Stderr
 
@@ -927,7 +928,8 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 						return &DockerBuildResult{
 							Action:               DockerActionExec,
 							BinaryPath:           dockerPath,
-							Args:                 buildExecArgs(cfg, containerName),
+							Args:                 d.buildExecArgs(cfg, containerName),
+							Env:                  d.commandEnv(cfg),
 							ContainerName:        containerName,
 							ContainerJustStarted: true,
 						}, nil
@@ -936,7 +938,8 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 					return &DockerBuildResult{
 						Action:        DockerActionExec,
 						BinaryPath:    dockerPath,
-						Args:          buildExecArgs(cfg, containerName),
+						Args:          d.buildExecArgs(cfg, containerName),
+						Env:           d.commandEnv(cfg),
 						ContainerName: containerName,
 					}, nil
 				}
@@ -959,6 +962,7 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 			Action:        DockerActionCreate,
 			BinaryPath:    dockerPath,
 			Args:          args,
+			Env:           d.commandEnv(cfg),
 			ContainerName: containerName,
 		}, nil
 	}
@@ -985,6 +989,7 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 		Action:     DockerActionRun,
 		BinaryPath: dockerPath,
 		Args:       args,
+		Env:        d.commandEnv(cfg),
 	}
 	// Surface the krun container name so Run can resolve the guest PID for
 	// session registration (buildRunArgs injected the matching --name).
@@ -1066,7 +1071,14 @@ func userConfiguredEnv(cfg *Config, name string) bool {
 }
 
 // buildExecArgs builds arguments for docker exec into a running container.
-func buildExecArgs(cfg *Config, containerName string) []string {
+//
+// The proxy environment is re-injected here rather than trusted from the
+// container: a kept container carries the env it was created with, and the
+// proxy credential is per session, so an exec into it must hand the workload
+// the current session's URL. The credential is deliberately not part of
+// configHash - recreating the container per session would defeat
+// keep_container - and the port and CA path, which are, stay create-time.
+func (d *DockerIsolator) buildExecArgs(cfg *Config, containerName string) []string {
 	args := []string{"exec"}
 	// Attach stdin (-i) so piped input reaches the exec'd command; add a TTY only
 	// for interactive sessions.
@@ -1076,6 +1088,7 @@ func buildExecArgs(cfg *Config, containerName string) []string {
 		args = append(args, "-i")
 	}
 	args = append(args, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	args = append(args, d.proxyEnvArgs(cfg)...)
 	args = append(args, containerName)
 	if len(cfg.Command) > 0 {
 		args = append(args, cfg.Command...)
@@ -1338,40 +1351,21 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "--add-host", d.engine.hostAlias+":"+hostIP)
 	}
 
-	// Proxy mode
+	// Proxy mode. PROXY_MODE/PROXY_HOST/PROXY_PORT are shim-facing and the CA
+	// mount is create-time (its path is in configHash); the proxy environment
+	// itself comes from proxyEnvArgs, which docker exec renders again.
 	if cfg.ProxyEnabled {
 		args = append(args, "-e", "PROXY_MODE=true")
-		proxyHost := cfg.ProxyHost
-		if proxyHost == "" {
-			proxyHost = d.proxyHost()
-		}
-		args = append(args, "-e", fmt.Sprintf("PROXY_HOST=%s", proxyHost))
+		args = append(args, "-e", fmt.Sprintf("PROXY_HOST=%s", d.resolveProxyHost(cfg)))
 		args = append(args, "-e", fmt.Sprintf("PROXY_PORT=%d", cfg.ProxyPort))
-
-		// Set the proxy env vars directly so they're available in all processes
-		// (not just the entrypoint shell). This ensures curl, mise, etc. use the
-		// proxy. The set itself lives in internal/proxyenv, shared with the bwrap
-		// backend so a variable added there reaches both.
-		proxyURL := fmt.Sprintf("http://%s:%d", proxyHost, cfg.ProxyPort)
-		proxyVars := proxyenv.Vars(proxyURL, cfg.ProxyExtraEnv)
 
 		// Mount CA certificate for HTTPS MITM. Unlike bwrap, /etc/ssl/certs is
 		// writable here, so the certificate lands where tools already look.
 		if cfg.ProxyCAPath != "" {
-			caDest := "/etc/ssl/certs/devsandbox-ca.crt"
-			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", cfg.ProxyCAPath, caDest))
-			proxyVars = append(proxyVars, proxyenv.CAVars(caDest, cfg.ProxyExtraCAEnv)...)
+			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", cfg.ProxyCAPath, containerCACertPath))
 		}
 
-		for _, v := range proxyVars {
-			// A Default must not clobber a value the user configured: `-e` is
-			// last-wins and the user's env is emitted above, so skip it entirely
-			// when they set the var themselves (documented override).
-			if v.Default && userConfiguredEnv(cfg, v.Name) {
-				continue
-			}
-			args = append(args, "-e", fmt.Sprintf("%s=%s", v.Name, v.Value))
-		}
+		args = append(args, d.proxyEnvArgs(cfg)...)
 	}
 
 	// Per-session network for proxy isolation
@@ -1524,6 +1518,91 @@ func (d *DockerIsolator) writeOverlayManifest(cfg *Config, manifest *OverlayMani
 // NetworkName returns the per-session Docker network name, if any.
 func (d *DockerIsolator) NetworkName() string {
 	return d.networkName
+}
+
+// containerCACertPath is where the docker/krun backend mounts the proxy CA
+// certificate: /etc/ssl/certs is writable here, so it lands where tools look.
+const containerCACertPath = "/etc/ssl/certs/devsandbox-ca.crt"
+
+// resolveProxyHost returns the host the container reaches the proxy at: the
+// configured one, else the engine's host alias.
+func (d *DockerIsolator) resolveProxyHost(cfg *Config) string {
+	if cfg.ProxyHost != "" {
+		return cfg.ProxyHost
+	}
+	return d.proxyHost()
+}
+
+// proxyVars is the shared proxy environment for this launch: proxyenv.Vars,
+// plus proxyenv.CAVars when a CA certificate is mounted, minus a Default the
+// user configured themselves. Nil when the proxy is off.
+func (d *DockerIsolator) proxyVars(cfg *Config) []proxyenv.Var {
+	if !cfg.ProxyEnabled {
+		return nil
+	}
+	proxyURL := proxyenv.URL(d.resolveProxyHost(cfg), cfg.ProxyPort, cfg.ProxyAuthToken)
+	vars := proxyenv.Vars(proxyURL, cfg.ProxyExtraEnv)
+	if cfg.ProxyCAPath != "" {
+		vars = append(vars, proxyenv.CAVars(containerCACertPath, cfg.ProxyExtraCAEnv)...)
+	}
+	kept := vars[:0]
+	for _, v := range vars {
+		// A Default must not clobber a value the user configured: `-e` is
+		// last-wins and the user's env is emitted before this block, so skip
+		// it entirely when they set the var themselves (documented override).
+		if v.Default && userConfiguredEnv(cfg, v.Name) {
+			continue
+		}
+		kept = append(kept, v)
+	}
+	return kept
+}
+
+// proxyEnvArgs renders the shared proxy environment as `-e` arguments, set
+// directly so every process in the container sees them, not just the
+// entrypoint shell. The set itself lives in internal/proxyenv, shared with the
+// bwrap backend so a variable added there reaches both. Both `docker create`
+// (buildCommonArgs) and `docker exec` (buildExecArgs, miseExecArgs) call this,
+// so a reused container gets the current session's proxy URL. Empty when the
+// proxy is off.
+//
+// A Secret variable is named without its value: docker and podman both read a
+// bare `-e NAME` from the CLI's own environment, which commandEnv supplies.
+// The CLI stays attached for the whole session and /proc/<pid>/cmdline is
+// readable by every local user, so a credential spelled into argv would be
+// readable by exactly the processes it exists to keep out.
+func (d *DockerIsolator) proxyEnvArgs(cfg *Config) []string {
+	var args []string
+	for _, v := range d.proxyVars(cfg) {
+		if v.Secret {
+			args = append(args, "-e", v.Name)
+			continue
+		}
+		args = append(args, "-e", fmt.Sprintf("%s=%s", v.Name, v.Value))
+	}
+	return args
+}
+
+// commandEnv is the environment the engine CLI runs with: the invoking
+// environment plus every Secret proxy variable proxyEnvArgs named without a
+// value. Nil - inherit unchanged - when there is nothing to add, so a launch
+// without the proxy is exactly what it was.
+func (d *DockerIsolator) commandEnv(cfg *Config) []string {
+	var env []string
+	for _, v := range d.proxyVars(cfg) {
+		if v.Secret {
+			env = append(env, v.Name+"="+v.Value)
+		}
+	}
+	if env == nil {
+		return nil
+	}
+	// The engine CLI honours HTTP(S)_PROXY for its own daemon transport on a
+	// tcp:// DOCKER_HOST (go-connections ConfigureTransport), which would send
+	// every control-plane call through the sandbox proxy. NO_PROXY is never
+	// bare in argv, so this reaches the CLI only, never the container.
+	env = append(env, "NO_PROXY=*", "no_proxy=*")
+	return append(os.Environ(), env...)
 }
 
 // proxyHost returns the host address for proxy connections from within the container.

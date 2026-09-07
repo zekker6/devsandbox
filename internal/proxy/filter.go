@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -433,18 +434,23 @@ func (e *FilterEngine) Config() *FilterConfig {
 
 // BlockResponse creates an HTTP 403 response for blocked requests.
 func BlockResponse(req *http.Request, reason string) *http.Response {
-	body := fmt.Sprintf("Request blocked by devsandbox: %s\n", reason)
+	resp := textResponse(req, http.StatusForbidden, fmt.Sprintf("Request blocked by devsandbox: %s\n", reason))
+	resp.Header.Set("X-Blocked-By", "devsandbox")
+	return resp
+}
 
+// textResponse builds a plain-text HTTP/1.1 response the proxy answers with
+// itself, in place of anything from upstream.
+func textResponse(req *http.Request, status int, body string) *http.Response {
 	return &http.Response{
-		StatusCode: http.StatusForbidden,
-		Status:     "403 Forbidden",
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Header: http.Header{
 			"Content-Type":   []string{"text/plain; charset=utf-8"},
-			"Content-Length": []string{fmt.Sprintf("%d", len(body))},
-			"X-Blocked-By":   []string{"devsandbox"},
+			"Content-Length": []string{strconv.Itoa(len(body))},
 		},
 		Body:          io.NopCloser(strings.NewReader(body)),
 		ContentLength: int64(len(body)),

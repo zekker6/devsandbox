@@ -118,8 +118,9 @@ enabled = true
 extra_env = ["GRADLE_OPTS_PROXY", "MY_CUSTOM_PROXY"]
 ```
 
-Each variable in `extra_env` is set to the proxy URL (e.g., `http://10.0.2.2:8080`)
-when proxy mode is active.
+Each variable in `extra_env` is set to the proxy URL when proxy mode is active
+(e.g., `http://devsandbox:<token>@10.0.2.2:8080` - the URL carries the session's
+[proxy credential](proxy.md#proxy-authentication), which the tool must send).
 
 ### Proxy Extra CA Environment Variables
 

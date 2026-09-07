@@ -141,6 +141,29 @@ Three things about exit code 78 in the rendered prologue:
   bound read-write into the sandbox - and a workload that can delete the marker makes its own exit 78 read as an abort,
   destroying the signal. Same reasoning as `internal/herdrstate`; see *State the host trusts* above.
 
+## Proxy credential transport
+
+The per-session proxy credential is the one secret devsandbox itself hands the sandbox, and the boundary it draws is
+"only this session", which includes other users on the host. Two things keep that true:
+
+- **Never put it on a command line.** `/proc/<pid>/cmdline` is world-readable on a default procfs, and the launcher
+  lives for the whole session - pasta carries the entire bwrap invocation in its argv, the attached `docker exec`
+  client carries its `-e` list. `proxyenv.Var.Secret` marks every credential-bearing variable, and each backend keys on
+  it: the bwrap builder routes them through `SetSecretEnv`/`SecretArgs` and `bwrap.StartWithPasta` writes those to a
+  0600 file under `$XDG_STATE_HOME/devsandbox/bwrap-args/` that the wrapper prologue opens on fd 3 for `--args 3`
+  (pasta closes every other inherited descriptor at startup, so the file cannot simply be passed down); the docker/krun
+  backend emits a bare `-e NAME` and values it through `commandEnv`, which every `exec.Cmd` the engine runs must carry.
+  That environment also sets `NO_PROXY=*`: the engine CLI honours `HTTP(S)_PROXY` for its own daemon transport on a
+  `tcp://` `DOCKER_HOST`, so without it every control-plane call would go through the sandbox proxy and be filtered.
+  `NO_PROXY` is never bare in argv, so the wildcard reaches the CLI only and the container keeps its explicit value.
+  `TestBuilder_AddProxyEnvironment_KeepsCredentialOutOfArgv` and `TestProxyEnvArgs_KeepsCredentialOutOfArgv` grep the
+  rendered argv for the token; a new place that spells a `Secret` value into argv fails there.
+- **One argv builder per exec path.** `docker.go`'s `execCommand` builds the workload exec from `buildExecArgs` and
+  `commandEnv`, and `installMiseTools` goes through `miseExecArgs` for the same reason: a second hand-assembled
+  `docker exec` argv silently dropped the re-injected credential on every reused `keep_container` container, so the
+  second session of a project got 407 on every request while the tests over `buildExecArgs` stayed green.
+  `TestExecCommand_CarriesCurrentProxyEnv` pins the path that runs, not the function that renders.
+
 ## Proxy filter scopes
 
 `internal/proxy`'s filter has exactly three scopes - `host`, `path`, `url` (`filter_types.go`) - and an unset scope
@@ -274,7 +297,7 @@ Split such a package three ways: an untagged file holding the types and any pure
 
 ## Pinned dependencies
 
-`github.com/elazarl/goproxy` was held at v1.8.4 because v1.8.5 wrapped the MITM client connection in a `bufio.Writer` flushed only after `resp.Write` returned, so response headers and small SSE events stayed buffered until the whole body was consumed - streaming responses arrived all at once. v1.9.0 writes the response through a head-only buffer (`responseHeadWriter`) and streams the body; the two regression tests in `internal/proxy/server_test.go`, `TestServerSSE_StreamsHeadersWithoutBuffering` and `TestServerStreaming_EmptyContentTypeNotBuffered`, pass on it (re-run 2026-09-02), and the `renovate.json` cap is gone. Those two tests stay the tripwire: if a goproxy bump makes them fail, the buffering is back - re-pin with an `allowedVersions` rule on `github.com/elazarl/goproxy` in `renovate.json`, keeping `osvVulnerabilityAlerts` on so a CVE update can still lift the cap, rather than loosen the tests.
+`github.com/elazarl/goproxy` was held at v1.8.4 because v1.8.5 wrapped the MITM client connection in a `bufio.Writer` flushed only after `resp.Write` returned, so response headers and small SSE events stayed buffered until the whole body was consumed - streaming responses arrived all at once. v1.9.0 writes the response through a head-only buffer (`responseHeadWriter`) and streams the body; the two regression tests in `internal/proxy/server_test.go`, `TestServerSSE_StreamsHeadersWithoutBuffering` and `TestServerStreaming_EmptyContentTypeNotBuffered`, pass on it (re-run 2026-09-02), and the `renovate.json` cap is gone. Those two tests stay the tripwire: if a goproxy bump makes them fail, the buffering is back - re-pin with an `allowedVersions` rule on `github.com/elazarl/goproxy` in `renovate.json`, keeping `osvVulnerabilityAlerts` on so a CVE update can still lift the cap, rather than loosen the tests. `TestServerAuth_CONNECT_MITM` in `internal/proxy/server_auth_test.go` is a second tripwire: the tunnel credential rides on goproxy copying `ctx.UserData` from the CONNECT context into every per-request context (`https.go`, `http2.go`), so a version that stops doing that fails it and would otherwise answer 407 to every request inside an authenticated tunnel.
 
 ## Documentation site
 

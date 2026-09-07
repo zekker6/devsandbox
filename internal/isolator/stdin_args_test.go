@@ -38,14 +38,15 @@ func TestBuildRunArgs_StdinAttachment(t *testing.T) {
 }
 
 func TestBuildExecArgs_StdinAttachment(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
 	cfg := &Config{Shell: "/bin/bash", Command: []string{"cat"}}
-	args := buildExecArgs(cfg, "container")
+	args := iso.buildExecArgs(cfg, "container")
 	if !slices.Contains(args, "-i") || slices.Contains(args, "-it") {
 		t.Errorf("non-interactive exec must use -i (not -it); got %v", args)
 	}
 
 	cfg.Interactive = true
-	args = buildExecArgs(cfg, "container")
+	args = iso.buildExecArgs(cfg, "container")
 	if !slices.Contains(args, "-it") {
 		t.Errorf("interactive exec must use -it; got %v", args)
 	}

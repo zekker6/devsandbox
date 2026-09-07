@@ -15,7 +15,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +32,7 @@ func TestNewServer(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 0) // Port 0 for random port
+	cfg := newTestConfig(tmpDir, 0) // Port 0 for random port
 
 	server, err := NewServer(cfg)
 	if err != nil {
@@ -56,7 +55,7 @@ func TestServerStartStop(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18080)
+	cfg := newTestConfig(tmpDir, 18080)
 
 	server, err := NewServer(cfg)
 	if err != nil {
@@ -105,7 +104,7 @@ func TestServerHTTPProxy(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18081)
+	cfg := newTestConfig(tmpDir, 18081)
 
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
@@ -121,7 +120,7 @@ func TestServerHTTPProxy(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Create HTTP client that uses proxy
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
@@ -174,7 +173,7 @@ func TestServerHTTPSProxy(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18082)
+	cfg := newTestConfig(tmpDir, 18082)
 
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
@@ -190,7 +189,7 @@ func TestServerHTTPSProxy(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Create HTTPS client that uses proxy and trusts our CA
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 
 	// Trust both our CA and the test server's CA
 	certPool := x509.NewCertPool()
@@ -244,7 +243,7 @@ func TestServerDynamicPortSelection(t *testing.T) {
 	// Both request port 18084
 	requestedPort := 18084
 
-	cfg1 := NewConfig(tmpDir1, requestedPort)
+	cfg1 := newTestConfig(tmpDir1, requestedPort)
 	server1, err := NewServer(cfg1)
 	if err != nil {
 		t.Fatalf("NewServer 1 failed: %v", err)
@@ -261,7 +260,7 @@ func TestServerDynamicPortSelection(t *testing.T) {
 	}
 
 	// Now start second server requesting same port
-	cfg2 := NewConfig(tmpDir2, requestedPort)
+	cfg2 := newTestConfig(tmpDir2, requestedPort)
 	server2, err := NewServer(cfg2)
 	if err != nil {
 		t.Fatalf("NewServer 2 failed: %v", err)
@@ -292,7 +291,7 @@ func TestNewServer_NoMITM(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 0)
+	cfg := newTestConfig(tmpDir, 0)
 	cfg.MITM = false
 
 	server, err := NewServer(cfg)
@@ -331,7 +330,7 @@ func TestServerHTTPS_NoMITM_Tunnels(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18083)
+	cfg := newTestConfig(tmpDir, 18083)
 	cfg.MITM = false
 
 	proxyServer, err := NewServer(cfg)
@@ -349,7 +348,7 @@ func TestServerHTTPS_NoMITM_Tunnels(t *testing.T) {
 	// Create HTTPS client that uses proxy — no proxy CA needed since MITM is off.
 	// InsecureSkipVerify is used because httptest.NewTLSServer uses a self-signed cert;
 	// the test verifies tunnel functionality, not certificate validation.
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -405,7 +404,7 @@ func TestServerHEAD_PreservesContentLength(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18085)
+	cfg := newTestConfig(tmpDir, 18085)
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
@@ -417,7 +416,7 @@ func TestServerHEAD_PreservesContentLength(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
@@ -485,7 +484,7 @@ func TestServerHEAD_PreservesContentLength_MITM(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18086)
+	cfg := newTestConfig(tmpDir, 18086)
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
@@ -498,7 +497,7 @@ func TestServerHEAD_PreservesContentLength_MITM(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 
 	certPool := x509.NewCertPool()
 	certPool.AddCert(proxyServer.CA().Certificate)
@@ -594,7 +593,7 @@ func TestServerSSE_StreamsHeadersWithoutBuffering(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18087)
+	cfg := newTestConfig(tmpDir, 18087)
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
@@ -607,7 +606,7 @@ func TestServerSSE_StreamsHeadersWithoutBuffering(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	certPool := x509.NewCertPool()
 	certPool.AddCert(proxyServer.CA().Certificate)
 	certPool.AddCert(testServer.Certificate())
@@ -709,7 +708,7 @@ func TestServerStreaming_EmptyContentTypeNotBuffered(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18089)
+	cfg := newTestConfig(tmpDir, 18089)
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
@@ -722,7 +721,7 @@ func TestServerStreaming_EmptyContentTypeNotBuffered(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	certPool := x509.NewCertPool()
 	certPool.AddCert(proxyServer.CA().Certificate)
 	certPool.AddCert(testServer.Certificate())
@@ -912,7 +911,7 @@ func TestServerWebSocket_MITMTunnel(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18090)
+	cfg := newTestConfig(tmpDir, 18090)
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
@@ -925,7 +924,7 @@ func TestServerWebSocket_MITMTunnel(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	certPool := x509.NewCertPool()
 	certPool.AddCert(proxyServer.CA().Certificate)
 	certPool.AddCert(testServer.Certificate())
@@ -1018,7 +1017,7 @@ func TestServerWebSocket_PlainHTTPNonMITM(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18091)
+	cfg := newTestConfig(tmpDir, 18091)
 	cfg.MITM = false // transparent mode: no HTTPS interception
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
@@ -1031,7 +1030,7 @@ func TestServerWebSocket_PlainHTTPNonMITM(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 	defer transport.CloseIdleConnections()
 
@@ -1152,7 +1151,7 @@ func TestServerDebugLogging(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	cfg := NewConfig(tmpDir, 18088)
+	cfg := newTestConfig(tmpDir, 18088)
 	proxyServer, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
@@ -1172,7 +1171,7 @@ func TestServerDebugLogging(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	certPool := x509.NewCertPool()
 	certPool.AddCert(proxyServer.CA().Certificate)
 	certPool.AddCert(testServer.Certificate())
@@ -1233,7 +1232,7 @@ func TestServerHTTPProxy_BoundsLoggedRequestBody(t *testing.T) {
 	defer testServer.Close()
 
 	tmpDir := t.TempDir()
-	cfg := NewConfig(tmpDir, 0)
+	cfg := newTestConfig(tmpDir, 0)
 	limit := 4096
 	cfg.MaxLogBodyBytes = &limit
 
@@ -1246,7 +1245,7 @@ func TestServerHTTPProxy_BoundsLoggedRequestBody(t *testing.T) {
 	}
 	defer func() { _ = proxyServer.Stop() }()
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", proxyServer.Addr()))
+	proxyURL := testProxyURL(proxyServer)
 	client := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 		Timeout:   10 * time.Second,

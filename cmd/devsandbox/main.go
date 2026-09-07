@@ -573,6 +573,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		defer deferProxyCleanup(proxyRes)
 
 		cfg.ProxyPort = proxyRes.port
+		cfg.ProxyAuthToken = proxyRes.token
 		proxyServer = proxyRes.server
 
 		notice.Info("Proxy server started on %s:%d", pCfg.GetBindAddress(), proxyRes.port)
@@ -696,6 +697,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		ProxyServer:    proxyServer,
 		ProxyCAPath:    proxyCAPath,
 		ProxyPort:      cfg.ProxyPort,
+		ProxyAuthToken: cfg.ProxyAuthToken,
 		SandboxLogger:  sandboxLogger,
 		LogDispatcher:  logDispatcher,
 		SandboxName:    sandboxName,
@@ -1091,13 +1093,17 @@ type proxyResult struct {
 	server  *proxy.Server
 	cleanup func()
 	port    int
+	token   string // per-session credential the sandbox must present
 	caPath  string
 	// signaled is set when a signal triggered shutdown (accessed from goroutine).
 	signaled atomic.Bool
 }
 
 // startProxyServer creates, starts, and returns a proxy server with signal-based cleanup.
+// It mints the session's proxy credential: the server refuses to exist without
+// one, and the sandbox is handed it through the proxy URL.
 func startProxyServer(pCfg *proxy.Config) (*proxyResult, error) {
+	pCfg.AuthToken = proxy.NewAuthToken()
 	server, err := proxy.NewServer(pCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create proxy server: %w", err)
@@ -1110,6 +1116,7 @@ func startProxyServer(pCfg *proxy.Config) (*proxyResult, error) {
 	result := &proxyResult{
 		server: server,
 		port:   server.Port(),
+		token:  pCfg.AuthToken,
 		caPath: pCfg.CACertPath,
 	}
 

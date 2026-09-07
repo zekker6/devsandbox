@@ -3,7 +3,9 @@ package proxy
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
+	"devsandbox/internal/proxyenv"
 )
 
 const (
@@ -39,6 +42,7 @@ const (
 
 type Server struct {
 	config              *Config
+	authCredential      []byte // proxyenv.AuthUser + ":" + config.AuthToken, the Basic payload a client must present
 	ca                  *CA
 	proxy               *goproxy.ProxyHttpServer
 	listener            net.Listener
@@ -128,6 +132,17 @@ func validateFilterScopes(cfg *Config) error {
 	return nil
 }
 
+// ErrMissingAuthToken reports a configuration with no per-session credential.
+// The check keys on the token alone, never on Config.Enabled: a server that
+// exists is reachable, whatever the flag says.
+var ErrMissingAuthToken = errors.New("proxy auth token is required: every proxy session needs a per-session credential (see Config.AuthToken)")
+
+// NewAuthToken returns a fresh per-session proxy credential: 32 random bytes,
+// hex-encoded, so it needs no escaping in the proxy URL.
+func NewAuthToken() string {
+	return randomHex(32)
+}
+
 // randomHex returns n random bytes, hex-encoded.
 func randomHex(n int) string {
 	b := make([]byte, n)
@@ -138,6 +153,12 @@ func randomHex(n int) string {
 }
 
 func NewServer(cfg *Config) (*Server, error) {
+	// Refuse to exist without a credential, before creating anything: a
+	// listener without one is usable by every local process.
+	if cfg.AuthToken == "" {
+		return nil, ErrMissingAuthToken
+	}
+
 	// Refuse an unenforceable configuration before creating anything.
 	if err := validateFilterScopes(cfg); err != nil {
 		return nil, err
@@ -260,6 +281,7 @@ func NewServer(cfg *Config) (*Server, error) {
 
 	s := &Server{
 		config:              cfg,
+		authCredential:      []byte(proxyenv.AuthUser + ":" + cfg.AuthToken),
 		ca:                  ca,
 		proxy:               proxy,
 		reqLogger:           reqLogger,
@@ -279,6 +301,63 @@ func NewServer(cfg *Config) (*Server, error) {
 	return s, nil
 }
 
+// authMarker is the type of authOK. Only its identity matters.
+type authMarker struct{}
+
+// authOK marks a goproxy context whose CONNECT carried a valid credential.
+// goproxy copies the CONNECT ctx's UserData into every per-request ctx of an
+// intercepted tunnel (https.go, http2.go), so the request hook can tell a
+// request that arrived inside an authenticated tunnel - which carries no
+// Proxy-Authorization of its own - from one that arrived on a plain
+// connection and must present the header itself.
+var authOK = &authMarker{}
+
+// authorized reports whether req presents the session credential as
+// Proxy-Authorization: Basic base64(proxyenv.AuthUser + ":" + token). The
+// comparison is constant-time; the scheme match is case-insensitive per
+// RFC 7235.
+func (s *Server) authorized(req *http.Request) bool {
+	scheme, payload, ok := strings.Cut(req.Header.Get("Proxy-Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, "Basic") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payload))
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(decoded, s.authCredential) == 1
+}
+
+// authorizeConnect checks the CONNECT request's credential and returns the
+// response to refuse the tunnel with, or nil when it may proceed. It runs
+// before any filtering: an unauthenticated tunnel reaches neither the filter
+// nor the request log, because it was never this session's traffic.
+func (s *Server) authorizeConnect(ctx *goproxy.ProxyCtx) *http.Response {
+	if s.authorized(ctx.Req) {
+		return nil
+	}
+	s.logAuthRefused(ctx.Req)
+	return proxyAuthRequired(ctx.Req)
+}
+
+// logAuthRefused records a refusal in the internal proxy log so a client that
+// drops URL credentials can be diagnosed with `devsandbox logs internal
+// --type proxy`. Nothing about the request beyond its target is recorded: it
+// is not this session's traffic.
+func (s *Server) logAuthRefused(req *http.Request) {
+	s.proxy.Logger.Printf("AUTH: refused %s %s from %s: missing or invalid proxy credential",
+		req.Method, RequestHost(req), req.RemoteAddr)
+}
+
+// proxyAuthRequired builds the 407 an unauthenticated request or CONNECT is
+// answered with. The challenge names the scheme the proxy URL already
+// satisfies, so a client that honours challenges and has the URL recovers.
+func proxyAuthRequired(req *http.Request) *http.Response {
+	resp := textResponse(req, http.StatusProxyAuthRequired, "proxy authentication required\n")
+	resp.Header.Set("Proxy-Authenticate", `Basic realm="devsandbox"`)
+	return resp
+}
+
 func (s *Server) setupMITM() {
 	if !s.config.MITM {
 		// Transparent mode: the tunnel is not intercepted, so this hook is the
@@ -286,6 +365,11 @@ func (s *Server) setupMITM() {
 		// CONNECT to handleHttps, which never reaches the OnRequest DoFunc
 		// installed by setupLogging.
 		s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			if resp := s.authorizeConnect(ctx); resp != nil {
+				ctx.Resp = resp
+				return goproxy.RejectConnect, host
+			}
+
 			if resp := s.filterConnect(host); resp != nil {
 				// goproxy writes ctx.Resp to the client before closing the
 				// tunnel, so the sandbox sees the 403 and its reason rather
@@ -306,17 +390,21 @@ func (s *Server) setupMITM() {
 		return
 	}
 
-	// MITM mode: intercept all HTTPS connections. In debug mode, log each
-	// CONNECT so we can confirm a host is actually being intercepted (vs.
-	// tunneled or never reaching the proxy at all).
-	if s.debug {
-		s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+	// MITM mode: intercept every authenticated HTTPS connection. The tunnel is
+	// marked so the requests decoded inside it are accepted on its credential.
+	// In debug mode, log each CONNECT so we can confirm a host is actually
+	// being intercepted (vs. tunneled or never reaching the proxy at all).
+	s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+		if resp := s.authorizeConnect(ctx); resp != nil {
+			ctx.Resp = resp
+			return goproxy.RejectConnect, host
+		}
+		ctx.UserData = authOK
+		if s.debug {
 			s.debugf("CONNECT %s -> MITM", host)
-			return goproxy.MitmConnect, host
-		})
-	} else {
-		s.proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
-	}
+		}
+		return goproxy.MitmConnect, host
+	})
 
 	// Set up certificate generation
 	goproxy.GoproxyCa = tls.Certificate{
@@ -430,6 +518,19 @@ func finalizeEntry(ctx *goproxy.ProxyCtx) {
 func (s *Server) setupLogging() {
 	// Set up request logging and filtering
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		// Authenticate first. The tunnel marker must be read before anything
+		// below overwrites UserData with the log entry; a request inside an
+		// authenticated MITM tunnel carries no Proxy-Authorization of its own.
+		// A refused request reaches nothing else: not the log, not the filter.
+		if ctx.UserData != authOK && !s.authorized(req) {
+			s.logAuthRefused(req)
+			return nil, proxyAuthRequired(req)
+		}
+		// The credential is the proxy's, not the destination's. goproxy strips
+		// it before forwarding; stripping it here keeps it out of the request
+		// log, the ask prompt and the redaction scan as well.
+		req.Header.Del("Proxy-Authorization")
+
 		// Capture request for logging (before credential injection to avoid logging tokens)
 		entry, reqBody := s.reqLogger.LogRequest(req)
 		ctx.UserData = entry

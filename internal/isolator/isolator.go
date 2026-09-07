@@ -44,9 +44,10 @@ type RunConfig struct {
 	HasActiveTools bool
 
 	// Proxy state (started by main.go before Run)
-	ProxyServer *proxy.Server // nil if proxy disabled
-	ProxyCAPath string
-	ProxyPort   int // actual port after binding
+	ProxyServer    *proxy.Server // nil if proxy disabled
+	ProxyCAPath    string
+	ProxyPort      int    // actual port after binding
+	ProxyAuthToken string // per-session credential the proxy requires
 
 	// Logging
 	SandboxLogger *logging.ErrorLogger
@@ -117,6 +118,9 @@ type Config struct {
 	ProxyEnabled bool
 	// ProxyPort is the proxy server port.
 	ProxyPort int
+	// ProxyAuthToken is the per-session credential the proxy requires; it
+	// rides in the exported proxy URL (proxyenv.URL).
+	ProxyAuthToken string
 	// ProxyHost is the proxy server host (for Docker: host.docker.internal on macOS).
 	ProxyHost string
 	// ProxyCAPath is the path to the proxy CA certificate (for HTTPS MITM).

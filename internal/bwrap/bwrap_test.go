@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -98,7 +99,7 @@ func TestInvocationsUnlimitedAreUnchanged(t *testing.T) {
 	// change without notice; the wrapper script is the one element matched
 	// loosely, since it is a formatted block rather than a flag.
 	t.Run("pasta", func(t *testing.T) {
-		prog, args, err := pastaInvocation(cgroups.Limits{}, "/opt/pasta", "/opt/bwrap", testBwrapArgs, testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{})
+		prog, args, err := pastaInvocation(cgroups.Limits{}, "/opt/pasta", "/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{})
 		if err != nil {
 			t.Fatalf("pastaInvocation() error: %v", err)
 		}
@@ -174,7 +175,7 @@ func TestInvocationsLimitedCarryTheScopePrefix(t *testing.T) {
 	// On the proxy path pasta is the outermost process, so pasta - not bwrap -
 	// is what the scope has to contain.
 	t.Run("pasta wraps pasta, not bwrap", func(t *testing.T) {
-		prog, args, err := pastaInvocation(testLimits, "/opt/pasta", "/opt/bwrap", testBwrapArgs, testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{})
+		prog, args, err := pastaInvocation(testLimits, "/opt/pasta", "/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{})
 		if err != nil {
 			t.Fatalf("pastaInvocation() error: %v", err)
 		}
@@ -220,7 +221,7 @@ func TestInvocationsPropagateWrapErrors(t *testing.T) {
 	})
 
 	t.Run("pasta", func(t *testing.T) {
-		if _, _, err := pastaInvocation(testLimits, "/opt/pasta", "/opt/bwrap", testBwrapArgs, testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{}); !errors.Is(err, wantErr) {
+		if _, _, err := pastaInvocation(testLimits, "/opt/pasta", "/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{}); !errors.Is(err, wantErr) {
 			t.Fatalf("pastaInvocation() error = %v, want %v", err, wantErr)
 		}
 	})
@@ -230,7 +231,7 @@ func TestInvocationsPropagateWrapErrors(t *testing.T) {
 // assembly assertions below stay readable.
 func mustPastaCmdline(t *testing.T, portForwardArgs []string, mapHostLoopback bool, lockdown egress.Lockdown) []string {
 	t.Helper()
-	args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, testShellCmd, portForwardArgs, mapHostLoopback, lockdown, testEgressTools)
+	args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, "", testShellCmd, portForwardArgs, mapHostLoopback, lockdown, testEgressTools)
 	if err != nil {
 		t.Fatalf("pastaCmdline() error: %v", err)
 	}
@@ -395,7 +396,7 @@ func TestPastaCmdlineLockdownFailsClosed(t *testing.T) {
 	// its result discarded. Rendering anyway would emit bare binary names, which
 	// is the silent non-application the absolute paths exist to prevent.
 	t.Run("unresolved tools", func(t *testing.T) {
-		args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, testShellCmd, nil, true, testLockdown, egress.Tools{})
+		args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, true, testLockdown, egress.Tools{})
 		if !errors.Is(err, egress.ErrNoIPBinary) {
 			t.Fatalf("pastaCmdline() error = %v, want %v", err, egress.ErrNoIPBinary)
 		}
@@ -405,7 +406,7 @@ func TestPastaCmdlineLockdownFailsClosed(t *testing.T) {
 	})
 
 	t.Run("no firewall backend", func(t *testing.T) {
-		args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, testShellCmd, nil, true, testLockdown,
+		args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, true, testLockdown,
 			egress.Tools{IP: "/usr/sbin/ip"})
 		if !errors.Is(err, egress.ErrNoFirewallBackend) {
 			t.Fatalf("pastaCmdline() error = %v, want %v", err, egress.ErrNoFirewallBackend)
@@ -419,7 +420,7 @@ func TestPastaCmdlineLockdownFailsClosed(t *testing.T) {
 	// safe outcome, since the alternative is a sandbox with no path to the proxy
 	// and no explanation.
 	t.Run("zero proxy port", func(t *testing.T) {
-		_, err := pastaCmdline("/opt/bwrap", testBwrapArgs, testShellCmd, nil, true,
+		_, err := pastaCmdline("/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, true,
 			egress.Lockdown{Enabled: true, Gateway: network.PastaGatewayIP, ProxyPort: 0, ReadyFile: "/run/devsandbox-test/applied"}, testEgressTools)
 		if err == nil {
 			t.Fatal("pastaCmdline() error = nil, want a refusal for an invalid proxy port")
@@ -434,7 +435,7 @@ func TestPastaCmdlineLockdownFailsClosed(t *testing.T) {
 	// that option produces a sandbox that can reach nothing and says nothing about
 	// why, so the launch must be refused with the prerequisite named.
 	t.Run("no map-host-loopback support", func(t *testing.T) {
-		args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, testShellCmd, nil, false, testLockdown, testEgressTools)
+		args, err := pastaCmdline("/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, false, testLockdown, testEgressTools)
 		if err == nil {
 			t.Fatal("pastaCmdline() error = nil, want a refusal without --map-host-loopback support")
 		}
@@ -449,7 +450,7 @@ func TestPastaCmdlineLockdownFailsClosed(t *testing.T) {
 	// The non-proxy path never touches the tools at all, so a host with no
 	// nft/iptables keeps launching exactly as before.
 	t.Run("no lockdown needs no tools", func(t *testing.T) {
-		if _, err := pastaCmdline("/opt/bwrap", testBwrapArgs, testShellCmd, nil, true, egress.Lockdown{}, egress.Tools{}); err != nil {
+		if _, err := pastaCmdline("/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, true, egress.Lockdown{}, egress.Tools{}); err != nil {
 			t.Fatalf("pastaCmdline() error = %v, want a non-proxy launch to succeed", err)
 		}
 	})
@@ -457,7 +458,7 @@ func TestPastaCmdlineLockdownFailsClosed(t *testing.T) {
 	// The refusal above is scoped to proxy mode: an old pasta must keep launching
 	// non-proxy sandboxes, which have no gateway to map and no rules to contradict.
 	t.Run("no lockdown needs no map-host-loopback", func(t *testing.T) {
-		if _, err := pastaCmdline("/opt/bwrap", testBwrapArgs, testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{}); err != nil {
+		if _, err := pastaCmdline("/opt/bwrap", testBwrapArgs, "", testShellCmd, nil, false, egress.Lockdown{}, egress.Tools{}); err != nil {
 			t.Fatalf("pastaCmdline() error = %v, want a non-proxy launch to succeed without --map-host-loopback", err)
 		}
 	})
@@ -557,5 +558,159 @@ func TestPastaStartTimeout(t *testing.T) {
 	}
 	if got := pastaStartTimeout(testLimits); got <= 2*time.Second {
 		t.Errorf("pastaStartTimeout(limited) = %v, want more than the unlimited budget", got)
+	}
+}
+
+// A private argument file changes three things and nothing else: the wrapper
+// gains the prologue that opens it, the file becomes the wrapper's first
+// positional argument, and bwrap gets `--args 3` after its argv so the
+// private entries apply last. Without a file the invocation is untouched, so
+// a non-proxy launch never depends on the mechanism.
+func TestPastaCmdline_SecretArgsFile(t *testing.T) {
+	const file = "/state/devsandbox/bwrap-args/args-1"
+	with, err := pastaCmdline("/opt/bwrap", testBwrapArgs, file, testShellCmd, nil, true, testLockdown, testEgressTools)
+	if err != nil {
+		t.Fatalf("pastaCmdline() error: %v", err)
+	}
+	without := mustPastaCmdline(t, nil, true, testLockdown)
+
+	sh := slices.Index(with, "sh")
+	if sh < 0 || with[sh+1] != "-c" {
+		t.Fatalf("args = %v, want an sh -c wrapper", with)
+	}
+	script := with[sh+2]
+	if !strings.HasPrefix(script, secretArgsPrologue) {
+		t.Errorf("wrapper script does not start with the private-args prologue:\n%s", script)
+	}
+	if strings.TrimPrefix(script, secretArgsPrologue) != without[slices.Index(without, "sh")+2] {
+		t.Error("the prologue changed more of the wrapper than its prefix")
+	}
+	if got := with[sh+3 : sh+5]; got[0] != "_" || got[1] != file {
+		t.Errorf("wrapper positional args = %v, want [_ %s]", got, file)
+	}
+	bw := slices.Index(with, "/opt/bwrap")
+	if bw < 0 {
+		t.Fatalf("args = %v, want the bwrap path", with)
+	}
+	// The first "--" is pasta's own; the one after bwrap ends bwrap's options.
+	sep := bw + slices.Index(with[bw:], "--")
+	if sep < bw {
+		t.Fatalf("args = %v, want bwrap's -- separator", with)
+	}
+	if !slices.Equal(with[sep-2:sep], []string{"--args", secretArgsFD}) {
+		t.Errorf("args before bwrap's -- = %v, want [--args %s] as the last bwrap options", with[sep-2:sep], secretArgsFD)
+	}
+	if !slices.Equal(with[bw+1:sep-2], testBwrapArgs) {
+		t.Errorf("bwrap args = %v, want %v unchanged ahead of --args", with[bw+1:sep-2], testBwrapArgs)
+	}
+	if slices.Contains(without, "--args") || strings.Contains(without[slices.Index(without, "sh")+2], "exec 3<") {
+		t.Errorf("args without a file = %v, want no --args and no prologue", without)
+	}
+}
+
+// The file holds the entries NUL-separated - bwrap --args' format - and is
+// readable by its owner only: it is the one place the proxy credential is
+// written on the host outside the process environment.
+func TestWriteSecretArgs(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+
+	path, err := writeSecretArgs([]string{"--setenv", "HTTP_PROXY", "http://devsandbox:tok@10.0.2.2:8080"})
+	if err != nil {
+		t.Fatalf("writeSecretArgs() error: %v", err)
+	}
+	if !strings.HasPrefix(path, stateHome+"/devsandbox/bwrap-args/") {
+		t.Errorf("path = %q, want it under $XDG_STATE_HOME/devsandbox/bwrap-args", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %o, want 0600", info.Mode().Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "--setenv\x00HTTP_PROXY\x00http://devsandbox:tok@10.0.2.2:8080\x00"; string(data) != want {
+		t.Errorf("content = %q, want %q", data, want)
+	}
+
+	if _, err := writeSecretArgs([]string{"--setenv", "X", "a\x00b"}); err == nil {
+		t.Error("writeSecretArgs() accepted a NUL byte, which would split the entry")
+	}
+	removeSecretArgsFile(path)
+	removeSecretArgsFile(path) // a second removal is not an error
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("file still present after removal: %v", err)
+	}
+}
+
+// TestSecretArgsPrologue_HandsBwrapThePrivateArgs runs the real prologue in
+// front of a real bwrap: the variable set only through the private file must
+// reach the sandboxed command, the file must be gone once bwrap has started,
+// and the sandboxed command's view of its parent argv must show `--args 3`
+// rather than the value. It is the one test that proves the mechanism rather
+// than the argv shape.
+func TestSecretArgsPrologue_HandsBwrapThePrivateArgs(t *testing.T) {
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip("bwrap not on PATH")
+	}
+	if out, err := exec.Command(bwrapPath, "--ro-bind", "/", "/", "--unshare-user", "--", "/bin/true").CombinedOutput(); err != nil {
+		t.Skipf("bwrap cannot create a user namespace here: %v\n%s", err, out)
+	}
+
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const secret = "http://devsandbox:0123456789abcdef@10.0.2.2:8080"
+	file, err := writeSecretArgs([]string{"--setenv", "HTTP_PROXY", secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeSecretArgsFile(file)
+
+	script := secretArgsPrologue + `exec "$@"`
+	probe := `printf '%s\n' "$HTTP_PROXY"; tr '\0' ' ' < /proc/$PPID/cmdline; echo`
+	cmd := exec.Command("sh", "-c", script, "_", file,
+		bwrapPath, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-all", "--clearenv", "--args", secretArgsFD,
+		"--", "/bin/sh", "-c", probe)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper + bwrap failed: %v\n%s", err, out)
+	}
+	lines := strings.SplitN(strings.TrimRight(string(out), "\n"), "\n", 2)
+	if len(lines) != 2 {
+		t.Fatalf("output = %q, want the variable line and the parent argv line", out)
+	}
+	if lines[0] != secret {
+		t.Errorf("HTTP_PROXY in the sandbox = %q, want %q", lines[0], secret)
+	}
+	if strings.Contains(lines[1], secret) {
+		t.Errorf("bwrap's argv carries the private value: %q", lines[1])
+	}
+	if !strings.Contains(lines[1], "--args "+secretArgsFD) {
+		t.Errorf("bwrap's argv = %q, want --args %s", lines[1], secretArgsFD)
+	}
+	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the wrapper left the private argument file in place: %v", err)
+	}
+}
+
+// A file the wrapper cannot read stops the launch with devsandbox's own
+// message rather than the shell's, and never reaches bwrap.
+func TestSecretArgsPrologue_RefusesAnUnreadableFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone")
+	cmd := exec.Command("sh", "-c", secretArgsPrologue+`echo reached-bwrap; exit 0`, "_", missing, "bwrap")
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("err = %v, want exit status 1\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "devsandbox: cannot read the private bwrap argument file "+missing) {
+		t.Errorf("output = %q, want devsandbox's own message naming the file", out)
+	}
+	if strings.Contains(string(out), "reached-bwrap") {
+		t.Error("the wrapper continued past an unreadable argument file")
 	}
 }

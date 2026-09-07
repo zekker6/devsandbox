@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +23,7 @@ func setupRedactionTest(t *testing.T, redaction *RedactionConfig) *redactionTest
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	cfg := NewConfig(tmpDir, 0)
+	cfg := newTestConfig(tmpDir, 0)
 	cfg.Redaction = redaction
 
 	server, err := NewServer(cfg)
@@ -39,7 +37,7 @@ func setupRedactionTest(t *testing.T, redaction *RedactionConfig) *redactionTest
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", server.Addr()))
+	proxyURL := testProxyURL(server)
 	certPool := x509.NewCertPool()
 	certPool.AddCert(server.CA().Certificate)
 
@@ -66,7 +64,7 @@ func TestRedactionIntegration_BlockSecretInBody(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	cfg := NewConfig(tmpDir, 0)
+	cfg := newTestConfig(tmpDir, 0)
 	cfg.Redaction = &RedactionConfig{
 		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
@@ -86,7 +84,7 @@ func TestRedactionIntegration_BlockSecretInBody(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", server.Addr()))
+	proxyURL := testProxyURL(server)
 
 	certPool := x509.NewCertPool()
 	certPool.AddCert(server.CA().Certificate)
@@ -129,7 +127,7 @@ func TestRedactionIntegration_NoSecretAllowed(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	cfg := NewConfig(tmpDir, 0)
+	cfg := newTestConfig(tmpDir, 0)
 	cfg.Redaction = &RedactionConfig{
 		Enabled:       new(true),
 		DefaultAction: RedactionActionBlock,
@@ -149,7 +147,7 @@ func TestRedactionIntegration_NoSecretAllowed(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", server.Addr()))
+	proxyURL := testProxyURL(server)
 
 	certPool := x509.NewCertPool()
 	certPool.AddCert(server.CA().Certificate)

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.20.1...HEAD)
 
+### Breaking Changes
+
+- The proxy now requires a per-session credential. Every proxy variable devsandbox exports - `HTTP_PROXY`, `HTTPS_PROXY`, their lowercase forms, Yarn's, and any `extra_env` name - carries it as URL userinfo, so curl, git, pip, npm, Node's built-in `fetch`, Go, mise and Claude Code keep working unchanged. A client that ignores URL credentials, or a proxy URL you spelled out by hand without them, is answered `407 Proxy Authentication Required`; use the exported variable instead. There is no opt-out. The listener was open to every local process - other users on the host, a sandbox sharing the host network namespace, a container that reaches the gateway - and the proxy injects your configured credentials into what it forwards, so any of them could use those tokens; now only the session that was handed the credential can. The credential lives only in process environments and never on a command line, where `ps` would show it to every local user: on bwrap it reaches the sandbox through a private file the launch wrapper hands to bwrap's `--args`, on Docker and krun through the engine CLI's environment. On Docker with `keep_container`, a reused container gets the new session's credential at exec time rather than being recreated. See [Proxy authentication](docs/proxy.md#proxy-authentication).
+
 ### Added
 
 - `devsandbox agent-wrappers activate` now takes `--agents`, so you can wrap only the agents you name and leave the rest running unsandboxed: `--agents claude,codex`, the flag repeated once per agent, or both. Omitting it wraps every supported agent that is installed, exactly as before. An unsupported name or an explicitly empty selection exits non-zero listing the supported agents and writes nothing to stdout, so a startup file never evaluates half a snippet; selecting an agent you have not installed stays a no-op rather than an error. See [Tools: Shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default).
