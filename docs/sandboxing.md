@@ -74,6 +74,7 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 | Custom mount rules                | User-configurable (see below)       |
 | Network (default)                 | Full access                         |
 | Network (proxy mode)              | Isolated, routed through MITM proxy; enforced deny-by-default on bwrap and krun, advisory on Docker (see [per-backend behavior](proxy.md#backend-specific-behavior)) |
+| Terminal (bwrap)                  | Host tty session shared. On kernels that allow `TIOCSTI` (before 6.2, or `dev.tty.legacy_tiocsti=1`) sandboxed code can inject keystrokes into it; `devsandbox doctor` reports the status in its `tty` row. Docker and krun allocate their own pty |
 
 ### What's Not Available (by default)
 
@@ -486,6 +487,7 @@ This verifies:
 - Docker base image (`ghcr.io/zekker6/devsandbox:latest`) presence
 - Configuration file validity
 - Kernel version
+- Whether the kernel lets sandboxed code inject keystrokes into the host terminal (`tty` - `dev.tty.legacy_tiocsti`, bwrap only)
 - Recent errors in internal logs
 - Detected development tools (mise, editors, etc.)
 

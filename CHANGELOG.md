@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `devsandbox agent-wrappers activate` now takes `--agents`, so you can wrap only the agents you name and leave the rest running unsandboxed: `--agents claude,codex`, the flag repeated once per agent, or both. Omitting it wraps every supported agent that is installed, exactly as before. An unsupported name or an explicitly empty selection exits non-zero listing the supported agents and writes nothing to stdout, so a startup file never evaluates half a snippet; selecting an agent you have not installed stays a no-op rather than an error. See [Tools: Shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default).
+- `devsandbox doctor` now reports whether the kernel lets sandboxed code inject keystrokes into your terminal (the `tty` row). The bwrap backend keeps your terminal as the workload's controlling tty, so on a kernel that still allows `TIOCSTI` - anything before 6.2, or a newer one with `dev.tty.legacy_tiocsti=1` - sandboxed code can queue input that your shell runs once devsandbox exits. The row is advisory and names the sysctl to set; docker and krun allocate their own pty and are not exposed. See [Security Model](docs/sandboxing.md#security-model).
 
 ### Changed
 
