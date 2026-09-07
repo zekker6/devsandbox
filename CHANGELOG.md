@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The host `~/.claude.json` is no longer mounted read-write into the sandbox. That file is read back by your host Claude Code on every start - MCP servers, per-project trust, account state - so a sandboxed agent could register an MCP server your host then launched, or mark a project trusted. Each project's sandbox now gets its own copy, seeded from the host file on the first launch and never written back; host-side changes made after that do not flow in until you delete the copy. Existing sandboxes are seeded on their next launch too. See [Claude Code](docs/tools.md#claude-code).
 - Custom mount rules now mask files reached through symlinks without bubblewrap 0.12.0 aborting with `Can't mount on symlink destination`. See [Custom Mounts](docs/configuration.md#custom-mounts).
 
 ## [v0.20.1](https://github.com/zekker6/devsandbox/releases/tag/v0.20.1) - 2026-08-25

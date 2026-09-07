@@ -116,7 +116,6 @@ Checking tools...
     • config: ~/.config/git/ignore
 ✓ claude (/home/user/.local/bin/claude)
     ✓ ~/.claude
-    ✓ ~/.claude.json
 ✗ starship (not available)
     ! starship binary not found in PATH
 
@@ -383,10 +382,12 @@ Configuration directories are mounted read-write to allow Claude to save setting
 ```
 ~/.claude           → Sandbox (read-write)
 ~/.config/Claude    → Sandbox (read-write)
-~/.claude.json      → Sandbox (read-write)
+~/.claude.json      → Sandbox (per-project copy, seeded on first launch)
 ```
 
 These directories are isolated to the sandbox home - not your real host directories. Claude's conversation state and settings persist across sandbox sessions for the same project but are not shared with your host.
+
+`~/.claude.json` is different from the directories: it is a single file the host's own Claude Code reads back on every start - MCP servers, per-project trust, onboarding and account state. The sandbox never sees the host file. On the first launch of a project devsandbox copies it into the sandbox home, and from then on that copy is the sandbox's own: Claude writes it freely, changes you make on the host afterwards do not flow in, and nothing the sandboxed Claude writes reaches the host file. A sandboxed agent therefore cannot register an MCP server your host Claude Code would launch. To pick up a host-side change (a new MCP server, a fresh login), delete the copy at `~/.local/share/devsandbox/<project>/home/.claude.json` and it is re-seeded on the next launch. With `CLAUDE_CONFIG_DIR` set, Claude Code keeps this state under that directory instead and no copy is made.
 
 Inside a herdr pane, a direct `devsandbox claude` launch lets Claude's herdr
 integration report its native session to herdr through the filtered proxy, so
