@@ -790,17 +790,36 @@ The socket path is auto-detected from the current directory's sandbox. You can a
 devsandbox proxy monitor /path/to/ask.sock
 ```
 
+The socket lives under the project's sandbox directory, so every devsandbox session of that project
+shares it. Both ends identify themselves when they connect: proxy and monitor exchange a role hello
+before any request, and each refuses a peer that does not answer with the opposite role. Two things
+follow from that:
+
+- **Start the monitor before launching concurrent sessions.** A second session of the same project
+  finds the first session's socket, and since its owner is a proxy rather than a monitor, it blocks
+  every ask-mode request for its lifetime - the launch warns
+  `the ask socket ... is owned by another devsandbox session, not a monitor`. A monitor started
+  first owns the socket instead: every session connects to it, and requests are shown one at a time
+  so a key always answers the request on screen. If the monitor exits while sessions are running,
+  they keep re-dialing the socket and pick up a restarted monitor; a session that reaches another
+  session's proxy on that path instead stops with the same warning.
+- **Monitor and sandbox must be the same devsandbox version.** The hello names the protocol version.
+  A monitor or sandbox from a build that predates it, or that speaks a different version, is refused
+  and reported rather than served: the session warns
+  `the ask socket ... is owned by a monitor or session from an older devsandbox build`, and the
+  proxy's internal log records `ask mode: refused a connection on ...` with the cause.
+
 The monitor displays incoming requests:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Request #1                                                      │
+│  Request #3f9c0d2a8b1e4c7d9a6f5e0b2c4d8e1f                        │
 ├──────────────────────────────────────────────────────────────────┤
 │  Method: GET                                                     │
 │  Host:   api.example.com                                         │
 │  Path:   /v1/users                                               │
 ├──────────────────────────────────────────────────────────────────┤
-│  [A]llow    [B]lock    Allow [S]ession    Block [N]ever         │
+│  [a]llow    [b]lock    [s]ession-allow    [n]ever-allow          │
 └──────────────────────────────────────────────────────────────────┘
 Decision:
 ```
@@ -812,7 +831,7 @@ Decision:
 - `s` - Allow and remember for session
 - `n` - Block and remember for session
 
-**Timeout**: Requests that don't receive a response within 30 seconds are automatically rejected and logged to internal logs as unanswered.
+**Timeout**: Requests that don't receive a response within 30 seconds are automatically rejected and logged to internal logs as unanswered. The window is measured from when the sandbox asked, not from when the prompt is drawn: a request that waited behind another session's prompt for longer than that is skipped with `expired before it could be shown` rather than drawn with a fresh window, since the sandbox has already blocked it.
 
 ### Generate Filter Rules from Logs
 

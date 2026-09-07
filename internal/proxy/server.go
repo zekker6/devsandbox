@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +16,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -54,7 +55,6 @@ type Server struct {
 	wg                  sync.WaitGroup
 	mu                  sync.Mutex
 	running             bool
-	requestID           atomic.Uint64
 	debug               bool // DEVSANDBOX_DEBUG: log per-request lifecycle to the internal proxy log
 }
 
@@ -126,6 +126,15 @@ func validateFilterScopes(cfg *Config) error {
 			ErrUnenforceableFilterScope, i+1, rule.Pattern, scope, scope)
 	}
 	return nil
+}
+
+// randomHex returns n random bytes, hex-encoded.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	// crypto/rand.Read never returns an error since Go 1.24; it crashes the
+	// process instead if the platform source is unavailable.
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func NewServer(cfg *Config) (*Server, error) {
@@ -238,7 +247,7 @@ func NewServer(cfg *Config) (*Server, error) {
 	var askServer *AskServer
 	var askQueue *AskQueue
 	if cfg.Filter.IsEnabled() && cfg.Filter.usesAskAction() {
-		askServer, err = NewAskServer(cfg.SandboxBase)
+		askServer, err = NewAskServer(cfg.SandboxBase, proxy.Logger)
 		if err != nil {
 			_ = proxyLogger.Close()
 			_ = reqLogger.Close()
@@ -246,7 +255,7 @@ func NewServer(cfg *Config) (*Server, error) {
 		}
 
 		timeout := time.Duration(cfg.Filter.GetAskTimeout()) * time.Second
-		askQueue = NewAskQueue(askServer, filterEngine, timeout)
+		askQueue = NewAskQueue(askServer, filterEngine, timeout, proxy.Logger)
 	}
 
 	s := &Server{
@@ -737,15 +746,20 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// newAskRequestID returns 16 random bytes as hex. The id is the only thing
+// tying a monitor's answer to a pending request, so it must not be guessable:
+// a sequential counter let any peer on the ask socket answer a request it had
+// never been shown.
+func newAskRequestID() string {
+	return randomHex(16)
+}
+
 // handleAskMode prompts the user for a decision on the request.
 // Returns the filter action and logs unanswered requests to internal logs.
 func (s *Server) handleAskMode(req *http.Request, entry *RequestLog, reqBody []byte) FilterAction {
-	// Generate unique request ID
-	id := s.requestID.Add(1)
-
 	// Build ask request
 	askReq := &AskRequest{
-		ID:     fmt.Sprintf("%d", id),
+		ID:     newAskRequestID(),
 		Method: req.Method,
 		URL:    req.URL.String(),
 		// The authority the request is actually sent to, not the Host header

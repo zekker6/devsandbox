@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"devsandbox/internal/notice"
 )
 
 // ErrNoMonitor indicates no monitor is connected to handle ask requests.
@@ -26,6 +28,118 @@ const (
 	// AskModeClient means AskServer connects to a pre-existing monitor socket as a client.
 	AskModeClient AskMode = "client"
 )
+
+// AskProto is the ask socket protocol every hello names. A peer speaking
+// another version is refused rather than guessed at, so bump it when the
+// message shapes change.
+const AskProto = "devsandbox-ask/1"
+
+// AskRole says which end of the ask socket a process is.
+type AskRole string
+
+const (
+	AskRoleProxy   AskRole = "proxy"
+	AskRoleMonitor AskRole = "monitor"
+)
+
+// peer returns the role a connection from r must find on the other end.
+func (r AskRole) peer() AskRole {
+	if r == AskRoleProxy {
+		return AskRoleMonitor
+	}
+	return AskRoleProxy
+}
+
+// AskHello is the first JSON object each end sends on an ask socket
+// connection, before any request or response.
+//
+// The socket path is per project, and which side listens depends only on who
+// started first: a proxy that finds the socket live dials it and took whatever
+// answered as its monitor, while a listening proxy admitted whoever dialed.
+// Two concurrent sessions of one project therefore registered each other -
+// one's requests were decoded by the other as responses, and a matching id
+// resolved a pending request nobody had been prompted for. The hello names
+// the speaker's role so each side can require the opposite one before it
+// exchanges a single request.
+type AskHello struct {
+	Proto string  `json:"proto"`
+	Role  AskRole `json:"role"`
+}
+
+// askHelloTimeout bounds how long either end waits for the peer's hello. A
+// peer that never sends one is refused, not admitted after a grace period.
+var askHelloTimeout = 5 * time.Second
+
+// errAskHelloTimeout is the handshake failure for a peer that sent nothing
+// before the hello deadline. A build that predates the hello never sends one,
+// so this cause names an older monitor or session, not a wrong-role peer.
+var errAskHelloTimeout = errors.New("no hello from peer")
+
+// askReconnectInterval is how often a client-mode AskServer re-dials the
+// socket after its monitor disconnects.
+var askReconnectInterval = time.Second
+
+// AskHandshake exchanges hellos on a freshly opened connection. The dialer
+// (initiator) sends its hello first and then requires the listener's; the
+// listener reads first and answers only a peer it accepts, so a refused peer
+// learns nothing. dec and enc must be the pair the message loop uses
+// afterwards: the decoder buffers past the hello, and a second decoder on
+// conn would lose those bytes.
+func AskHandshake(conn net.Conn, dec *json.Decoder, enc *json.Encoder, role AskRole, initiator bool) error {
+	return askHandshake(conn, dec, enc, role, initiator, askHelloTimeout)
+}
+
+func askHandshake(conn net.Conn, dec *json.Decoder, enc *json.Encoder, role AskRole, initiator bool, timeout time.Duration) error {
+	hello := AskHello{Proto: AskProto, Role: role}
+	if initiator {
+		if err := enc.Encode(hello); err != nil {
+			return fmt.Errorf("send hello: %w", err)
+		}
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set hello deadline: %w", err)
+	}
+	var peer AskHello
+	err := dec.Decode(&peer)
+	if clearErr := conn.SetReadDeadline(time.Time{}); err == nil && clearErr != nil {
+		return fmt.Errorf("clear hello deadline: %w", clearErr)
+	}
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("%w within %s", errAskHelloTimeout, timeout)
+		}
+		return fmt.Errorf("read hello: %w", err)
+	}
+	if peer.Proto != AskProto {
+		return fmt.Errorf("peer sent no %q hello (got %q)", AskProto, peer.Proto)
+	}
+	if want := role.peer(); peer.Role != want {
+		return fmt.Errorf("peer is a %q, not a %q", peer.Role, want)
+	}
+
+	if !initiator {
+		if err := enc.Encode(hello); err != nil {
+			return fmt.Errorf("send hello: %w", err)
+		}
+	}
+	return nil
+}
+
+// askDeadError is what the user is told when the socket's owner refused the
+// handshake. It names the fix rather than the mechanism, and the fix depends
+// on the cause: a peer that sent no hello at all is a monitor or session from
+// a build that predates the handshake, while a peer that answered with the
+// wrong role is a concurrent session of the same project - the socket path is
+// per project, and a monitor started first is what both sessions would have
+// found.
+func askDeadError(socketPath string, cause error) error {
+	if errors.Is(cause, errAskHelloTimeout) {
+		return fmt.Errorf("ask mode: the ask socket %s is owned by a monitor or session from an older devsandbox build, not a monitor this build can talk to (%v); every ask-mode request in this session will be blocked. Run `devsandbox proxy monitor` from this build, and start it before launching concurrent sessions", socketPath, cause)
+	}
+	return fmt.Errorf("ask mode: the ask socket %s is owned by another devsandbox session, not a monitor (%v); every ask-mode request in this session will be blocked. Start `devsandbox proxy monitor` before launching concurrent sessions", socketPath, cause)
+}
 
 // AskRequest is sent from the proxy to the monitor for user approval.
 type AskRequest struct {
@@ -54,10 +168,23 @@ type monitorConn struct {
 	decoder *json.Decoder
 }
 
+// askLogger is where the ask server and queue report a peer they refused and
+// a monitor answer they refused to act on. It is the method set of
+// goproxy.Logger so the proxy's own logger fits.
+type askLogger interface {
+	Printf(format string, v ...any)
+}
+
 // AskServer manages connections from monitor clients and routes approval requests.
 type AskServer struct {
 	mode       AskMode
 	socketPath string
+	logger     askLogger
+
+	// Captured at construction so the goroutines below never read the
+	// package-level knobs a test may be resetting.
+	helloTimeout      time.Duration
+	reconnectInterval time.Duration
 
 	// Server mode fields
 	listener   net.Listener
@@ -69,6 +196,10 @@ type AskServer struct {
 	encoder  *json.Encoder
 	decoder  *json.Decoder
 	clientMu sync.Mutex
+	// handshakeErr records that the socket's owner did not identify as a
+	// monitor. Once set, no monitor is ever connected again: Ask reports
+	// ErrNoMonitor and the reconnect loop has stopped.
+	handshakeErr error
 
 	// Shared fields
 	pending   map[string]chan AskResponse
@@ -78,10 +209,11 @@ type AskServer struct {
 	mu     sync.Mutex
 }
 
-// NewAskServer creates a new ask mode server.
+// NewAskServer creates a new ask mode server. A peer it refuses on the socket
+// is reported through logger.
 // If an existing monitor socket is detected and responsive, connects as a client.
 // Otherwise, creates its own socket and listens for monitor connections (server mode).
-func NewAskServer(sandboxRoot string) (*AskServer, error) {
+func NewAskServer(sandboxRoot string, logger askLogger) (*AskServer, error) {
 	socketDir := AskSocketDir(sandboxRoot)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create socket directory: %w", err)
@@ -93,17 +225,8 @@ func NewAskServer(sandboxRoot string) (*AskServer, error) {
 	if _, err := os.Stat(socketPath); err == nil {
 		conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
 		if err == nil {
-			// Socket is live — connect as client
-			server := &AskServer{
-				mode:       AskModeClient,
-				socketPath: socketPath,
-				conn:       conn,
-				encoder:    json.NewEncoder(conn),
-				decoder:    json.NewDecoder(conn),
-				pending:    make(map[string]chan AskResponse),
-			}
-			go server.handleClientResponses()
-			return server, nil
+			// Socket is live - join it as a client
+			return newAskClient(socketPath, conn, logger), nil
 		}
 		// Stale socket — remove and fall through to server mode
 		_ = os.Remove(socketPath)
@@ -116,15 +239,47 @@ func NewAskServer(sandboxRoot string) (*AskServer, error) {
 	}
 
 	server := &AskServer{
-		mode:       AskModeServer,
-		socketPath: socketPath,
-		listener:   listener,
-		pending:    make(map[string]chan AskResponse),
+		mode:         AskModeServer,
+		socketPath:   socketPath,
+		logger:       logger,
+		helloTimeout: askHelloTimeout,
+		listener:     listener,
+		pending:      make(map[string]chan AskResponse),
 	}
 
 	go server.acceptConnections()
 
 	return server, nil
+}
+
+// newAskClient joins a live socket. Whoever owns it has to identify as a
+// monitor before a single request is sent; otherwise the server starts in the
+// dead state, where every Ask reports no monitor and nothing re-dials. That
+// is not a launch failure - the socket's owner could trigger one at will -
+// so the refusal is exposed through HandshakeError for the caller to report.
+func newAskClient(socketPath string, conn net.Conn, logger askLogger) *AskServer {
+	server := &AskServer{
+		mode:              AskModeClient,
+		socketPath:        socketPath,
+		logger:            logger,
+		helloTimeout:      askHelloTimeout,
+		reconnectInterval: askReconnectInterval,
+		pending:           make(map[string]chan AskResponse),
+	}
+
+	dec := json.NewDecoder(conn)
+	enc := json.NewEncoder(conn)
+	if err := askHandshake(conn, dec, enc, AskRoleProxy, true, server.helloTimeout); err != nil {
+		_ = conn.Close()
+		server.handshakeErr = askDeadError(socketPath, err)
+		return server
+	}
+
+	server.conn = conn
+	server.decoder = dec
+	server.encoder = enc
+	go server.handleClientResponses()
+	return server
 }
 
 // Mode returns the operating mode of the AskServer.
@@ -150,6 +305,18 @@ func (s *AskServer) HasMonitor() bool {
 	return len(s.monitors) > 0
 }
 
+// HandshakeError reports why a client-mode AskServer has no monitor and will
+// not get one: the socket was live, but its owner did not identify as a
+// monitor. It is nil while a monitor is connected or being re-dialed. The
+// caller owns telling the user about a refusal at launch, where a Warn lands
+// on the confirmation gate; a refusal during a reconnect is raised as an Alert
+// here, because by then the workload owns the terminal.
+func (s *AskServer) HandshakeError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.handshakeErr
+}
+
 // acceptConnections handles incoming connections from monitors.
 func (s *AskServer) acceptConnections() {
 	for {
@@ -164,18 +331,41 @@ func (s *AskServer) acceptConnections() {
 			continue
 		}
 
-		monitor := &monitorConn{
-			conn:    conn,
-			encoder: json.NewEncoder(conn),
-			decoder: json.NewDecoder(conn),
-		}
-
-		s.monitorsMu.Lock()
-		s.monitors = append(s.monitors, monitor)
-		s.monitorsMu.Unlock()
-
-		go s.handleMonitor(monitor)
+		go s.admitMonitor(conn)
 	}
+}
+
+// admitMonitor registers conn as a monitor once it has identified as one. The
+// handshake runs off the accept loop so a silent peer holds up nobody else,
+// and the registration checks closed under the monitors lock so a connection
+// admitted while Close runs is closed rather than stranded. A refused peer is
+// told nothing, so the log line is the only record of why a monitor - one
+// from an older build, say - never got a request.
+func (s *AskServer) admitMonitor(conn net.Conn) {
+	monitor := &monitorConn{
+		conn:    conn,
+		encoder: json.NewEncoder(conn),
+		decoder: json.NewDecoder(conn),
+	}
+	if err := askHandshake(conn, monitor.decoder, monitor.encoder, AskRoleProxy, false, s.helloTimeout); err != nil {
+		_ = conn.Close()
+		s.logger.Printf("ask mode: refused a connection on %s: %v", s.socketPath, err)
+		return
+	}
+
+	s.monitorsMu.Lock()
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		s.monitorsMu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	s.monitors = append(s.monitors, monitor)
+	s.monitorsMu.Unlock()
+
+	s.handleMonitor(monitor)
 }
 
 // handleMonitor reads responses from a connected monitor.
@@ -211,7 +401,8 @@ func (s *AskServer) handleMonitor(monitor *monitorConn) {
 }
 
 // handleClientResponses reads responses from the monitor in client mode.
-// If the monitor disconnects, it retries connecting until Close() is called.
+// If the monitor disconnects, it retries connecting until Close() is called
+// or a re-dial reaches something that is not a monitor.
 func (s *AskServer) handleClientResponses() {
 	for {
 		// Read responses from the current connection
@@ -255,7 +446,7 @@ func (s *AskServer) handleClientResponses() {
 		}
 		s.pendingMu.Unlock()
 
-		// Reconnect loop: retry every second until socket is available
+		// Reconnect loop: retry until the socket is available again
 		for {
 			s.mu.Lock()
 			if s.closed {
@@ -264,11 +455,22 @@ func (s *AskServer) handleClientResponses() {
 			}
 			s.mu.Unlock()
 
-			time.Sleep(1 * time.Second)
+			time.Sleep(s.reconnectInterval)
 
 			conn, err := net.DialTimeout("unix", s.socketPath, 2*time.Second)
 			if err != nil {
 				continue
+			}
+
+			// The path is the same one the monitor used to own, and a
+			// concurrent session's proxy may have taken it since. Whatever
+			// answered has to prove it is a monitor before it gets a request.
+			dec := json.NewDecoder(conn)
+			enc := json.NewEncoder(conn)
+			if herr := askHandshake(conn, dec, enc, AskRoleProxy, true, s.helloTimeout); herr != nil {
+				_ = conn.Close()
+				s.refuseSocketOwner(herr)
+				return
 			}
 
 			// Reconnected — update connection state
@@ -282,14 +484,33 @@ func (s *AskServer) handleClientResponses() {
 			s.mu.Unlock()
 
 			s.clientMu.Lock()
-			s.encoder = json.NewEncoder(conn)
+			s.encoder = enc
 			s.clientMu.Unlock()
 
-			s.decoder = json.NewDecoder(conn)
+			s.decoder = dec
 
 			break // Back to reading responses
 		}
 	}
+}
+
+// refuseSocketOwner puts a client-mode server into the dead state after a
+// re-dial reached something other than a monitor, and tells the user. The
+// workload is running by now, so a plain Warn would be diverted to the log
+// file; only an Alert reaches the terminal.
+func (s *AskServer) refuseSocketOwner(cause error) {
+	deadErr := askDeadError(s.socketPath, cause)
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if !closed {
+		notice.Alert("%v", deadErr)
+	}
+	// Published after the Alert, so whoever observes the dead state through
+	// HandshakeError also finds the notice already written.
+	s.mu.Lock()
+	s.handshakeErr = deadErr
+	s.mu.Unlock()
 }
 
 // removeMonitor removes a disconnected monitor from the list.
@@ -439,14 +660,16 @@ type AskQueue struct {
 	server       *AskServer
 	filterEngine *FilterEngine
 	timeout      time.Duration
+	logger       askLogger
 }
 
 // NewAskQueue creates a new ask queue.
-func NewAskQueue(server *AskServer, engine *FilterEngine, timeout time.Duration) *AskQueue {
+func NewAskQueue(server *AskServer, engine *FilterEngine, timeout time.Duration, logger askLogger) *AskQueue {
 	return &AskQueue{
 		server:       server,
 		filterEngine: engine,
 		timeout:      timeout,
+		logger:       logger,
 	}
 }
 
@@ -463,6 +686,17 @@ func (q *AskQueue) RequestApproval(req *AskRequest) (FilterAction, error) {
 	if err != nil {
 		// Return specific error for logging
 		return FilterActionBlock, err
+	}
+
+	// Only the two decisions are acted on. Treating "anything but block" as
+	// allow let a mistyped verb, a case variant or a newer monitor's vocabulary
+	// approve a request nobody approved, and Remember would then have cached
+	// that non-decision for the rest of the session.
+	switch resp.Action {
+	case FilterActionAllow, FilterActionBlock:
+	default:
+		q.logger.Printf("ask mode: monitor answered request %s with unrecognised action %q - blocked", req.ID, string(resp.Action))
+		return FilterActionBlock, nil
 	}
 
 	// Cache decision if requested

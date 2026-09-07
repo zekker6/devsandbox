@@ -173,6 +173,31 @@ falls through to host. Three things are load-bearing:
   same value keyed the decision cache, so one ask-mode approval was reusable against any destination. `RequestHost`
   is the single reader; filtering, the cache, the ask prompt and the audit event all go through it.
 
+## Ask mode socket and monitor
+
+`internal/proxy/askmode.go` is the Unix socket between a proxy running `--filter-default=ask` and `devsandbox proxy
+monitor`; `cmd/devsandbox/proxy.go` is the monitor. Three invariants, each because it was violated:
+
+- **Every connection opens with a role hello, and each end requires the opposite role.** The socket path is per
+  project, so a second session of the same project finds the first's socket live, dials it, and used to be accepted as
+  that proxy's monitor - and an `AskRequest` forwarded to a proxy decoded as an `AskResponse` with an empty action,
+  which read as allow. Two sessions then approved each other's requests with nobody asked. `AskHandshake` sends
+  `{"proto":"devsandbox-ask/1","role":"proxy"|"monitor"}` as the first JSON object in both directions - on the initial
+  connection **and on every re-dial of the reconnect loop**, because the path is the one a monitor used to own and a
+  concurrent session's proxy may have taken it since - and a missing, wrong-protocol or same-role hello closes the
+  connection before any request is sent. A proxy must never accept a proxy-role peer, in either direction. A proxy
+  that dials and is refused enters a dead state - `HasMonitor` false, every `Ask` returns `ErrNoMonitor` and blocks,
+  no reconnect - and reports it through `HandshakeError` instead of failing the launch, because the socket's owner
+  could trigger that failure at will. `main.go` raises it as `notice.Warn` before `SetRunning` so it lands on the
+  confirmation gate; a refusal during a reconnect is `notice.Alert` in `refuseSocketOwner`, because by then the
+  workload owns the terminal. Independently of the handshake, `RequestApproval` maps any `Action` outside
+  `{allow, block}` to block and logs the raw value with `%q`, and request ids come from `crypto/rand`, so a peer
+  cannot resolve a request it was never sent.
+- **A monitor unlinks the socket only on a dial nobody answers.** `connectOrServeMonitor` treats `errAskSocketStale`
+  (connection refused) as the one stale-socket signal; a peer that answers but fails the handshake is
+  `errAskPeerRejected` and is reported as is. Removing a socket a running session owns would cut that session off
+  from its monitor.
+
 ## Session designation
 
 `internal/sandbox/lock.go` decides which bwrap launch owns a project's persistent overlay. Three lock files, and the

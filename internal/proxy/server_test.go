@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/elazarl/goproxy"
 )
 
 func TestNewServer(t *testing.T) {
@@ -1328,5 +1331,61 @@ func TestServer_CredentialInjector_SpecificityOrder(t *testing.T) {
 	}
 	if req.Header.Get("X-Wide") != "" {
 		t.Errorf("wide injector must not run when specific matched")
+	}
+}
+
+func TestHandleAskMode_RequestIDsAreRandom(t *testing.T) {
+	dir := shortTempDir(t)
+	askServer, err := NewAskServer(dir, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewAskServer failed: %v", err)
+	}
+	defer func() { _ = askServer.Close() }()
+
+	var (
+		idsMu sync.Mutex
+		ids   []string
+	)
+	startMonitor(t, askServer, dir, func(req AskRequest) AskResponse {
+		idsMu.Lock()
+		ids = append(ids, req.ID)
+		idsMu.Unlock()
+		return AskResponse{ID: req.ID, Action: FilterActionAllow}
+	})
+
+	// handleAskMode's error branch logs through s.proxy.Logger: an ask error
+	// on a Server without one panics instead of failing the test.
+	proxy := goproxy.NewProxyHttpServer()
+	proxy.Logger = log.New(io.Discard, "", 0)
+	s := &Server{
+		proxy:    proxy,
+		askQueue: NewAskQueue(askServer, nil, 5*time.Second, log.New(io.Discard, "", 0)),
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/path", nil)
+
+	const calls = 1000
+	for i := 0; i < calls; i++ {
+		if got := s.handleAskMode(req, nil, nil); got != FilterActionAllow {
+			t.Fatalf("call %d: got %q, want allow", i, got)
+		}
+	}
+
+	idsMu.Lock()
+	defer idsMu.Unlock()
+	if len(ids) != calls {
+		t.Fatalf("monitor saw %d requests, want %d", len(ids), calls)
+	}
+	seen := make(map[string]struct{}, calls)
+	for _, id := range ids {
+		if len(id) != 32 {
+			t.Fatalf("request id %q: want 32 hex chars (16 random bytes)", id)
+		}
+		if _, err := hex.DecodeString(id); err != nil {
+			t.Fatalf("request id %q is not hex: %v", id, err)
+		}
+		if _, dup := seen[id]; dup {
+			t.Fatalf("request id %q issued twice", id)
+		}
+		seen[id] = struct{}{}
 	}
 }

@@ -282,23 +282,10 @@ func readRequestLog(t *testing.T, srv *Server) []RequestLog {
 func askMonitor(t *testing.T, sandboxBase string, action FilterAction) net.Conn {
 	t.Helper()
 
-	conn, err := net.Dial("unix", AskSocketPath(sandboxBase))
-	if err != nil {
-		t.Fatalf("monitor dial failed: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	go func() {
-		for {
-			var req AskRequest
-			if err := dec.Decode(&req); err != nil {
-				return
-			}
-			_ = enc.Encode(AskResponse{ID: req.ID, Action: action, Remember: true})
-		}
-	}()
+	conn, dec, enc := dialAsMonitor(t, AskSocketPath(sandboxBase))
+	go serveAsMonitor(dec, enc, func(req AskRequest) AskResponse {
+		return AskResponse{ID: req.ID, Action: action, Remember: true}
+	})
 	return conn
 }
 

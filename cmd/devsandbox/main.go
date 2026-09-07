@@ -590,6 +590,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 			} else {
 				notice.Info("Filter: %d rules, default action: %s", len(pCfg.Filter.Rules), pCfg.Filter.DefaultAction)
 			}
+			warnAskHandshake(proxyServer.AskServer())
 		}
 
 		if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
@@ -1137,6 +1138,20 @@ func startProxyServer(pCfg *proxy.Config) (*proxyResult, error) {
 // Call as: defer deferProxyCleanup(result)
 func deferProxyCleanup(result *proxyResult) {
 	result.cleanup()
+}
+
+// warnAskHandshake reports an ask server that found the socket owned by another
+// session. The ask socket is per project: a second session finds the first's
+// socket live and, before the role handshake, took that proxy for its monitor.
+// Now it refuses and blocks every ask. This runs before SetRunning, so a Warn
+// lands on the confirmation gate.
+func warnAskHandshake(askServer *proxy.AskServer) {
+	if askServer == nil {
+		return
+	}
+	if err := askServer.HandshakeError(); err != nil {
+		notice.Warn("%v", err)
+	}
 }
 
 // wrapperLogPath returns the path to the current wrapper log file, creating
