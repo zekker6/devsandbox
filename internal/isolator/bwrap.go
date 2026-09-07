@@ -110,6 +110,7 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 
 		sandboxCfg.NetworkIsolated = netProvider.NetworkIsolated()
 		sandboxCfg.ProxyPort = cfg.ProxyPort
+		sandboxCfg.ProxyAuthToken = cfg.ProxyAuthToken
 		sandboxCfg.GatewayIP = netProvider.GatewayIP()
 		sandboxCfg.ProxyCAPath = cfg.ProxyCAPath
 	}
@@ -135,6 +136,7 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	}
 
 	bwrapArgs := builder.Build()
+	secretArgs := builder.SecretArgs()
 	shellCmd := sandbox.BuildShellCommand(sandboxCfg, cfg.Command)
 
 	// Debug output. Wrapping an argv-less "bwrap" yields exactly the systemd-run
@@ -148,7 +150,7 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		var sb strings.Builder
 		sb.WriteString("=== Sandbox Debug ===\n")
 		fmt.Fprintf(&sb, "%s \\\n", launcher)
-		for _, arg := range slices.Concat(prefix, bwrapArgs) {
+		for _, arg := range slices.Concat(prefix, bwrapArgs, secretArgs) {
 			fmt.Fprintf(&sb, "    %s \\\n", arg)
 		}
 		fmt.Fprintf(&sb, "    -- %v\n", shellCmd)
@@ -171,7 +173,7 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		portForwardArgs = sandbox.BuildPastaPortArgs(cfg.AppCfg.PortForwarding.Rules)
 	}
 
-	return b.launch(cfg, bwrapArgs, shellCmd, portForwardArgs)
+	return b.launch(cfg, bwrapArgs, secretArgs, shellCmd, portForwardArgs)
 }
 
 // bwrapLaunchers holds the two bwrap entry points the dispatch chooses between.
@@ -180,7 +182,7 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 // else, so an argument that silently stopped carrying them would otherwise leave
 // every check in this package - and in internal/bwrap - green.
 type bwrapLaunchers struct {
-	startWithPasta func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error)
+	startWithPasta func(cgroups.Limits, []string, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error)
 	execRun        func(cgroups.Limits, []string, []string, func(pid int)) error
 }
 
@@ -199,7 +201,7 @@ var launchers = bwrapLaunchers{
 // bwrap outright - which the plain path used to do via syscall.Exec - leaves
 // nothing host-side to notice that the sandbox was OOM-killed, and a sandbox that
 // dies without a trace is exactly what the monitoring here exists to end.
-func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, shellCmd, portForwardArgs []string) error {
+func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, secretArgs, shellCmd, portForwardArgs []string) error {
 	if cfg.SandboxCfg.ProxyEnabled {
 		lockdown := egressLockdown(cfg)
 		tools, err := preflightEgressLockdown(lockdown)
@@ -217,7 +219,7 @@ func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, shellCmd, portForwardA
 		defer func() { _ = os.RemoveAll(readyDir) }()
 		lockdown.ReadyFile = filepath.Join(readyDir, "applied")
 
-		proc, err := launchers.startWithPasta(b.config.Limits, bwrapArgs, shellCmd, portForwardArgs, lockdown, tools)
+		proc, err := launchers.startWithPasta(b.config.Limits, bwrapArgs, secretArgs, shellCmd, portForwardArgs, lockdown, tools)
 		if err != nil {
 			// A lockdown that aborted before the sandbox PID was observable
 			// surfaces here as the wrapper's exit status rather than as a start
@@ -232,6 +234,13 @@ func (b *BwrapIsolator) launch(cfg *RunConfig, bwrapArgs, shellCmd, portForwardA
 		waitErr := proc.Wait()
 		monitor.finish(waitErr)
 		return asLockdownOrCommandExit(waitErr, lockdown.ReadyFile)
+	}
+
+	// Only the pasta path has a wrapper to hand bwrap a private argument file,
+	// and only proxy mode produces private arguments. Refuse rather than let
+	// the credential fall back onto the command line.
+	if len(secretArgs) > 0 {
+		return errors.New("private bwrap arguments are only supported on the proxy launch path")
 	}
 
 	var monitor *oomMonitor

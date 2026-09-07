@@ -23,7 +23,9 @@ A limit the user configured must never silently fail to apply. This is stricter 
 
 The same rule applies to config devsandbox *generates* for a tool: never emit a key whose value will not resolve inside the sandbox. `internal/sandbox/tools/git.go` writes `core.excludesFile` into the safe gitconfig only once the file it names has been copied in, because git ignores a missing `excludesFile` with exit 0 and no warning - so a dangling value is not an error the user ever sees, it is their global ignore rules quietly not applying. `copyAuxFiles` deletes an uncopied key from the value map rather than leaving the caller to remember. A generated config is also read fresh every launch: caching it against one source file's mtime goes stale the moment the real source is an `[include]` target, which is a different file.
 
-**"Inside the sandbox" is not one absolute path.** bwrap binds the sandbox home at the *host* home path, Docker and krun mount it at `/home/sandboxuser` - so a `Binding` whose `Dest` names a location inside the sandbox home has to say so with `tools.Binding.HomeRelativeDest`, or the Docker/krun conversion (`internal/isolator/docker.go`, which only remaps a `Dest` it is told to) mounts it where the guest never looks. Only a destination that must be used verbatim leaves the flag unset: an identical-path pin such as the shared temp directory or a host binary, or a repository path like the worktree `.git`, whose absolute `gitdir:` pointer has to resolve unchanged. A path *value* written into a generated config has the same problem and cannot use the flag, so spell it `~/`-relative and let the tool expand it against `$HOME` - which is what `core.excludesFile` does.
+**"Inside the sandbox" is not one absolute path.** bwrap binds the sandbox home at the *host* home path, Docker and krun mount it at `/home/sandboxuser` - so a `Binding` whose `Dest` names a location inside the sandbox home has to say so with `tools.Binding.HomeRelativeDest`, or the Docker/krun conversion (`internal/isolator/docker.go`, which only remaps a `Dest` it is told to) mounts it where the guest never looks. Only a destination that must be used verbatim leaves the flag unset: an identical-path pin such as the shared temp directory or a host binary, or a repository path like the worktree `.git`, whose absolute `gitdir:` pointer has to resolve unchanged. A path *value* written into a generated config has the same problem and cannot use the flag, so spell it `~/`-relative and let the tool expand it against `$HOME` - which is what `core.excludesFile` does. A tool `Environment` value gets a third treatment: `remapEnvValue` in `internal/isolator/docker.go` replaces every occurrence of the host home in the value with `/home/sandboxuser` on Docker and krun, which covers a bare path and the `unix:`, `unix:path=` and `unix://` socket addresses alike - with one exception, a value that (behind the same scheme prefixes) equals or lies under the project directory is left verbatim, because the project is mounted at its identical host path. `MISE_TRUSTED_CONFIG_PATHS` is the worked example: remapped, it would name a directory nothing mounts, and the project config would silently stay untrusted.
+
+**A host config file the host itself reads back is never bind-mounted writable - seed a copy into the sandbox home instead.** `~/.claude.json` was a read-write bind, and the host's own Claude Code reads it back (`mcpServers`, project trust flags, oauth state), so a sandboxed agent could plant an MCP server the host then launched. `Claude.Setup`'s `seedClaudeJSON` is the worked example: copy once with `WriteFileAtomic` at 0600; a non-empty copy is sandbox state and wins; a 0-byte one counts as absent, because bwrap created that placeholder at every existing sandbox home while the bind existed; and a symlink at the destination is replaced with a `notice.Alert` rather than refused, because a `Setup` error aborts a bwrap launch and would let the sandbox block its own next launch at will. `TestRegistry_NoWritableBindUnderHostHome` scans every tool for a writable `MountBind` under the host home so the class cannot return. The only entries it excuses are identical-path binds the host does not read as configuration - the shared temp directory, the opt-in zellij socket directory, the herdr proxy socket - and each is exercised, not merely declared, so extend that list only with something of the same kind.
 
 ## Terminal socket proxies
 
@@ -51,7 +53,7 @@ Two more invariants come from the herdr agent-reporting work:
 
 - **Anchor every validator to something derived on the host.** A request is checked against what devsandbox already knows - the pane id herdr gave this process, the agent devsandbox was asked to launch, the session directory that tool's own bindings produce - never against a value the request supplies. Where a bound is a filesystem path, take it from the same function that produces the bind mount so the two cannot drift apart.
 - **Charset-restrict any sandbox-supplied string the host will hand to a shell.** herdr shell-quotes a reported session id and types it into a host pane shell, so the filter caps it at 128 bytes of `[A-Za-z0-9._-]` rather than trusting an unversioned third-party quoter. Length checks are not enough. Confinement of a path that names a location *inside* the sandbox overlay must be lexical - `pathWithin` resolves symlinks against the host filesystem, which proves nothing about a path the host cannot see.
-- **Scan runes, not bytes, when rejecting what a terminal will act on.** A byte-wise `< 0x20` test sees only C0. The C1 controls (U+0080-U+009F, U+009B being CSI) arrive UTF-8-encoded as bytes ≥ 0xC2 and sail straight through it, which defeats the check in the case it exists for. `hasControlRune` in `internal/herdrproxy/filter.go` refuses Cc and Cf; ordinary non-ASCII text stays allowed, because the check bounds behavior, not charset.
+- **Scan runes, not bytes, when rejecting what a terminal will act on.** A byte-wise `< 0x20` test sees only C0. The C1 controls (U+0080-U+009F, U+009B being CSI) arrive UTF-8-encoded as bytes ≥ 0xC2 and sail straight through it, which defeats the check in the case it exists for. `termsafe.HasControlRune` (which `internal/herdrproxy/filter.go` calls) refuses Cc and Cf; ordinary non-ASCII text stays allowed, because the check bounds behavior, not charset.
 
 **A wrapper-only agent needs just the `agentid` entry; herdr session capture is what adds the other three.** The `agents` table drives two things on its own: the shell wrappers (`agentid.KnownAgents`) and the run-agent worktree guard (`IsResumeInvocation`). An agent herdr cannot restore - herdr v0.7.4 compiles resume plans for `claude`/`pi`/`codex` only - belongs in the table with an empty `resumeFlag` and its own resume verbs in `resumeAliases` (`opencode`, `copilot` are the worked examples), and it deliberately gets no `ToolWithAgentSessionDir`: wiring capture for a launch herdr will never replay is dead code that also flips such a launch onto the filtered proxy for no benefit.
 
@@ -153,6 +155,29 @@ Three things about exit code 78 in the rendered prologue:
   bound read-write into the sandbox - and a workload that can delete the marker makes its own exit 78 read as an abort,
   destroying the signal. Same reasoning as `internal/herdrstate`; see *State the host trusts* above.
 
+## Proxy credential transport
+
+The per-session proxy credential is the one secret devsandbox itself hands the sandbox, and the boundary it draws is
+"only this session", which includes other users on the host. Two things keep that true:
+
+- **Never put it on a command line.** `/proc/<pid>/cmdline` is world-readable on a default procfs, and the launcher
+  lives for the whole session - pasta carries the entire bwrap invocation in its argv, the attached `docker exec`
+  client carries its `-e` list. `proxyenv.Var.Secret` marks every credential-bearing variable, and each backend keys on
+  it: the bwrap builder routes them through `SetSecretEnv`/`SecretArgs` and `bwrap.StartWithPasta` writes those to a
+  0600 file under `$XDG_STATE_HOME/devsandbox/bwrap-args/` that the wrapper prologue opens on fd 3 for `--args 3`
+  (pasta closes every other inherited descriptor at startup, so the file cannot simply be passed down); the docker/krun
+  backend emits a bare `-e NAME` and values it through `commandEnv`, which every `exec.Cmd` the engine runs must carry.
+  That environment also sets `NO_PROXY=*`: the engine CLI honours `HTTP(S)_PROXY` for its own daemon transport on a
+  `tcp://` `DOCKER_HOST`, so without it every control-plane call would go through the sandbox proxy and be filtered.
+  `NO_PROXY` is never bare in argv, so the wildcard reaches the CLI only and the container keeps its explicit value.
+  `TestBuilder_AddProxyEnvironment_KeepsCredentialOutOfArgv` and `TestProxyEnvArgs_KeepsCredentialOutOfArgv` grep the
+  rendered argv for the token; a new place that spells a `Secret` value into argv fails there.
+- **One argv builder per exec path.** `docker.go`'s `execCommand` builds the workload exec from `buildExecArgs` and
+  `commandEnv`, and `installMiseTools` goes through `miseExecArgs` for the same reason: a second hand-assembled
+  `docker exec` argv silently dropped the re-injected credential on every reused `keep_container` container, so the
+  second session of a project got 407 on every request while the tests over `buildExecArgs` stayed green.
+  `TestExecCommand_CarriesCurrentProxyEnv` pins the path that runs, not the function that renders.
+
 ## Proxy filter scopes
 
 `internal/proxy`'s filter has exactly three scopes - `host`, `path`, `url` (`filter_types.go`) - and an unset scope
@@ -184,6 +209,38 @@ falls through to host. Three things are load-bearing:
   header meant `CONNECT evil:443` carrying `Host: allowed` was checked against a name it was not contacting, and the
   same value keyed the decision cache, so one ask-mode approval was reusable against any destination. `RequestHost`
   is the single reader; filtering, the cache, the ask prompt and the audit event all go through it.
+
+## Ask mode socket and monitor
+
+`internal/proxy/askmode.go` is the Unix socket between a proxy running `--filter-default=ask` and `devsandbox proxy
+monitor`; `cmd/devsandbox/proxy.go` is the monitor. Three invariants, each because it was violated:
+
+- **Every connection opens with a role hello, and each end requires the opposite role.** The socket path is per
+  project, so a second session of the same project finds the first's socket live, dials it, and used to be accepted as
+  that proxy's monitor - and an `AskRequest` forwarded to a proxy decoded as an `AskResponse` with an empty action,
+  which read as allow. Two sessions then approved each other's requests with nobody asked. `AskHandshake` sends
+  `{"proto":"devsandbox-ask/1","role":"proxy"|"monitor"}` as the first JSON object in both directions - on the initial
+  connection **and on every re-dial of the reconnect loop**, because the path is the one a monitor used to own and a
+  concurrent session's proxy may have taken it since - and a missing, wrong-protocol or same-role hello closes the
+  connection before any request is sent. A proxy must never accept a proxy-role peer, in either direction. A proxy
+  that dials and is refused enters a dead state - `HasMonitor` false, every `Ask` returns `ErrNoMonitor` and blocks,
+  no reconnect - and reports it through `HandshakeError` instead of failing the launch, because the socket's owner
+  could trigger that failure at will. `main.go` raises it as `notice.Warn` before `SetRunning` so it lands on the
+  confirmation gate; a refusal during a reconnect is `notice.Alert` in `refuseSocketOwner`, because by then the
+  workload owns the terminal. Independently of the handshake, `RequestApproval` maps any `Action` outside
+  `{allow, block}` to block and logs the raw value with `%q`, and request ids come from `crypto/rand`, so a peer
+  cannot resolve a request it was never sent.
+- **A monitor unlinks the socket only on a dial nobody answers.** `connectOrServeMonitor` treats `errAskSocketStale`
+  (connection refused) as the one stale-socket signal; a peer that answers but fails the handshake is
+  `errAskPeerRejected` and is reported as is. Removing a socket a running session owns would cut that session off
+  from its monitor.
+- **Any sandbox-supplied string printed to a host terminal goes through `internal/termsafe`.** The monitor runs the
+  terminal in raw mode and printed the request's method, host, path and headers verbatim, so a request could redraw
+  the approval prompt or move the cursor - and its two error paths embedded the decode error, which quotes the
+  offending bytes, into the same terminal. `termsafe.Escape` (Cc and Cf become visible escapes, printable non-ASCII
+  passes) and `termsafe.Truncate` (by rune, never mid-character) wrap every field, the decision echo and both error
+  paths in `cmd/devsandbox/proxy.go`. The rule is general: a byte that originated inside the sandbox reaches a host
+  terminal only through `termsafe`, and that includes an error string that wraps sandbox input.
 
 ## Session designation
 
@@ -254,7 +311,7 @@ Split such a package three ways: an untagged file holding the types and any pure
 
 ## Pinned dependencies
 
-`github.com/elazarl/goproxy` is held at **v1.8.4**. v1.8.5 wraps the client connection in a `bufio.Writer` that is only flushed after `resp.Write` returns, so on the MITM path response headers and small SSE events stay buffered until the whole body is consumed - streaming responses arrive all at once. `renovate.json` caps the version, but that does not stop a manual `go get -u`; if `internal/proxy`'s two streaming regression tests start failing, check whether goproxy moved. Lift the cap only once upstream ships a fix, and re-run those tests to confirm.
+`github.com/elazarl/goproxy` was held at v1.8.4 because v1.8.5 wrapped the MITM client connection in a `bufio.Writer` flushed only after `resp.Write` returned, so response headers and small SSE events stayed buffered until the whole body was consumed - streaming responses arrived all at once. v1.9.0 writes the response through a head-only buffer (`responseHeadWriter`) and streams the body; the two regression tests in `internal/proxy/server_test.go`, `TestServerSSE_StreamsHeadersWithoutBuffering` and `TestServerStreaming_EmptyContentTypeNotBuffered`, pass on it (re-run 2026-09-02), and the `renovate.json` cap is gone. Those two tests stay the tripwire: if a goproxy bump makes them fail, the buffering is back - re-pin with an `allowedVersions` rule on `github.com/elazarl/goproxy` in `renovate.json`, keeping `osvVulnerabilityAlerts` on so a CVE update can still lift the cap, rather than loosen the tests. `TestServerAuth_CONNECT_MITM` in `internal/proxy/server_auth_test.go` is a second tripwire: the tunnel credential rides on goproxy copying `ctx.UserData` from the CONNECT context into every per-request context (`https.go`, `http2.go`), so a version that stops doing that fails it and would otherwise answer 407 to every request inside an authenticated tunnel.
 
 ## Documentation site
 

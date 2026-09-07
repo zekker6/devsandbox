@@ -318,6 +318,8 @@ devsandbox proxy monitor
 
 On Linux, proxy mode uses [pasta](https://passt.top/) for network namespace isolation (embedded, no install needed). On macOS, it uses per-session Docker networks.
 
+The proxy URL handed to the sandbox carries a per-session credential, so no other local process can use the proxy or the credentials it injects; see [Proxy authentication](docs/proxy.md#proxy-authentication).
+
 See [Proxy Mode docs](docs/proxy.md) for filtering rules, log formats, and remote logging setup. Audit-grade structured logging - per-session metadata, lifecycle events, and security events forwarded to syslog/OTLP - is documented under [Audit Logging](docs/configuration.md#audit-logging).
 
 ## Installation Details

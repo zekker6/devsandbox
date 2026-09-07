@@ -58,6 +58,12 @@ type Builder struct {
 	// warnedHiddenDirs deduplicates the "hidden rule matched a directory" warning
 	// across the three mount passes, keyed by absolute path.
 	warnedHiddenDirs map[string]bool
+	// secretEnv holds the --setenv pairs kept out of args; see SetSecretEnv.
+	secretEnv []secretEnvEntry
+}
+
+type secretEnvEntry struct {
+	name, value string
 }
 
 func NewBuilder(cfg *Config) *Builder {
@@ -312,6 +318,7 @@ func (b *Builder) SetEnv(name, value string) *Builder {
 	// If a --setenv entry for this name already exists, update its value in
 	// place rather than appending a duplicate. Env vars are a map by name, so
 	// later callers logically replace earlier ones.
+	b.dropSecretEnv(name)
 	for i := 0; i < len(b.args)-2; i++ {
 		if b.args[i] == "--setenv" && b.args[i+1] == name {
 			b.args[i+2] = value
@@ -320,6 +327,51 @@ func (b *Builder) SetEnv(name, value string) *Builder {
 	}
 	b.add("--setenv", name, value)
 	return b
+}
+
+// SetSecretEnv sets name=value like SetEnv, but keeps the pair out of the
+// argument list Build returns. bwrap's argv - and pasta's, which carries it
+// for the whole session - is readable by every local user through
+// /proc/<pid>/cmdline, so a value that must stay private (the proxy
+// credential) is handed to bwrap through `--args FD` instead; SecretArgs
+// returns the entries in the form the launcher writes to that descriptor. The
+// name is still one entry: a secret replaces an argv value of the same name
+// and a later SetEnv replaces the secret.
+func (b *Builder) SetSecretEnv(name, value string) *Builder {
+	for i := 0; i < len(b.args)-2; i++ {
+		if b.args[i] == "--setenv" && b.args[i+1] == name {
+			b.args = slices.Delete(b.args, i, i+3)
+			break
+		}
+	}
+	for i := range b.secretEnv {
+		if b.secretEnv[i].name == name {
+			b.secretEnv[i].value = value
+			return b
+		}
+	}
+	b.secretEnv = append(b.secretEnv, secretEnvEntry{name: name, value: value})
+	return b
+}
+
+func (b *Builder) dropSecretEnv(name string) {
+	b.secretEnv = slices.DeleteFunc(b.secretEnv, func(e secretEnvEntry) bool { return e.name == name })
+}
+
+// SecretArgs returns the --setenv entries SetSecretEnv recorded, as bwrap
+// arguments, in the order they were first set. They are applied after the
+// arguments Build returns, so a secret wins over any argv entry of the same
+// name that reached bwrap by another route. Nil when nothing is secret, which
+// lets the launcher skip the descriptor entirely.
+func (b *Builder) SecretArgs() []string {
+	if len(b.secretEnv) == 0 {
+		return nil
+	}
+	args := make([]string, 0, 3*len(b.secretEnv))
+	for _, e := range b.secretEnv {
+		args = append(args, "--setenv", e.name, e.value)
+	}
+	return args
 }
 
 func (b *Builder) SetEnvIfSet(name string) *Builder {
@@ -338,6 +390,9 @@ func (b *Builder) SetEnvDefault(name, value string) *Builder {
 		if b.args[i] == "--setenv" && b.args[i+1] == name {
 			return b
 		}
+	}
+	if slices.ContainsFunc(b.secretEnv, func(e secretEnvEntry) bool { return e.name == name }) {
+		return b
 	}
 	return b.SetEnv(name, value)
 }
@@ -1216,7 +1271,7 @@ const bwrapCACertPath = "/tmp/devsandbox-ca.crt"
 // The variable set itself lives in internal/proxyenv so the docker/krun backend
 // renders the same one.
 func (b *Builder) AddProxyEnvironment() *Builder {
-	proxyURL := fmt.Sprintf("http://%s:%d", b.cfg.GatewayIP, b.cfg.ProxyPort)
+	proxyURL := proxyenv.URL(b.cfg.GatewayIP, b.cfg.ProxyPort, b.cfg.ProxyAuthToken)
 
 	vars := proxyenv.Vars(proxyURL, b.cfg.ProxyExtraEnv)
 
@@ -1228,11 +1283,14 @@ func (b *Builder) AddProxyEnvironment() *Builder {
 	for _, v := range vars {
 		// A Default must not clobber a value applied earlier (env passthrough and
 		// config.sandbox.environment both run before this).
-		if v.Default {
+		switch {
+		case v.Default:
 			b.SetEnvDefault(v.Name, v.Value)
-			continue
+		case v.Secret:
+			b.SetSecretEnv(v.Name, v.Value)
+		default:
+			b.SetEnv(v.Name, v.Value)
 		}
-		b.SetEnv(v.Name, v.Value)
 	}
 
 	return b

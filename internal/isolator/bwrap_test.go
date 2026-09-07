@@ -124,7 +124,7 @@ func TestBwrapLaunchCarriesTheConfiguredLimits(t *testing.T) {
 
 			prev := launchers
 			launchers = bwrapLaunchers{
-				startWithPasta: func(l cgroups.Limits, _, _, _ []string, _ egress.Lockdown, _ egress.Tools) (*bwrap.SandboxProcess, error) {
+				startWithPasta: func(l cgroups.Limits, _, _, _, _ []string, _ egress.Lockdown, _ egress.Tools) (*bwrap.SandboxProcess, error) {
 					gotLaunch, got = "startWithPasta", l
 					return nil, sentinel
 				},
@@ -140,7 +140,7 @@ func TestBwrapLaunchCarriesTheConfiguredLimits(t *testing.T) {
 			t.Cleanup(func() { launchers = prev })
 
 			iso := NewBwrapIsolator(BwrapConfig{Limits: want})
-			if err := iso.launch(tt.cfg, nil, nil, nil); !errors.Is(err, sentinel) {
+			if err := iso.launch(tt.cfg, nil, nil, nil, nil); !errors.Is(err, sentinel) {
 				t.Fatalf("launch() error = %v, want the stub launcher's error", err)
 			}
 			if gotLaunch != tt.wantLaunch {
@@ -167,7 +167,7 @@ func TestBwrapLaunchUnlimitedPassesZeroLimits(t *testing.T) {
 	t.Cleanup(func() { launchers = prev })
 
 	iso := NewBwrapIsolator(BwrapConfig{})
-	if err := iso.launch(&RunConfig{SandboxCfg: &sandbox.Config{}}, nil, nil, nil); !errors.Is(err, sentinel) {
+	if err := iso.launch(&RunConfig{SandboxCfg: &sandbox.Config{}}, nil, nil, nil, nil); !errors.Is(err, sentinel) {
 		t.Fatalf("launch() error = %v, want the stub launcher's error", err)
 	}
 	if !got.IsZero() {
@@ -218,7 +218,7 @@ func TestBwrapLaunchProxyModeReportsStartAndExitStatus(t *testing.T) {
 	proc := startedSandboxProcess(t, 7, nsPID)
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(cgroups.Limits, []string, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
 			return proc, nil
 		},
 	}
@@ -231,7 +231,7 @@ func TestBwrapLaunchProxyModeReportsStartAndExitStatus(t *testing.T) {
 		OnSandboxStart: func(pid int, nsPath string) { gotPID, gotPath = pid, nsPath },
 	}
 
-	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil)
+	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil)
 
 	if gotPID != nsPID {
 		t.Errorf("OnSandboxStart received PID %d, want %d (a callback that never fires leaves the sandbox unwired)", gotPID, nsPID)
@@ -255,14 +255,14 @@ func TestBwrapLaunchProxyModeWithoutCallback(t *testing.T) {
 	stubEgressPreflight(t)
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(cgroups.Limits, []string, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
 			return startedSandboxProcess(t, 0, 4242), nil
 		},
 	}
 	t.Cleanup(func() { launchers = prev })
 
 	cfg := &RunConfig{SandboxCfg: &sandbox.Config{ProxyEnabled: true}}
-	if err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil); err != nil {
+	if err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil); err != nil {
 		t.Fatalf("launch() error = %v, want nil for a workload that exited 0", err)
 	}
 }
@@ -292,14 +292,14 @@ func TestBwrapLaunchProxyModePassesTheLockdown(t *testing.T) {
 	sentinel := errors.New("stub launcher")
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(_ cgroups.Limits, _, _, _ []string, l egress.Lockdown, _ egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(_ cgroups.Limits, _, _, _, _ []string, l egress.Lockdown, _ egress.Tools) (*bwrap.SandboxProcess, error) {
 			got = l
 			return nil, sentinel
 		},
 	}
 	t.Cleanup(func() { launchers = prev })
 
-	if err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil); !errors.Is(err, sentinel) {
+	if err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil); !errors.Is(err, sentinel) {
 		t.Fatalf("launch() error = %v, want the stub launcher's error", err)
 	}
 
@@ -333,7 +333,7 @@ func TestBwrapLaunchRendersThePreflightedTools(t *testing.T) {
 	sentinel := errors.New("stub launcher")
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(_ cgroups.Limits, _, _, _ []string, _ egress.Lockdown, tools egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(_ cgroups.Limits, _, _, _, _ []string, _ egress.Lockdown, tools egress.Tools) (*bwrap.SandboxProcess, error) {
 			got = tools
 			return nil, sentinel
 		},
@@ -341,7 +341,7 @@ func TestBwrapLaunchRendersThePreflightedTools(t *testing.T) {
 	t.Cleanup(func() { launchers = prev })
 
 	cfg := &RunConfig{SandboxCfg: &sandbox.Config{ProxyEnabled: true, ProxyPort: 8123, GatewayIP: network.PastaGatewayIP}}
-	if err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil); !errors.Is(err, sentinel) {
+	if err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil); !errors.Is(err, sentinel) {
 		t.Fatalf("launch() error = %v, want the stub launcher's error", err)
 	}
 	if got != wantTools {
@@ -380,14 +380,14 @@ func TestBwrapLaunchReportsTheLockdownAbort(t *testing.T) {
 	proc := startedSandboxProcess(t, egress.LockdownExitCode, 4242)
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(cgroups.Limits, []string, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
 			return proc, nil
 		},
 	}
 	t.Cleanup(func() { launchers = prev })
 
 	cfg := &RunConfig{SandboxCfg: &sandbox.Config{ProxyEnabled: true, ProxyPort: 8123, GatewayIP: network.PastaGatewayIP}}
-	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil)
+	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil)
 
 	if !errors.Is(err, ErrEgressLockdown) {
 		t.Fatalf("launch() error = %v, want it to wrap ErrEgressLockdown", err)
@@ -406,7 +406,7 @@ func TestBwrapLaunchKeepsAWorkloadExit78(t *testing.T) {
 	proc := startedSandboxProcess(t, egress.LockdownExitCode, 4242)
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(_ cgroups.Limits, _, _, _ []string, l egress.Lockdown, _ egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(_ cgroups.Limits, _, _, _, _ []string, l egress.Lockdown, _ egress.Tools) (*bwrap.SandboxProcess, error) {
 			// Stand in for the prologue: the marker is written once every rule
 			// has applied, immediately before the workload is exec'd.
 			if l.ReadyFile == "" {
@@ -421,7 +421,7 @@ func TestBwrapLaunchKeepsAWorkloadExit78(t *testing.T) {
 	t.Cleanup(func() { launchers = prev })
 
 	cfg := &RunConfig{SandboxCfg: &sandbox.Config{ProxyEnabled: true, ProxyPort: 8123, GatewayIP: network.PastaGatewayIP}}
-	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil)
+	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil)
 
 	if errors.Is(err, ErrEgressLockdown) {
 		t.Fatalf("launch() error = %v, want no lockdown claim once the lockdown applied", err)
@@ -444,14 +444,14 @@ func TestBwrapLaunchNeighbouringExitCodesStayWorkloadStatuses(t *testing.T) {
 			proc := startedSandboxProcess(t, code, 4242)
 			prev := launchers
 			launchers = bwrapLaunchers{
-				startWithPasta: func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
+				startWithPasta: func(cgroups.Limits, []string, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
 					return proc, nil
 				},
 			}
 			t.Cleanup(func() { launchers = prev })
 
 			cfg := &RunConfig{SandboxCfg: &sandbox.Config{ProxyEnabled: true, ProxyPort: 8123, GatewayIP: network.PastaGatewayIP}}
-			err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil)
+			err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil)
 
 			var exitErr *CommandExitError
 			if !errors.As(err, &exitErr) {
@@ -483,7 +483,7 @@ func TestBwrapProxyLaunchAbortsWhenTheFirewallBinaryIsMissing(t *testing.T) {
 
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(cgroups.Limits, []string, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
 			t.Error("startWithPasta ran despite an unenforceable lockdown, so the sandbox would come up with egress open")
 			return nil, nil
 		},
@@ -491,7 +491,7 @@ func TestBwrapProxyLaunchAbortsWhenTheFirewallBinaryIsMissing(t *testing.T) {
 	t.Cleanup(func() { launchers = prev })
 
 	cfg := &RunConfig{SandboxCfg: &sandbox.Config{ProxyEnabled: true, ProxyPort: 8123, GatewayIP: network.PastaGatewayIP}}
-	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil)
+	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil)
 
 	if !errors.Is(err, ErrEgressPreflight) {
 		t.Fatalf("launch() error = %v, want it to wrap ErrEgressPreflight", err)
@@ -528,7 +528,7 @@ func TestBwrapProxyLaunchAbortsWhenTheProbeFails(t *testing.T) {
 
 	prev := launchers
 	launchers = bwrapLaunchers{
-		startWithPasta: func(cgroups.Limits, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
+		startWithPasta: func(cgroups.Limits, []string, []string, []string, []string, egress.Lockdown, egress.Tools) (*bwrap.SandboxProcess, error) {
 			t.Error("startWithPasta ran after the probe refused the rule set")
 			return nil, nil
 		},
@@ -536,7 +536,7 @@ func TestBwrapProxyLaunchAbortsWhenTheProbeFails(t *testing.T) {
 	t.Cleanup(func() { launchers = prev })
 
 	cfg := &RunConfig{SandboxCfg: &sandbox.Config{ProxyEnabled: true, ProxyPort: 8123, GatewayIP: network.PastaGatewayIP}}
-	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil)
+	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil)
 
 	if !errors.Is(err, ErrEgressPreflight) {
 		t.Fatalf("launch() error = %v, want it to wrap ErrEgressPreflight", err)
@@ -576,7 +576,7 @@ func TestBwrapNonProxyLaunchNeedsNoFirewall(t *testing.T) {
 	}}
 	t.Cleanup(func() { launchers = prev })
 
-	if err := NewBwrapIsolator(BwrapConfig{}).launch(&RunConfig{SandboxCfg: &sandbox.Config{}}, nil, nil, nil); err != nil {
+	if err := NewBwrapIsolator(BwrapConfig{}).launch(&RunConfig{SandboxCfg: &sandbox.Config{}}, nil, nil, nil, nil); err != nil {
 		t.Fatalf("launch() error = %v, want a non-proxy launch to succeed with no firewall present", err)
 	}
 	if !launched {
@@ -600,7 +600,7 @@ func TestBwrapLaunchExecRunMapsExitStatus(t *testing.T) {
 	t.Cleanup(func() { launchers = prev })
 
 	cfg := &RunConfig{SandboxCfg: &sandbox.Config{}, HasActiveTools: true}
-	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil)
+	err := NewBwrapIsolator(BwrapConfig{}).launch(cfg, nil, nil, nil, nil)
 
 	var exitErr *CommandExitError
 	if !errors.As(err, &exitErr) {

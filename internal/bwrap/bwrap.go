@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -201,6 +202,10 @@ func forwardSignals(p *os.Process) func() {
 type SandboxProcess struct {
 	Cmd          *exec.Cmd
 	NamespacePID int // PID inside the sandbox network namespace
+	// secretArgsFile is the file the wrapper hands bwrap through --args. The
+	// wrapper unlinks it once opened; this copy of the path covers a wrapper
+	// that died before reaching that line.
+	secretArgsFile string
 }
 
 // NamespacePath returns the /proc path to the sandbox network namespace.
@@ -222,7 +227,83 @@ func (p *SandboxProcess) Pid() int {
 
 // Wait waits for the sandbox process to exit.
 func (p *SandboxProcess) Wait() error {
-	return p.Cmd.Wait()
+	err := p.Cmd.Wait()
+	removeSecretArgsFile(p.secretArgsFile)
+	return err
+}
+
+// secretArgsFD is the descriptor the wrapper opens the private argument file
+// on and names in bwrap's --args. 3 is the first free descriptor after the
+// standard three; pasta closes every other inherited descriptor at startup,
+// which is why the file is opened by the wrapper rather than passed down.
+const secretArgsFD = "3"
+
+// secretArgsPrologue is prepended to the pasta wrapper script when bwrap has
+// private arguments. It opens the file named by the first positional argument
+// on secretArgsFD, unlinks it so nothing outlives the read, and shifts it out
+// so the rest of the wrapper still sees `bwrap ...` as "$@". The read test
+// fails with its own message: a bare `exec 3<` failure exits with the shell's
+// wording and status, which names neither devsandbox nor the file.
+const secretArgsPrologue = `[ -r "$1" ] || { echo "devsandbox: cannot read the private bwrap argument file $1" >&2; exit 1; }
+exec 3<"$1"
+rm -f -- "$1"
+shift
+`
+
+// writeSecretArgs writes args NUL-separated - the form bwrap's --args reads -
+// to a fresh 0600 file under the devsandbox state directory and returns its
+// path. That directory is chosen for the same reason as the egress marker's:
+// the sandbox repoints XDG_STATE_HOME at its synthetic home, and $TMPDIR may
+// be a directory bound read-write into the sandbox, so neither a running
+// session nor another local user can read or swap the file.
+func writeSecretArgs(args []string) (string, error) {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve the home directory for the private bwrap arguments: %w", err)
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	dir := filepath.Join(base, "devsandbox", "bwrap-args")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create the private bwrap argument directory %s: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, "args-*")
+	if err != nil {
+		return "", fmt.Errorf("create the private bwrap argument file: %w", err)
+	}
+	var b strings.Builder
+	for _, arg := range args {
+		if strings.ContainsRune(arg, 0) {
+			_ = f.Close()
+			removeSecretArgsFile(f.Name())
+			return "", fmt.Errorf("private bwrap argument %q contains a NUL byte", arg)
+		}
+		b.WriteString(arg)
+		b.WriteByte(0)
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		_ = f.Close()
+		removeSecretArgsFile(f.Name())
+		return "", fmt.Errorf("write the private bwrap argument file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		removeSecretArgsFile(f.Name())
+		return "", fmt.Errorf("write the private bwrap argument file: %w", err)
+	}
+	return f.Name(), nil
+}
+
+// removeSecretArgsFile unlinks path, tolerating the wrapper having done so
+// first. An empty path means no file was written.
+func removeSecretArgsFile(path string) {
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "devsandbox: remove the private bwrap argument file %s: %v\n", path, err)
+	}
 }
 
 // StartWithPasta starts bwrap inside pasta for network namespace isolation and
@@ -242,7 +323,13 @@ func (p *SandboxProcess) Wait() error {
 // binaries the caller's preflight proved usable are the exact ones the script
 // runs; a second resolution could disagree with the one that was verified. They
 // are unused when the lockdown is disabled.
-func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, portForwardArgs []string, lockdown egress.Lockdown, tools egress.Tools) (*SandboxProcess, error) {
+//
+// secretArgs are bwrap arguments that must not appear on any command line:
+// pasta's argv carries the whole bwrap invocation for the life of the session
+// and /proc/<pid>/cmdline is readable by every local user. They are written to
+// a private file the wrapper opens for bwrap's --args, and applied after
+// bwrapArgs. Pass nil when nothing is private.
+func StartWithPasta(limits cgroups.Limits, bwrapArgs, secretArgs []string, shellCmd []string, portForwardArgs []string, lockdown egress.Lockdown, tools egress.Tools) (*SandboxProcess, error) {
 	pastaPath, err := embed.PastaPath()
 	if err != nil {
 		return nil, fmt.Errorf("pasta not available (required for proxy mode): %w\nRun 'devsandbox doctor' for details", err)
@@ -253,6 +340,14 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 		return nil, fmt.Errorf("bwrap not available: %w", err)
 	}
 
+	secretArgsFile := ""
+	if len(secretArgs) > 0 {
+		secretArgsFile, err = writeSecretArgs(secretArgs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Use --map-host-loopback if supported.
 	// For embedded pasta, we know the version at build time.
 	// For system pasta (fallback), check at runtime.
@@ -261,8 +356,9 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 		supportsMapHostLoopback = pastaSupportsMapHostLoopback(pastaPath)
 	}
 
-	prog, args, err := pastaInvocation(limits, pastaPath, bwrapPath, bwrapArgs, shellCmd, portForwardArgs, supportsMapHostLoopback, lockdown, tools)
+	prog, args, err := pastaInvocation(limits, pastaPath, bwrapPath, bwrapArgs, secretArgsFile, shellCmd, portForwardArgs, supportsMapHostLoopback, lockdown, tools)
 	if err != nil {
+		removeSecretArgsFile(secretArgsFile)
 		return nil, err
 	}
 
@@ -275,6 +371,7 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 	cmd.Env = os.Environ()
 
 	if err := cmd.Start(); err != nil {
+		removeSecretArgsFile(secretArgsFile)
 		return nil, fmt.Errorf("failed to start pasta/bwrap: %w", err)
 	}
 
@@ -287,6 +384,7 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 	if err != nil {
 		_ = cmd.Process.Kill()
 		waitErr := cmd.Wait()
+		removeSecretArgsFile(secretArgsFile)
 		// A lockdown that aborts before the child is observable exits the wrapper
 		// with LockdownExitCode, and that status is the only evidence of what
 		// happened. Discarding it here reports an unapplied security control as a
@@ -300,16 +398,17 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string
 	}
 
 	return &SandboxProcess{
-		Cmd:          cmd,
-		NamespacePID: namespacePID,
+		Cmd:            cmd,
+		NamespacePID:   namespacePID,
+		secretArgsFile: secretArgsFile,
 	}, nil
 }
 
 // pastaInvocation returns the program and the arguments after argv[0] for the
 // proxy launch path, where pasta is the outermost process and therefore the one
 // the scope must contain.
-func pastaInvocation(limits cgroups.Limits, pastaPath, bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []string, mapHostLoopback bool, lockdown egress.Lockdown, tools egress.Tools) (string, []string, error) {
-	args, err := pastaCmdline(bwrapPath, bwrapArgs, shellCmd, portForwardArgs, mapHostLoopback, lockdown, tools)
+func pastaInvocation(limits cgroups.Limits, pastaPath, bwrapPath string, bwrapArgs []string, secretArgsFile string, shellCmd, portForwardArgs []string, mapHostLoopback bool, lockdown egress.Lockdown, tools egress.Tools) (string, []string, error) {
+	args, err := pastaCmdline(bwrapPath, bwrapArgs, secretArgsFile, shellCmd, portForwardArgs, mapHostLoopback, lockdown, tools)
 	if err != nil {
 		return "", nil, err
 	}
@@ -332,10 +431,14 @@ func pastaStartTimeout(limits cgroups.Limits) time.Duration {
 	return pastaScopedStartBudget
 }
 
-// pastaCmdline assembles pasta's arguments, excluding argv[0].
-func pastaCmdline(bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []string, mapHostLoopback bool, lockdown egress.Lockdown, tools egress.Tools) ([]string, error) {
+// pastaCmdline assembles pasta's arguments, excluding argv[0]. A non-empty
+// secretArgsFile is the private argument file written by writeSecretArgs: the
+// wrapper is given secretArgsPrologue and the file as its first positional
+// argument, and bwrap gets `--args 3` after bwrapArgs so the file's entries
+// apply last.
+func pastaCmdline(bwrapPath string, bwrapArgs []string, secretArgsFile string, shellCmd, portForwardArgs []string, mapHostLoopback bool, lockdown egress.Lockdown, tools egress.Tools) ([]string, error) {
 	// Build pasta command with network isolation:
-	// pasta --config-net [-4] [--map-host-loopback 10.0.2.2] -f -- sh -c '...' _ bwrap [args] -- shell
+	// pasta --config-net [-4] [--map-host-loopback 10.0.2.2] -f -- sh -c '...' _ [argsfile] bwrap [args] [--args 3] -- shell
 	//
 	// --config-net: Configure tap interface in namespace (required for network to work)
 	// -4: IPv4 only, emitted with the lockdown (see below)
@@ -404,9 +507,18 @@ func pastaCmdline(bwrapPath string, bwrapArgs, shellCmd, portForwardArgs []strin
 
 	args = append(args, "-f") // Foreground mode
 	args = append(args, "--")
+	if secretArgsFile != "" {
+		wrapperScript = secretArgsPrologue + wrapperScript
+	}
 	args = append(args, "sh", "-c", wrapperScript, "_") // Wrapper to capture PID and delete default route
+	if secretArgsFile != "" {
+		args = append(args, secretArgsFile)
+	}
 	args = append(args, bwrapPath)
 	args = append(args, bwrapArgs...)
+	if secretArgsFile != "" {
+		args = append(args, "--args", secretArgsFD)
+	}
 	args = append(args, "--")
 	args = append(args, shellCmd...)
 
@@ -455,8 +567,8 @@ func pastaWrapperScript(lockdown egress.Lockdown, tools egress.Tools) (string, e
 //
 // Unlike the regular Exec function, this uses exec.Command instead of syscall.Exec
 // so that the calling process (and its proxy server goroutine) stays alive.
-func ExecWithPasta(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, portForwardArgs []string, lockdown egress.Lockdown, tools egress.Tools) error {
-	proc, err := StartWithPasta(limits, bwrapArgs, shellCmd, portForwardArgs, lockdown, tools)
+func ExecWithPasta(limits cgroups.Limits, bwrapArgs, secretArgs []string, shellCmd []string, portForwardArgs []string, lockdown egress.Lockdown, tools egress.Tools) error {
+	proc, err := StartWithPasta(limits, bwrapArgs, secretArgs, shellCmd, portForwardArgs, lockdown, tools)
 	if err != nil {
 		return err
 	}

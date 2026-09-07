@@ -10,23 +10,75 @@ func names(vars []Var) []string {
 	return out
 }
 
+func TestURL(t *testing.T) {
+	tests := []struct {
+		host  string
+		port  int
+		token string
+		want  string
+	}{
+		{"10.0.2.2", 8080, "tok", "http://devsandbox:tok@10.0.2.2:8080"},
+		{"host.docker.internal", 18889, "0123456789abcdef", "http://devsandbox:0123456789abcdef@host.docker.internal:18889"},
+		{"::1", 8080, "tok", "http://devsandbox:tok@[::1]:8080"},
+	}
+	for _, tt := range tests {
+		if got := URL(tt.host, tt.port, tt.token); got != tt.want {
+			t.Errorf("URL(%q, %d, %q) = %q, want %q", tt.host, tt.port, tt.token, got, tt.want)
+		}
+	}
+}
+
+// TestVars_EveryProxyVariableCarriesTheCredential pins that the credentialed
+// URL reaches every variable a client might read the proxy from: one that
+// lost the userinfo would send no Proxy-Authorization and get 407. The same
+// variables, and only those, are marked Secret: a backend keys on that flag
+// to keep the credential off the launch command line, so a URL-carrying
+// variable without it lands in world-readable argv.
+func TestVars_EveryProxyVariableCarriesTheCredential(t *testing.T) {
+	proxyURL := URL("10.0.2.2", 8080, "tok")
+	for _, v := range Vars(proxyURL, []string{"MY_TOOL_PROXY"}) {
+		switch v.Name {
+		case "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+			"YARN_HTTP_PROXY", "YARN_HTTPS_PROXY", "MY_TOOL_PROXY":
+			if v.Value != proxyURL {
+				t.Errorf("%s = %q, want %q", v.Name, v.Value, proxyURL)
+			}
+			if !v.Secret {
+				t.Errorf("%s carries the credential but is not marked Secret", v.Name)
+			}
+		default:
+			if v.Value == proxyURL {
+				t.Errorf("%s = the proxy URL; only proxy address variables carry it", v.Name)
+			}
+			if v.Secret {
+				t.Errorf("%s = %q is marked Secret without carrying the credential", v.Name, v.Value)
+			}
+		}
+	}
+	for _, v := range CAVars("/tmp/ca.crt", []string{"MY_CA"}) {
+		if v.Secret {
+			t.Errorf("CA variable %s is marked Secret", v.Name)
+		}
+	}
+}
+
 func TestVars_OrderAndValues(t *testing.T) {
-	const proxyURL = "http://10.0.2.2:8080"
+	const proxyURL = "http://devsandbox:tok@10.0.2.2:8080"
 
 	got := Vars(proxyURL, []string{"MY_TOOL_PROXY"})
 
 	want := []Var{
-		{Name: "HTTP_PROXY", Value: proxyURL},
-		{Name: "HTTPS_PROXY", Value: proxyURL},
-		{Name: "http_proxy", Value: proxyURL},
-		{Name: "https_proxy", Value: proxyURL},
+		{Name: "HTTP_PROXY", Value: proxyURL, Secret: true},
+		{Name: "HTTPS_PROXY", Value: proxyURL, Secret: true},
+		{Name: "http_proxy", Value: proxyURL, Secret: true},
+		{Name: "https_proxy", Value: proxyURL, Secret: true},
 		{Name: "NO_PROXY", Value: "localhost,127.0.0.1"},
 		{Name: "no_proxy", Value: "localhost,127.0.0.1"},
-		{Name: "YARN_HTTP_PROXY", Value: proxyURL},
-		{Name: "YARN_HTTPS_PROXY", Value: proxyURL},
+		{Name: "YARN_HTTP_PROXY", Value: proxyURL, Secret: true},
+		{Name: "YARN_HTTPS_PROXY", Value: proxyURL, Secret: true},
 		{Name: "NODE_USE_ENV_PROXY", Value: "1"},
 		{Name: "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT", Value: "3s", Default: true},
-		{Name: "MY_TOOL_PROXY", Value: proxyURL},
+		{Name: "MY_TOOL_PROXY", Value: proxyURL, Secret: true},
 		{Name: "DEVSANDBOX_PROXY", Value: "1"},
 	}
 

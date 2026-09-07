@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -225,33 +224,79 @@ func TestMise_Bindings_LocalBinReadOnly(t *testing.T) {
 	}
 }
 
-func TestCheckMiseTrust_NoMise(t *testing.T) {
-	// If mise is not installed, CheckMiseTrust should return nil
-	if _, err := exec.LookPath("mise"); err != nil {
-		statuses, err := CheckMiseTrust(t.TempDir())
-		if err != nil {
-			t.Fatalf("CheckMiseTrust() error = %v, want nil", err)
-		}
-		if statuses != nil {
-			t.Errorf("CheckMiseTrust() = %v, want nil when mise not available", statuses)
-		}
+// TestMise_Environment_TrustsProjectConfigs covers the in-sandbox replacement
+// for the host-side `mise trust` prompt: the project directory is exported as
+// MISE_TRUSTED_CONFIG_PATHS so every mise config under it loads without a
+// prompt, and that trust never touches the host trust store.
+func TestMise_Environment_TrustsProjectConfigs(t *testing.T) {
+	const trustKey = "MISE_TRUSTED_CONFIG_PATHS"
+	const globalKey = "MISE_GLOBAL_CONFIG_FILE"
+
+	tests := []struct {
+		name    string
+		global  GlobalConfig
+		toolCfg map[string]any
+		want    map[string]string
+		absent  []string
+	}{
+		{
+			name:   "project dir is trusted",
+			global: GlobalConfig{ProjectDir: "/p"},
+			want:   map[string]string{trustKey: "/p"},
+			absent: []string{globalKey},
+		},
+		{
+			name:   "no project dir trusts nothing",
+			global: GlobalConfig{},
+			absent: []string{trustKey},
+		},
+		{
+			name:    "coexists with ignore_global_config",
+			global:  GlobalConfig{ProjectDir: "/p"},
+			toolCfg: map[string]any{"ignore_global_config": true},
+			want:    map[string]string{trustKey: "/p", globalKey: "/dev/null"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Mise{}
+			m.Configure(tt.global, tt.toolCfg)
+			env := m.Environment("/home/testuser", "/tmp/sandbox")
+
+			got := make(map[string]string, len(env))
+			for _, e := range env {
+				if _, dup := got[e.Name]; dup {
+					t.Errorf("%s emitted twice", e.Name)
+				}
+				got[e.Name] = e.Value
+			}
+			for name, want := range tt.want {
+				if v, ok := got[name]; !ok {
+					t.Errorf("%s missing from Environment()", name)
+				} else if v != want {
+					t.Errorf("%s = %q, want %q", name, v, want)
+				}
+			}
+			for _, name := range tt.absent {
+				if v, ok := got[name]; ok {
+					t.Errorf("%s = %q, want absent", name, v)
+				}
+			}
+		})
 	}
 }
 
-func TestCheckMiseTrust_NoConfig(t *testing.T) {
-	if _, err := exec.LookPath("mise"); err != nil {
-		t.Skip("mise not installed")
-	}
-
-	dir := t.TempDir()
-	statuses, err := CheckMiseTrust(dir)
-	if err != nil {
-		t.Fatalf("CheckMiseTrust() error = %v", err)
-	}
-	// No config files means no statuses (or all trusted global configs)
-	for _, s := range statuses {
-		if !s.Trusted {
-			t.Errorf("unexpected untrusted status for %s", s.Path)
+// TestMise_Configure_ProjectDirDoesNotLeak guards the registry singleton: a
+// later Configure without a project dir must not keep trusting the previous
+// one.
+func TestMise_Configure_ProjectDirDoesNotLeak(t *testing.T) {
+	m := &Mise{}
+	m.Configure(GlobalConfig{ProjectDir: "/first"}, nil)
+	m.Configure(GlobalConfig{}, nil)
+	for _, e := range m.Environment("/h", "/s") {
+		if e.Name == "MISE_TRUSTED_CONFIG_PATHS" {
+			t.Errorf("MISE_TRUSTED_CONFIG_PATHS leaked across Configure calls: %q", e.Value)
 		}
 	}
 }

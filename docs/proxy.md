@@ -301,7 +301,7 @@ flowchart TB
         proxy --> internet
     end
     subgraph sandbox["Sandbox (netns)"]
-        app["Application<br/>HTTP_PROXY=10.0.2.2:8080"]
+        app["Application<br/>HTTP_PROXY=devsandbox:token@10.0.2.2:8080"]
         gateway["Gateway<br/>10.0.2.2"]
         app --> gateway
     end
@@ -311,8 +311,9 @@ flowchart TB
 ## Proxy Environment Variables
 
 When proxy mode is active, every backend exports the same set, with the proxy URL
-pointing at that backend's gateway (`http://10.0.2.2:8080` for bwrap and krun,
-the Docker host alias for Docker):
+pointing at that backend's gateway and carrying the session's credential
+(`http://devsandbox:<token>@10.0.2.2:8080` for bwrap and krun, the Docker host
+alias for Docker - see [Proxy authentication](#proxy-authentication)):
 
 | Variable                             | Value             | Purpose                                              |
 |--------------------------------------|-------------------|------------------------------------------------------|
@@ -331,6 +332,44 @@ rest are set unconditionally, since they state where the proxy is.
 Add tool-specific variable names with
 [`extra_env`](configuration.md#proxy-extra-environment-variables) - each is set
 to the same proxy URL.
+
+### Proxy authentication
+
+Every session mints a credential the proxy requires on every request and every
+`CONNECT`; a request without it, or with another session's, is answered
+`407 Proxy Authentication Required` and reaches neither the filter nor the
+request log. The credential travels as URL userinfo
+(`http://devsandbox:<token>@...`) in every proxy variable above, which is how a
+client that reads `HTTP_PROXY`/`HTTPS_PROXY` sends it as
+`Proxy-Authorization: Basic ...` with no further configuration. curl, git, pip,
+npm, Node's built-in `fetch` (undici, via `NODE_USE_ENV_PROXY`), Go, mise and
+Claude Code all read URL credentials from the proxy variables. A client that
+ignores them, or a proxy URL you spell out by hand without them (`curl -x
+http://10.0.2.2:8080`), gets 407: use the exported variable (`curl -x
+"$HTTP_PROXY"`) or pass the credential the way the client expects.
+
+There is no opt-out, for the same reason the egress lockdown has none. The
+listener is reachable by every local process - other users on the host, a
+sandbox that shares the host network namespace, a container that reaches the
+gateway - and the proxy injects your configured
+[credentials](#credential-injection) into what it forwards, so without a
+per-session credential any of them could use those tokens.
+
+The credential is rotated every session and lives only in process
+environments, which are readable by their owner alone. It is never placed on
+a command line: `/proc/<pid>/cmdline` is readable by every local user, and the
+launcher (pasta on bwrap, the attached `docker exec` client on Docker) lives
+for the whole session. On bwrap the credential-bearing variables are written
+to a private file under `$XDG_STATE_HOME/devsandbox/bwrap-args/`, which the
+launch wrapper opens for bwrap's `--args` and unlinks; on Docker and krun they
+are named as bare `-e NAME` and valued from the engine CLI's environment. On
+the Docker backend with `keep_container`, a reused container is handed the
+current session's URL at `docker exec` time, so the container is not
+recreated. The credential is never written to the request log, the ask prompt
+or audit events; note that `DEVSANDBOX_DEBUG=1` prints the full sandbox
+invocation on the host at launch, proxy environment included. Refused requests
+are recorded in the internal proxy log (`devsandbox logs internal --type
+proxy`) as `AUTH: refused ...`, which is where to look when a tool reports 407.
 
 ## CA Certificate
 
@@ -790,17 +829,36 @@ The socket path is auto-detected from the current directory's sandbox. You can a
 devsandbox proxy monitor /path/to/ask.sock
 ```
 
+The socket lives under the project's sandbox directory, so every devsandbox session of that project
+shares it. Both ends identify themselves when they connect: proxy and monitor exchange a role hello
+before any request, and each refuses a peer that does not answer with the opposite role. Two things
+follow from that:
+
+- **Start the monitor before launching concurrent sessions.** A second session of the same project
+  finds the first session's socket, and since its owner is a proxy rather than a monitor, it blocks
+  every ask-mode request for its lifetime - the launch warns
+  `the ask socket ... is owned by another devsandbox session, not a monitor`. A monitor started
+  first owns the socket instead: every session connects to it, and requests are shown one at a time
+  so a key always answers the request on screen. If the monitor exits while sessions are running,
+  they keep re-dialing the socket and pick up a restarted monitor; a session that reaches another
+  session's proxy on that path instead stops with the same warning.
+- **Monitor and sandbox must be the same devsandbox version.** The hello names the protocol version.
+  A monitor or sandbox from a build that predates it, or that speaks a different version, is refused
+  and reported rather than served: the session warns
+  `the ask socket ... is owned by a monitor or session from an older devsandbox build`, and the
+  proxy's internal log records `ask mode: refused a connection on ...` with the cause.
+
 The monitor displays incoming requests:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Request #1                                                      │
+│  Request #3f9c0d2a8b1e4c7d9a6f5e0b2c4d8e1f                        │
 ├──────────────────────────────────────────────────────────────────┤
 │  Method: GET                                                     │
 │  Host:   api.example.com                                         │
 │  Path:   /v1/users                                               │
 ├──────────────────────────────────────────────────────────────────┤
-│  [A]llow    [B]lock    Allow [S]ession    Block [N]ever         │
+│  [a]llow    [b]lock    [s]ession-allow    [n]ever-allow          │
 └──────────────────────────────────────────────────────────────────┘
 Decision:
 ```
@@ -812,7 +870,7 @@ Decision:
 - `s` - Allow and remember for session
 - `n` - Block and remember for session
 
-**Timeout**: Requests that don't receive a response within 30 seconds are automatically rejected and logged to internal logs as unanswered.
+**Timeout**: Requests that don't receive a response within 30 seconds are automatically rejected and logged to internal logs as unanswered. The window is measured from when the sandbox asked, not from when the prompt is drawn: a request that waited behind another session's prompt for longer than that is skipped with `expired before it could be shown` rather than drawn with a fresh window, since the sandbox has already blocked it.
 
 ### Generate Filter Rules from Logs
 
@@ -1202,6 +1260,14 @@ its own is not. This is deliberate - permitting `:53` to the gateway would re-op
 The sandbox sees the host's `/etc/resolv.conf` (bound read-only), which changes nothing here: on a `systemd-resolved`
 host it names `127.0.0.53`, which inside the namespace is the sandbox's own loopback with nothing listening on it, so
 direct DNS did not work there before the lockdown either.
+
+### "407 Proxy Authentication Required"
+
+The client did not send this session's credential. Every proxy variable devsandbox exports carries it
+as URL userinfo, so this is a client that ignores URL credentials, or a proxy URL typed by hand
+without them (`curl -x http://10.0.2.2:8080`). Use the exported variable (`curl -x "$HTTP_PROXY"`) or
+pass the credential the way the client expects. `devsandbox logs internal --type proxy` records each
+refusal as `AUTH: refused ...`. See [Proxy authentication](#proxy-authentication).
 
 ### Certificate errors
 

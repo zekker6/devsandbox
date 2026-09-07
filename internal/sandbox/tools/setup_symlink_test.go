@@ -68,6 +68,17 @@ func TestSetup_DestinationIsSymlink(t *testing.T) {
 			},
 		},
 		{
+			name: "claude",
+			tool: func() ToolWithSetup { return &Claude{} },
+			seed: func(t *testing.T, homeDir string) {
+				t.Setenv("CLAUDE_CONFIG_DIR", "")
+				writeFile(t, filepath.Join(homeDir, ".claude.json"), `{"hasCompletedOnboarding":true}`)
+			},
+			dest: func(sandboxHome string) string {
+				return filepath.Join(sandboxHome, ".claude.json")
+			},
+		},
+		{
 			name: "portal",
 			tool: func() ToolWithSetup { return &Portal{notifications: true} },
 			seed: func(t *testing.T, homeDir string) {},

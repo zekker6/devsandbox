@@ -111,6 +111,12 @@ run "redaction takes precedence over filter" EMIT "content redaction" 0 Bash \
 	"curl -sS -d @payload https://api.example.com" \
 	"Request blocked by devsandbox: request blocked: secret pattern detected in outgoing request"
 
+# A proxy URL typed without the session credential is answered 407 with this
+# body; the status line is capitalized differently and is not the signature.
+run "proxy auth refused" EMIT "session credential" 0 Bash \
+	"curl -sS -x http://127.0.0.1:3128 http://example.com" \
+	"proxy authentication required"
+
 run "docker socket write" EMIT "read-only" 0 Bash \
 	"docker run -it alpine sh" \
 	"Error response from daemon: docker proxy: POST /v1.43/containers/create blocked (write operations not allowed)"

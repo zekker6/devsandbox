@@ -2,10 +2,12 @@ package sandbox
 
 import (
 	"bytes"
+	"devsandbox/internal/proxyenv"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -675,27 +677,37 @@ func TestBuilderErr(t *testing.T) {
 	}
 }
 
+// testProxyAuthToken is the per-session credential the builder tests hand the
+// proxy environment; the URL it produces carries it as userinfo.
+const testProxyAuthToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func TestBuilder_AddProxyEnvironment_BuiltinVars(t *testing.T) {
 	cfg := &Config{
-		ProxyEnabled: true,
-		ProxyMITM:    true,
-		ProxyPort:    8080,
-		GatewayIP:    "10.0.2.2",
+		ProxyEnabled:   true,
+		ProxyMITM:      true,
+		ProxyPort:      8080,
+		ProxyAuthToken: testProxyAuthToken,
+		GatewayIP:      "10.0.2.2",
 	}
 
 	b := NewBuilder(cfg)
 	b.AddProxyEnvironment()
 
-	args := b.Build()
+	args := slices.Concat(b.Build(), b.SecretArgs())
+
+	proxyURL := "http://devsandbox:" + testProxyAuthToken + "@10.0.2.2:8080"
+	if proxyURL != proxyenv.URL("10.0.2.2", 8080, testProxyAuthToken) {
+		t.Fatalf("proxyenv.URL = %q, want %q", proxyenv.URL("10.0.2.2", 8080, testProxyAuthToken), proxyURL)
+	}
 
 	// Check for YARN proxy vars
 	expectedVars := map[string]string{
-		"HTTP_PROXY":                         "http://10.0.2.2:8080",
-		"HTTPS_PROXY":                        "http://10.0.2.2:8080",
-		"http_proxy":                         "http://10.0.2.2:8080",
-		"https_proxy":                        "http://10.0.2.2:8080",
-		"YARN_HTTP_PROXY":                    "http://10.0.2.2:8080",
-		"YARN_HTTPS_PROXY":                   "http://10.0.2.2:8080",
+		"HTTP_PROXY":                         proxyURL,
+		"HTTPS_PROXY":                        proxyURL,
+		"http_proxy":                         proxyURL,
+		"https_proxy":                        proxyURL,
+		"YARN_HTTP_PROXY":                    proxyURL,
+		"YARN_HTTPS_PROXY":                   proxyURL,
 		"NO_PROXY":                           "localhost,127.0.0.1",
 		"no_proxy":                           "localhost,127.0.0.1",
 		"NODE_USE_ENV_PROXY":                 "1",
@@ -779,18 +791,19 @@ func TestBuilder_AddProxyEnvironment_ExtraCAEnv(t *testing.T) {
 
 func TestBuilder_AddProxyEnvironment_ExtraEnv(t *testing.T) {
 	cfg := &Config{
-		ProxyEnabled:  true,
-		ProxyMITM:     true,
-		ProxyPort:     9090,
-		GatewayIP:     "10.0.2.2",
-		ProxyExtraEnv: []string{"MY_CUSTOM_PROXY", "ANOTHER_PROXY"},
+		ProxyEnabled:   true,
+		ProxyMITM:      true,
+		ProxyPort:      9090,
+		ProxyAuthToken: testProxyAuthToken,
+		GatewayIP:      "10.0.2.2",
+		ProxyExtraEnv:  []string{"MY_CUSTOM_PROXY", "ANOTHER_PROXY"},
 	}
 
 	b := NewBuilder(cfg)
 	b.AddProxyEnvironment()
 
-	args := b.Build()
-	proxyURL := "http://10.0.2.2:9090"
+	args := slices.Concat(b.Build(), b.SecretArgs())
+	proxyURL := proxyenv.URL("10.0.2.2", 9090, testProxyAuthToken)
 
 	for _, varName := range []string{"MY_CUSTOM_PROXY", "ANOTHER_PROXY"} {
 		found := false
@@ -866,20 +879,21 @@ func TestBuilder_AddEnvironment_EnvVars(t *testing.T) {
 
 func TestBuilder_AddProxyEnvironment_NoMITM(t *testing.T) {
 	cfg := &Config{
-		ProxyEnabled: true,
-		ProxyMITM:    false,
-		ProxyPort:    8080,
-		GatewayIP:    "10.0.2.2",
+		ProxyEnabled:   true,
+		ProxyMITM:      false,
+		ProxyPort:      8080,
+		ProxyAuthToken: testProxyAuthToken,
+		GatewayIP:      "10.0.2.2",
 	}
 
 	b := NewBuilder(cfg)
 	b.AddProxyEnvironment()
 
-	args := b.Build()
+	args := slices.Concat(b.Build(), b.SecretArgs())
 	joined := strings.Join(args, " ")
 
 	// Should still have proxy env vars
-	if !strings.Contains(joined, "--setenv HTTP_PROXY http://10.0.2.2:8080") {
+	if !strings.Contains(joined, "--setenv HTTP_PROXY "+proxyenv.URL("10.0.2.2", 8080, testProxyAuthToken)) {
 		t.Error("expected HTTP_PROXY to be set")
 	}
 	if !strings.Contains(joined, "--setenv DEVSANDBOX_PROXY 1") {
@@ -901,6 +915,45 @@ func TestBuilder_AddProxyEnvironment_NoMITM(t *testing.T) {
 	}
 	if strings.Contains(joined, "REQUESTS_CA_BUNDLE") {
 		t.Error("REQUESTS_CA_BUNDLE should not be set when MITM is disabled")
+	}
+}
+
+// TestBuilder_AddProxyEnvironment_URLCarriesSessionToken pins that every value
+// pointing at the proxy is proxyenv.URL with the configured credential: a
+// variable rendered any other way would send no Proxy-Authorization and be
+// refused with 407.
+func TestBuilder_AddProxyEnvironment_URLCarriesSessionToken(t *testing.T) {
+	cfg := &Config{
+		ProxyEnabled:   true,
+		ProxyMITM:      true,
+		ProxyPort:      8081,
+		ProxyAuthToken: "fedcba9876543210",
+		GatewayIP:      "10.0.2.2",
+		ProxyExtraEnv:  []string{"MY_TOOL_PROXY"},
+	}
+
+	b := NewBuilder(cfg)
+	b.AddProxyEnvironment()
+	args := slices.Concat(b.Build(), b.SecretArgs())
+
+	want := proxyenv.URL("10.0.2.2", 8081, "fedcba9876543210")
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "YARN_HTTP_PROXY", "YARN_HTTPS_PROXY", "MY_TOOL_PROXY"} {
+		got, ok := "", false
+		for i := 0; i < len(args)-2; i++ {
+			if args[i] == "--setenv" && args[i+1] == name {
+				got, ok = args[i+2], true
+			}
+		}
+		if !ok {
+			t.Errorf("%s not set", name)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+		if !strings.Contains(got, "fedcba9876543210") {
+			t.Errorf("%s = %q does not carry the session token", name, got)
+		}
 	}
 }
 
@@ -1476,5 +1529,100 @@ func TestBuilder_HiddenFilesInsideDirectoryAreDevNulled(t *testing.T) {
 		if !found {
 			t.Errorf("%s is not overlaid with /dev/null, args: %v", f, args)
 		}
+	}
+}
+
+// TestBuilder_AddProxyEnvironment_KeepsCredentialOutOfArgv pins the split
+// SetSecretEnv exists for: every variable carrying the session credential
+// leaves Build() and is handed over through SecretArgs, so the token never
+// reaches bwrap's (or pasta's) world-readable command line, while the
+// variables that merely say where the proxy is stay in argv.
+func TestBuilder_AddProxyEnvironment_KeepsCredentialOutOfArgv(t *testing.T) {
+	const token = "fedcba9876543210fedcba9876543210"
+	cfg := &Config{
+		ProxyEnabled:   true,
+		ProxyMITM:      true,
+		ProxyPort:      8081,
+		ProxyAuthToken: token,
+		GatewayIP:      "10.0.2.2",
+		ProxyExtraEnv:  []string{"MY_TOOL_PROXY"},
+	}
+
+	b := NewBuilder(cfg)
+	b.AddProxyEnvironment()
+	argv := b.Build()
+	secret := b.SecretArgs()
+
+	for _, arg := range argv {
+		if strings.Contains(arg, token) {
+			t.Errorf("Build() carries the session token in %q", arg)
+		}
+	}
+	if len(secret)%3 != 0 {
+		t.Fatalf("SecretArgs() = %v, want --setenv triples", secret)
+	}
+	got := make(map[string]string)
+	for i := 0; i < len(secret); i += 3 {
+		if secret[i] != "--setenv" {
+			t.Fatalf("SecretArgs()[%d] = %q, want --setenv", i, secret[i])
+		}
+		got[secret[i+1]] = secret[i+2]
+	}
+	want := proxyenv.URL("10.0.2.2", 8081, token)
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "YARN_HTTP_PROXY", "YARN_HTTPS_PROXY", "MY_TOOL_PROXY"} {
+		if got[name] != want {
+			t.Errorf("SecretArgs %s = %q, want %q", name, got[name], want)
+		}
+		delete(got, name)
+	}
+	for name, value := range got {
+		t.Errorf("SecretArgs carries %s=%q, which is not a credential", name, value)
+	}
+	for _, name := range []string{"NO_PROXY", "DEVSANDBOX_PROXY", "NODE_EXTRA_CA_CERTS"} {
+		if !slices.Contains(argv, name) {
+			t.Errorf("%s missing from Build(); only credential-bearing variables move to SecretArgs", name)
+		}
+	}
+}
+
+// TestBuilder_SetSecretEnv_IsOneNamespaceWithSetEnv pins that a name is one
+// entry whichever way it was set: a secret replaces an argv value, a later
+// SetEnv replaces the secret, and SetEnvDefault yields to either.
+func TestBuilder_SetSecretEnv_IsOneNamespaceWithSetEnv(t *testing.T) {
+	setenvValue := func(args []string, name string) (string, bool) {
+		for i := 0; i < len(args)-2; i++ {
+			if args[i] == "--setenv" && args[i+1] == name {
+				return args[i+2], true
+			}
+		}
+		return "", false
+	}
+
+	b := NewBuilder(&Config{})
+	b.SetEnv("HTTP_PROXY", "from-argv")
+	b.SetSecretEnv("HTTP_PROXY", "secret-1")
+	if v, ok := setenvValue(b.Build(), "HTTP_PROXY"); ok {
+		t.Errorf("Build() still carries HTTP_PROXY=%q after SetSecretEnv", v)
+	}
+	if v, ok := setenvValue(b.SecretArgs(), "HTTP_PROXY"); !ok || v != "secret-1" {
+		t.Errorf("SecretArgs HTTP_PROXY = %q, %v; want secret-1", v, ok)
+	}
+
+	b.SetSecretEnv("HTTP_PROXY", "secret-2")
+	if got := b.SecretArgs(); len(got) != 3 || got[2] != "secret-2" {
+		t.Errorf("second SetSecretEnv: SecretArgs() = %v, want one entry with secret-2", got)
+	}
+
+	b.SetEnvDefault("HTTP_PROXY", "default")
+	if _, ok := setenvValue(b.Build(), "HTTP_PROXY"); ok {
+		t.Error("SetEnvDefault overrode a secret of the same name")
+	}
+
+	b.SetEnv("HTTP_PROXY", "from-argv-again")
+	if b.SecretArgs() != nil {
+		t.Errorf("SetEnv left the secret in place: SecretArgs() = %v", b.SecretArgs())
+	}
+	if v, ok := setenvValue(b.Build(), "HTTP_PROXY"); !ok || v != "from-argv-again" {
+		t.Errorf("Build() HTTP_PROXY = %q, %v; want from-argv-again", v, ok)
 	}
 }

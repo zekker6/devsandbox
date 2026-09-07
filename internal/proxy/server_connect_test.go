@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -20,7 +19,7 @@ import (
 func startTunnelProxy(t *testing.T, filter *FilterConfig) *Server {
 	t.Helper()
 
-	cfg := NewConfig(shortTempDir(t), 0)
+	cfg := newTestConfig(shortTempDir(t), 0)
 	cfg.MITM = false
 	cfg.Filter = filter
 
@@ -36,10 +35,19 @@ func startTunnelProxy(t *testing.T, filter *FilterConfig) *Server {
 }
 
 // sendCONNECT opens a raw connection to the proxy, sends a CONNECT for target
-// and returns the proxy's answer to it. Raw TCP rather than an http.Client:
-// the response to the CONNECT itself is the thing under test, and a client
-// transport turns it into an opaque dial error.
+// carrying the session credential, and returns the proxy's answer to it. Raw
+// TCP rather than an http.Client: the response to the CONNECT itself is the
+// thing under test, and a client transport turns it into an opaque dial error.
 func sendCONNECT(t *testing.T, proxyAddr, target string) *http.Response {
+	t.Helper()
+	resp, _ := sendCONNECTWithHeaders(t, proxyAddr, target, proxyAuthHeader(testAuthToken))
+	return resp
+}
+
+// sendCONNECTWithHeaders is sendCONNECT with the caller choosing the extra
+// header lines (each "Name: value\r\n"), and it hands back the connection so
+// the caller can drive the tunnel - or prove it never opened.
+func sendCONNECTWithHeaders(t *testing.T, proxyAddr, target, headers string) (*http.Response, net.Conn) {
 	t.Helper()
 
 	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
@@ -51,7 +59,7 @@ func sendCONNECT(t *testing.T, proxyAddr, target string) *http.Response {
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
-	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, headers); err != nil {
 		t.Fatalf("write CONNECT %s: %v", target, err)
 	}
 
@@ -64,7 +72,7 @@ func sendCONNECT(t *testing.T, proxyAddr, target string) *http.Response {
 		t.Fatalf("read CONNECT response for %s: %v", target, err)
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
-	return resp
+	return resp, conn
 }
 
 // TestServerCONNECT_NoMITM_HostRuleBlocks is the regression test for HTTPS
@@ -180,7 +188,7 @@ func TestNewServer_NoMITM_RefusesUnenforceableScopes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewConfig(shortTempDir(t), 0)
+			cfg := newTestConfig(shortTempDir(t), 0)
 			cfg.MITM = tt.mitm
 			cfg.Filter = &FilterConfig{DefaultAction: FilterActionAllow, Rules: tt.rules}
 
@@ -282,23 +290,10 @@ func readRequestLog(t *testing.T, srv *Server) []RequestLog {
 func askMonitor(t *testing.T, sandboxBase string, action FilterAction) net.Conn {
 	t.Helper()
 
-	conn, err := net.Dial("unix", AskSocketPath(sandboxBase))
-	if err != nil {
-		t.Fatalf("monitor dial failed: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	go func() {
-		for {
-			var req AskRequest
-			if err := dec.Decode(&req); err != nil {
-				return
-			}
-			_ = enc.Encode(AskResponse{ID: req.ID, Action: action, Remember: true})
-		}
-	}()
+	conn, dec, enc := dialAsMonitor(t, AskSocketPath(sandboxBase))
+	go serveAsMonitor(dec, enc, func(req AskRequest) AskResponse {
+		return AskResponse{ID: req.ID, Action: action, Remember: true}
+	})
 	return conn
 }
 
@@ -320,7 +315,7 @@ func newAskTunnelServer(t *testing.T) (*Server, string) {
 	t.Helper()
 
 	base := shortTempDir(t)
-	cfg := NewConfig(base, 0)
+	cfg := newTestConfig(base, 0)
 	cfg.MITM = false
 	cfg.Filter = &FilterConfig{
 		DefaultAction:  FilterActionAsk,
@@ -432,7 +427,7 @@ func TestServerCONNECT_NoMITM_NoFilter(t *testing.T) {
 // request too and wrote its entry a second time. The CONNECT path logs once, so
 // the two disagreed about how many requests the session made.
 func TestServerHTTP_BlockedRequestIsLoggedOnce(t *testing.T) {
-	cfg := NewConfig(shortTempDir(t), 0)
+	cfg := newTestConfig(shortTempDir(t), 0)
 	cfg.MITM = false
 	cfg.Filter = &FilterConfig{
 		DefaultAction: FilterActionAllow,
@@ -450,10 +445,7 @@ func TestServerHTTP_BlockedRequestIsLoggedOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Stop() })
 
-	proxyURL, err := url.Parse("http://" + srv.Addr())
-	if err != nil {
-		t.Fatal(err)
-	}
+	proxyURL := testProxyURL(srv)
 	client := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 		Timeout:   10 * time.Second,
@@ -486,7 +478,7 @@ func TestServerHTTP_BlockedRequestIsLoggedOnce(t *testing.T) {
 // goroutine nothing can reach - and a failure creating it would abort a launch
 // that was never going to ask anything.
 func TestNewServer_AskServerNotBuiltWhenFilteringIsOff(t *testing.T) {
-	cfg := NewConfig(shortTempDir(t), 0)
+	cfg := newTestConfig(shortTempDir(t), 0)
 	cfg.MITM = false
 	cfg.Filter = &FilterConfig{
 		Rules: []FilterRule{{Pattern: "*.example.com", Action: FilterActionAsk}},

@@ -116,7 +116,6 @@ Checking tools...
     • config: ~/.config/git/ignore
 ✓ claude (/home/user/.local/bin/claude)
     ✓ ~/.claude
-    ✓ ~/.claude.json
 ✗ starship (not available)
     ! starship binary not found in PATH
 
@@ -147,6 +146,8 @@ This means:
 - All installed tool versions are available
 - Tool configurations (`.mise.toml`) are respected
 - New tools cannot be installed from inside the sandbox (by default)
+
+Project mise configs are trusted inside the sandbox automatically: devsandbox exports `MISE_TRUSTED_CONFIG_PATHS=<project dir>` into the sandbox on every backend, so every mise config file under the project tree loads without a trust prompt. That trust exists only inside the sandbox. devsandbox never runs `mise trust` on the host, so a cloned repository's `.mise.toml` stays untrusted in your host shell until you trust it there yourself - its hooks, templates and `env` blocks cannot run in your host shell on devsandbox's say-so.
 
 On the container backends (`docker` and `krun`) the guest boots from a fresh image, but `MISE_DATA_DIR` points at the persistent sandbox home, so tools you install inside the sandbox (python, go, etc.) are installed once and reused on later runs rather than re-downloaded every launch. The image's pre-baked node is mirrored into that data dir on startup so it resolves immediately without a reinstall.
 
@@ -383,10 +384,12 @@ Configuration directories are mounted read-write to allow Claude to save setting
 ```
 ~/.claude           → Sandbox (read-write)
 ~/.config/Claude    → Sandbox (read-write)
-~/.claude.json      → Sandbox (read-write)
+~/.claude.json      → Sandbox (per-project copy, seeded on first launch)
 ```
 
 These directories are isolated to the sandbox home - not your real host directories. Claude's conversation state and settings persist across sandbox sessions for the same project but are not shared with your host.
+
+`~/.claude.json` is different from the directories: it is a single file the host's own Claude Code reads back on every start - MCP servers, per-project trust, onboarding and account state. The sandbox never sees the host file. On the first launch of a project devsandbox copies it into the sandbox home, and from then on that copy is the sandbox's own: Claude writes it freely, changes you make on the host afterwards do not flow in, and nothing the sandboxed Claude writes reaches the host file. A sandboxed agent therefore cannot register an MCP server your host Claude Code would launch. To pick up a host-side change (a new MCP server, a fresh login), delete the copy at `~/.local/share/devsandbox/<project>/home/.claude.json` and it is re-seeded on the next launch. With `CLAUDE_CONFIG_DIR` set, Claude Code keeps this state under that directory instead and no copy is made.
 
 Inside a herdr pane, a direct `devsandbox claude` launch lets Claude's herdr
 integration report its native session to herdr through the filtered proxy, so

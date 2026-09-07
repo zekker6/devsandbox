@@ -126,6 +126,13 @@ if hit "Request blocked by devsandbox:"; then
 		"devsandbox logs proxy --last 20; devsandbox filter show"
 fi
 
+if hit "proxy authentication required"; then
+	emit "the proxy refused the request with 407: the client did not send the session credential that every proxy variable devsandbox exports carries as URL userinfo." \
+		'use the exported variable (curl -x "$HTTP_PROXY") or pass the credential the way the client expects; a proxy URL typed by hand without it is refused.' \
+		'docs/proxy.md, section "Proxy authentication"' \
+		"devsandbox logs internal --type proxy (look for AUTH: refused)"
+fi
+
 if hit "docker proxy:" && hit "write operations not allowed"; then
 	emit "the Docker socket is proxied read-only, so container lifecycle calls are refused." \
 		"there is no setting that permits writes; run the container outside the sandbox if it is really needed." \

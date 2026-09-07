@@ -12,11 +12,15 @@ import (
 const (
 	testProxyHost   = "10.0.2.2"
 	testProxyPort   = 8080
-	testProxyURL    = "http://10.0.2.2:8080"
+	testProxyToken  = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	bwrapCADest     = "/tmp/devsandbox-ca.crt"
 	dockerCADest    = "/etc/ssl/certs/devsandbox-ca.crt"
 	miseTimeoutName = "MISE_FETCH_REMOTE_VERSIONS_TIMEOUT"
 )
+
+// testProxyURL is the URL both backends must hand the sandbox: the session
+// credential rides as userinfo.
+var testProxyURL = proxyenv.URL(testProxyHost, testProxyPort, testProxyToken)
 
 // sharedVarNames lists, in order, every variable the shared source produces for
 // a proxied MITM run - the sequence both backends must render.
@@ -30,8 +34,10 @@ func sharedVarNames(extraEnv, extraCAEnv []string) []string {
 	return names
 }
 
-// dockerEnv returns the `-e NAME=VALUE` pairs in the order they appear.
-func dockerEnv(t *testing.T, args []string) []proxyenv.Var {
+// dockerEnv returns the `-e` entries in the order they appear, resolving a
+// bare `-e NAME` from env the way the engine CLI resolves it from its own
+// environment.
+func dockerEnv(t *testing.T, args, env []string) []proxyenv.Var {
 	t.Helper()
 	var out []proxyenv.Var
 	for i := 0; i < len(args)-1; i++ {
@@ -40,7 +46,7 @@ func dockerEnv(t *testing.T, args []string) []proxyenv.Var {
 		}
 		name, value, ok := strings.Cut(args[i+1], "=")
 		if !ok {
-			t.Fatalf("malformed -e argument %q", args[i+1])
+			value = resolveBareEnv(t, name, env)
 		}
 		out = append(out, proxyenv.Var{Name: name, Value: value})
 	}
@@ -93,11 +99,14 @@ func valueOf(vars []proxyenv.Var, name string) (string, bool) {
 	return "", false
 }
 
+// bwrapProxyArgs returns everything the builder hands bwrap: the argv and the
+// private-descriptor entries, which is where the credential-bearing variables
+// go and why the two are concatenated rather than Build() read alone.
 func bwrapProxyArgs(t *testing.T, cfg *sandbox.Config) []proxyenv.Var {
 	t.Helper()
 	b := sandbox.NewBuilder(cfg)
 	b.AddProxyEnvironment()
-	return bwrapEnv(b.Build())
+	return bwrapEnv(slices.Concat(b.Build(), b.SecretArgs()))
 }
 
 func dockerProxyArgs(t *testing.T, cfg *Config) []proxyenv.Var {
@@ -108,14 +117,17 @@ func dockerProxyArgs(t *testing.T, cfg *Config) []proxyenv.Var {
 	if err != nil {
 		t.Fatalf("buildCommonArgs: %v", err)
 	}
-	return dockerEnv(t, args)
+	return dockerEnv(t, args, iso.commandEnv(cfg))
 }
 
-// TestProxyEnv_BackendsRenderTheSameNamesInOrder is the drift guard: a variable
-// added to internal/proxyenv must reach both backends, and one added to a single
-// backend must fail here rather than yielding a sandbox that proxies under bwrap
-// and bypasses the proxy under docker/krun.
-func TestProxyEnv_BackendsRenderTheSameNamesInOrder(t *testing.T) {
+// TestProxyEnv_BackendsRenderTheSameNames is the drift guard: a variable added
+// to internal/proxyenv must reach both backends, and one added to a single
+// backend must fail here rather than yielding a sandbox that proxies under
+// bwrap and bypasses the proxy under docker/krun. Names are compared as sets:
+// each backend sets every name once, and bwrap applies its private-descriptor
+// entries after the argv ones, so the emission order is a property of the
+// transport, not of the shared list.
+func TestProxyEnv_BackendsRenderTheSameNames(t *testing.T) {
 	extraEnv := []string{"MY_TOOL_PROXY"}
 	extraCAEnv := []string{"MY_TOOL_CA_BUNDLE"}
 	want := sharedVarNames(extraEnv, extraCAEnv)
@@ -124,6 +136,7 @@ func TestProxyEnv_BackendsRenderTheSameNamesInOrder(t *testing.T) {
 		ProxyEnabled:    true,
 		ProxyMITM:       true,
 		ProxyPort:       testProxyPort,
+		ProxyAuthToken:  testProxyToken,
 		GatewayIP:       testProxyHost,
 		ProxyExtraEnv:   extraEnv,
 		ProxyExtraCAEnv: extraCAEnv,
@@ -136,6 +149,7 @@ func TestProxyEnv_BackendsRenderTheSameNamesInOrder(t *testing.T) {
 		ProxyEnabled:    true,
 		ProxyHost:       testProxyHost,
 		ProxyPort:       testProxyPort,
+		ProxyAuthToken:  testProxyToken,
 		ProxyCAPath:     "/tmp/devsandbox-ca-src.crt",
 		ProxyExtraEnv:   extraEnv,
 		ProxyExtraCAEnv: extraCAEnv,
@@ -152,10 +166,11 @@ func TestProxyEnv_BackendsRenderTheSameNamesInOrder(t *testing.T) {
 		if len(got) != len(want) {
 			t.Fatalf("%s rendered %d shared vars %v, want %d %v", tc.backend, len(got), got, len(want), want)
 		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Errorf("%s var[%d] = %q, want %q (full order: %v)", tc.backend, i, got[i], want[i], got)
-			}
+		sortedGot, sortedWant := slices.Clone(got), slices.Clone(want)
+		slices.Sort(sortedGot)
+		slices.Sort(sortedWant)
+		if !slices.Equal(sortedGot, sortedWant) {
+			t.Errorf("%s rendered %v, want %v", tc.backend, got, want)
 		}
 	}
 }
@@ -177,6 +192,7 @@ func TestProxyEnv_BackendsKeepTheirOwnCAPath(t *testing.T) {
 		ProxyEnabled:    true,
 		ProxyMITM:       true,
 		ProxyPort:       testProxyPort,
+		ProxyAuthToken:  testProxyToken,
 		GatewayIP:       testProxyHost,
 		ProxyExtraCAEnv: []string{"MY_TOOL_CA_BUNDLE"},
 	})
@@ -188,6 +204,7 @@ func TestProxyEnv_BackendsKeepTheirOwnCAPath(t *testing.T) {
 		ProxyEnabled:    true,
 		ProxyHost:       testProxyHost,
 		ProxyPort:       testProxyPort,
+		ProxyAuthToken:  testProxyToken,
 		ProxyCAPath:     "/tmp/devsandbox-ca-src.crt",
 		ProxyExtraCAEnv: []string{"MY_TOOL_CA_BUNDLE"},
 	})
@@ -221,6 +238,7 @@ func TestProxyEnv_BackendsSkipTheCABlock(t *testing.T) {
 		ProxyEnabled:    true,
 		ProxyMITM:       false,
 		ProxyPort:       testProxyPort,
+		ProxyAuthToken:  testProxyToken,
 		GatewayIP:       testProxyHost,
 		ProxyExtraCAEnv: []string{"MY_TOOL_CA_BUNDLE"},
 	})
@@ -232,6 +250,7 @@ func TestProxyEnv_BackendsSkipTheCABlock(t *testing.T) {
 		ProxyEnabled:    true,
 		ProxyHost:       testProxyHost,
 		ProxyPort:       testProxyPort,
+		ProxyAuthToken:  testProxyToken,
 		ProxyCAPath:     "",
 		ProxyExtraCAEnv: []string{"MY_TOOL_CA_BUNDLE"},
 	})
@@ -262,10 +281,11 @@ func TestProxyEnv_BackendsSkipTheCABlock(t *testing.T) {
 func TestProxyEnv_BackendsDeferToAUserConfiguredValue(t *testing.T) {
 	t.Run("bwrap keeps an earlier value", func(t *testing.T) {
 		cfg := &sandbox.Config{
-			ProxyEnabled: true,
-			ProxyMITM:    true,
-			ProxyPort:    testProxyPort,
-			GatewayIP:    testProxyHost,
+			ProxyEnabled:   true,
+			ProxyMITM:      true,
+			ProxyPort:      testProxyPort,
+			ProxyAuthToken: testProxyToken,
+			GatewayIP:      testProxyHost,
 		}
 		b := sandbox.NewBuilder(cfg)
 		// AddEnvironment applies passthrough and config.sandbox.environment before
@@ -274,7 +294,7 @@ func TestProxyEnv_BackendsDeferToAUserConfiguredValue(t *testing.T) {
 		b.SetEnv("HTTP_PROXY", "http://user-set:1")
 		b.AddProxyEnvironment()
 
-		got := bwrapEnv(b.Build())
+		got := bwrapEnv(slices.Concat(b.Build(), b.SecretArgs()))
 		if value, _ := valueOf(got, miseTimeoutName); value != "30s" {
 			t.Errorf("%s = %q, want the user's 30s", miseTimeoutName, value)
 		}
@@ -285,14 +305,15 @@ func TestProxyEnv_BackendsDeferToAUserConfiguredValue(t *testing.T) {
 
 	t.Run("docker skips the default it would clobber with", func(t *testing.T) {
 		got := dockerProxyArgs(t, &Config{
-			ProjectDir:   "/tmp/test-project",
-			SandboxHome:  "/tmp/test-sandbox",
-			HomeDir:      "/home/testuser",
-			Shell:        "/bin/bash",
-			ProxyEnabled: true,
-			ProxyHost:    testProxyHost,
-			ProxyPort:    testProxyPort,
-			Environment:  map[string]string{miseTimeoutName: "30s"},
+			ProjectDir:     "/tmp/test-project",
+			SandboxHome:    "/tmp/test-sandbox",
+			HomeDir:        "/home/testuser",
+			Shell:          "/bin/bash",
+			ProxyEnabled:   true,
+			ProxyHost:      testProxyHost,
+			ProxyPort:      testProxyPort,
+			ProxyAuthToken: testProxyToken,
+			Environment:    map[string]string{miseTimeoutName: "30s"},
 		})
 		if value, _ := valueOf(got, miseTimeoutName); value != "30s" {
 			t.Errorf("%s = %q, want the user's 30s", miseTimeoutName, value)
@@ -310,13 +331,14 @@ func TestProxyEnv_BackendsDeferToAUserConfiguredValue(t *testing.T) {
 
 	t.Run("docker applies the default when the user set nothing", func(t *testing.T) {
 		got := dockerProxyArgs(t, &Config{
-			ProjectDir:   "/tmp/test-project",
-			SandboxHome:  "/tmp/test-sandbox",
-			HomeDir:      "/home/testuser",
-			Shell:        "/bin/bash",
-			ProxyEnabled: true,
-			ProxyHost:    testProxyHost,
-			ProxyPort:    testProxyPort,
+			ProjectDir:     "/tmp/test-project",
+			SandboxHome:    "/tmp/test-sandbox",
+			HomeDir:        "/home/testuser",
+			Shell:          "/bin/bash",
+			ProxyEnabled:   true,
+			ProxyHost:      testProxyHost,
+			ProxyPort:      testProxyPort,
+			ProxyAuthToken: testProxyToken,
 		})
 		if value, ok := valueOf(got, miseTimeoutName); !ok || value != "3s" {
 			t.Errorf("%s = %q ok=%v, want 3s", miseTimeoutName, value, ok)

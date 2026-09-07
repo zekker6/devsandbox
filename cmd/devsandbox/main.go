@@ -25,7 +25,6 @@ import (
 	"devsandbox/internal/logging"
 	"devsandbox/internal/notice"
 	"devsandbox/internal/portforward"
-	"devsandbox/internal/prompt"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/mounts"
@@ -221,13 +220,6 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	appCfg, _, projectDir, err := config.LoadConfigWithOptions(loadOpts)
 	if err != nil {
-		return err
-	}
-
-	// Ensure mise configs are trusted before sandbox launch.
-	// Inside the sandbox, mise config dirs are read-only so trust prompts
-	// cannot be persisted, causing repeated prompts on every launch.
-	if err := ensureMiseTrust(projectDir); err != nil {
 		return err
 	}
 
@@ -585,6 +577,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		defer deferProxyCleanup(proxyRes)
 
 		cfg.ProxyPort = proxyRes.port
+		cfg.ProxyAuthToken = proxyRes.token
 		proxyServer = proxyRes.server
 
 		notice.Info("Proxy server started on %s:%d", pCfg.GetBindAddress(), proxyRes.port)
@@ -602,6 +595,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 			} else {
 				notice.Info("Filter: %d rules, default action: %s", len(pCfg.Filter.Rules), pCfg.Filter.DefaultAction)
 			}
+			warnAskHandshake(proxyServer.AskServer())
 		}
 
 		if pCfg.Redaction != nil && pCfg.Redaction.IsEnabled() {
@@ -707,6 +701,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		ProxyServer:    proxyServer,
 		ProxyCAPath:    proxyCAPath,
 		ProxyPort:      cfg.ProxyPort,
+		ProxyAuthToken: cfg.ProxyAuthToken,
 		SandboxLogger:  sandboxLogger,
 		LogDispatcher:  logDispatcher,
 		SandboxName:    sandboxName,
@@ -1108,13 +1103,17 @@ type proxyResult struct {
 	server  *proxy.Server
 	cleanup func()
 	port    int
+	token   string // per-session credential the sandbox must present
 	caPath  string
 	// signaled is set when a signal triggered shutdown (accessed from goroutine).
 	signaled atomic.Bool
 }
 
 // startProxyServer creates, starts, and returns a proxy server with signal-based cleanup.
+// It mints the session's proxy credential: the server refuses to exist without
+// one, and the sandbox is handed it through the proxy URL.
 func startProxyServer(pCfg *proxy.Config) (*proxyResult, error) {
+	pCfg.AuthToken = proxy.NewAuthToken()
 	server, err := proxy.NewServer(pCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create proxy server: %w", err)
@@ -1127,6 +1126,7 @@ func startProxyServer(pCfg *proxy.Config) (*proxyResult, error) {
 	result := &proxyResult{
 		server: server,
 		port:   server.Port(),
+		token:  pCfg.AuthToken,
 		caPath: pCfg.CACertPath,
 	}
 
@@ -1157,59 +1157,18 @@ func deferProxyCleanup(result *proxyResult) {
 	result.cleanup()
 }
 
-// ensureMiseTrust checks that mise config files in the project directory are trusted.
-// Inside the sandbox, mise's config/state dirs are read-only so trust changes cannot
-// be persisted. This pre-flight check prevents repeated trust prompts on every launch.
-func ensureMiseTrust(projectDir string) error {
-	statuses, err := tools.CheckMiseTrust(projectDir)
-	if err != nil || len(statuses) == 0 {
-		return nil
+// warnAskHandshake reports an ask server that found the socket owned by another
+// session. The ask socket is per project: a second session finds the first's
+// socket live and, before the role handshake, took that proxy for its monitor.
+// Now it refuses and blocks every ask. This runs before SetRunning, so a Warn
+// lands on the confirmation gate.
+func warnAskHandshake(askServer *proxy.AskServer) {
+	if askServer == nil {
+		return
 	}
-
-	var untrusted []string
-	for _, s := range statuses {
-		if !s.Trusted {
-			untrusted = append(untrusted, s.Path)
-		}
+	if err := askServer.HandshakeError(); err != nil {
+		notice.Warn("%v", err)
 	}
-
-	if len(untrusted) == 0 {
-		return nil
-	}
-
-	notice.Info("Mise config is not trusted for this project.")
-	notice.Info("Trust cannot be persisted inside the sandbox (read-only mounts),\nso mise will prompt on every launch without this.")
-	for _, path := range untrusted {
-		notice.Info("  untrusted: %s", path)
-	}
-
-	// Asked on stderr and answered on stdin, so both ends need a human.
-	if !prompt.IsInteractive(os.Stdin, os.Stderr) {
-		notice.Warn("run 'mise trust' in the project directory to fix this")
-		return nil
-	}
-
-	// The lines below write to stderr directly because they form an interactive
-	// prompt (fmt.Scanln reads the response). Routing them through notice would
-	// split the prompt text from the input cursor.
-	fmt.Fprintf(os.Stderr, "Trust mise config? [Y/n]: ")
-	var response string
-	if _, err := fmt.Scanln(&response); err != nil {
-		// Empty input (just Enter) defaults to yes
-		response = "y"
-	}
-	response = strings.ToLower(strings.TrimSpace(response))
-
-	if response != "" && response != "y" && response != "yes" {
-		notice.Info("Skipped. Run 'mise trust' manually to avoid repeated prompts.")
-		return nil
-	}
-
-	if err := tools.TrustMiseConfig(projectDir); err != nil {
-		return fmt.Errorf("failed to trust mise config: %w", err)
-	}
-	notice.Info("Mise config trusted.")
-	return nil
 }
 
 // wrapperLogPath returns the path to the current wrapper log file, creating

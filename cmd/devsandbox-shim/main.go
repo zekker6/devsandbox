@@ -81,7 +81,9 @@ func main() {
 	preferHostMise(uid, gid)
 	// NOTE: .env hiding is now handled at container creation via Docker volume
 	// mounts (no CAP_SYS_ADMIN needed).
-	miseTrust(uid, gid)
+	// Project mise configs are trusted through MISE_TRUSTED_CONFIG_PATHS, which
+	// the isolator exports into the container env and every mise invocation
+	// below inherits. Nothing in the guest runs `mise trust`.
 	setupCacheDirs(uid, gid)
 	setupDirectories(uid, gid)
 	// Seed baked installs first: on a version present in both sources the baked
@@ -258,28 +260,6 @@ func userCreateArgs(uid, gid int, exists idExistsFunc) []string {
 		"-d", sandboxHome,
 		"-s", "/bin/bash",
 		sandboxUser,
-	}
-}
-
-// miseTrust trusts only known mise config files in the project directory.
-// We deliberately avoid `mise trust --all` because it would auto-trust every
-// .mise.toml in the container, including attacker-injected configs in cloned repos.
-func miseTrust(uid, gid int) {
-	projectDir := os.Getenv("PROJECT_DIR")
-	if projectDir == "" {
-		return
-	}
-
-	// Trust only the project-level mise configs that the user controls.
-	configs := []string{
-		filepath.Join(projectDir, ".mise.toml"),
-		filepath.Join(projectDir, ".mise", "config.toml"),
-	}
-
-	for _, cfg := range configs {
-		if _, err := os.Stat(cfg); err == nil {
-			runAsUser(uid, gid, "mise", "trust", cfg)
-		}
 	}
 }
 
@@ -702,20 +682,6 @@ func run(name string, args ...string) error {
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-func runAsUser(uid, gid int, name string, args ...string) {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: uint32(uid),
-			Gid: uint32(gid),
-		},
-	}
-	// Ignore errors — these are best-effort
-	_ = cmd.Run()
 }
 
 func chownRecursive(path string, uid, gid int) error {

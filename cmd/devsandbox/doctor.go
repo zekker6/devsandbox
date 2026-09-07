@@ -64,6 +64,8 @@ Checks (Linux only):
   - Optional binaries (pasta for proxy mode)
   - User namespace support
   - Kernel version
+  - Whether the kernel lets sandboxed code inject keystrokes into the host
+    terminal (TIOCSTI, dev.tty.legacy_tiocsti) - advisory, bwrap only
   - Overlayfs support
   - Proxy-mode egress firewall (nft/iptables plus the netfilter modules the
     lockdown rules need) - advisory, needed only with --proxy`,
@@ -95,6 +97,7 @@ func runDoctor() error {
 		results = append(results, checkEmbeddedBinary("pasta", embed.PastaVersion, false))
 		results = append(results, checkUserNamespaces())
 		results = append(results, checkKernelVersion())
+		results = append(results, checkTIOCSTI(tiocstiProcPath))
 		results = append(results, checkOverlayfs())
 		// Advisory, and Linux-only because the lockdown is: proxy mode on bwrap
 		// and krun both abort without a working firewall backend, so this is not
@@ -395,6 +398,71 @@ func checkKernelVersion() checkResult {
 		name:    "kernel",
 		status:  "ok",
 		message: version,
+	}
+}
+
+// tiocstiProcPath is the sysctl that, since Linux 6.2, gates ioctl(TIOCSTI)
+// behind CAP_SYS_ADMIN in the initial user namespace - a capability the
+// sandbox never holds. Its default is CONFIG_LEGACY_TIOCSTI, still 1 on several
+// distribution kernels; before 6.2 the file does not exist and the ioctl is
+// always allowed.
+const tiocstiProcPath = "/proc/sys/dev/tty/legacy_tiocsti"
+
+// checkTIOCSTI reports whether the kernel lets sandboxed code push keystrokes
+// into the host terminal. devsandbox keeps the host tty as the bwrap workload's
+// controlling terminal on purpose: bwrap's --new-session would detach it and
+// close the gap, at the cost of job control (Ctrl+Z, foreground/background,
+// signals delivered from the terminal). So every unmet case is advisory - a
+// warn that names the sysctl, never an error - and docker and krun, which
+// allocate their own pty, are not exposed.
+func checkTIOCSTI(procPath string) checkResult {
+	const backendNote = "Only the bwrap backend is exposed: docker and krun allocate their own pty."
+
+	data, err := os.ReadFile(procPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return checkResult{
+				name:    "tty",
+				status:  "warn",
+				message: "kernel before 6.2: TIOCSTI cannot be disabled; sandboxed code can inject keystrokes into this terminal",
+				hint: "Linux 6.2 added dev.tty.legacy_tiocsti, which lets the ioctl be refused to unprivileged code.\n" +
+					"Upgrade the kernel and set dev.tty.legacy_tiocsti=0, or use a backend that does not share the host tty.\n" +
+					backendNote,
+			}
+		}
+		return checkResult{
+			name:    "tty",
+			status:  "warn",
+			message: fmt.Sprintf("cannot read %s: %v", procPath, err),
+			hint: "Read the value by hand with `sysctl dev.tty.legacy_tiocsti`; 0 means sandboxed code cannot inject keystrokes.\n" +
+				backendNote,
+		}
+	}
+
+	switch value := strings.TrimSpace(string(data)); value {
+	case "0":
+		return checkResult{
+			name:    "tty",
+			status:  "ok",
+			message: "TIOCSTI disabled by the kernel",
+		}
+	case "1":
+		return checkResult{
+			name:    "tty",
+			status:  "warn",
+			message: "TIOCSTI allowed (dev.tty.legacy_tiocsti=1): sandboxed code can inject keystrokes into this terminal",
+			hint: "Disable it: sudo sysctl -w dev.tty.legacy_tiocsti=0\n" +
+				"Persist it: echo 'dev.tty.legacy_tiocsti = 0' | sudo tee /etc/sysctl.d/99-devsandbox-tiocsti.conf\n" +
+				backendNote,
+		}
+	default:
+		return checkResult{
+			name:    "tty",
+			status:  "warn",
+			message: fmt.Sprintf("unexpected value %q in %s", value, procPath),
+			hint: "Expected 0 or 1. Read the value by hand with `sysctl dev.tty.legacy_tiocsti`; 0 means sandboxed code cannot inject keystrokes.\n" +
+				backendNote,
+		}
 	}
 }
 

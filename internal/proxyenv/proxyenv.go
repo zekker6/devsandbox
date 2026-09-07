@@ -15,6 +15,25 @@
 // backend-specific PROXY_MODE/PROXY_HOST/PROXY_PORT trio.
 package proxyenv
 
+import (
+	"net"
+	"strconv"
+)
+
+// AuthUser is the username half of the proxy credential. The proxy checks the
+// Basic payload against AuthUser + ":" + token, so the two sides of the wire
+// contract read the same constant.
+const AuthUser = "devsandbox"
+
+// URL composes the proxy URL the sandbox is handed, carrying the per-session
+// credential as URL userinfo so every client that reads HTTP_PROXY sends it as
+// Proxy-Authorization without further configuration. Both backends call this
+// rather than formatting the URL themselves, so the credential form cannot
+// drift between them.
+func URL(host string, port int, token string) string {
+	return "http://" + AuthUser + ":" + token + "@" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
 // Var is one environment variable to export into the sandbox.
 type Var struct {
 	Name  string
@@ -23,6 +42,12 @@ type Var struct {
 	// must win over the value here. Each backend applies that with its own
 	// precedence mechanism.
 	Default bool
+	// Secret is true when Value carries the session credential. A backend must
+	// keep such a value out of anything another local user can read - the
+	// launch command line above all, since /proc/<pid>/cmdline is world-readable
+	// and the launcher lives for the whole session - or the credential protects
+	// the proxy from nobody it was meant to.
+	Secret bool
 }
 
 // noProxyValue keeps the sandbox's own loopback traffic off the proxy.
@@ -33,16 +58,16 @@ const noProxyValue = "localhost,127.0.0.1"
 func Vars(proxyURL string, extraEnv []string) []Var {
 	vars := []Var{
 		// Standard proxy env vars (both cases for broad compatibility)
-		{Name: "HTTP_PROXY", Value: proxyURL},
-		{Name: "HTTPS_PROXY", Value: proxyURL},
-		{Name: "http_proxy", Value: proxyURL},
-		{Name: "https_proxy", Value: proxyURL},
+		{Name: "HTTP_PROXY", Value: proxyURL, Secret: true},
+		{Name: "HTTPS_PROXY", Value: proxyURL, Secret: true},
+		{Name: "http_proxy", Value: proxyURL, Secret: true},
+		{Name: "https_proxy", Value: proxyURL, Secret: true},
 		{Name: "NO_PROXY", Value: noProxyValue},
 		{Name: "no_proxy", Value: noProxyValue},
 
 		// Tool-specific proxy env vars
-		{Name: "YARN_HTTP_PROXY", Value: proxyURL},
-		{Name: "YARN_HTTPS_PROXY", Value: proxyURL},
+		{Name: "YARN_HTTP_PROXY", Value: proxyURL, Secret: true},
+		{Name: "YARN_HTTPS_PROXY", Value: proxyURL, Secret: true},
 
 		// Node.js >=24: opt-in for built-in fetch (undici) to honor HTTP(S)_PROXY
 		// env vars. Without this, npx-based tools like mcp-remote bypass the proxy
@@ -61,7 +86,7 @@ func Vars(proxyURL string, extraEnv []string) []Var {
 
 	// User-defined extra proxy env vars from config
 	for _, name := range extraEnv {
-		vars = append(vars, Var{Name: name, Value: proxyURL})
+		vars = append(vars, Var{Name: name, Value: proxyURL, Secret: true})
 	}
 
 	vars = append(vars, Var{Name: "DEVSANDBOX_PROXY", Value: "1"})

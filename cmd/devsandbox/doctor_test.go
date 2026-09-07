@@ -436,3 +436,92 @@ func TestLiveLogName(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckTIOCSTI drives the tty row through a file the test controls, since
+// the live /proc value on a developer machine reports only one of the four
+// states. Every unmet case is a warn, never an error: the gap is a kernel
+// property that bwrap cannot close, so doctor must not fail on it.
+func TestCheckTIOCSTI(t *testing.T) {
+	writeProc := func(t *testing.T, content string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "legacy_tiocsti")
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	tests := []struct {
+		name        string
+		path        func(t *testing.T) string
+		wantStatus  string
+		wantMessage []string
+		wantHint    []string
+	}{
+		{
+			name:        "disabled",
+			path:        func(t *testing.T) string { return writeProc(t, "0\n") },
+			wantStatus:  "ok",
+			wantMessage: []string{"TIOCSTI disabled by the kernel"},
+		},
+		{
+			name:        "enabled",
+			path:        func(t *testing.T) string { return writeProc(t, "1\n") },
+			wantStatus:  "warn",
+			wantMessage: []string{"legacy_tiocsti=1"},
+			wantHint:    []string{"dev.tty.legacy_tiocsti=0"},
+		},
+		{
+			name:        "missing file is a pre-6.2 kernel",
+			path:        func(t *testing.T) string { return filepath.Join(t.TempDir(), "legacy_tiocsti") },
+			wantStatus:  "warn",
+			wantMessage: []string{"kernel before 6.2", "TIOCSTI cannot be disabled", "inject keystrokes"},
+			wantHint:    []string{"6.2"},
+		},
+		{
+			name:        "garbage names the value",
+			path:        func(t *testing.T) string { return writeProc(t, "maybe\n") },
+			wantStatus:  "warn",
+			wantMessage: []string{`"maybe"`},
+		},
+		{
+			name: "unreadable names the error",
+			// A directory is unreadable as a file on every host, root included;
+			// a 0000 file is readable by root and so would pass in CI.
+			path:        func(t *testing.T) string { return t.TempDir() },
+			wantStatus:  "warn",
+			wantMessage: []string{"cannot read"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := checkTIOCSTI(tt.path(t))
+			if r.name != "tty" {
+				t.Errorf("name = %q, want %q", r.name, "tty")
+			}
+			if r.status != tt.wantStatus {
+				t.Errorf("status = %q, want %q (message %q)", r.status, tt.wantStatus, r.message)
+			}
+			for _, want := range tt.wantMessage {
+				if !strings.Contains(r.message, want) {
+					t.Errorf("message = %q, want it to contain %q", r.message, want)
+				}
+			}
+			for _, want := range tt.wantHint {
+				if !strings.Contains(r.hint, want) {
+					t.Errorf("hint = %q, want it to contain %q", r.hint, want)
+				}
+			}
+			if r.status == "ok" && r.hint != "" {
+				t.Errorf("hint = %q on a satisfied row, want none", r.hint)
+			}
+			if r.status == "warn" && r.hint == "" {
+				t.Error("a warn row carries no remediation")
+			}
+			if _, failed := doctorSummary([]checkResult{r}); failed {
+				t.Error("the tty row failed the doctor run; it is advisory")
+			}
+		})
+	}
+}

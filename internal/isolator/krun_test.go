@@ -3,6 +3,7 @@ package isolator
 import (
 	"bytes"
 	"context"
+	"devsandbox/internal/proxyenv"
 	"fmt"
 	"io"
 	"os"
@@ -89,12 +90,13 @@ func TestKrunIsolator_CreateArgs_InjectRuntime(t *testing.T) {
 func TestKrunIsolator_ProxyHostAlias(t *testing.T) {
 	iso := newKrunTestIsolator()
 	cfg := &Config{
-		ProjectDir:   "/tmp/test-project",
-		SandboxHome:  "/tmp/test-sandbox",
-		HomeDir:      "/home/testuser",
-		Shell:        "/bin/bash",
-		ProxyEnabled: true,
-		ProxyPort:    8080,
+		ProjectDir:     "/tmp/test-project",
+		SandboxHome:    "/tmp/test-sandbox",
+		HomeDir:        "/home/testuser",
+		Shell:          "/bin/bash",
+		ProxyEnabled:   true,
+		ProxyPort:      8080,
+		ProxyAuthToken: "tok",
 	}
 
 	args, err := iso.buildCommonArgs(cfg)
@@ -123,8 +125,14 @@ func TestKrunIsolator_ProxyHostAlias(t *testing.T) {
 	if !strings.Contains(argsStr, "PROXY_HOST=10.0.2.2") {
 		t.Errorf("expected PROXY_HOST=10.0.2.2, got: %s", argsStr)
 	}
-	if !strings.Contains(argsStr, "HTTP_PROXY=http://10.0.2.2:8080") {
-		t.Errorf("expected HTTP_PROXY via 10.0.2.2:8080, got: %s", argsStr)
+	// The credential-bearing variable is named in argv and valued in the CLI's
+	// environment, so the guest is pointed at the gateway with this session's
+	// credential while podman's own command line never shows it.
+	if !strings.Contains(argsStr, "-e HTTP_PROXY ") || strings.Contains(argsStr, "tok") {
+		t.Errorf("expected a bare -e HTTP_PROXY and no credential in argv, got: %s", argsStr)
+	}
+	if want := "HTTP_PROXY=" + proxyenv.URL("10.0.2.2", 8080, "tok"); !slices.Contains(iso.commandEnv(cfg), want) {
+		t.Errorf("expected %s in the CLI environment, got: %v", want, iso.commandEnv(cfg))
 	}
 }
 

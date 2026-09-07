@@ -473,10 +473,12 @@ func TestSandbox_ProxyServerRunning(t *testing.T) {
 
 	// Test that the proxy server is accessible from inside the sandbox
 	// The proxy runs on the host, so we need to test connectivity to it
-	// Use a simple HTTP request to a known endpoint
+	// Use a simple HTTP request to a known endpoint. curl takes the proxy
+	// from the exported http_proxy, which carries the per-session credential
+	// the proxy requires; a URL spelled here by hand would have none and be
+	// answered 407.
 	cmd := exec.Command(binaryPath, "--proxy", "--proxy-port", "18888",
 		"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-		"--proxy", "http://10.0.2.2:18888",
 		"--max-time", "5",
 		"http://httpbin.org/get")
 

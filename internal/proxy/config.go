@@ -28,8 +28,17 @@ const (
 )
 
 type Config struct {
-	Enabled        bool
-	MITM           bool // When false, CONNECT requests are tunneled without TLS interception. Default: true.
+	Enabled bool
+	MITM    bool // When false, CONNECT requests are tunneled without TLS interception. Default: true.
+	// AuthToken is the per-session credential every client must present as
+	// Proxy-Authorization: Basic base64(proxyenv.AuthUser + ":" + AuthToken).
+	// The listener is reachable by every local process - other users, a
+	// sandbox that shares the host network namespace, a container that can
+	// reach the gateway - and the proxy injects credentials into what it
+	// forwards, so without this the injected tokens were usable by any of
+	// them. NewServer refuses an empty token; there is no opt-out, for the
+	// same reason the egress lockdown has none. Generate it with NewAuthToken.
+	AuthToken      string
 	Port           int
 	BindAddress    string // IP to bind to (default "127.0.0.1"). For Docker, use DockerBridgeIP().
 	SandboxBase    string // Root directory for this sandbox instance
