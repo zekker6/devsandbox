@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"unicode"
 
 	"devsandbox/internal/cmdpattern"
 	"devsandbox/internal/socketproxy"
+	"devsandbox/internal/termsafe"
 )
 
 // maxLabelBytes bounds free-text fields the sandbox can put on screen.
@@ -528,28 +528,10 @@ func agentMessageReason(msg string) string {
 	if len(msg) > maxLabelBytes {
 		return "message exceeds the length limit"
 	}
-	if hasControlRune(msg) {
+	if termsafe.HasControlRune(msg) {
 		return "message contains a control character"
 	}
 	return ""
-}
-
-// hasControlRune reports whether s contains a character a terminal may act on
-// rather than render.
-//
-// The check is per rune, not per byte: a byte-wise scan for < 0x20 sees only C0,
-// while the C1 controls (U+0080-U+009F, U+009B being CSI) arrive UTF-8-encoded
-// as bytes >= 0xC2 and would pass it - defeating the check in exactly the case
-// it exists for, since herdr renders this text in a host pane. Format characters
-// (Cf) are refused with them: a bidi override or zero-width joiner in a
-// one-line status label can only misrepresent what the user is looking at.
-func hasControlRune(s string) bool {
-	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return true
-		}
-	}
-	return false
 }
 
 // agentSessionPathReason validates agent_session_path, returning the failing
@@ -578,7 +560,7 @@ func (f *Filter) agentSessionPathReason(p string) string {
 	if !filepath.IsAbs(p) {
 		return "agent_session_path is not absolute"
 	}
-	if hasControlRune(p) {
+	if termsafe.HasControlRune(p) {
 		return "agent_session_path contains a control character"
 	}
 	if !isRestrictedPath(p) {

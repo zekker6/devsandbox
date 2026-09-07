@@ -15,9 +15,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"devsandbox/internal/notice"
 	"devsandbox/internal/proxy"
+	"devsandbox/internal/termsafe"
 )
 
 // The monitor sits on the same socket a concurrent session's proxy would take,
@@ -337,6 +339,114 @@ func TestAcceptSandboxes_ServesSessionsConcurrently(t *testing.T) {
 	}
 }
 
+// The monitor draws sandbox-supplied bytes on a raw-mode terminal. An escape
+// sequence in any request field, or in an error that quotes what the peer
+// sent, could clear the screen and repaint the prompt over a different host -
+// so nothing the peer chose may reach the terminal as a control character.
+
+// terminalLines splits monitor output into lines and fails on any control or
+// format rune inside one. The CRLF terminators are the monitor's own.
+func terminalLines(t *testing.T, out string) []string {
+	t.Helper()
+	lines := strings.Split(out, "\r\n")
+	for i, line := range lines {
+		if termsafe.HasControlRune(line) {
+			t.Errorf("line %d reaches the terminal with a control rune: %q", i, line)
+		}
+	}
+	return lines
+}
+
+func TestDisplayRequest_EscapesEveryField(t *testing.T) {
+	req := &proxy.AskRequest{
+		ID:      "7\x1b[2J",
+		Method:  "GET\x1b[H",
+		Host:    "api.example.com\x1b[2J\x1b[Hevil.example.com",
+		Path:    "/v1/\xc2\x9b2J\xe2\x80\xaetxt.exe",
+		Headers: map[string]string{"X-Trick\x1b[1A": "\x1b]0;pwned\a"},
+		Body:    "\x1b[31mpayload\x1b[0m\r\n",
+	}
+
+	var buf bytes.Buffer
+	displayRequest(&buf, req)
+	lines := terminalLines(t, buf.String())
+
+	for _, want := range []string{`7\x1b[2J`, `GET\x1b[H`, `\x1b[2J\x1b[Hevil`, `\u009b2J\u202etxt`, `X-Trick\x1b[1A: \x1b]0;pwned\a`, `\x1b[31mpayload`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("output lacks the escaped form %q:\n%s", want, buf.String())
+		}
+	}
+
+	width := utf8.RuneCountInString(lines[0])
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		if got := utf8.RuneCountInString(line); got != width {
+			t.Errorf("line %d is %d runes wide, want %d: %q", i, got, width, line)
+		}
+	}
+}
+
+func TestDisplayRequest_TruncatesByRune(t *testing.T) {
+	req := &proxy.AskRequest{
+		ID:     "1",
+		Method: "POST",
+		Host:   strings.Repeat("日", 80),
+		Path:   "/" + strings.Repeat("\x1b", 80),
+		Body:   strings.Repeat("é", 200),
+	}
+
+	var buf bytes.Buffer
+	displayRequest(&buf, req)
+	lines := terminalLines(t, buf.String())
+
+	if !utf8.ValidString(buf.String()) {
+		t.Error("output is not valid UTF-8: a field was cut inside a sequence")
+	}
+	width := utf8.RuneCountInString(lines[0])
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		if got := utf8.RuneCountInString(line); got != width {
+			t.Errorf("line %d is %d runes wide, want %d: %q", i, got, width, line)
+		}
+	}
+	if !strings.Contains(buf.String(), "...") {
+		t.Error("an over-long field was not marked as truncated")
+	}
+}
+
+func TestGetUserDecision_EscapesTheEchoedHost(t *testing.T) {
+	cases := []struct {
+		key  byte
+		want string
+	}{
+		{key: 'a', want: "Allowed: "},
+		{key: 'b', want: "Blocked: "},
+		{key: 's', want: "Allowed for session: "},
+		{key: 'n', want: "Blocked for session: "},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.key), func(t *testing.T) {
+			req := &proxy.AskRequest{ID: "1", Host: "ok.example.com\x1b[2J\x1b[H✓ Allowed: evil.example.com"}
+			keys := make(chan byte, 1)
+			keys <- tc.key
+
+			var buf bytes.Buffer
+			resp := getUserDecision(&buf, req, keys, time.Now().Add(5*time.Second))
+			if resp.ID != req.ID {
+				t.Errorf("response id = %q, want %q", resp.ID, req.ID)
+			}
+			terminalLines(t, buf.String())
+			if !strings.Contains(buf.String(), tc.want+`ok.example.com\x1b[2J\x1b[H`) {
+				t.Errorf("echo line missing or unescaped:\n%s", buf.String())
+			}
+		})
+	}
+}
+
 func TestAskTimeout_DefaultsTo30Seconds(t *testing.T) {
 	cases := []struct {
 		timeout int
@@ -411,7 +521,7 @@ func TestGetUserDecision_BlocksWithoutAnAnswer(t *testing.T) {
 // drawn: the proxy has already blocked it, and a key pressed for it would
 // answer nothing - or worse, the next prompt.
 func TestPromptDecision_SkipsAnExpiredRequest(t *testing.T) {
-	req := &proxy.AskRequest{ID: "1", Host: "late.example.com"}
+	req := &proxy.AskRequest{ID: "1", Host: "late.example.com\x1b[2J"}
 	keys := make(chan byte, 1)
 	keys <- 'a'
 
@@ -420,10 +530,11 @@ func TestPromptDecision_SkipsAnExpiredRequest(t *testing.T) {
 	if resp.ID != req.ID || resp.Action != proxy.FilterActionBlock {
 		t.Errorf("response = %+v, want block for %q", resp, req.ID)
 	}
+	terminalLines(t, buf.String())
 	if strings.Contains(buf.String(), "Request #") {
 		t.Errorf("an expired request was drawn:\n%s", buf.String())
 	}
-	if !strings.Contains(buf.String(), `Request from late.example.com expired before it could be shown`) {
+	if !strings.Contains(buf.String(), `Request from late.example.com\x1b[2J expired before it could be shown`) {
 		t.Errorf("output lacks the expired line:\n%s", buf.String())
 	}
 	if len(keys) != 1 {
@@ -599,4 +710,65 @@ func TestWarnAskHandshake(t *testing.T) {
 			t.Errorf("warning %q does not carry the handshake error", entries[0].Msg)
 		}
 	})
+}
+
+// scriptedConn is a net.Conn whose reads serve a fixed byte sequence and then
+// fail with an error of the test's choosing, standing in for a peer whose
+// bytes end up quoted inside the error that ends its connection.
+type scriptedConn struct {
+	net.Conn
+	r   io.Reader
+	err error
+}
+
+func (c *scriptedConn) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		return n, nil
+	}
+	if errors.Is(err, io.EOF) {
+		return 0, c.err
+	}
+	return n, err
+}
+
+func (c *scriptedConn) Write(p []byte) (int, error)       { return len(p), nil }
+func (c *scriptedConn) Close() error                      { return nil }
+func (c *scriptedConn) SetReadDeadline(_ time.Time) error { return nil }
+
+func TestServeSandbox_EscapesConnectionErrors(t *testing.T) {
+	proxyHello, err := json.Marshal(proxy.AskHello{Proto: proxy.AskProto, Role: proxy.AskRoleProxy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerErr := errors.New("read: \x1b[2J\x1b[H\xc2\x9b31mConnection error: none\x1b[0m")
+
+	cases := []struct {
+		name   string
+		before string
+		want   string
+	}{
+		{name: "refused before the hello", before: "", want: "Refused a connection: "},
+		{name: "failed after the hello", before: string(proxyHello) + "\n", want: "Connection error: "},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &scriptedConn{r: strings.NewReader(tc.before), err: peerErr}
+			decide := func(req *proxy.AskRequest) proxy.AskResponse {
+				t.Errorf("a request was shown: %+v", req)
+				return proxy.AskResponse{ID: req.ID, Action: proxy.FilterActionBlock}
+			}
+
+			var buf bytes.Buffer
+			serveSandbox(context.Background(), &buf, conn, decide)
+			terminalLines(t, buf.String())
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("output lacks %q:\n%s", tc.want, buf.String())
+			}
+			if !strings.Contains(buf.String(), `read: \x1b[2J\x1b[H\u009b31m`) {
+				t.Errorf("error text missing or unescaped:\n%s", buf.String())
+			}
+		})
+	}
 }

@@ -20,6 +20,7 @@ import (
 	"devsandbox/internal/config"
 	"devsandbox/internal/proxy"
 	"devsandbox/internal/sandbox"
+	"devsandbox/internal/termsafe"
 )
 
 // errAskSocketStale is returned when nothing answers on the socket path. It is
@@ -182,7 +183,7 @@ func askTimeout(req *proxy.AskRequest) time.Duration {
 // window closed before it reached the screen.
 func promptDecision(w io.Writer, req *proxy.AskRequest, keyChan <-chan byte, deadline time.Time) proxy.AskResponse {
 	if !time.Now().Before(deadline) {
-		emitf(w, "Request from %s expired before it could be shown (the sandbox already blocked it)\r\n", req.Host)
+		emitf(w, "Request from %s expired before it could be shown (the sandbox already blocked it)\r\n", termsafe.Escape(req.Host))
 		return proxy.AskResponse{ID: req.ID, Action: proxy.FilterActionBlock}
 	}
 	displayRequest(w, req)
@@ -248,7 +249,7 @@ func serveSandbox(ctx context.Context, w io.Writer, conn net.Conn, decide decide
 
 	if err := handshakeWithProxy(conn, decoder, encoder, false); err != nil {
 		if ctx.Err() == nil {
-			emitf(w, "\r\nRefused a connection: %v\r\n\r\n", err)
+			emitf(w, "\r\nRefused a connection: %s\r\n\r\n", errText(err))
 		}
 		return
 	}
@@ -260,7 +261,7 @@ func serveSandbox(ctx context.Context, w io.Writer, conn net.Conn, decide decide
 		return
 	}
 	if !errors.Is(err, io.EOF) {
-		emitf(w, "\r\nConnection error: %v\r\n", err)
+		emitf(w, "\r\nConnection error: %s\r\n", errText(err))
 	}
 	emit(w, "\r\nSandbox disconnected. Waiting for next connection...\r\n\r\n")
 }
@@ -421,7 +422,7 @@ func runProxyMonitor(socketPath string) error {
 		emit(out, "\r\nExiting monitor...\r\n")
 		return nil
 	}
-	emitf(out, "\r\nConnection closed: %v\r\n", err)
+	emitf(out, "\r\nConnection closed: %s\r\n", errText(err))
 	return nil
 }
 
@@ -436,6 +437,27 @@ func printHeader(w io.Writer) {
 	emit(w, "\r\n")
 }
 
+// Every string in a request is the sandbox's to choose, and the monitor draws
+// it on a raw-mode terminal that acts on whatever control sequence it is
+// handed: an ESC in a path could clear the screen and repaint the prompt over
+// a different host than the one being approved. Nothing the peer sent reaches
+// the terminal except through cell or errText.
+
+// cell renders a sandbox-supplied string into a box column: escaped so the
+// terminal shows it, then cut to the column width in runes. Escaping goes
+// first because it can lengthen the text, and cutting escaped text cannot
+// expose a control character - only printable ASCII is left around the cut.
+func cell(s string, width int) string {
+	return termsafe.Truncate(termsafe.Escape(s), width)
+}
+
+// errText renders an error for the terminal. Its text can carry bytes the
+// peer chose - a decode error quotes what it choked on, a refused hello the
+// role it claimed - so it is escaped like a request field.
+func errText(err error) string {
+	return termsafe.Escape(err.Error())
+}
+
 // emit and emitf write monitor output. A failed write to the user's own
 // terminal has no remedy but stopping, and the connection loop stops by itself
 // when the peer goes away, so the error is dropped instead of being threaded
@@ -446,29 +468,27 @@ func emitf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format,
 
 func displayRequest(w io.Writer, req *proxy.AskRequest) {
 	emit(w, "┌──────────────────────────────────────────────────────────────────┐\r\n")
-	emitf(w, "│  %-64s│\r\n", fmt.Sprintf("Request #%s", req.ID))
+	emitf(w, "│  %-64s│\r\n", cell("Request #"+req.ID, 64))
 	emit(w, "├──────────────────────────────────────────────────────────────────┤\r\n")
-	emitf(w, "│  Method: %-55s│\r\n", req.Method)
-	emitf(w, "│  Host:   %-55s│\r\n", truncate(req.Host, 55))
-	emitf(w, "│  Path:   %-55s│\r\n", truncate(req.Path, 55))
+	emitf(w, "│  Method: %-56s│\r\n", cell(req.Method, 56))
+	emitf(w, "│  Host:   %-56s│\r\n", cell(req.Host, 56))
+	emitf(w, "│  Path:   %-56s│\r\n", cell(req.Path, 56))
 
 	if len(req.Headers) > 0 {
 		emit(w, "├──────────────────────────────────────────────────────────────────┤\r\n")
 		for k, v := range req.Headers {
-			line := fmt.Sprintf("%s: %s", k, v)
-			emitf(w, "│  %-62s│\r\n", truncate(line, 62))
+			emitf(w, "│  %-64s│\r\n", cell(k+": "+v, 64))
 		}
 	}
 
 	if req.Body != "" {
 		emit(w, "├──────────────────────────────────────────────────────────────────┤\r\n")
 		emit(w, "│  Body preview:                                                   │\r\n")
-		preview := truncate(req.Body, 60)
-		emitf(w, "│  %-62s│\r\n", preview)
+		emitf(w, "│  %-64s│\r\n", cell(req.Body, 64))
 	}
 
 	emit(w, "├──────────────────────────────────────────────────────────────────┤\r\n")
-	emit(w, "│  [a]llow    [b]lock    [s]ession-allow    [n]ever-allow         │\r\n")
+	emit(w, "│  [a]llow    [b]lock    [s]ession-allow    [n]ever-allow          │\r\n")
 	emit(w, "└──────────────────────────────────────────────────────────────────┘\r\n")
 }
 
@@ -476,6 +496,7 @@ func getUserDecision(w io.Writer, req *proxy.AskRequest, keyChan <-chan byte, de
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 
+	host := termsafe.Escape(req.Host)
 	emit(w, "Decision: ")
 
 	for {
@@ -489,24 +510,24 @@ func getUserDecision(w io.Writer, req *proxy.AskRequest, keyChan <-chan byte, de
 			switch key {
 			case 'a', 'A', 'y', 'Y':
 				resp.Action = proxy.FilterActionAllow
-				emitf(w, "%c\r\n✓ Allowed: %s\r\n", key, req.Host)
+				emitf(w, "%c\r\n✓ Allowed: %s\r\n", key, host)
 				return resp
 
 			case 'b', 'B':
 				resp.Action = proxy.FilterActionBlock
-				emitf(w, "%c\r\n✗ Blocked: %s\r\n", key, req.Host)
+				emitf(w, "%c\r\n✗ Blocked: %s\r\n", key, host)
 				return resp
 
 			case 's', 'S':
 				resp.Action = proxy.FilterActionAllow
 				resp.Remember = true
-				emitf(w, "%c\r\n✓ Allowed for session: %s\r\n", key, req.Host)
+				emitf(w, "%c\r\n✓ Allowed for session: %s\r\n", key, host)
 				return resp
 
 			case 'n', 'N':
 				resp.Action = proxy.FilterActionBlock
 				resp.Remember = true
-				emitf(w, "%c\r\n✗ Blocked for session: %s\r\n", key, req.Host)
+				emitf(w, "%c\r\n✗ Blocked for session: %s\r\n", key, host)
 				return resp
 
 			default:
@@ -518,11 +539,4 @@ func getUserDecision(w io.Writer, req *proxy.AskRequest, keyChan <-chan byte, de
 			return proxy.AskResponse{ID: req.ID, Action: proxy.FilterActionBlock}
 		}
 	}
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }

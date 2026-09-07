@@ -53,7 +53,7 @@ Two more invariants come from the herdr agent-reporting work:
 
 - **Anchor every validator to something derived on the host.** A request is checked against what devsandbox already knows - the pane id herdr gave this process, the agent devsandbox was asked to launch, the session directory that tool's own bindings produce - never against a value the request supplies. Where a bound is a filesystem path, take it from the same function that produces the bind mount so the two cannot drift apart.
 - **Charset-restrict any sandbox-supplied string the host will hand to a shell.** herdr shell-quotes a reported session id and types it into a host pane shell, so the filter caps it at 128 bytes of `[A-Za-z0-9._-]` rather than trusting an unversioned third-party quoter. Length checks are not enough. Confinement of a path that names a location *inside* the sandbox overlay must be lexical - `pathWithin` resolves symlinks against the host filesystem, which proves nothing about a path the host cannot see.
-- **Scan runes, not bytes, when rejecting what a terminal will act on.** A byte-wise `< 0x20` test sees only C0. The C1 controls (U+0080-U+009F, U+009B being CSI) arrive UTF-8-encoded as bytes ≥ 0xC2 and sail straight through it, which defeats the check in the case it exists for. `hasControlRune` in `internal/herdrproxy/filter.go` refuses Cc and Cf; ordinary non-ASCII text stays allowed, because the check bounds behavior, not charset.
+- **Scan runes, not bytes, when rejecting what a terminal will act on.** A byte-wise `< 0x20` test sees only C0. The C1 controls (U+0080-U+009F, U+009B being CSI) arrive UTF-8-encoded as bytes ≥ 0xC2 and sail straight through it, which defeats the check in the case it exists for. `termsafe.HasControlRune` (which `internal/herdrproxy/filter.go` calls) refuses Cc and Cf; ordinary non-ASCII text stays allowed, because the check bounds behavior, not charset.
 
 **A wrapper-only agent needs just the `agentid` entry; herdr session capture is what adds the other three.** The `agents` table drives two things on its own: the shell wrappers (`agentid.KnownAgents`) and the run-agent worktree guard (`IsResumeInvocation`). An agent herdr cannot restore - herdr v0.7.4 compiles resume plans for `claude`/`pi`/`codex` only - belongs in the table with an empty `resumeFlag` and its own resume verbs in `resumeAliases` (`opencode`, `copilot` are the worked examples), and it deliberately gets no `ToolWithAgentSessionDir`: wiring capture for a launch herdr will never replay is dead code that also flips such a launch onto the filtered proxy for no benefit.
 
@@ -197,6 +197,13 @@ monitor`; `cmd/devsandbox/proxy.go` is the monitor. Three invariants, each becau
   (connection refused) as the one stale-socket signal; a peer that answers but fails the handshake is
   `errAskPeerRejected` and is reported as is. Removing a socket a running session owns would cut that session off
   from its monitor.
+- **Any sandbox-supplied string printed to a host terminal goes through `internal/termsafe`.** The monitor runs the
+  terminal in raw mode and printed the request's method, host, path and headers verbatim, so a request could redraw
+  the approval prompt or move the cursor - and its two error paths embedded the decode error, which quotes the
+  offending bytes, into the same terminal. `termsafe.Escape` (Cc and Cf become visible escapes, printable non-ASCII
+  passes) and `termsafe.Truncate` (by rune, never mid-character) wrap every field, the decision echo and both error
+  paths in `cmd/devsandbox/proxy.go`. The rule is general: a byte that originated inside the sandbox reaches a host
+  terminal only through `termsafe`, and that includes an error string that wraps sandbox input.
 
 ## Session designation
 
