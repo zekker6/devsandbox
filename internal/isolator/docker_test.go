@@ -1827,3 +1827,156 @@ func TestDockerIsolator_ConfigHash_StableAcrossHostTerminalEnv(t *testing.T) {
 		t.Errorf("configHash changed with the host terminal window id (%s vs %s)", first, second)
 	}
 }
+
+// TestRemapEnvValue pins the one exception to the home-to-container-home
+// substitution: the project directory is mounted at its identical host path, so
+// a value naming it must reach the guest unchanged even when the project lives
+// under $HOME. MISE_TRUSTED_CONFIG_PATHS is the value that matters - remapped,
+// it names a directory nothing mounts and the project's mise config silently
+// stays untrusted. The scheme-prefixed values that motivated the substring
+// replace must still be remapped.
+func TestRemapEnvValue(t *testing.T) {
+	const homeDir = "/home/u"
+	const projectDir = "/home/u/Code/p"
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"MISE_TRUSTED_CONFIG_PATHS equals project dir", projectDir, projectDir},
+		{"path below the project dir", projectDir + "/.mise.toml", projectDir + "/.mise.toml"},
+		{"unix: scheme on a project path", "unix:" + projectDir + "/a.sock", "unix:" + projectDir + "/a.sock"},
+		{"KITTY_LISTEN_ON unix: scheme", "unix:/home/u/.run/1/kitty.sock", "unix:/home/sandboxuser/.run/1/kitty.sock"},
+		{"DBUS_SESSION_BUS_ADDRESS unix:path= scheme", "unix:path=/home/u/.run/1/bus", "unix:path=/home/sandboxuser/.run/1/bus"},
+		{"DOCKER_HOST unix:// scheme", "unix:///home/u/.run/1/docker.sock", "unix:///home/sandboxuser/.run/1/docker.sock"},
+		{"bare home path", "/home/u/.cache/x", "/home/sandboxuser/.cache/x"},
+		{"sibling sharing the project dir as a string prefix", "/home/u/Code/p2", "/home/sandboxuser/Code/p2"},
+		{"home itself", "/home/u", "/home/sandboxuser"},
+		{"outside home", "/etc/x", "/etc/x"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := remapEnvValue(tt.value, homeDir, projectDir); got != tt.want {
+				t.Errorf("remapEnvValue(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+
+	// Without a project dir there is no exception at all.
+	if got := remapEnvValue(projectDir, homeDir, ""); got != "/home/sandboxuser/Code/p" {
+		t.Errorf("remapEnvValue with no project dir = %q, want the remapped path", got)
+	}
+}
+
+// envProbeTool emits fixed environment values so the remap applied to tool
+// environments can be asserted end to end through getToolBindings.
+type envProbeTool struct{ env []tools.EnvVar }
+
+func (e *envProbeTool) Name() string                           { return "env-remap-probe" }
+func (e *envProbeTool) Description() string                    { return "test tool" }
+func (e *envProbeTool) Available(string) bool                  { return true }
+func (e *envProbeTool) Bindings(_, _ string) []tools.Binding   { return nil }
+func (e *envProbeTool) Environment(_, _ string) []tools.EnvVar { return e.env }
+func (e *envProbeTool) ShellInit(string) string                { return "" }
+
+// TestGetToolBindings_ProjectDirEnvNotRemapped asserts the container env for a
+// project under $HOME carries MISE_TRUSTED_CONFIG_PATHS at the exact host
+// project path while home-rooted values are still remapped. The real mise tool
+// contributes its own entry when mise is installed on the host, so every entry
+// under that name is checked rather than the first.
+func TestGetToolBindings_ProjectDirEnvNotRemapped(t *testing.T) {
+	homeDir := t.TempDir()
+	projectDir := filepath.Join(homeDir, "Code", "p")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := &envProbeTool{env: []tools.EnvVar{
+		{Name: "MISE_TRUSTED_CONFIG_PATHS", Value: projectDir},
+		{Name: "ENV_PROBE_SOCKET", Value: "unix://" + homeDir + "/.run/probe.sock"},
+	}}
+	tools.Register(probe)
+	defer tools.Unregister(probe.Name())
+
+	sandboxHome := filepath.Join(homeDir, ".local", "share", "devsandbox", "p")
+	if err := os.MkdirAll(sandboxHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{
+		HomeDir:     homeDir,
+		SandboxHome: sandboxHome,
+		ProjectDir:  projectDir,
+		Shell:       "bash",
+	}
+	_, envVars, _ := iso.getToolBindings(cfg)
+
+	trusted, socket := 0, ""
+	for _, env := range envVars {
+		if after, ok := strings.CutPrefix(env, "MISE_TRUSTED_CONFIG_PATHS="); ok {
+			trusted++
+			if after != projectDir {
+				t.Errorf("MISE_TRUSTED_CONFIG_PATHS = %q, want exactly %q", after, projectDir)
+			}
+		}
+		if after, ok := strings.CutPrefix(env, "ENV_PROBE_SOCKET="); ok {
+			socket = after
+		}
+	}
+	if trusted == 0 {
+		t.Error("MISE_TRUSTED_CONFIG_PATHS missing from the container env")
+	}
+	if want := "unix://" + containerHome + "/.run/probe.sock"; socket != want {
+		t.Errorf("ENV_PROBE_SOCKET = %q, want %q", socket, want)
+	}
+}
+
+// TestBuildCommonArgs_TrustsProjectMiseConfigWithoutHostMise pins that the
+// in-sandbox trust for the project's mise configs does not depend on mise
+// being installed on the host: the image carries its own mise and the boot
+// runs `mise install` either way, so a host without mise used to boot a guest
+// whose project config was untrusted. With host mise present the variable is
+// still emitted exactly once.
+func TestBuildCommonArgs_TrustsProjectMiseConfigWithoutHostMise(t *testing.T) {
+	cfg := &Config{
+		ProjectDir:  "/tmp/test-project",
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+	count := func(t *testing.T) int {
+		t.Helper()
+		iso := NewDockerIsolator(DockerConfig{})
+		iso.imageTag = "test:latest"
+		args, err := iso.buildCommonArgs(cfg)
+		if err != nil {
+			t.Fatalf("buildCommonArgs: %v", err)
+		}
+		n := 0
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "-e" && args[i+1] == "MISE_TRUSTED_CONFIG_PATHS="+cfg.ProjectDir {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("no mise on the host", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if got := count(t); got != 1 {
+			t.Errorf("MISE_TRUSTED_CONFIG_PATHS emitted %d times without host mise, want 1", got)
+		}
+	})
+	t.Run("mise on the host", func(t *testing.T) {
+		bin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(bin, "mise"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin)
+		if got := count(t); got != 1 {
+			t.Errorf("MISE_TRUSTED_CONFIG_PATHS emitted %d times with host mise, want exactly 1", got)
+		}
+	})
+}

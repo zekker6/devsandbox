@@ -1,13 +1,11 @@
 package tools
 
 import (
-	"bufio"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strings"
 )
 
 func init() {
@@ -20,6 +18,10 @@ type Mise struct {
 	// ignoreGlobalConfig, when set, points MISE_GLOBAL_CONFIG_FILE at /dev/null in
 	// the sandbox so mise does not read the host user's global ~/.config/mise/config.toml.
 	ignoreGlobalConfig bool
+	// projectDir is exported as MISE_TRUSTED_CONFIG_PATHS so the project's own
+	// mise configs load without a trust prompt. The trust is scoped to the
+	// sandbox: devsandbox never runs `mise trust` on the host.
+	projectDir string
 }
 
 func (m *Mise) Name() string {
@@ -83,16 +85,24 @@ type miseConfig struct {
 func (m *Mise) ConfigType() reflect.Type { return reflect.TypeFor[miseConfig]() }
 
 // Configure implements ToolWithConfig. It reads the mise-specific settings from
-// the `[tools.mise]` config section.
-func (m *Mise) Configure(_ GlobalConfig, toolCfg map[string]any) {
+// the `[tools.mise]` config section and records the project directory to trust.
+func (m *Mise) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	var cfg miseConfig
 	decodeConfig(m.Name(), toolCfg, &cfg)
 	m.ignoreGlobalConfig = cfg.IgnoreGlobalConfig
+	m.projectDir = globalCfg.ProjectDir
 }
 
 func (m *Mise) Environment(homeDir, sandboxHome string) []EnvVar {
 	// MISE_SHELL is set by the builder based on detected shell
 	// PATH includes mise shims, also set by builder
+	var env []EnvVar
+	if m.projectDir != "" {
+		// Trust every mise config under the project tree inside the sandbox
+		// only. The old host-side `mise trust` wrote the host trust store, so
+		// a cloned repository's config hooks ran in the user's host shell too.
+		env = append(env, EnvVar{Name: "MISE_TRUSTED_CONFIG_PATHS", Value: m.projectDir})
+	}
 	if m.ignoreGlobalConfig {
 		// Point the global config at /dev/null so the sandbox does not eagerly
 		// resolve/install the host user's global `@latest` tools. On a proxy/egress
@@ -100,9 +110,9 @@ func (m *Mise) Environment(homeDir, sandboxHome string) []EnvVar {
 		// swarm of them can OOM the guest. The project's `.mise.toml`, the image's
 		// system config (baked node), and `~/.config/mise/settings.toml` still apply;
 		// only the global `config.toml` tool list is dropped.
-		return []EnvVar{{Name: "MISE_GLOBAL_CONFIG_FILE", Value: "/dev/null"}}
+		env = append(env, EnvVar{Name: "MISE_GLOBAL_CONFIG_FILE", Value: "/dev/null"})
 	}
-	return nil
+	return env
 }
 
 func (m *Mise) ShellInit(shell string) string {
@@ -197,71 +207,4 @@ func hostMiseInstallsMount(homeDir, goos string) *DockerMount {
 		Dest:     hostMiseInstallsDest,
 		ReadOnly: true,
 	}
-}
-
-// MiseTrustStatus represents the trust status of a mise config directory.
-type MiseTrustStatus struct {
-	Path    string
-	Trusted bool
-}
-
-// CheckMiseTrust checks if mise config files in the given directory are trusted.
-// Only returns statuses for config files within the specified directory, ignoring
-// parent directory configs that mise also reports.
-// Returns nil if mise is not available or no config files are found.
-func CheckMiseTrust(dir string) ([]MiseTrustStatus, error) {
-	if _, err := exec.LookPath("mise"); err != nil {
-		return nil, nil
-	}
-
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("resolving directory path: %w", err)
-	}
-
-	cmd := exec.Command("mise", "trust", "--show")
-	cmd.Dir = dir
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, nil
-	}
-
-	var statuses []MiseTrustStatus
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		idx := strings.LastIndex(line, ": ")
-		if idx == -1 {
-			continue
-		}
-		path := line[:idx]
-		status := line[idx+2:]
-
-		// Only include configs that are within the requested directory.
-		// mise trust --show also reports configs from parent directories.
-		absPath, pathErr := filepath.Abs(path)
-		if pathErr != nil {
-			continue
-		}
-		if !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) && absPath != absDir {
-			continue
-		}
-
-		statuses = append(statuses, MiseTrustStatus{
-			Path:    path,
-			Trusted: status == "trusted",
-		})
-	}
-
-	return statuses, nil
-}
-
-// TrustMiseConfig runs `mise trust` for the given directory.
-func TrustMiseConfig(dir string) error {
-	cmd := exec.Command("mise", "trust")
-	cmd.Dir = dir
-	return cmd.Run()
 }

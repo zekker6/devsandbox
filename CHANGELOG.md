@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Updated embedded bubblewrap to 0.12.0.
+- The launch-time `Trust mise config? [Y/n]` prompt is gone. It defaulted to yes, never showed the file, and ran `mise trust` on the host - so one Enter let a cloned repository's `.mise.toml` hooks and templates run in your host shell. Project mise configs are now trusted inside the sandbox only, through `MISE_TRUSTED_CONFIG_PATHS`, and devsandbox no longer writes the host trust store: a repository's mise config stays untrusted in your host shell until you run `mise trust` there yourself. See [Tool Management with mise](docs/tools.md#tool-management-with-mise).
 
 ### Fixed
 

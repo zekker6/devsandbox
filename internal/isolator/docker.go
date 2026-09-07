@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1230,6 +1231,16 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 	for _, env := range toolEnvVars {
 		args = append(args, "-e", env)
 	}
+	// The mise tool's Environment grants the project's mise configs in-sandbox
+	// trust, but that tool is only consulted when mise is on the host PATH,
+	// while the image carries its own mise and installMiseTools runs either
+	// way. Grant it here too, so a host without mise does not boot a guest
+	// whose project config is untrusted.
+	if cfg.ProjectDir != "" && !slices.ContainsFunc(toolEnvVars, func(env string) bool {
+		return strings.HasPrefix(env, "MISE_TRUSTED_CONFIG_PATHS=")
+	}) {
+		args = append(args, "-e", "MISE_TRUSTED_CONFIG_PATHS="+cfg.ProjectDir)
+	}
 
 	// Write overlay manifest if any tmpoverlay bindings exist
 	if len(overlayManifest.Overlays) > 0 {
@@ -1727,13 +1738,36 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 					envVars = append(envVars, env.Name+"="+val)
 				}
 			} else if env.Value != "" {
-				value := strings.ReplaceAll(env.Value, cfg.HomeDir, containerHome)
-				envVars = append(envVars, env.Name+"="+value)
+				envVars = append(envVars, env.Name+"="+remapEnvValue(env.Value, cfg.HomeDir, cfg.ProjectDir))
 			}
 		}
 	}
 
 	return mounts, envVars, manifest
+}
+
+// remapEnvValue rewrites a tool environment value for the container, where the
+// sandbox home is containerHome. It is a substring replace, not a prefix one,
+// because socket addresses carry a scheme in front of the path
+// (KITTY_LISTEN_ON=unix:..., DBUS_SESSION_BUS_ADDRESS=unix:path=...,
+// DOCKER_HOST=unix://...). The project directory is the one exception: it is
+// mounted at its identical host path, so a value naming it or a path below it
+// (MISE_TRUSTED_CONFIG_PATHS, for a project under $HOME) must reach the guest
+// unchanged, or it names a directory nothing mounts.
+func remapEnvValue(value, homeDir, projectDir string) string {
+	if projectDir != "" {
+		path := value
+		for _, scheme := range []string{"unix:path=", "unix://", "unix:"} {
+			if strings.HasPrefix(value, scheme) {
+				path = strings.TrimPrefix(value, scheme)
+				break
+			}
+		}
+		if path == projectDir || strings.HasPrefix(path, projectDir+"/") {
+			return value
+		}
+	}
+	return strings.ReplaceAll(value, homeDir, containerHome)
 }
 
 // containerName generates a Docker container name for the sandbox.
