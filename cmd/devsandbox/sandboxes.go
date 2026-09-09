@@ -190,15 +190,10 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 			out := cmd.OutOrStdout()
 			locations := reclaim.Locations()
 
-			// The worktrees registered under the sandboxes about to be removed,
-			// read before the host-scoped sweep below. That sweep reclaims the
-			// session records, and a sandbox selected for pruning is inactive by
-			// definition - so its records name dead pids and the sweep takes
-			// every one of them. Reading the store afterwards finds nothing and
-			// the worktrees stay registered in their repository. Use this snapshot
-			// only for worktree cleanup: a session name can be reused after the
-			// sweep, including while confirmation waits. The host sweep alone
-			// owns stale session-record removal and reporting.
+			// Keep cleanup candidates across the sweep and confirmation. The
+			// sweep retains records with existing worktrees, but a launch can
+			// still reuse a stale session's name while confirmation waits. Use
+			// this snapshot only for worktree cleanup, never record deletion.
 			sessionStore, sessErr := session.DefaultStore()
 			if sessErr != nil {
 				notice.Warn("session store unavailable; worktree cleanup skipped: %v", sessErr)
@@ -359,16 +354,24 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 			// Remove sandboxes (handles both bwrap and docker)
 			reclaimSkip = toPrune
 			var removed, failed int
+			var worktreesRemoved bool
 			wtMgr := worktree.NewManager()
 			for _, s := range toPrune {
-				// Remove any worktrees registered under this sandbox root before
-				// wiping its on-disk state. Best-effort: warnings only.
+				var cleanupErr error
 				for _, sess := range session.FilterForSandbox(sessionSnapshot, s.SandboxRoot) {
-					if sess.Worktree != nil && sess.Worktree.RepoRoot != "" {
+					if sess.Worktree != nil && sess.Worktree.RepoRoot != "" && sess.Worktree.Path != "" {
 						if err := wtMgr.Remove(cmd.Context(), sess.Worktree.RepoRoot, sess.Worktree.Path); err != nil {
-							notice.Warn("worktree cleanup for %s: %v", sess.Name, err)
+							cleanupErr = errors.Join(cleanupErr, fmt.Errorf("worktree cleanup for %s: %w", sess.Name, err))
+						} else {
+							worktreesRemoved = true
 						}
 					}
+				}
+				if cleanupErr != nil {
+					notice.Error("Keeping %s: %v", s.Name, cleanupErr)
+					retErr = errors.Join(retErr, cleanupErr)
+					failed++
+					continue
 				}
 				if err := sandbox.RemoveSandboxByType(s, volumes); err != nil {
 					notice.Error("Failed to remove %s: %v", s.Name, err)
@@ -378,13 +381,23 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 				}
 			}
 
+			if worktreesRemoved {
+				n, err := sessionStore.CleanStaleErr()
+				if err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("reclaim session records after worktree cleanup: %w", err))
+				}
+				if n > 0 {
+					_, _ = fmt.Fprintf(out, "Reclaimed %d stale session record(s) after worktree cleanup.\n", n)
+				}
+			}
+
 			fmt.Printf("Removed %d sandbox(es)", removed)
 			if failed > 0 {
 				fmt.Printf(", %d failed", failed)
 			}
 			fmt.Println()
 
-			return nil
+			return retErr
 		},
 	}
 

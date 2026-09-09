@@ -926,7 +926,14 @@ func (d *DockerIsolator) BuildDocker(ctx context.Context, cfg *Config) (*DockerB
 				// Fall through to image build + create path below.
 			} else {
 				if !running {
-					// Container exists but stopped — start it.
+					// Seed contents can change without changing the container fingerprint.
+					_, _, manifest := d.getToolBindings(cfg)
+					if len(manifest.Overlays) > 0 || len(manifest.Seeds) > 0 {
+						if _, err := d.writeOverlayManifest(cfg, manifest); err != nil {
+							return nil, fmt.Errorf("write overlay manifest: %w", err)
+						}
+					}
+					// Container exists but stopped - start it.
 					// If start fails (e.g., its Docker network was removed),
 					// remove the stale container and fall through to recreate.
 					startCmd := exec.CommandContext(ctx, dockerPath, "start", containerName)

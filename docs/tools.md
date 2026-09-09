@@ -321,7 +321,7 @@ AI coding assistants execute arbitrary code - installing packages, running build
 Remembering to type `devsandbox` first is the weak point. `devsandbox agent-wrappers activate` prints shell functions that send supported agents through the sandbox automatically. Nothing is written to disk: you evaluate the output from your own startup file, the way `mise activate` works.
 
 | Shell | Startup file | Line to add |
-|-------|--------------|-------------|
+| ------- | -------------- | ------------- |
 | fish | `~/.config/fish/config.fish` | `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish \| source; end` |
 | bash | `~/.bashrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash)"; fi` |
 | zsh | `~/.zshrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh)"; fi` |
@@ -342,7 +342,7 @@ The wrappable agents are `claude`, `pi`, `codex`, `opencode`, and `copilot` (the
 **Wrapping only some of them.** `--agents` narrows the set, so the agents you leave out keep running unsandboxed as usual:
 
 | Shell | Line to add |
-|-------|-------------|
+| ------- | ------------- |
 | fish | `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish --agents claude,codex \| source; end` |
 | bash | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash --agents claude,codex)"; fi` |
 | zsh | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh --agents claude,codex)"; fi` |
@@ -393,7 +393,7 @@ These directories are isolated to the sandbox home - not your real host director
 
 Docker on macOS keeps the sandbox home in a named volume. Container setup seeds that volume from the private copy too, preserving any non-empty configuration already in the volume. The setup manifest containing the copy is host-owned, mode `0600`, and mounted read-only. Upgrading recreates containers that used the old manifest path; their persistent home volumes remain intact. Seed files larger than 8 MiB are skipped with a warning. A directory or other non-file at the destination is left untouched, with a warning on your terminal even when the container starts detached.
 
-To pick up a host-side change, delete `~/.local/share/devsandbox/<project>/home/.claude.json` before the next launch. On macOS Docker, also delete `~/.claude.json` **inside the sandbox** and restart the container, since its named-volume home is separate from the host-side copy.
+To pick up a host-side change, delete `~/.local/share/devsandbox/<project>/home/.claude.json` before the next launch. On macOS Docker, also delete `~/.claude.json` **inside the sandbox**, stop the container, and launch it again through devsandbox, since its named-volume home is separate from the host-side copy. devsandbox refreshes the setup manifest before restarting a kept container; a direct `docker start` does not refresh it.
 
 With `[tools.claude] mount_mode = "disabled"`, setup does not copy host configuration or declare container seeds. This does not erase a private copy left by an earlier enabled launch. With `CLAUDE_CONFIG_DIR` set, Claude Code keeps its state under that directory instead and no copy is made.
 
@@ -508,7 +508,7 @@ inside the sandbox:
 ```
 
 | Path | Contents |
-|------|----------|
+| ------ | ---------- |
 | `~/.config/rtk/config.toml` | Tracking, display, tee, telemetry and hook settings |
 | `~/.config/rtk/filters.toml`, `~/.config/rtk/filters/*.toml` | Global output filters |
 | `~/.local/share/rtk/history.db` | SQLite tracking database behind `rtk gain` |
@@ -734,7 +734,7 @@ socket = "/run/docker.sock"  # Optional: custom socket path
 The Docker proxy allows:
 
 | Operation Type | Allowed | Examples |
-|----------------|---------|----------|
+| ---------------- | --------- | ---------- |
 | Read operations | ✓ | `docker ps`, `docker images`, `docker inspect` |
 | Container logs | ✓ | `docker logs <container>` |
 | Container exec | ✓ | `docker exec -it <container> bash` |
@@ -754,7 +754,7 @@ On **Linux**, the Docker socket defaults to `/run/docker.sock`.
 On **macOS**, the socket location varies by Docker runtime. devsandbox probes these paths in order and uses the first one found:
 
 | Priority | Path | Runtime |
-|----------|------|---------|
+| ---------- | ------ | --------- |
 | 1 | `~/.docker/run/docker.sock` | Docker Desktop |
 | 2 | `/var/run/docker.sock` | OrbStack (symlink) |
 | 3 | `~/.colima/default/docker.sock` | Colima |
@@ -829,13 +829,17 @@ Nothing else in the sandbox home behaves this way: the rest is an overlay whose 
 Left alone, the directory grows without bound - build caches, test scratch trees and agent scratchpads accumulate on disk forever. devsandbox reclaims it at launch:
 
 | Situation | What happens |
-|---|---|
+| --- | --- |
 | No other devsandbox session is using this project | The directory is emptied, restoring the lifetime you would expect of `$TMPDIR`. |
 | Another session for the same project is live | Its files may be in use, so only entries with nothing modified in the last 7 days are removed. |
 
 A directory belonging to a different project is never touched, and the previous location (`~/.cache/devsandbox/revdiff-ipc/`) is reclaimed the first time the project launches.
 
-Removing the sandbox removes the directory with it: `--rm`, `devsandbox sandboxes prune` and `devsandbox scratchpad rm` all delete it alongside the sandbox state. A directory whose sandbox is already gone - left by a removal that was interrupted, or by a version before this one - is reclaimed by `devsandbox sandboxes prune` once nothing in it has changed for 7 days, under the previous location as well.
+Removing the sandbox removes the directory with it: `--rm`, `devsandbox sandboxes prune` and `devsandbox scratchpad rm` all delete it alongside the sandbox state. A directory with a recorded owner whose sandbox is already gone is reclaimed by `devsandbox sandboxes prune` once nothing in it has changed for 7 days, under the previous location as well.
+
+Ownership records live outside the sandbox under `$XDG_STATE_HOME/devsandbox/shared-tmp-owners/`, falling back to `~/.local/state/devsandbox/shared-tmp-owners/`. Launches record the owning sandbox home, and prune backfills records for directories belonging to sandboxes in the current base. These records protect directories under previous `sandbox.base_path` values too. An inaccessible owner base blocks cleanup rather than treating an unmounted volume as deleted. Prune removes an ownership record only after its sandbox and both temporary directories are gone.
+
+Older directories without a known owner are left alone: their hashed names cannot prove which base owns them. A launch or prune against their original base records their ownership. Remove an unattributed directory manually only after confirming that no session uses it.
 
 `prune` also reclaims the directory of a sandbox that still exists, without needing a launch: for each remaining sandbox it removes the entries with nothing modified in the last 7 days. It never empties the directory the way a cold-start launch does, because a prune process does not register as a session and so cannot tell "no other session" from "a session that has not registered yet".
 
@@ -875,7 +879,7 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 ```
 
 | Mode | Behavior |
-|---|---|
+| --- | --- |
 | `auto` | Proxy starts iff at least one enabled tool declares a capability. |
 | `enforce` | Proxy always starts; with no capabilities declared, every request is denied (useful to verify no tool silently uses kitty). |
 | `disabled` | Proxy never starts; `KITTY_LISTEN_ON` is not exposed inside the sandbox. |
@@ -883,7 +887,7 @@ extra_capabilities = ["list_owned"]    # additive only; launch_* entries are rej
 ### Capabilities
 
 | Capability | Allows |
-|---|---|
+| --- | --- |
 | `launch_overlay` | `kitty @ launch --type=overlay` |
 | `launch_window` | `kitty @ launch --type=window` |
 | `launch_tab` | `kitty @ launch --type=tab` |
@@ -907,7 +911,7 @@ There is **no basename fallback left for any pattern.** A pattern that pins no r
 A launch command may carry a `KEY=VAL` prefix ahead of the program, either as `/usr/bin/env 'KEY=VAL' …` or as a leading shell assignment. The revdiff launcher emits one so the overlay inherits the editor from the caller's shell, whose exports the terminal's own process never saw. The same rules apply to the kitty patterns and to the [herdr launch script](#launch-scripts-are-validated-and-relocated), which share one validator.
 
 | Variable | Accepted value |
-|---|---|
+| --- | --- |
 | `EDITOR`, `VISUAL` | A known editor, named either bare or by an absolute path the host's own `PATH` lookup of that name yields, optionally followed by option words that editor is known to treat as a switch. Empty is accepted, and so is a value byte-identical to your own host `EDITOR`/`VISUAL` - both forms subject to the `PATH` rule below. |
 | `REVDIFF_EXIT_CODE_ON_ANNOTATIONS` | A short scalar with no path separator. |
 | Anything else | Denied. |
@@ -933,7 +937,7 @@ If a launch is denied and your editor is an unusual one, export `EDITOR` on the 
 The command line is not the only thing a kitty request carries. `kitty @ launch` accepts around forty further options, and the proxy decodes every one of them: an option it does not model is a **denial**, not a pass-through, because an approved request is forwarded to the host socket byte for byte.
 
 | Option | Treatment |
-|---|---|
+| --- | --- |
 | `--env`, `--copy-env` | Denied. Both set environment variables for a process running on the host, and an agent the sandbox controls picks the program that reads them (`EDITOR`, `LD_PRELOAD`). |
 | `--copy-cmdline` | Denied. It discards the command line the pattern allowlist just vetted and runs the source window's instead. |
 | `--watcher` | Denied. kitty imports the named Python file into its own process. |
@@ -1003,7 +1007,7 @@ mode = "auto"
 ```
 
 | Mode | Behavior |
-|------|----------|
+| ------ | ---------- |
 | `auto` (default) | Proxy starts only when some enabled tool declares a capability. |
 | `disabled` | Proxy never starts and `HERDR_SOCKET_PATH` is not exported, so the sandboxed CLI cannot reach herdr at all. |
 | `enforce` | Proxy always starts; with no capabilities declared, every request is denied (useful to verify no tool silently uses herdr). |
@@ -1013,7 +1017,7 @@ There is deliberately no `extra_capabilities` setting as kitty has: with this fe
 ### Capabilities
 
 | Capability | Permits |
-|------------|---------|
+| ------------ | --------- |
 | `launch_overlay` | `tab.create`, then `pane.send_input` and `tab.close` **scoped to the tab and pane that call returned** |
 | `notify` | `notification.show` |
 | `agent_reporting` | `pane.report_agent_session`, `pane.report_agent`, `pane.release_agent`, **all confined to this sandbox's own pane and the agent devsandbox launched** |
@@ -1045,7 +1049,7 @@ herdr can remember which agent a pane was running and, after the server restarts
 **What `agent_reporting` permits.** Exactly three methods, all of which only tell herdr *what* the pane is running:
 
 | Method | Sent by | Purpose |
-|--------|---------|---------|
+| -------- | --------- | --------- |
 | `pane.report_agent_session` | Claude, Pi, Codex | the agent's native session ID and/or transcript path |
 | `pane.report_agent` | Pi | the same, plus a status label (`idle`, `working`, `blocked`) |
 | `pane.release_agent` | Pi | the agent is exiting |
@@ -1081,7 +1085,7 @@ herdr can remember which agent a pane was running and, after the server restarts
 ### What Gets Mounted
 
 | Resource | Mode | Purpose |
-|----------|------|---------|
+| ---------- | ------ | --------- |
 | Proxy socket (`$HOME/.run/<pid>/herdr.sock`) | read-write (proxy is local to the sandbox home) | herdr control via the filtering proxy |
 | Proxy socket, second path (`$HOME/.config/herdr/herdr.sock`) | read-write bind mount | the path herdr's client derives on its own, for subcommands that ignore `HERDR_SOCKET_PATH` |
 | `herdr` binary | read-only | CLI for `herdr tab create`, `herdr pane run`, etc. Skipped when the binary already sits under a mounted directory, as mise installs do. |

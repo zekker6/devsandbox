@@ -594,6 +594,7 @@ func backdate(t *testing.T, root string, when time.Time) {
 // binds under, and an empty base is refused rather than naming every
 // directory an orphan.
 func TestLocations_OrphanedSharedTmp(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	loc := locationNamed(t, "orphaned shared temp")
 	if loc.PerSandbox {
 		t.Fatal("orphaned shared temp is registered per sandbox, want host-scoped")
@@ -616,10 +617,14 @@ func TestLocations_OrphanedSharedTmp(t *testing.T) {
 		t.Fatal(err)
 	}
 	live := tools.SharedTmpPath(homeDir, sandbox.SandboxHomePath(liveRoot))
-	orphan := tools.SharedTmpPath(homeDir, sandbox.SandboxHomePath(filepath.Join(base, "gone-0a1b2c3d")))
+	orphanHome := sandbox.SandboxHomePath(filepath.Join(base, "gone-0a1b2c3d"))
+	orphan := tools.SharedTmpPath(homeDir, orphanHome)
 	recent := tools.SharedTmpPath(homeDir, sandbox.SandboxHomePath(filepath.Join(base, "new-0a1b2c3d")))
 	for _, dir := range []string{live, orphan, recent} {
 		writeFile(t, filepath.Join(dir, "go-build", "a.o"), 1)
+	}
+	if _, err := tools.SweepOrphanSharedTmp(homeDir, []string{orphanHome}); err != nil {
+		t.Fatalf("record previous owner: %v", err)
 	}
 	old := time.Now().Add(-8 * 24 * time.Hour)
 	backdate(t, live, old)
@@ -804,7 +809,7 @@ func TestLocations_InternalErrorLogs(t *testing.T) {
 	}
 }
 
-// TestLocations_CatalogueIsComplete pins the catalogue to the eleven locations
+// TestLocations_CatalogueIsComplete pins the catalogue to the twelve locations
 // the discovery table enumerates, in order. It is the check a reviewer runs a
 // new host-owned state directory against: adding one without registering it
 // here leaves it growing unreported, and dropping one silently retires a
@@ -829,6 +834,7 @@ func TestLocations_CatalogueIsComplete(t *testing.T) {
 		{name: "wrapper log"},
 		{name: "interrupted removals"},
 		{name: "orphaned shared temp"},
+		{name: "shared temp owners"},
 		{name: "run directories", perSandbox: true, reportedOnly: true},
 		{name: "session overlay dirs", perSandbox: true, reportedOnly: true},
 		{name: "live shared temp", perSandbox: true},

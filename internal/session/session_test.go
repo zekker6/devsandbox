@@ -787,6 +787,83 @@ func TestStore_CleanStaleErr_ReportsFailedRemoval(t *testing.T) {
 	}
 }
 
+func TestStore_CleanStaleErr_PreservesWorktreeCleanup(t *testing.T) {
+	for _, state := range []procstate.State{procstate.Dead, procstate.Unknown} {
+		t.Run(state.String(), func(t *testing.T) {
+			store := newTestStore(t)
+			store.SetProbe(func(int) procstate.State { return state })
+			checkout := filepath.Join(t.TempDir(), "checkout")
+			if err := os.Mkdir(checkout, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sess := makeSession("worktree")
+			sess.Worktree = &session.WorktreeInfo{RepoRoot: t.TempDir(), Path: checkout}
+			if err := store.Register(sess); err != nil {
+				t.Fatal(err)
+			}
+			ageRecord(t, store, sess.Name, 365*24*time.Hour)
+
+			if n, err := store.CleanStaleErr(); n != 0 || err != nil {
+				t.Fatalf("sweep existing checkout = %d, %v; want 0, nil", n, err)
+			}
+			if _, err := store.Get(sess.Name); err != nil {
+				t.Fatalf("worktree cleanup record lost: %v", err)
+			}
+			if err := os.Remove(checkout); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := store.CleanStaleErr(); n != 1 || err != nil {
+				t.Fatalf("sweep removed checkout = %d, %v; want 1, nil", n, err)
+			}
+		})
+	}
+}
+
+func TestStore_CleanStaleErr_WorktreeStatFailure(t *testing.T) {
+	store := newTestStore(t)
+	store.SetProbe(func(int) procstate.State { return procstate.Dead })
+	checkout := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(checkout, checkout); err != nil {
+		t.Fatal(err)
+	}
+	sess := makeSession("worktree")
+	sess.Worktree = &session.WorktreeInfo{RepoRoot: t.TempDir(), Path: checkout}
+	if err := store.Register(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Register(makeSession("ordinary")); err != nil {
+		t.Fatal(err)
+	}
+	n, err := store.CleanStaleErr()
+	if n != 1 || !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("sweep = %d, %v; want 1 and ELOOP", n, err)
+	}
+	if !strings.Contains(err.Error(), checkout) || !strings.Contains(err.Error(), sess.Name) {
+		t.Errorf("error does not identify the record and checkout: %v", err)
+	}
+	if _, err := store.Get(sess.Name); err != nil {
+		t.Fatalf("cleanup record lost after stat failure: %v", err)
+	}
+}
+
+func TestStore_CleanStaleErr_IncompleteWorktreeIsReclaimed(t *testing.T) {
+	for _, wt := range []*session.WorktreeInfo{
+		{Path: t.TempDir()},
+		{RepoRoot: t.TempDir()},
+	} {
+		store := newTestStore(t)
+		store.SetProbe(func(int) procstate.State { return procstate.Dead })
+		sess := makeSession("incomplete")
+		sess.Worktree = wt
+		if err := store.Register(sess); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := store.CleanStaleErr(); n != 1 || err != nil {
+			t.Fatalf("sweep incomplete worktree %+v = %d, %v; want 1, nil", wt, n, err)
+		}
+	}
+}
+
 func TestStore_Dir(t *testing.T) {
 	dir := t.TempDir()
 	if got := session.NewStore(dir).Dir(); got != dir {

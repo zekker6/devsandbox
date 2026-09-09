@@ -552,14 +552,8 @@ func chdir(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 }
 
-// TestPruneRemovesWorktreesOfPrunedSandboxes pins the ordering between the
-// host-scoped sweep and the removal loop. Session records are one of the
-// catalogued locations, and their sweep removes every record whose pid is
-// dead - and a sandbox selected for pruning is inactive by definition, so its
-// records are exactly the ones the sweep takes. Reading the store after the
-// sweep finds nothing, and the git worktrees those records register stay
-// registered in the repository with their checkout deleted underneath them.
-func TestPruneRemovesWorktreesOfPrunedSandboxes(t *testing.T) {
+func preparePruneWorktree(t *testing.T) (*session.Store, string, string, string) {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
@@ -580,7 +574,7 @@ func TestPruneRemovesWorktreesOfPrunedSandboxes(t *testing.T) {
 	}
 	if err := store.Register(&session.Session{
 		Name:    "gone",
-		PID:     999999999, // dead: the record the sweep reclaims
+		PID:     999999999,
 		WorkDir: wtPath,
 		Worktree: &session.WorktreeInfo{
 			RepoRoot: repo,
@@ -591,6 +585,11 @@ func TestPruneRemovesWorktreesOfPrunedSandboxes(t *testing.T) {
 		t.Fatalf("register session: %v", err)
 	}
 
+	return store, orphanRoot, repo, wtPath
+}
+
+func TestPruneRemovesWorktreesOfPrunedSandboxes(t *testing.T) {
+	store, _, repo, wtPath := preparePruneWorktree(t)
 	cmd := newPruneCmd()
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -599,10 +598,86 @@ func TestPruneRemovesWorktreesOfPrunedSandboxes(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("prune --force = %v, want nil", err)
 	}
+	if _, err := store.Get("gone"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("cleaned worktree record survived: %v", err)
+	}
 
 	list := gitOutput(t, repo, "worktree", "list", "--porcelain")
 	if strings.Contains(list, wtPath) {
 		t.Errorf("the pruned sandbox's worktree is still registered:\n%s\nprune said:\n%s", list, buf.String())
+	}
+}
+
+func TestPruneRetainsWorktreeUntilRemoval(t *testing.T) {
+	for _, mode := range []string{"selection", "declined confirmation", "cleanup failure"} {
+		t.Run(mode, func(t *testing.T) {
+			store, root, repo, wtPath := preparePruneWorktree(t)
+			cmd := newPruneCmd()
+			var buf bytes.Buffer
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			switch mode {
+			case "selection":
+				cmd.SetArgs([]string{"--keep", "1", "--force"})
+			case "declined confirmation":
+				inputPath := filepath.Join(t.TempDir(), "input")
+				if err := os.WriteFile(inputPath, []byte("n\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				input, err := os.Open(inputPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				previous := os.Stdin
+				os.Stdin = input
+				t.Cleanup(func() {
+					os.Stdin = previous
+					if err := input.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+			case "cleanup failure":
+				git(t, repo, "worktree", "lock", wtPath)
+				cmd.SetArgs([]string{"--force"})
+			}
+			err := cmd.Execute()
+			if mode == "cleanup failure" {
+				if err == nil || !strings.Contains(err.Error(), "worktree cleanup") {
+					t.Fatalf("prune = %v, want worktree cleanup failure", err)
+				}
+			} else if err != nil {
+				t.Fatalf("first prune: %v", err)
+			}
+			if _, err := store.Get("gone"); err != nil {
+				t.Fatalf("retained sandbox lost its worktree record: %v", err)
+			}
+			if _, err := os.Stat(root); err != nil {
+				t.Fatalf("retained sandbox removed: %v", err)
+			}
+			if _, err := os.Stat(wtPath); err != nil {
+				t.Fatalf("retained checkout removed: %v", err)
+			}
+			if mode == "cleanup failure" {
+				git(t, repo, "worktree", "unlock", wtPath)
+			}
+
+			later := newPruneCmd()
+			later.SetOut(&buf)
+			later.SetErr(&buf)
+			later.SetArgs([]string{"--force"})
+			if err := later.Execute(); err != nil {
+				t.Fatalf("later prune: %v", err)
+			}
+			if list := gitOutput(t, repo, "worktree", "list", "--porcelain"); strings.Contains(list, wtPath) {
+				t.Errorf("later prune left worktree registered:\n%s", list)
+			}
+			if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("later prune left sandbox: %v", err)
+			}
+			if _, err := store.Get("gone"); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("later prune left cleanup record: %v", err)
+			}
+		})
 	}
 }
 

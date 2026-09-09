@@ -171,6 +171,10 @@ func prepareSharedTmp(homeDir, sandboxHome string, logger ErrorLogger) error {
 		return fmt.Errorf("shared tmp: register session: %w", err)
 	}
 
+	if err := recordSharedTmpOwner(homeDir, sandboxHome); err != nil {
+		return err
+	}
+
 	dir := SharedTmpPath(homeDir, sandboxHome)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("shared tmp: create %s: %w", dir, err)
@@ -345,27 +349,32 @@ func StageSharedTmpForRemoval(homeDir, sandboxHome string) (string, error) {
 // exists, under both the current root and the legacy revdiff-ipc root, and
 // reports how many it removed.
 //
-// A directory's name is a one-way hash of its sandbox home, so an orphan is
-// found by elimination: liveHomes are the sandbox homes that exist, each is
-// hashed, and a directory whose name is in neither set belongs to no sandbox.
-// Absence alone does not remove it - a launch creating its sandbox home right
-// now has a directory with no sandbox behind it yet - so the directory also
-// has to be untouched for sharedTmpStaleAge, judged over its whole subtree
-// like every other prune here. The age costs nothing and removes the question.
+// liveHomes protects the currently configured base and backfills ownership
+// for existing directories there. Other hashes are removed only when their
+// host-owned record proves the owning sandbox is gone, including under a
+// previous base. Unknown ownership is kept. Every removal also requires the
+// whole subtree to be untouched for sharedTmpStaleAge.
 //
-// The caller decides what is live, and an incomplete list deletes the
-// directories of live sandboxes: a caller that could not enumerate its
-// sandboxes must not call this at all. A missing root holds nothing and is
-// not an error. A directory that cannot be removed is reported and the sweep
-// continues. The legacy root is removed once it is empty; the current root is
-// in use and stays.
+// A missing root holds nothing and is not an error. A directory that cannot
+// be removed is reported and the sweep continues. The legacy root is removed
+// once it is empty; the current root stays.
 func SweepOrphanSharedTmp(homeDir string, liveHomes []string) (int, error) {
 	if homeDir == "" {
 		return 0, errors.New("shared tmp: orphan sweep needs the home directory")
 	}
 	live := make(map[string]bool, len(liveHomes))
 	for _, home := range liveHomes {
-		live[sharedTmpSessionID(home)] = true
+		id := sharedTmpSessionID(home)
+		live[id] = true
+		absent, err := sharedTmpDirsAbsent(homeDir, id)
+		if err != nil {
+			return 0, err
+		}
+		if !absent {
+			if err := recordSharedTmpOwner(homeDir, home); err != nil {
+				return 0, err
+			}
+		}
 	}
 	cutoff := time.Now().Add(-sharedTmpStaleAge)
 
@@ -373,7 +382,7 @@ func SweepOrphanSharedTmp(homeDir string, liveHomes []string) (int, error) {
 	var errs []error
 	legacyRoot := filepath.Join(homeDir, legacySharedTmpRelPath)
 	for _, root := range []string{SharedTmpRoot(homeDir), legacyRoot} {
-		n, err := sweepOrphanRoot(root, live, cutoff)
+		n, err := sweepOrphanRoot(homeDir, root, live, cutoff)
 		removed += n
 		errs = append(errs, err)
 	}
@@ -385,7 +394,7 @@ func SweepOrphanSharedTmp(homeDir string, liveHomes []string) (int, error) {
 // not in live and whose subtree has nothing modified since cutoff. An entry
 // that is not a directory - a symlink included - is not a shared temp
 // directory and is neither followed nor removed.
-func sweepOrphanRoot(root string, live map[string]bool, cutoff time.Time) (int, error) {
+func sweepOrphanRoot(homeDir, root string, live map[string]bool, cutoff time.Time) (int, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -398,6 +407,13 @@ func sweepOrphanRoot(root string, live map[string]bool, cutoff time.Time) (int, 
 	for _, e := range entries {
 		if !e.IsDir() || live[e.Name()] {
 			continue
+		}
+		if !stagedSharedTmpName.MatchString(e.Name()) {
+			gone, err := sharedTmpOwnerGone(homeDir, e.Name())
+			if err != nil || !gone {
+				errs = append(errs, err)
+				continue
+			}
 		}
 		path := filepath.Join(root, e.Name())
 		if fsutil.ModifiedSince(path, cutoff) {

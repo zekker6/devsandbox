@@ -52,6 +52,7 @@ brew install mise
 ```
 
 A Docker runtime is also required (ensure it is running before using devsandbox):
+
 - [OrbStack](https://orbstack.dev/) - recommended for Apple Silicon (fastest startup, lowest resource usage)
 - [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) - most widely tested
 - [Colima](https://github.com/abiosoft/colima) - free and open-source
@@ -142,7 +143,7 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 ### Resource access defaults
 
 | Resource | Default Access |
-|---|---|
+| --- | --- |
 | Project directory | Read/Write |
 | `.env` / `.env.*` files | Hidden (masked with `/dev/null`); scanned up to 3 directory levels below the project root, skipping `node_modules`, `.git`, `vendor`, `.venv`. Configurable - [`hide_env_files`](docs/configuration.md#sandbox-settings) / `--no-hide-env` expose them |
 | `~/.ssh` | Not mounted |
@@ -229,7 +230,7 @@ if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bas
 By default, `.git` is mounted read-only - you can view history, diff, and status, but commits are blocked and no credentials are exposed.
 
 | Mode | `.git` | Commits | Credentials | gitconfig |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `readonly` | read-only | blocked | none **(default)** | safe copy: identity + ignore rules |
 | `readwrite` | read-write | allowed | SSH, GPG, credentials | yours, plus the files it references |
 | `disabled` | read-write | allowed | none | none |
@@ -256,7 +257,7 @@ mode = "readwrite"  # for trusted projects that need push/sign
 `devsandbox --worktree` creates (or reuses) a git worktree and enters the sandbox rooted there. Agent edits land on a dedicated branch without touching your main checkout.
 
 | Flag | Behavior |
-|---|---|
+| --- | --- |
 | `--worktree` | Auto-generate `devsandbox/<session-or-timestamp>` off `HEAD`. |
 | `--worktree=<branch>` | Reuse the branch if it exists; otherwise create it off `--worktree-base`. |
 | `--worktree-base=<ref>` | Base ref when creating a new branch. Defaults to `HEAD`. Ignored if the branch already exists. |
@@ -264,7 +265,7 @@ mode = "readwrite"  # for trusted projects that need push/sign
 Interaction with `--git-mode`:
 
 | Combination | Effect |
-|---|---|
+| --- | --- |
 | `--worktree` + `--git-mode=readonly` (default) | `git status`/`log`/`diff` work; commits fail. |
 | `--worktree` + `--git-mode=readwrite` | Commits land on the worktree's branch only. Main checkout untouched. |
 | `--worktree` + `--git-mode=disabled` | Rejected at flag parse time. |
@@ -327,6 +328,7 @@ See [Proxy Mode docs](docs/proxy.md) for filtering rules, log formats, and remot
 **Linux:**
 
 Requirements:
+
 - Linux kernel with unprivileged user namespaces enabled (verify: `unshare --user true` should succeed silently)
 - No system packages required (bwrap and pasta binaries are embedded)
 - Proxy mode only: `iproute2` and `nft` (or `iptables`), with the `nf_tables`/`nf_conntrack` kernel modules loadable - a `--proxy` launch aborts without them
@@ -389,6 +391,8 @@ task site:clean
 
 One-time setup (must be done in the GitHub UI, cannot be done from the workflow): **Repository → Settings → Pages → Source = "GitHub Actions"**. After the first successful workflow run, the site is reachable at `https://zekker6.github.io/devsandbox/`.
 
+`devsandbox sandboxes prune` preserves shared temp directories across sandbox base-path changes and keeps worktree-cleanup records for retained sandboxes. See [Pruning Sandboxes](docs/sandboxing.md#pruning-sandboxes).
+
 ## Quick Reference
 
 ```bash
@@ -429,7 +433,7 @@ The repository doubles as a [Claude Code](https://code.claude.com/docs/) plugin 
 ```
 
 | Plugin | What it adds |
-|---|---|
+| --- | --- |
 | `devsandbox-config` | A skill that answers configuration questions by fetching this site's documentation, rather than recalling an older release |
 | `devsandbox-triage` | A Bash tool hook that recognizes a failing command as one of devsandbox's restrictions and names the setting or document that explains it |
 
@@ -440,7 +444,7 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 ## Documentation
 
 | Page | Contents |
-|---|---|
+| --- | --- |
 | [Sandboxing](docs/sandboxing.md) | Isolation backends, security model, filesystem layout, overlay mounts, custom mounts, Docker backend details |
 | [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, content redaction, credential injection, remote logging |
 | [Tools](docs/tools.md) | mise integration, shell/editor/prompt setup, AI assistant configs and shell wrappers, rtk, Git modes, Docker socket proxy, kitty/herdr/zellij terminal integration, XDG desktop portal |
@@ -450,6 +454,7 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 ## Limitations
 
 **Linux (bwrap):**
+
 - Requires unprivileged user namespaces (see [Troubleshooting](docs/sandboxing.md#troubleshooting) for distro-specific guidance)
 - SELinux or AppArmor may restrict namespace operations (see [Security Modules](docs/sandboxing.md#security-modules))
 - MITM proxy may break tools with certificate pinning
@@ -458,12 +463,14 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 - `[sandbox.resources]` limits need cgroup v2 and a systemd user manager with the `memory`/`cpu`/`pids` controllers delegated to `user@<uid>.service`; a limit that cannot be enforced aborts the launch. Nothing about systemd is required when no limits are configured
 
 **macOS (Docker):**
+
 - Requires a running Docker daemon
 - Project directory access goes through macOS virtualization (VirtioFS/gRPC-FUSE), which may be slower for I/O-heavy operations. Sandbox-internal operations (npm install, Go builds) use named Docker volumes with near-native speed.
 - File watching (hot reload) may require polling mode. See [File Watching Limitations](docs/sandboxing.md#file-watching-limitations) for workarounds.
 - Network isolation uses HTTP_PROXY instead of pasta
 
 **krun (microVM, experimental):**
+
 - Proxy-mode egress lockdown is applied host-side in the VMM's pasta network namespace and needs `nft` or `iptables` on the host
 - `devsandbox forward` is best-effort - the session is registered, but reaching a guest listener is not yet validated
 - macOS is not yet validated and requires Apple Silicon; **proxy mode is refused on macOS** because the egress lockdown is Linux-only (fails closed rather than running with open egress)
@@ -472,6 +479,7 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 - Every launch boots a fresh microVM - no `keep_container` reuse, and no online boot-time install of the project's mise tools (see [krun backend](docs/getting-started/krun.md))
 
 **Both:**
+
 - Docker socket access is read-only (no container creation/deletion) - see [Tools docs](docs/tools.md#docker)
 - No nested Docker (cannot run Docker inside the sandbox)
 

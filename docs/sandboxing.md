@@ -15,7 +15,7 @@ them (see [proxy mode](proxy.md#requirements-bwrap-backend)).
 devsandbox supports three isolation backends:
 
 | Backend | Platform | Description |
-|---------|----------|-------------|
+| --------- | ---------- | ------------- |
 | `bwrap` | Linux only | Uses bubblewrap for namespace-based isolation. Preferred on Linux. |
 | `docker` | Linux, macOS | Uses Docker containers. Required for macOS, optional on Linux. |
 | `krun` | Linux, macOS | **Experimental.** Runs the sandbox image inside a libkrun microVM (`podman --runtime krun`) for hardware-level isolation. Opt-in only. See [krun microVM backend](configuration.md#krun-microvm-backend-experimental). |
@@ -25,6 +25,7 @@ devsandbox supports three isolation backends:
 ### Automatic Selection
 
 By default (`--isolation=auto`), devsandbox selects the best backend for your platform:
+
 - **Linux**: Uses `bwrap` (bubblewrap)
 - **macOS**: Uses `docker`
 
@@ -55,7 +56,7 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 ### Choosing a Backend (Linux)
 
 | Choose bwrap when | Choose Docker when |
-|---|---|
+| --- | --- |
 | You want sub-second startup | SELinux/AppArmor blocks namespace operations |
 | You prefer minimal dependencies | You need Dockerfile customization |
 | You want native filesystem performance | You want consistency with macOS teammates |
@@ -200,6 +201,7 @@ express: a shell only aborts a `while` loop on a child that actually died of
 `SIGINT`. `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT` aimed at devsandbox alone are
 forwarded on to the sandbox, since the terminal delivers them to the whole process
 group anyway. In proxy mode the scope wraps `pasta`, the outermost sandbox process
+
 - devsandbox itself stays outside it, so the proxy is never capped by the sandbox's
 memory limit.
 
@@ -425,8 +427,10 @@ swept and every location is reported with its current entry count and size, exce
 locations of the sandboxes the run is previewing the removal of - the report describes the state a
 real run would leave behind.
 
-The early session-record sweep owns stale-record removal. The snapshot retained for worktree
-cleanup cannot delete a session that reused a reclaimed name while confirmation was waiting.
+The session-record sweep retains worktree-cleanup information while the checkout exists, including
+when selection keeps its sandbox or you decline confirmation. A later prune unregisters the worktree
+before removing the sandbox. A cleanup failure keeps that sandbox for a retry. Stale-record cleanup
+rereads the store rather than deleting snapshot names, so a live session that reused a name survives.
 Herdr pane saves and orphan checks share a store lock, so pruning an old mapping cannot unlink
 a replacement written by a concurrent launch.
 
@@ -434,9 +438,10 @@ a replacement written by a concurrent launch.
 `.devsandbox.toml` or an `[[include]]` file that sets it is ignored, with a warning naming the
 file. Both layers are selected by the working directory, and these commands are not run from the
 project's - so a base that varies by directory is one they cannot resolve, and they would judge the
-whole host against whichever value their own directory happens to select. A sandbox they cannot see
-has the shared `$TMPDIR` it is still using at risk of being reclaimed as an orphan, since that
-sweep finds an orphan by elimination against the sandboxes it can see.
+whole host against whichever value their own directory happens to select. Shared temp ownership
+records also cover previous base paths, so changing the global setting does not make old sessions'
+`$TMPDIR` directories orphaned. Unattributed directories are kept rather than deleted by age alone.
+See [Shared temp cleanup](tools.md#cleanup).
 
 A sandbox tree that a `--rm` teardown renamed aside and was then killed before deleting is one of
 those locations. It is removed once the teardown's process is gone, or once it has been staged for
@@ -661,7 +666,7 @@ between runs instead of vanishing when the sandbox stops.
 ### Choosing an Overlay Mode
 
 | Mode | Writes persist? | Host modified? | Use when |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `split` (default) | Caches/data: yes. Configs: no | Never | Default - protects host configs from supply chain attacks |
 | `overlay` | Yes (all) | Never | You want all tool state to persist across sessions |
 | `tmpoverlay` | No | Never | Disposable experiments, CI, untrusted code |
@@ -702,7 +707,7 @@ devsandbox overlay migrate --sandbox my-project --tool claude --apply --set-mode
 **Flags:**
 
 | Flag | Purpose |
-|---|---|
+| --- | --- |
 | `--sandbox NAME` | Operate on one sandbox (mutually exclusive with `--all-sandboxes`). |
 | `--all-sandboxes` | Iterate every sandbox under `~/.local/share/devsandbox/`. |
 | `--path HOST_PATH` | Promote a specific host path (mutually exclusive with `--tool`). |
@@ -836,7 +841,7 @@ By default, Docker containers are kept after exit to enable fast restarts. This 
 **Container Lifecycle:**
 
 | State | Behavior |
-|-------|----------|
+| ------- | ---------- |
 | Container doesn't exist | Creates new container, then starts it |
 | Container stopped | Starts existing container (~1-2s) |
 | Container running | Exec into running container (instant) |
@@ -844,6 +849,7 @@ By default, Docker containers are kept after exit to enable fast restarts. This 
 **Container Naming:**
 
 Containers are named `devsandbox-<project>-<hash>` where hash is derived from the project path:
+
 - Same project directory always gets the same container
 - Different directories with same project name get different containers
 
@@ -864,6 +870,7 @@ devsandbox --rm
 ```
 
 This works for both backends:
+
 - **Docker**: don't keep container after exit (fresh container each run)
 - **bwrap**: remove sandbox home directory after exit
 
@@ -874,6 +881,7 @@ directories, so it runs in *concurrent mode*: it reports
 stacked on the first session's state as a read-only lower, and discards that
 upper when it exits. Reads see everything the first session has written; writes
 do not survive. The designation runs under a lock held across the whole decision
+
 - checking whether anyone else is here and registering as present are one
 indivisible step - so exactly one of two launches started together owns the
 persistent overlay, whichever wins the tie. A launch only owns it while no other
@@ -928,6 +936,7 @@ The image is rebuilt on every sandbox start. Docker layer caching keeps this fas
 hasn't changed.
 
 The base image (`ghcr.io/zekker6/devsandbox:latest`) includes:
+
 - Debian slim base
 - mise for tool management
 - Common development tools (git, curl, bash, zsh)
@@ -972,7 +981,7 @@ devsandbox image build
 ### Platform Differences
 
 | Feature | Linux (bwrap) | Linux (docker) | macOS (docker) |
-|---------|---------------|----------------|----------------|
+| --------- | --------------- | ---------------- | ---------------- |
 | Sandbox home | Bind mount | Bind mount | Named volume |
 | File performance | Native | Near-native | Slower (volume) |
 | .env hiding | Overlay | Volume mount | Volume mount |
@@ -984,7 +993,7 @@ devsandbox image build
 #### Supported Runtimes
 
 | Runtime | Notes |
-|---------|-------|
+| --------- | ------- |
 | [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) | Official Docker runtime. Best compatibility. |
 | [OrbStack](https://orbstack.dev/) | Lightweight alternative. Faster startup, lower resource usage. |
 | [Colima](https://github.com/abiosoft/colima) | Free, open-source. Uses Lima VMs. |
@@ -994,6 +1003,7 @@ All three provide a Docker-compatible daemon. devsandbox auto-detects the Docker
 #### Recommended Resources
 
 Docker Desktop (or equivalent) should be configured with at least:
+
 - **RAM**: 4 GB+
 - **CPUs**: 2+
 
@@ -1046,6 +1056,7 @@ Container creation, deletion, and image manipulation are blocked by the proxy fi
 ## Limitations
 
 ### Bwrap Backend (Linux)
+
 - **Linux only** - Uses Linux-specific namespaces and capabilities
 - **User namespaces required** - Most modern distros have this enabled
 - **No nested containers** - Running Docker inside the sandbox is not supported
@@ -1054,6 +1065,7 @@ Container creation, deletion, and image manipulation are blocked by the proxy fi
 - **Resource limits need systemd** - `[sandbox.resources]` requires cgroup v2 and a systemd user manager with the relevant controllers delegated; without limits configured, none of that is needed
 
 ### Docker Backend (All Platforms)
+
 - **Docker required** - Docker Desktop or Docker Engine must be installed and running
 - **No pasta network** - Uses HTTP_PROXY for network isolation instead
 - **Performance on macOS** - File operations may be slower due to volume mounts

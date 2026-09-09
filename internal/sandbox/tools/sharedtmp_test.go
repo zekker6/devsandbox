@@ -129,6 +129,7 @@ func TestSharedTmpEnv_ExportsTmpdir(t *testing.T) {
 }
 
 func TestPrepareSharedTmp_CreatesDirWithCorrectMode(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 
@@ -152,6 +153,7 @@ func TestPrepareSharedTmp_CreatesDirWithCorrectMode(t *testing.T) {
 // TestPrepareSharedTmp_TightensLooseModeOnExistingDir covers the case MkdirAll
 // silently skips: the directory already exists with a permissive mode.
 func TestPrepareSharedTmp_TightensLooseModeOnExistingDir(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	dir := SharedTmpPath(homeDir, sandboxHome)
@@ -179,6 +181,7 @@ func TestPrepareSharedTmp_TightensLooseModeOnExistingDir(t *testing.T) {
 // $TMPDIR points here, so without a wipe every temporary file the sandbox ever
 // wrote survives on the host forever.
 func TestPrepareSharedTmp_ColdStartWipesContents(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	dir := SharedTmpPath(homeDir, sandboxHome)
@@ -202,6 +205,7 @@ func TestPrepareSharedTmp_ColdStartWipesContents(t *testing.T) {
 // plain os.RemoveAll has: unlinking a child needs write permission on its
 // parent, and build and test temporaries do lay down 0555 directories.
 func TestPrepareSharedTmp_ColdStartWipesReadOnlyTree(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	dir := SharedTmpPath(homeDir, sandboxHome)
@@ -226,6 +230,7 @@ func TestPrepareSharedTmp_ColdStartWipesReadOnlyTree(t *testing.T) {
 // same project is still using these files, and a non-recursive mkdir in a
 // running tenant fails with ENOENT once they vanish.
 func TestPrepareSharedTmp_LiveSiblingKeepsRecentContent(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	// The parent PID is alive and never equal to our own.
@@ -252,6 +257,7 @@ func TestPrepareSharedTmp_LiveSiblingKeepsRecentContent(t *testing.T) {
 // case above: a sibling blocks the wipe, so age is the only signal separating
 // its working files from residue of runs already gone.
 func TestPrepareSharedTmp_LiveSiblingPrunesStaleContent(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	registerSibling(t, sandboxHome, os.Getppid())
@@ -280,6 +286,7 @@ func TestPrepareSharedTmp_LiveSiblingPrunesStaleContent(t *testing.T) {
 // writing deep inside a tree it created days ago looks stale to a shallow
 // check — and that tenant belongs to the sibling this prune protects.
 func TestPrepareSharedTmp_PruneChecksWholeSubtree(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	registerSibling(t, sandboxHome, os.Getppid())
@@ -307,6 +314,7 @@ func TestPrepareSharedTmp_PruneChecksWholeSubtree(t *testing.T) {
 // TestPrepareSharedTmp_LeavesSiblingProjects checks the wipe is scoped to this
 // sandbox home. Other projects' directories share the root.
 func TestPrepareSharedTmp_LeavesSiblingProjects(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	other := filepath.Join(SharedTmpRoot(homeDir), "deadbeefcafe")
@@ -325,6 +333,7 @@ func TestPrepareSharedTmp_LeavesSiblingProjects(t *testing.T) {
 // directory for this same sandbox home is dead once no current devsandbox binds
 // it, and it is where the reported disk usage accumulated.
 func TestPrepareSharedTmp_ReclaimsLegacyDir(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	legacy := legacySharedTmpPath(homeDir, sandboxHome)
@@ -346,6 +355,7 @@ func TestPrepareSharedTmp_ReclaimsLegacyDir(t *testing.T) {
 // TestPrepareSharedTmp_KeepsLegacyRootWithOtherProjects makes sure reclaiming
 // the legacy layout never reaches past this sandbox home.
 func TestPrepareSharedTmp_KeepsLegacyRootWithOtherProjects(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 	otherLegacy := filepath.Join(homeDir, legacySharedTmpRelPath, "deadbeefcafe")
@@ -365,6 +375,7 @@ func TestPrepareSharedTmp_KeepsLegacyRootWithOtherProjects(t *testing.T) {
 // two simultaneous starts safe: each has to be visible to the other, so both
 // fall back to the conservative prune instead of both concluding they are alone.
 func TestPrepareSharedTmp_RegistersBeforeObserving(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	homeDir := t.TempDir()
 	sandboxHome := t.TempDir()
 
@@ -512,18 +523,16 @@ func TestPruneSharedTmpStale_RefusesEmptyArgs(t *testing.T) {
 	}
 }
 
-// TestSweepOrphanSharedTmp covers the rule an orphan is judged by: absent
-// from the live set AND untouched for the stale age. Each other combination
-// is kept - a live sandbox's directory however old, and a recent orphan,
-// because a launch may be creating that sandbox right now. An entry that is
-// not a directory is not a shared temp directory at all.
+// A recorded orphan must be absent from the live set, have a missing owner
+// root and be untouched for the stale age. Files outside those directories
+// are not temporary directories and stay untouched.
 func TestSweepOrphanSharedTmp(t *testing.T) {
 	homeDir := t.TempDir()
 	liveHome := "/srv/sandboxes/live-0a1b2c3d/home"
 	old := time.Now().Add(-sharedTmpStaleAge - time.Hour)
 
 	live := SharedTmpPath(homeDir, liveHome)
-	orphan := SharedTmpPath(homeDir, "/srv/sandboxes/gone-0a1b2c3d/home")
+	orphan := SharedTmpPath(homeDir, recordOrphanTmpOwner(t, homeDir))
 	recent := SharedTmpPath(homeDir, "/srv/sandboxes/new-0a1b2c3d/home")
 	for _, dir := range []string{live, orphan, recent} {
 		writeFileAt(t, filepath.Join(dir, "go-build", "a.o"), "junk", time.Time{})
@@ -557,7 +566,7 @@ func TestSweepOrphanSharedTmp_UnknownAgeIsKept(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	homeDir := t.TempDir()
-	unreadable := SharedTmpPath(homeDir, "/srv/sandboxes/locked-0a1b2c3d/home")
+	unreadable := SharedTmpPath(homeDir, recordOrphanTmpOwner(t, homeDir))
 	writeFileAt(t, filepath.Join(unreadable, "go-build", "a.o"), "junk", time.Time{})
 	ageTree(t, unreadable, time.Now().Add(-sharedTmpStaleAge-time.Hour))
 	if err := os.Chmod(unreadable, 0o000); err != nil {
@@ -583,11 +592,11 @@ func TestSweepOrphanSharedTmp_UnknownAgeIsKept(t *testing.T) {
 // it, as the launch does.
 func TestSweepOrphanSharedTmp_LegacyRoot(t *testing.T) {
 	homeDir := t.TempDir()
-	liveHome := "/srv/sandboxes/live-0a1b2c3d/home"
+	liveHome := recordOrphanTmpOwner(t, homeDir)
 	old := time.Now().Add(-sharedTmpStaleAge - time.Hour)
 	legacyRoot := filepath.Join(homeDir, legacySharedTmpRelPath)
 	live := legacySharedTmpPath(homeDir, liveHome)
-	orphan := legacySharedTmpPath(homeDir, "/srv/sandboxes/gone-0a1b2c3d/home")
+	orphan := legacySharedTmpPath(homeDir, recordOrphanTmpOwner(t, homeDir))
 	writeFileAt(t, filepath.Join(live, "sentinel"), "x", time.Time{})
 	writeFileAt(t, filepath.Join(orphan, "sentinel"), "x", time.Time{})
 	ageTree(t, live, old)
@@ -653,10 +662,10 @@ func TestSweepOrphanSharedTmp_ReportsFailedRemoval(t *testing.T) {
 	}
 	homeDir := t.TempDir()
 	old := time.Now().Add(-sharedTmpStaleAge - time.Hour)
-	stuck := SharedTmpPath(homeDir, "/srv/sandboxes/stuck-0a1b2c3d/home")
+	stuck := SharedTmpPath(homeDir, recordOrphanTmpOwner(t, homeDir))
 	writeFileAt(t, filepath.Join(stuck, "a"), "x", time.Time{})
 	ageTree(t, stuck, old)
-	legacyOrphan := legacySharedTmpPath(homeDir, "/srv/sandboxes/gone-0a1b2c3d/home")
+	legacyOrphan := legacySharedTmpPath(homeDir, recordOrphanTmpOwner(t, homeDir))
 	writeFileAt(t, filepath.Join(legacyOrphan, "a"), "x", time.Time{})
 	ageTree(t, legacyOrphan, old)
 	// Unlinking the orphan itself needs write permission on the root, which

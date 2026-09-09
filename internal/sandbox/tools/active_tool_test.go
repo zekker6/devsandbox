@@ -84,6 +84,7 @@ func TestActiveToolsRunner_PropagatesLaunchedAgent(t *testing.T) {
 	// session must not change the result.
 	t.Setenv("HERDR_ENV", "")
 	t.Setenv("KITTY_LISTEN_ON", "")
+	t.Setenv("XDG_STATE_HOME", "")
 
 	tool := &configRecordingTool{mockActiveTool: mockActiveTool{name: "config-recording-tool"}}
 	Register(tool)

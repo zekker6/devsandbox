@@ -179,12 +179,11 @@ var catalogue = []Location{
 	// points at inside the sandbox - the largest leak in this list. Removing a
 	// sandbox now removes its directory (RemoveSandboxRoot, RemoveSandboxIfIdle);
 	// this sweep is the backstop for removals that were interrupted and for
-	// orphans that already exist. An orphan is found by elimination against the
-	// sandboxes that exist under SandboxBase, and removed only once nothing in
-	// it has changed for 7 days, so a sandbox being created right now is never
-	// mistaken for one that is gone. The legacy revdiff-ipc root is swept by the
-	// same rule. Needs SandboxBase: a live set built from anywhere else, or from
-	// a listing that failed, would name live sandboxes as orphans.
+	// orphans with recorded ownership. The current base listing backfills owner
+	// records; records also cover previous bases. Unknown hashes are kept, not
+	// inferred orphaned from a partial listing. Removal requires a missing
+	// owner root, an accessible owner base and nothing changed for 7 days.
+	// The legacy revdiff-ipc root follows the same rule.
 	{
 		Name: "orphaned shared temp",
 		Path: func(t Target) string { return tools.SharedTmpRoot(t.HomeDir) },
@@ -204,6 +203,14 @@ var catalogue = []Location{
 			}
 			return tools.SweepOrphanSharedTmp(t.HomeDir, live)
 		},
+	},
+	// Ownership survives base-path changes and is removed only when the named
+	// sandbox and both its temporary directories are gone. No age backstop:
+	// an old owner record still protects an idle sandbox.
+	{
+		Name:  "shared temp owners",
+		Path:  func(t Target) string { return tools.SharedTmpOwnerRoot(t.HomeDir) },
+		Sweep: func(t Target) (int, error) { return tools.SweepSharedTmpOwners(t.HomeDir) },
 	},
 	// 7. Run directories: one socket directory per running devsandbox process,
 	// named by pid. Swept on every launch by cleanupStaleRunDirs before any
@@ -327,8 +334,8 @@ var errSandboxBaseAbsent = errors.New("sandbox base does not exist")
 // base, spelled exactly as the launch spells it, so the orphan sweep hashes
 // the same string the launch hashed. It reads the disk listing rather than
 // ListAllSandboxes, whose Docker entries carry a container name in
-// SandboxRoot. An empty base is refused: a live set built from anywhere but
-// the configured base names live sandboxes as orphans.
+// SandboxRoot. An empty base is refused rather than reading the working
+// directory. Ownership records protect homes under other bases.
 //
 // A base that is not on disk is refused for the same reason, and it has to be
 // checked here because ListSandboxes reads it as "no sandboxes yet" and

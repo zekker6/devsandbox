@@ -184,11 +184,9 @@ func (s *Store) ListForSandbox(sandboxRoot string) ([]*Session, error) {
 // worktree path is inside sandboxRoot. Paths are symlink-resolved before
 // comparison so /tmp/x and /private/tmp/x match on macOS.
 //
-// It takes a snapshot rather than reading the store because `sandboxes prune`
-// has to read the records before it sweeps them: the sweep removes every
-// record whose pid is dead, and the sandboxes prune selects are inactive by
-// definition, so a store read afterwards finds none of the worktrees it is
-// looking for.
+// The snapshot lets `sandboxes prune` keep its worktree cleanup candidates
+// across sweeps and confirmation. It must not authorize removing session
+// records by name, because another launch can reuse a stale session's name.
 func FilterForSandbox(all []*Session, sandboxRoot string) []*Session {
 	normRoot := resolvePath(sandboxRoot)
 	prefix := normRoot + string(os.PathSeparator)
@@ -242,9 +240,11 @@ func (s *Store) CleanStale() int {
 	return removed
 }
 
-// CleanStaleErr removes every session file whose process is gone, or whose
-// file has not been written for sessionStaleAge, and reports how many it
-// removed. A missing store directory holds nothing and is not an error; a
+// CleanStaleErr removes session files whose process is gone, or whose process
+// is uncertain and file has not been written for sessionStaleAge, and reports
+// how many it removed. Records with actionable worktree cleanup information
+// are kept until their checkout is absent; a failed stat is reported and the
+// record is kept. A missing store directory holds nothing and is not an error; a
 // store that cannot be read is. A file that cannot be removed is reported and
 // the sweep continues, so one stuck record never hides the rest.
 //
@@ -288,6 +288,16 @@ func (s *Store) CleanStaleErr() (int, error) {
 		}
 		if !s.stale(name, sess, cutoff) {
 			continue
+		}
+		if wt := sess.Worktree; wt != nil && wt.RepoRoot != "" && wt.Path != "" {
+			_, err := os.Stat(wt.Path)
+			if err == nil {
+				continue
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("stat worktree %q for session %q: %w", wt.Path, name, err))
+				continue
+			}
 		}
 		if err := s.Remove(name); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
