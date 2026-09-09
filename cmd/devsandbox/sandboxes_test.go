@@ -606,6 +606,78 @@ func TestPruneRemovesWorktreesOfPrunedSandboxes(t *testing.T) {
 	}
 }
 
+type pruneReportWriter func([]byte) (int, error)
+
+func (w pruneReportWriter) Write(p []byte) (int, error) { return w(p) }
+
+func TestPrunePreservesReusedSessionName(t *testing.T) {
+	home := prepareHome(t)
+	orphanRoot := makeSandbox(t, home, "gone", false)
+	keptRoot := makeSandbox(t, home, "kept", true)
+	store, err := session.DefaultStore()
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	if err := store.Register(&session.Session{
+		Name:    "reused",
+		PID:     999999999,
+		WorkDir: orphanRoot,
+	}); err != nil {
+		t.Fatalf("register stale session: %v", err)
+	}
+	replacement := &session.Session{
+		Name:    "reused",
+		PID:     os.Getpid(),
+		WorkDir: keptRoot,
+	}
+
+	cmd := newPruneCmd()
+	var buf bytes.Buffer
+	inserted := false
+	cmd.SetOut(pruneReportWriter(func(p []byte) (int, error) {
+		n, err := buf.Write(p)
+		// The host report's closing blank line runs after all host sweeps,
+		// before confirmation and sandbox removal, without a timing race.
+		if string(p) == "\n" && !inserted {
+			if _, err := store.Get(replacement.Name); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stale session was not swept before replacement: %v", err)
+			}
+			if _, err := os.Stat(orphanRoot); err != nil {
+				t.Fatalf("sandbox removed before replacement: %v", err)
+			}
+			if err := store.Register(replacement); err != nil {
+				t.Fatalf("register replacement: %v", err)
+			}
+			inserted = true
+		}
+		return n, err
+	}))
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("prune --force: %v", err)
+	}
+	if !inserted {
+		t.Fatal("replacement was not inserted after the host sweep")
+	}
+	if _, err := os.Stat(orphanRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("orphaned sandbox survived, stat error: %v", err)
+	}
+	if _, err := os.Stat(keptRoot); err != nil {
+		t.Errorf("replacement's sandbox was removed: %v", err)
+	}
+	got, err := store.Get(replacement.Name)
+	if err != nil {
+		t.Fatalf("live replacement did not survive prune: %v", err)
+	}
+	if got.PID != replacement.PID || got.WorkDir != replacement.WorkDir {
+		t.Errorf("session = %+v, want live replacement %+v", got, replacement)
+	}
+	if !strings.Contains(buf.String(), "session records: 0 entries, 0 B, reclaimed 1") {
+		t.Errorf("host report does not account for the stale session:\n%s", buf.String())
+	}
+}
+
 func git(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	gitOutput(t, dir, args...)

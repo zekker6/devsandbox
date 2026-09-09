@@ -195,7 +195,10 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 			// session records, and a sandbox selected for pruning is inactive by
 			// definition - so its records name dead pids and the sweep takes
 			// every one of them. Reading the store afterwards finds nothing and
-			// the worktrees stay registered in their repository.
+			// the worktrees stay registered in their repository. Use this snapshot
+			// only for worktree cleanup: a session name can be reused after the
+			// sweep, including while confirmation waits. The host sweep alone
+			// owns stale session-record removal and reporting.
 			sessionStore, sessErr := session.DefaultStore()
 			if sessErr != nil {
 				notice.Warn("session store unavailable; worktree cleanup skipped: %v", sessErr)
@@ -365,12 +368,6 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 						if err := wtMgr.Remove(cmd.Context(), sess.Worktree.RepoRoot, sess.Worktree.Path); err != nil {
 							notice.Warn("worktree cleanup for %s: %v", sess.Name, err)
 						}
-					}
-					// Remove the session file - the sandbox state dir it
-					// references is about to be deleted. The host-scoped sweep
-					// has usually taken it already, which is not a failure.
-					if err := sessionStore.Remove(sess.Name); err != nil && !errors.Is(err, os.ErrNotExist) {
-						notice.Warn("session cleanup for %s: %v", sess.Name, err)
 					}
 				}
 				if err := sandbox.RemoveSandboxByType(s, volumes); err != nil {
