@@ -544,8 +544,8 @@ one-line banner on exit points at the log instead. `--verbose` writes them to st
 so you can watch a running sandbox without tailing the log. The log is rotated when it reaches
 8 MiB and three files are kept (`wrapper.log`, `wrapper.log.1`, `wrapper.log.2`), so it is
 bounded without you having to clear it. `DEVSANDBOX_DEBUG=1` implies it and adds
-the bwrap arguments and a
-[per-request proxy trace](proxy.md#debugging-the-requestresponse-lifecycle).
+the bwrap arguments, with private proxy arguments omitted from stderr, the wrapper log and audit
+receivers, and a [per-request proxy trace](proxy.md#debugging-the-requestresponse-lifecycle).
 
 ### Common Issues
 

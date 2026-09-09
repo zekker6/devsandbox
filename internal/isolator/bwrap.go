@@ -139,23 +139,8 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	secretArgs := builder.SecretArgs()
 	shellCmd := sandbox.BuildShellCommand(sandboxCfg, cfg.Command)
 
-	// Debug output. Wrapping an argv-less "bwrap" yields exactly the systemd-run
-	// scope prefix the real launch uses, or "bwrap" alone when unlimited, so the
-	// dump never claims an invocation that is not the one being run.
-	if os.Getenv("DEVSANDBOX_DEBUG") != "" {
-		launcher, prefix, err := cgroups.Wrap(b.config.Limits, "bwrap", nil)
-		if err != nil {
-			return fmt.Errorf("failed to apply resource limits: %w", err)
-		}
-		var sb strings.Builder
-		sb.WriteString("=== Sandbox Debug ===\n")
-		fmt.Fprintf(&sb, "%s \\\n", launcher)
-		for _, arg := range slices.Concat(prefix, bwrapArgs, secretArgs) {
-			fmt.Fprintf(&sb, "    %s \\\n", arg)
-		}
-		fmt.Fprintf(&sb, "    -- %v\n", shellCmd)
-		sb.WriteString("===================")
-		notice.Info("%s", sb.String())
+	if err := b.debugArgs(bwrapArgs, secretArgs, shellCmd); err != nil {
+		return err
 	}
 
 	// Validate port forwarding requirements
@@ -174,6 +159,30 @@ func (b *BwrapIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 	}
 
 	return b.launch(cfg, bwrapArgs, secretArgs, shellCmd, portForwardArgs)
+}
+
+// debugArgs wraps an argv-less bwrap to show the same scope prefix as the launch.
+func (b *BwrapIsolator) debugArgs(bwrapArgs, secretArgs, shellCmd []string) error {
+	if os.Getenv("DEVSANDBOX_DEBUG") == "" {
+		return nil
+	}
+	launcher, prefix, err := cgroups.Wrap(b.config.Limits, "bwrap", nil)
+	if err != nil {
+		return fmt.Errorf("failed to apply resource limits: %w", err)
+	}
+	var sb strings.Builder
+	sb.WriteString("=== Sandbox Debug ===\n")
+	fmt.Fprintf(&sb, "%s \\\n", launcher)
+	for _, arg := range slices.Concat(prefix, bwrapArgs) {
+		fmt.Fprintf(&sb, "    %s \\\n", arg)
+	}
+	if len(secretArgs) > 0 {
+		sb.WriteString("    [private arguments omitted]\n")
+	}
+	fmt.Fprintf(&sb, "    -- %v\n", shellCmd)
+	sb.WriteString("===================")
+	notice.Info("%s", sb.String())
+	return nil
 }
 
 // bwrapLaunchers holds the two bwrap entry points the dispatch chooses between.

@@ -365,9 +365,9 @@ launch wrapper opens for bwrap's `--args` and unlinks; on Docker and krun they
 are named as bare `-e NAME` and valued from the engine CLI's environment. On
 the Docker backend with `keep_container`, a reused container is handed the
 current session's URL at `docker exec` time, so the container is not
-recreated. The credential is never written to the request log, the ask prompt
-or audit events; note that `DEVSANDBOX_DEBUG=1` prints the full sandbox
-invocation on the host at launch, proxy environment included. Refused requests
+recreated. The credential is never written to the request log, the ask prompt,
+wrapper diagnostics or audit events. `DEVSANDBOX_DEBUG=1` omits private arguments
+from its sandbox invocation dump. Refused requests
 are recorded in the internal proxy log (`devsandbox logs internal --type
 proxy`) as `AUTH: refused ...`, which is where to look when a tool reports 407.
 
