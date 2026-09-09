@@ -427,6 +427,8 @@ real run would leave behind.
 
 The early session-record sweep owns stale-record removal. The snapshot retained for worktree
 cleanup cannot delete a session that reused a reclaimed name while confirmation was waiting.
+Herdr pane saves and orphan checks share a store lock, so pruning an old mapping cannot unlink
+a replacement written by a concurrent launch.
 
 `sandbox.base_path` is a host-level setting and is read from the global config only. A project
 `.devsandbox.toml` or an `[[include]]` file that sets it is ignored, with a warning naming the

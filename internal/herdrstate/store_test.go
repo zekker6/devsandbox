@@ -104,11 +104,8 @@ func TestSaveWritesHashedFileWithRestrictivePerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1 (temp file left behind?)", len(entries))
-	}
-	if strings.Contains(entries[0].Name(), rec.PaneID) {
-		t.Errorf("filename %q contains the raw pane ID", entries[0].Name())
+	if len(entries) != 2 || entries[0].Name() != ".lock" || entries[1].Name() != filepath.Base(want) {
+		t.Fatalf("got entries %v, want one record and the store lock", entries)
 	}
 }
 
@@ -141,10 +138,13 @@ func TestSaveHostilePaneIDStaysInsideStoreDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
-	if len(entries) != 5 {
-		t.Fatalf("got %d records, want 5", len(entries))
+	if len(entries) != 6 {
+		t.Fatalf("got %d entries, want 5 records and the store lock", len(entries))
 	}
 	for _, e := range entries {
+		if e.Name() == ".lock" {
+			continue
+		}
 		if e.IsDir() {
 			t.Errorf("record %q is a directory", e.Name())
 		}
@@ -268,8 +268,8 @@ func TestConcurrentPanesKeepSeparateMappings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
-	if len(entries) != len(panes) {
-		t.Fatalf("got %d records, want %d — panes overwrote each other", len(entries), len(panes))
+	if len(entries) != len(panes)+1 {
+		t.Fatalf("got %d entries, want %d records and the store lock", len(entries), len(panes))
 	}
 
 	for _, p := range panes {
@@ -732,8 +732,12 @@ func TestPruneReportsRemovalFailure(t *testing.T) {
 }
 
 func TestPruneMissingDirIsNothingToDo(t *testing.T) {
-	n, err := herdrstate.Prune(filepath.Join(t.TempDir(), "never-created"))
+	dir := filepath.Join(t.TempDir(), "never-created")
+	n, err := herdrstate.Prune(dir)
 	if err != nil || n != 0 {
 		t.Fatalf("Prune on a missing directory = (%d, %v), want (0, nil)", n, err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("Prune created the missing directory: %v", err)
 	}
 }

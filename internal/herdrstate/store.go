@@ -97,7 +97,7 @@ func (s *Store) filePath(paneID string) string {
 // the new one but never a partial write.
 //
 // UpdatedAt is stamped when the caller left it zero.
-func (s *Store) Save(rec Record) error {
+func (s *Store) Save(rec Record) (err error) {
 	if rec.PaneID == "" {
 		return errors.New("herdrstate: pane ID is required")
 	}
@@ -124,6 +124,17 @@ func (s *Store) Save(rec Record) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("herdrstate: create %s: %w", s.dir, err)
 	}
+
+	lockPath := filepath.Join(s.dir, ".lock")
+	lock, err := fsutil.AcquireFileLock(lockPath)
+	if err != nil {
+		return fmt.Errorf("herdrstate: lock %s: %w", lockPath, err)
+	}
+	defer func() {
+		if releaseErr := lock.Release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("herdrstate: release lock %s: %w", lockPath, releaseErr))
+		}
+	}()
 
 	if err := fsutil.WriteFileAtomic(s.filePath(rec.PaneID), data, 0o600); err != nil {
 		return fmt.Errorf("herdrstate: write record: %w", err)
@@ -179,7 +190,7 @@ func readRecord(path string) (Record, error) {
 // one whose root cannot be checked for any reason other than not existing:
 // an unknown answer must never authorize a deletion. A removal failure is
 // reported and the sweep continues, so one stuck entry never hides the rest.
-func Prune(dir string) (int, error) {
+func Prune(dir string) (removed int, err error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
@@ -187,7 +198,19 @@ func Prune(dir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("herdrstate: read %s: %w", dir, err)
 	}
-	removed := 0
+	// Lock before reading any record and keep it through unlink: Save replaces
+	// the same pathname, so an orphan decision cannot outlive this lock.
+	lockPath := filepath.Join(dir, ".lock")
+	lock, err := fsutil.AcquireFileLock(lockPath)
+	if err != nil {
+		return 0, fmt.Errorf("herdrstate: lock %s: %w", lockPath, err)
+	}
+	defer func() {
+		if releaseErr := lock.Release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("herdrstate: release lock %s: %w", lockPath, releaseErr))
+		}
+	}()
+
 	var errs []error
 	for _, e := range entries {
 		if !e.Type().IsRegular() || filepath.Ext(e.Name()) != ".json" {
@@ -204,7 +227,7 @@ func Prune(dir string) (int, error) {
 		}
 		if err := os.Remove(path); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				// Another prune got there first; the record is gone either way.
+				// A removal outside the store already deleted the record.
 				continue
 			}
 			errs = append(errs, fmt.Errorf("herdrstate: remove record %s: %w", path, err))
