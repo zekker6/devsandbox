@@ -246,7 +246,7 @@ const secretArgsFD = "3"
 // wording and status, which names neither devsandbox nor the file.
 const secretArgsPrologue = `[ -r "$1" ] || { echo "devsandbox: cannot read the private bwrap argument file $1" >&2; exit 1; }
 exec 3<"$1"
-rm -f -- "$1"
+/bin/rm -f -- "$1" || { echo "devsandbox: cannot remove the private bwrap argument file $1" >&2; exit 1; }
 shift
 `
 
