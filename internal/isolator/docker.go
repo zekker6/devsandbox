@@ -25,6 +25,7 @@ import (
 	"devsandbox/internal/proxyenv"
 	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
+	"devsandbox/internal/termsafe"
 )
 
 const (
@@ -754,6 +755,13 @@ func (d *DockerIsolator) waitForContainerReady(dockerBinary, containerName strin
 		case <-ticker.C:
 			check := exec.Command(dockerBinary, "exec", containerName, "test", "-f", readySentinel)
 			if check.Run() == nil {
+				out, err := exec.Command(dockerBinary, "exec", containerName, "cat", readySentinel).Output()
+				if err != nil {
+					return fmt.Errorf("read container %s ready sentinel: %w", containerName, err)
+				}
+				if len(out) > 0 {
+					notice.Alert("Container setup warning: %s", termsafe.Escape(string(out)))
+				}
 				return nil
 			}
 			// `exec` fails both while the shim is still starting and after it
@@ -1257,8 +1265,7 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-e", "MISE_TRUSTED_CONFIG_PATHS="+cfg.ProjectDir)
 	}
 
-	// Write overlay manifest if any tmpoverlay bindings exist
-	if len(overlayManifest.Overlays) > 0 {
+	if len(overlayManifest.Overlays) > 0 || len(overlayManifest.Seeds) > 0 {
 		manifestPath, err := d.writeOverlayManifest(cfg, overlayManifest)
 		if err != nil {
 			return nil, fmt.Errorf("write overlay manifest: %w", err)
@@ -1480,9 +1487,9 @@ func (d *DockerIsolator) Cleanup() error {
 	return nil
 }
 
-// overlayManifestFileName is the manifest's name inside the per-project sandbox
-// state directory.
-const overlayManifestFileName = "overlays.json"
+// Private setup data must never reuse the old, publicly readable overlays.json
+// inode: chmod cannot revoke a descriptor another host user already opened.
+const overlayManifestFileName = "container-setup.json"
 
 // writeOverlayManifest writes the manifest into the per-project sandbox state
 // directory and returns the host path.
@@ -1507,12 +1514,6 @@ func (d *DockerIsolator) writeOverlayManifest(cfg *Config, manifest *OverlayMani
 	path := filepath.Join(cfg.SandboxRoot, overlayManifestFileName)
 	if err := manifest.Write(path); err != nil {
 		return "", err
-	}
-	// Write preserves the mode of an existing file, so a manifest left at 0600
-	// by an older devsandbox would stay unreadable to container-root whenever
-	// DAC_OVERRIDE is unavailable. The manifest lists container-side paths only.
-	if err := os.Chmod(path, 0o644); err != nil {
-		return "", fmt.Errorf("chmod overlay manifest: %w", err)
 	}
 	return path, nil
 }
@@ -1713,6 +1714,15 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		toolMountMode := config.ToolMountMode(cfg.ToolsConfig, tool.Name())
 		if toolMountMode == "disabled" {
 			continue
+		}
+
+		if seeded, ok := tool.(tools.ToolWithHomeSeedFiles); ok {
+			seeds, err := collectHomeSeeds(cfg.SandboxHome, seeded.HomeSeedFiles())
+			if err != nil {
+				notice.Alert("tool %s: cannot seed container home: %v", tool.Name(), err)
+			} else {
+				manifest.Seeds = append(manifest.Seeds, seeds...)
+			}
 		}
 
 		// The shared temp directory is emitted once for the first enabled tool
@@ -1943,9 +1953,15 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 		}
 	}
 
-	// Overlay manifest — changes in overlay paths require container recreation.
+	// Changing the manifest path must recreate kept containers bound to the old file.
+	if len(overlayManifest.Overlays) > 0 || len(overlayManifest.Seeds) > 0 {
+		_, _ = fmt.Fprintf(h, "manifest=%s\n", filepath.Join(cfg.SandboxRoot, overlayManifestFileName))
+	}
 	for _, entry := range overlayManifest.Overlays {
 		_, _ = fmt.Fprintf(h, "overlay=%s:%s\n", entry.Path, entry.Type)
+	}
+	for _, seed := range overlayManifest.Seeds {
+		_, _ = fmt.Fprintf(h, "seed=%s\n", seed.Name)
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil)[:8])

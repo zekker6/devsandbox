@@ -58,6 +58,22 @@ func TestReadOverlayManifest_Malformed(t *testing.T) {
 	}
 }
 
+func TestOverlayManifest_RefusesPublicInode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "container-setup.json")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := testOverlayManifest().Write(path); err == nil {
+		t.Fatal("accepted a manifest another host user could already have opened")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "original" {
+		t.Fatalf("refusal modified the public inode: %q, %v", got, err)
+	}
+}
+
 func TestOverlayManifest_Empty(t *testing.T) {
 	manifest := &OverlayManifest{}
 	dir := t.TempDir()

@@ -1,9 +1,7 @@
 package tools
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +17,23 @@ func init() {
 // Claude provides Claude AI tool integration.
 // Mounts Claude config directory with tmpoverlay (protects settings/credentials)
 // and projects subdirectory with persistent overlay (preserves session history and memory).
-type Claude struct{ Mounting }
+type Claude struct {
+	Mounting
+	disabled bool
+}
+
+func (c *Claude) Configure(_ GlobalConfig, toolCfg map[string]any) {
+	var cfg MountModeConfig
+	decodeConfig(c.Name(), toolCfg, &cfg)
+	c.disabled = cfg.MountMode == "disabled"
+}
+
+func (c *Claude) HomeSeedFiles() []string {
+	if c.disabled || c.configDir() != "" {
+		return nil
+	}
+	return []string{".claude.json"}
+}
 
 func (c *Claude) Name() string {
 	return "claude"
@@ -167,6 +181,9 @@ func (c *Claude) AgentSessionDir(homeDir string) string {
 // is mounted in that case, so writes already land in the sandbox home and
 // persist.
 func (c *Claude) Setup(homeDir, sandboxHome string) error {
+	if c.disabled {
+		return nil
+	}
 	if err := c.seedClaudeJSON(homeDir, sandboxHome); err != nil {
 		return err
 	}
@@ -213,42 +230,17 @@ func (c *Claude) seedClaudeJSON(homeDir, sandboxHome string) error {
 		return nil
 	}
 	dst := filepath.Join(sandboxHome, ".claude.json")
-	info, err := os.Lstat(dst)
-	switch {
-	case err == nil && info.Mode().IsRegular() && info.Size() > 0:
-		return nil
-	case err == nil && info.Mode()&os.ModeSymlink == 0 && !info.Mode().IsRegular():
-		kind := info.Mode().String()
-		if info.IsDir() {
-			kind = "directory"
-		}
-		notice.Alert("claude: %s is a %s, not a file; leaving it alone, so Claude Code in the sandbox will not find its state file", dst, kind)
-		return nil
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("stat %s: %w", dst, err)
-	}
-
 	src := filepath.Join(homeDir, ".claude.json")
-	data, err := os.ReadFile(src)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+	_, err := fsutil.SeedFile(dst, func() ([]byte, error) {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", src, err)
 		}
-		return fmt.Errorf("read %s: %w", src, err)
-	}
-
-	if info != nil && info.Mode()&os.ModeSymlink != 0 {
-		notice.Alert("claude: replaced a symlink at %s with a fresh copy of ~/.claude.json", dst)
-		if err := os.Remove(dst); err != nil {
-			return fmt.Errorf("remove symlink %s: %w", dst, err)
-		}
-	}
-	// WriteFileAtomic renames a fresh inode over the name, so even a link
-	// planted between the Remove and the rename is replaced, not opened.
-	if err := fsutil.WriteFileAtomic(dst, data, 0o600); err != nil {
-		return fmt.Errorf("seed %s: %w", dst, err)
-	}
-	return nil
+		return data, nil
+	}, func(format string, args ...any) {
+		notice.Alert("claude: "+format, args...)
+	})
+	return err
 }
 
 func (c *Claude) Environment(homeDir, sandboxHome string) []EnvVar {

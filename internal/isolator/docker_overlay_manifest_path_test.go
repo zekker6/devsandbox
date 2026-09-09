@@ -1,11 +1,14 @@
 package isolator
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"devsandbox/internal/fsutil"
 )
 
 func testOverlayManifest() *OverlayManifest {
@@ -69,28 +72,38 @@ func TestWriteOverlayManifest_RewritesInPlace(t *testing.T) {
 	}
 }
 
-// TestWriteOverlayManifest_ReadableByContainerRoot verifies the manifest ends up
-// world-readable even when an older devsandbox left it at 0600. Container-root
-// reads it during shim setup, and cannot bypass the DAC bits when DAC_OVERRIDE
-// is unavailable.
-func TestWriteOverlayManifest_ReadableByContainerRoot(t *testing.T) {
+// Seeds may contain account configuration. Container-root reads the private
+// manifest using the DAC_OVERRIDE capability granted for shim setup.
+func TestWriteOverlayManifest_PrivateEvenAfterUpgrade(t *testing.T) {
 	cfg := &Config{SandboxRoot: t.TempDir()}
-	stale := filepath.Join(cfg.SandboxRoot, overlayManifestFileName)
-	if err := os.WriteFile(stale, []byte("{}"), 0o600); err != nil {
+	stale := filepath.Join(cfg.SandboxRoot, "overlays.json")
+	if err := os.WriteFile(stale, []byte("{}"), 0o644); err != nil {
 		t.Fatalf("seed stale manifest: %v", err)
 	}
-
-	path, err := (&DockerIsolator{}).writeOverlayManifest(cfg, testOverlayManifest())
+	reader, err := os.Open(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	manifest := testOverlayManifest()
+	manifest.Seeds = []fsutil.FileSeed{{Name: ".claude.json", Data: []byte("private account state")}}
+	path, err := (&DockerIsolator{}).writeOverlayManifest(cfg, manifest)
 	if err != nil {
 		t.Fatalf("writeOverlayManifest: %v", err)
+	}
+	if path == stale {
+		t.Error("private manifest reused the formerly public path")
+	}
+	if got, err := io.ReadAll(reader); err != nil || string(got) != "{}" {
+		t.Fatalf("legacy reader can observe new manifest content: %q, %v", got, err)
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat manifest: %v", err)
 	}
-	if mode := info.Mode().Perm(); mode != 0o644 {
-		t.Errorf("manifest mode = %04o, want 0644", mode)
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("manifest mode = %04o, want 0600", mode)
 	}
 }
 

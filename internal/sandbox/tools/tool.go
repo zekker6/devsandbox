@@ -121,6 +121,14 @@ type ToolWithSetup interface {
 	Setup(homeDir, sandboxHome string) error
 }
 
+// ToolWithHomeSeedFiles names private files Setup seeds directly into the
+// sandbox home. Container backends carry their contents into the guest so a
+// named-volume home gets the same initial state as a bind-mounted home.
+type ToolWithHomeSeedFiles interface {
+	Tool
+	HomeSeedFiles() []string
+}
+
 // CheckResult contains detailed availability information for a tool.
 type CheckResult struct {
 	Available   bool     // Whether the tool is available

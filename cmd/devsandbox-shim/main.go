@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"devsandbox/internal/fsutil"
 	"devsandbox/internal/notice"
 )
 
@@ -109,11 +110,16 @@ func main() {
 		}
 	}
 	suppressSSHAgent()
-	writeReadySentinel()
+	manifest := loadOverlayManifest(overlayManifestPath)
+	seedWarnings, err := seedHomeFiles(sandboxHome, manifest.Seeds, uid, gid)
+	if err != nil {
+		fatal("seed sandbox home: %v", err)
+	}
+	if err := writeReadySentinel(readySentinel, seedWarnings); err != nil {
+		fatal("write ready sentinel: %v", err)
+	}
 
-	// Load overlay manifest — the Docker isolator writes this when tmpoverlay
-	// bindings exist. If present, we either copy (macOS) or fork with overlayfs (Linux).
-	overlays := loadOverlayManifest(overlayManifestPath)
+	overlays := manifest.Overlays
 
 	// Separate overlay types: copyoverlay (macOS) vs tmpoverlay (Linux overlayfs)
 	var copyOverlays, fsOverlays []overlayEntry
@@ -623,11 +629,9 @@ func suppressSSHAgent() {
 	}
 }
 
-// writeReadySentinel writes a sentinel file to signal that setup is complete.
-func writeReadySentinel() {
-	if err := os.WriteFile(readySentinel, nil, 0o644); err != nil {
-		warn("write ready sentinel: %v", err)
-	}
+// writeReadySentinel publishes setup warnings atomically with the ready signal.
+func writeReadySentinel(path string, warnings []string) error {
+	return fsutil.WriteFileAtomic(path, []byte(strings.Join(warnings, "\n")), 0o644)
 }
 
 // dropPrivsAndExec drops to the sandboxuser UID/GID and execs the given command.
@@ -715,22 +719,21 @@ type overlayEntry struct {
 }
 
 type overlayManifest struct {
-	Overlays []overlayEntry `json:"overlays"`
+	Overlays []overlayEntry    `json:"overlays"`
+	Seeds    []fsutil.FileSeed `json:"seeds,omitempty"`
 }
 
 func parseOverlayManifest(data []byte, m *overlayManifest) error {
 	return json.Unmarshal(data, m)
 }
 
-// loadOverlayManifest reads the overlay manifest and returns validated entries.
-// Returns an empty slice if the manifest file does not exist.
-// Fatals if the file exists but is malformed.
-// Skips entries whose path is not an existing directory.
-func loadOverlayManifest(path string) []overlayEntry {
+// loadOverlayManifest reads container setup state, keeping overlay entries
+// only when their target directory exists. Private file seeds may be absent.
+func loadOverlayManifest(path string) overlayManifest {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return overlayManifest{}
 		}
 		fatal("read overlay manifest: %v", err)
 	}
@@ -749,7 +752,32 @@ func loadOverlayManifest(path string) []overlayEntry {
 		}
 		valid = append(valid, entry)
 	}
-	return valid
+	m.Overlays = valid
+	return m
+}
+
+func seedHomeFiles(home string, seeds []fsutil.FileSeed, uid, gid int) ([]string, error) {
+	var warnings []string
+	seedWarn := func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+		warn(format, args...)
+	}
+	for _, seed := range seeds {
+		if seed.Name == "." || seed.Name == ".." || filepath.Base(seed.Name) != seed.Name {
+			return warnings, fmt.Errorf("invalid home seed filename %q", seed.Name)
+		}
+		dst := filepath.Join(home, seed.Name)
+		seeded, err := fsutil.SeedFile(dst, func() ([]byte, error) { return seed.Data, nil }, seedWarn)
+		if err != nil {
+			return warnings, err
+		}
+		if seeded {
+			if err := os.Lchown(dst, uid, gid); err != nil {
+				return warnings, fmt.Errorf("chown home seed %s: %w", seed.Name, err)
+			}
+		}
+	}
+	return warnings, nil
 }
 
 func warn(format string, args ...any) {

@@ -1,9 +1,13 @@
 package isolator
 
 import (
+	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
+
+	"devsandbox/internal/notice"
 )
 
 // fakeEngineExecFailsInspect builds a fake engine whose readiness probe
@@ -26,6 +30,47 @@ func TestWaitForContainerReady_SentinelPresent(t *testing.T) {
 
 	if err := newFakeEngineIsolator(bin).waitForContainerReady(bin, "devsandbox-test", 5*time.Second); err != nil {
 		t.Errorf("waitForContainerReady with sentinel present = %v, want nil", err)
+	}
+}
+
+func TestWaitForContainerReady_WarningsVisibleWhileRunning(t *testing.T) {
+	var stderr bytes.Buffer
+	if err := notice.Setup("", false, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	notice.SetRunning()
+	t.Cleanup(func() {
+		notice.Flush()
+		notice.SetStartup()
+		if err := notice.Setup("", false, io.Discard); err != nil {
+			t.Errorf("reset notice: %v", err)
+		}
+	})
+	bin := writeFakeEngine(t, `case "$1:$3:$4" in
+  exec:test:-f) exit 0 ;;
+  exec:cat:/tmp/.devsandbox-ready) printf 'seed warning: .claude.json is a directory\033[2J\302\233\342\200\256'; exit 0 ;;
+  *) exit 1 ;;
+esac`)
+	if err := newFakeEngineIsolator(bin).waitForContainerReady(bin, "devsandbox-test", 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, `seed warning: .claude.json is a directory\x1b[2J\u009b\u202e`) {
+		t.Fatalf("warning missing or not escaped in PhaseRunning: %q", got)
+	}
+	if strings.ContainsAny(got, "\x1b\u009b\u202e") {
+		t.Fatalf("guest terminal controls reached stderr: %q", got)
+	}
+}
+
+func TestWaitForContainerReady_UnreadableSentinelFails(t *testing.T) {
+	bin := writeFakeEngine(t, `case "$1:$3" in
+  exec:test) exit 0 ;;
+  *) exit 1 ;;
+esac`)
+	err := newFakeEngineIsolator(bin).waitForContainerReady(bin, "devsandbox-test", 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "ready sentinel") {
+		t.Fatalf("unreadable readiness warnings = %v, want a read error", err)
 	}
 }
 

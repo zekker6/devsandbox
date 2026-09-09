@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+
+	"devsandbox/internal/fsutil"
 )
 
 // OverlayManifestPath is the container-side path where the manifest is mounted.
 const OverlayManifestPath = "/tmp/.devsandbox-overlays.json"
 
-// OverlayManifest lists paths that the shim should mount as overlayfs.
+// OverlayManifest carries mount and private-file setup instructions for the shim.
 type OverlayManifest struct {
-	Overlays []OverlayEntry `json:"overlays"`
+	Overlays []OverlayEntry    `json:"overlays"`
+	Seeds    []fsutil.FileSeed `json:"seeds,omitempty"`
 }
 
 // OverlayEntry describes a single overlay mount.
@@ -32,7 +35,30 @@ func (m *OverlayManifest) Write(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal overlay manifest: %w", err)
 	}
-	return os.WriteFile(path, data, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	// Kept containers pin this inode. It must have been private from creation;
+	// tightening a public inode cannot revoke readers that already opened it.
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		_ = f.Close()
+		return fmt.Errorf("refusing to write private setup data to %s: remove the non-private manifest and recreate the container", path)
+	}
+	if err := f.Truncate(0); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // ReadOverlayManifest reads and parses a manifest file.

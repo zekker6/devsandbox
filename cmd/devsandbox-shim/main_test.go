@@ -225,7 +225,7 @@ func TestLoadOverlayManifest_Valid(t *testing.T) {
 		t.Skipf("cannot create test directory: %v", err)
 	}
 
-	entries := loadOverlayManifest(path)
+	entries := loadOverlayManifest(path).Overlays
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -238,7 +238,7 @@ func TestLoadOverlayManifest_Valid(t *testing.T) {
 }
 
 func TestLoadOverlayManifest_NotExists(t *testing.T) {
-	entries := loadOverlayManifest("/nonexistent/path.json")
+	entries := loadOverlayManifest("/nonexistent/path.json").Overlays
 	if len(entries) != 0 {
 		t.Errorf("expected empty slice for missing file, got %d entries", len(entries))
 	}
@@ -277,7 +277,7 @@ func TestLoadOverlayManifest_CopyOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries := loadOverlayManifest(path)
+	entries := loadOverlayManifest(path).Overlays
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -309,7 +309,7 @@ func TestLoadOverlayManifest_SkipsFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries := loadOverlayManifest(path)
+	entries := loadOverlayManifest(path).Overlays
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry (dir only), got %d", len(entries))
 	}
