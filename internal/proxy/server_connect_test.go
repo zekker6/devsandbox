@@ -14,10 +14,20 @@ import (
 	"time"
 )
 
+// disableAmbientConnectProxy keeps loopback CONNECT tests independent of a
+// proxy inherited from the environment. goproxy's CONNECT dialer does not
+// consult NO_PROXY.
+func disableAmbientConnectProxy(t *testing.T) {
+	t.Helper()
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+}
+
 // startTunnelProxy starts a running proxy with MITM disabled and the given
 // filter configuration, and returns it.
 func startTunnelProxy(t *testing.T, filter *FilterConfig) *Server {
 	t.Helper()
+	disableAmbientConnectProxy(t)
 
 	cfg := newTestConfig(shortTempDir(t), 0)
 	cfg.MITM = false

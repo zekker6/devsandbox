@@ -211,11 +211,7 @@ func TestServerAuth_CONNECT_Transparent(t *testing.T) {
 	defer ts.Close()
 	target := strings.TrimPrefix(ts.URL, "https://")
 
-	// goproxy chains every accepted CONNECT through an ambient HTTPS_PROXY
-	// without consulting NO_PROXY, so under an outer proxy (a devsandbox
-	// session, say) the tunnel to the loopback upstream never opens.
-	t.Setenv("HTTPS_PROXY", "")
-	t.Setenv("https_proxy", "")
+	disableAmbientConnectProxy(t)
 
 	cfg := newTestConfig(shortTempDir(t), 0)
 	cfg.MITM = false
