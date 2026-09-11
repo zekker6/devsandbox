@@ -414,13 +414,29 @@ tasks:
       # `zensical build --clean` does not invalidate snippet-included content
       # (e.g., updates to README.md don't propagate without removing .cache).
       - rm -rf public/ .cache/
-      # --strict turns Zensical's own unresolvable-link warnings into a build
-      # failure. It only sees links it can resolve from the Markdown source;
+      # Zensical has no source-exclusion setting. Build from tracked and
+      # unignored docs plus generated snippets so ignored plans and review notes
+      # cannot enter strict validation or the rendered site. Copy from the
+      # working tree so this gate still checks uncommitted edits.
+      - |
+        staging=$(mktemp -d .zensical-docs.XXXXXX)
+        config=$(mktemp .zensical-build.XXXXXX.toml)
+        cleanup() {
+          rm -rf "$staging" "$config"
+        }
+        trap cleanup EXIT
+        git ls-files --cached --others --exclude-standard docs | while IFS= read -r file; do
+          mkdir -p "$staging/$(dirname "$file")"
+          cp "$file" "$staging/$file"
+        done
+        mkdir -p "$staging/docs"
+        cp -R docs/.include "$staging/docs/.include"
+        awk -v docs_dir="$staging/docs" '
+          { print }
+          $0 == "[project]" { print "docs_dir = \"" docs_dir "\"" }
+        ' zensical.toml > "$config"
+        mise exec -- zensical build -f "$config" --clean --strict
       # `task site:check` covers the rendered output, snippets included.
-      - mise exec -- zensical build --clean --strict
-      # Strip internal-only dirs that Zensical may have rendered if they exist locally.
-      # CI checkouts don't have these, so this is a local-dev safety net.
-      - rm -rf public/docs/plans public/docs/summaries public/docs/superpowers
       - mkdir -p public/
       - cp -r site/landing/. public/
       - 'echo "Built: public/index.html (landing) + public/docs/ (zensical)"'
