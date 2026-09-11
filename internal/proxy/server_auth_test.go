@@ -452,6 +452,9 @@ func assertRefusedTunnel(t *testing.T, resp *http.Response, conn net.Conn) {
 	if got := resp.Header.Get("Proxy-Authenticate"); got != `Basic realm="devsandbox"` {
 		t.Errorf("Proxy-Authenticate = %q, want the Basic challenge", got)
 	}
+	if !resp.Close {
+		t.Error("CONNECT challenge must advertise Connection: close so clients reconnect for authentication")
+	}
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "proxy authentication required") {
 		t.Errorf("body = %q, want the refusal reason", body)

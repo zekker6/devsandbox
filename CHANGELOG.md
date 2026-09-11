@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- HTTPS Git clone and fetch no longer fail with `Proxy CONNECT aborted` during proxy authentication. Clients can reconnect to answer the authentication challenge, with MITM enabled or disabled. See [Proxy authentication](docs/proxy.md#proxy-authentication).
 - The bundled Docker image builds again after the shim gained new internal dependencies.
 - Pruning no longer mistakes a live session's shared `$TMPDIR` for an orphan after `sandbox.base_path` changes. Ownership records cover previous bases; directories whose ownership is unknown are kept. See [Shared temp cleanup](docs/tools.md#cleanup).
 - Keeping a sandbox or declining prune confirmation now preserves its worktree-cleanup record, so a later prune can unregister the checkout from Git. See [Pruning Sandboxes](docs/sandboxing.md#pruning-sandboxes).

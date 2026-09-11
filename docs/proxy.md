@@ -20,7 +20,7 @@ boundary.
 ## When to Enable Proxy Mode
 
 | Enable proxy when | Skip proxy when |
-|---|---|
+| --- | --- |
 | You want to monitor AI agent network activity | You trust the code and don't need traffic visibility |
 | You need credential injection (GitHub tokens) | Tools use certificate pinning that breaks MITM |
 | You need port forwarding (requires network isolation) | You want the fastest possible startup |
@@ -136,7 +136,7 @@ mitm = false
 ### What Changes
 
 | Feature | MITM enabled (default) | MITM disabled |
-|---------|----------------------|---------------|
+| --------- | ---------------------- | --------------- |
 | HTTP filtering/logging | Full | Full |
 | HTTPS body/header inspection | Full | None |
 | HTTPS credential injection | Works | Does not work |
@@ -274,7 +274,7 @@ on Docker as instrumentation for cooperating tools, not as a containment boundar
 to hold against uncooperative code.
 
 | Aspect | bwrap | krun | Docker |
-|--------|-------|------|--------|
+| -------- | ------- | ------ | -------- |
 | Enforcement | Enforced, fail-closed (no default route + deny-by-default firewall) | Enforced, fail-closed (no default route + deny-by-default firewall) | Advisory (env vars only) |
 | Network isolation | pasta namespace | pasta namespace around the microVM | Per-session Docker network |
 | Gateway IP | `10.0.2.2` | `10.0.2.2` | `host.docker.internal` |
@@ -347,6 +347,11 @@ Claude Code all read URL credentials from the proxy variables. A client that
 ignores them, or a proxy URL you spell out by hand without them (`curl -x
 http://10.0.2.2:8080`), gets 407: use the exported variable (`curl -x
 "$HTTP_PROXY"`) or pass the credential the way the client expects.
+
+Clients such as Git may wait for the `407` challenge before sending credentials.
+The CONNECT challenge advertises `Connection: close`, allowing them to reconnect
+and retry with authentication rather than fail with `Proxy CONNECT aborted`.
+This works with MITM enabled or disabled and needs no Git configuration change.
 
 There is no opt-out, for the same reason the egress lockdown has none. The
 listener is reachable by every local process - other users on the host, a
@@ -661,7 +666,7 @@ HTTP filtering allows you to control which requests are allowed, blocked, or req
 Filtering is enabled by setting `default_action` which determines what happens to requests that don't match any rule:
 
 | Default Action | Behavior |
-|----------------|----------|
+| ---------------- | ---------- |
 | `block` | Block unmatched requests (whitelist behavior) |
 | `allow` | Allow unmatched requests (blacklist behavior) |
 | `ask` | Prompt user for each unmatched request |
@@ -742,7 +747,7 @@ You can generate filter rules from a "known good" session using `devsandbox prox
 Default is `glob`. Patterns containing regex characters (`^$|()[]{}\+`) are auto-detected as regex.
 
 | Type | Example | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `glob` | `*.example.com` | Glob patterns (* and ?) - **default** |
 | `exact` | `api.example.com` | Exact string match |
 | `regex` | `^api\.(dev\|prod)\.com$` | Regular expressions |
@@ -752,7 +757,7 @@ Default is `glob`. Patterns containing regex characters (`^$|()[]{}\+`) are auto
 Default is `host`.
 
 | Scope | Description | Example Match |
-|-------|-------------|---------------|
+| ------- | ------------- | --------------- |
 | `host` | Request host only - **default** | `api.example.com` |
 | `path` | Request path only | `/api/v1/users` |
 | `url` | Full URL | `https://api.example.com/v1/users` |
@@ -957,7 +962,7 @@ sequenceDiagram
 Every injector is defined by the same set of fields under `[proxy.credentials.<name>]`:
 
 | Field | Purpose |
-|-------|---------|
+| ------- | --------- |
 | `enabled` | Master switch. Injector is inert unless `enabled = true`. |
 | `host` | Hostname to match. Exact (`api.github.com`) or glob (`*.example.com`). Matched case-insensitively, ignoring a trailing dot. |
 | `header` | HTTP header to set on matching requests. Canonicalized at load (`authorization` → `Authorization`). |
@@ -997,7 +1002,7 @@ enabled = true
 ### Source Types
 
 | Field | Description | Example |
-|-------|-------------|---------|
+| ------- | ------------- | --------- |
 | `env` | Read from an environment variable | `env = "DEVSANDBOX_GITHUB_TOKEN"` |
 | `file` | Read from a file (supports `~` expansion, whitespace trimmed) | `file = "~/.config/devsandbox/github-token"` |
 | `value` | Static value in config | `value = "github_pat_..."` |
@@ -1060,7 +1065,7 @@ everything else the proxy does - see [Coverage](#redaction-coverage) below befor
 ### Actions
 
 | Action | What happens |
-|--------|-------------|
+| -------- | ------------- |
 | **Block** | Request rejected with HTTP 403. Secret never leaves your machine. |
 | **Redact** | Secret replaced with `[REDACTED:<rule-name>]` in body, headers, and URL. Modified request forwarded to destination. |
 | **Log** | Request forwarded unmodified. Match recorded in proxy logs as a warning. |
@@ -1114,7 +1119,7 @@ Any scanned request containing the value of `$API_SECRET_KEY` is blocked with HT
 Rules detect secrets using either a **source** (exact value lookup) or a **pattern** (regex match).
 
 | Field | Description | Example |
-|-------|-------------|---------|
+| ------- | ------------- | --------- |
 | `env` | Environment variable on the host | `env = "API_SECRET_KEY"` |
 | `file` | File path (supports `~`, whitespace trimmed) | `file = "~/.secrets/token"` |
 | `env_file_key` | Key in project `.env` file | `env_file_key = "DB_PASSWORD"` |

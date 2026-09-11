@@ -337,7 +337,11 @@ func (s *Server) authorizeConnect(ctx *goproxy.ProxyCtx) *http.Response {
 		return nil
 	}
 	s.logAuthRefused(ctx.Req)
-	return proxyAuthRequired(ctx.Req)
+	resp := proxyAuthRequired(ctx.Req)
+	// RejectConnect closes the socket. Auth-negotiating clients need to
+	// reopen it for their authenticated retry rather than reuse it.
+	resp.Close = true
+	return resp
 }
 
 // logAuthRefused records a refusal in the internal proxy log so a client that
