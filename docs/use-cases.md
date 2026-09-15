@@ -164,7 +164,7 @@ devsandbox completion fish > ~/.config/fish/completions/devsandbox.fish
 
 ## Useful Aliases
 
-For the supported agents (`claude`, `pi`, `codex`, `opencode`, `copilot`), prefer `devsandbox agent-wrappers activate` over a hand-written alias: it passes arguments through untouched, provides `<agent>-no-ds` and `command <agent>` escape hatches, and does not recurse inside the sandbox. For `claude`, `pi`, and `codex` it is also what herdr's session restore hooks into. See [Tools: Shell wrappers](tools.md#shell-wrappers-run-agents-sandboxed-by-default). The aliases below remain useful for flag presets such as `--proxy`.
+For the supported agents (`claude`, `pi`, `codex`, `opencode`, `copilot`), prefer `devsandbox shell-wrappers activate` over a hand-written alias: it passes arguments through untouched, provides `<agent>-no-ds` and `command <agent>` escape hatches, and does not recurse inside the sandbox. For `claude`, `pi`, and `codex` it is also what herdr's session restore hooks into. See [Tools: Shell wrappers](tools.md#shell-wrappers-run-agents-sandboxed-by-default). The same activation wraps any command listed in [`[shell_wrappers] commands`](configuration.md#shell-wrappers), which replaces the `snpm`-style aliases below with the plain command name (see [Node.js Project](#nodejs-project)). The aliases remain useful for flag presets such as `--proxy`.
 
 Add these to your shell configuration:
 
@@ -276,6 +276,16 @@ devsandbox npm test
 # Build for production
 devsandbox npm run build
 ```
+
+Typing `devsandbox` in front of every command stops protecting you the first time you forget it, and a forgotten `npm install` runs every dependency's install scripts on the host. Wrap the package tooling instead, so the plain command name enters the sandbox:
+
+```toml
+# ~/.config/devsandbox/config.toml
+[shell_wrappers]
+commands = ["bun", "node", "npm"]
+```
+
+With the [activation line](tools.md#shell-wrappers-run-agents-sandboxed-by-default) in your startup file, `npm install` in a new shell runs `devsandbox run-command npm install`. `npm-no-ds install` or `command npm install` runs the host npm when you need it. To wrap a command for one project only, list it in that project's `.devsandbox.toml` and trust the file. Project lists add to the global one, and a shell already open picks up the change once you run activation again in that directory. See [Wrapping other commands](tools.md#wrapping-other-commands).
 
 > **macOS:** File watching (hot reload) may require polling mode. Set `WATCHPACK_POLLING=true devsandbox npm run dev` or see [File Watching Limitations](sandboxing.md#file-watching-limitations) for other frameworks.
 

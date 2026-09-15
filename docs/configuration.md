@@ -35,6 +35,7 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 | `[tools.kitty]` | `mode`, `extra_capabilities` | [Kitty Terminal](tools.md#kitty-terminal) |
 | `[tools.herdr]` | `mode` | [herdr Terminal Workspace](tools.md#herdr-terminal-workspace) |
 | `[tools.zellij]` | `enabled` | [Zellij Terminal Multiplexer](tools.md#zellij-terminal-multiplexer) |
+| `[shell_wrappers]` | `commands` | [Shell Wrappers](#shell-wrappers) |
 | `[logging]` | `attributes`, `receivers` | [Remote Logging](#remote-logging) |
 | `[[include]]` | `if`, `path` | [Per-Project Configuration](#per-project-configuration) |
 
@@ -566,7 +567,7 @@ as a shell does.
 
 # Control visibility of .devsandbox.toml inside the sandbox
 # - "hidden" (default): config file is not visible to sandboxed processes
-# - "readonly": config file is visible but read-only
+# - "readonly": config file is visible but read-only (a symlinked file is hidden instead)
 # - "readwrite": config file is visible and writable
 config_visibility = "hidden"
 ```
@@ -999,6 +1000,21 @@ When enabled, a filtered D-Bus proxy exposes only the notification portal interf
 No other D-Bus services are accessible.
 
 See [docs/tools.md](tools.md#xdg-desktop-portal-linux-only) for requirements and details.
+
+### Shell Wrappers
+
+```toml
+[shell_wrappers]
+# Commands that run inside devsandbox when typed in a host shell that evaluates
+# `devsandbox shell-wrappers activate`. Default: empty, nothing is wrapped.
+commands = ["bun", "node", "npm"]
+```
+
+`commands` adds up across layers. The global config, every matching include and a trusted `.devsandbox.toml` each contribute names, and the wrapped set is their union with duplicates removed. A project can wrap an extra command but cannot unwrap one the global config lists. A project's names apply only after you trust the file, and only in a shell that runs activation in that directory.
+
+A name that is a path, ends in `-no-ds`, is `devsandbox` or a supported agent, or is a reserved shell word is a configuration error naming the entry, such as `shell_wrappers.commands[0]: invalid command name "./npm": must be a bare command name, not a path`. It stops launches. It stops activation too when the name is in the global config or an include; a project file with a bad name is skipped with a warning instead, so the rest of the wrappers stay defined.
+
+See [Tools: Wrapping other commands](tools.md#wrapping-other-commands) for how to activate and refresh the wrappers, the `<name>-no-ds` and `command <name>` bypasses, and the full naming rules.
 
 ## Remote Logging
 
@@ -1475,7 +1491,7 @@ Local config found: .devsandbox.toml
 Trust this configuration? [y/N]:
 ```
 
-If the file changes, you'll be prompted again.
+If the file changes, you'll be prompted again. `devsandbox shell-wrappers activate` loads config the same way but never shows this prompt: it runs at shell start, so an untrusted or changed file is skipped with a note on stderr until you approve it at the prompt of a launch in that directory. Avoid `devsandbox trust add` for a changed file you have not read: it approves the file unseen, and the project directory is writable from inside the sandbox.
 
 **Managing trust:**
 
@@ -1533,6 +1549,7 @@ devsandbox --rm             # Docker: don't keep container; bwrap: remove sandbo
 - Maps (`[tools]`): deep merge
 - Arrays (`[[proxy.filter.rules]]`): concatenate (later rules have higher priority)
 - Redaction: most-restrictive-wins - later configs can enable but never disable; `default_action` takes the higher severity (`block` > `redact` > `log`); rules are always additive
+- `shell_wrappers.commands`: union of every layer with duplicates removed; a later layer adds names but never removes one
 
 ## See Also
 

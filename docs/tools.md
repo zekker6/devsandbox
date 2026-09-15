@@ -318,17 +318,19 @@ AI coding assistants execute arbitrary code - installing packages, running build
 
 ### Shell wrappers: run agents sandboxed by default
 
-Remembering to type `devsandbox` first is the weak point. `devsandbox agent-wrappers activate` prints shell functions that send supported agents through the sandbox automatically. Nothing is written to disk: you evaluate the output from your own startup file, the way `mise activate` works.
+Remembering to type `devsandbox` first is the weak point. `devsandbox shell-wrappers activate` prints shell functions that send supported agents, and any [commands you configure](#wrapping-other-commands), through the sandbox automatically. Nothing is written to disk: you evaluate the output from your own startup file, the way `mise activate` works.
 
 | Shell | Startup file | Line to add |
 | ------- | -------------- | ------------- |
-| fish | `~/.config/fish/config.fish` | `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish \| source; end` |
-| bash | `~/.bashrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash)"; fi` |
-| zsh | `~/.zshrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh)"; fi` |
+| fish | `~/.config/fish/config.fish` | `if test -z "$DEVSANDBOX"; devsandbox shell-wrappers activate fish \| source; end` |
+| bash | `~/.bashrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash)"; fi` |
+| zsh | `~/.zshrc` | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate zsh)"; fi` |
+
+`devsandbox agent-wrappers activate` is the command's previous name and remains an alias. A startup line that uses it keeps working and produces the same output, configured commands included.
 
 The `if ... $DEVSANDBOX ...` guard on each line is load-bearing, not boilerplate: these startup files are bind-mounted into the sandbox, where `devsandbox` need not exist, so an unguarded line would fail with command-not-found on every in-sandbox shell start. See **Two guards** below.
 
-The shell argument defaults to the base name of `$SHELL`, so `devsandbox agent-wrappers activate` alone works for a quick look at what would be defined. Once the line is in place:
+The shell argument defaults to the base name of `$SHELL`, so `devsandbox shell-wrappers activate` alone works for a quick look at what would be defined. Once the line is in place:
 
 ```bash
 claude                # -> devsandbox claude, in the current directory
@@ -337,15 +339,15 @@ claude-no-ds          # escape hatch: the real binary, unsandboxed
 command claude        # escape hatch: the real binary, unsandboxed
 ```
 
-The wrappable agents are `claude`, `pi`, `codex`, `opencode`, and `copilot` (the standalone GitHub Copilot CLI). Only the ones actually installed on your host are wrapped. Because the snippet is regenerated at every shell start, it cannot go stale: install a new agent, or upgrade devsandbox into a new directory, and the next shell picks it up with nothing to re-run. With none of them on the host the output is a comment saying so, which is still valid shell - your startup file keeps working.
+The wrappable agents are `claude`, `pi`, `codex`, `opencode`, and `copilot` (the standalone GitHub Copilot CLI). Only the ones actually installed on your host are wrapped. Because the snippet is regenerated at every shell start, a newly installed agent, or an upgrade that moved devsandbox into a new directory, is picked up by the next shell with nothing to re-run. Configured commands are a snapshot of the directory activation ran in instead; see [Wrapping other commands](#wrapping-other-commands). With none of them on the host the output opens with a comment saying so, followed by the cleanup that removes an earlier activation's wrappers. It is still valid shell, so your startup file keeps working.
 
 **Wrapping only some of them.** `--agents` narrows the set, so the agents you leave out keep running unsandboxed as usual:
 
 | Shell | Line to add |
 | ------- | ------------- |
-| fish | `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish --agents claude,codex \| source; end` |
-| bash | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash --agents claude,codex)"; fi` |
-| zsh | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh --agents claude,codex)"; fi` |
+| fish | `if test -z "$DEVSANDBOX"; devsandbox shell-wrappers activate fish --agents claude,codex \| source; end` |
+| bash | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash --agents claude,codex)"; fi` |
+| zsh | `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate zsh --agents claude,codex)"; fi` |
 
 Values are comma-separated, given by repeating the flag, or both: `--agents claude,codex` and `--agents claude --agents codex` select the same pair. Omitting the flag wraps every supported agent, which is what the lines further up do.
 
@@ -353,13 +355,49 @@ Names are checked strictly. An unsupported name, or an explicitly empty `--agent
 
 If you use [herdr's agent session restore](#agent-session-capture-and-restore), keep `claude`, `pi` and `codex` in the selection. Restore works by herdr typing that agent's own resume command into the pane shell for the wrapper to intercept, so an agent you leave out has its resume run against the host agent instead - it starts fresh rather than reopening the sandboxed session.
 
+#### Wrapping other commands
+
+Agents are not the only programs worth sandboxing by default. `npm install` runs every dependency's lifecycle scripts with your full access to the host, and `bun` and `node` run whatever the project hands them. List such commands under [`[shell_wrappers]`](configuration.md#shell-wrappers) and the same activation line wraps them:
+
+```toml
+# ~/.config/devsandbox/config.toml, or a project's .devsandbox.toml
+[shell_wrappers]
+commands = ["bun", "node", "npm"]
+```
+
+```bash
+npm install           # -> devsandbox run-command npm install, in the current directory
+npm-no-ds install     # escape hatch: the host npm, unsandboxed
+command npm install   # escape hatch: the host npm, unsandboxed
+```
+
+The list is empty by default, so nothing beyond the agents is wrapped until you name it. A configured command is wrapped whether or not the host has it installed, because it is looked up inside the sandbox when you run it. `--agents` has no effect on this list.
+
+Command wrappers call `devsandbox run-command <command>` rather than `devsandbox <command>`. That keeps a command that shares a name with a devsandbox subcommand, such as `config` or `tools`, running as a sandboxed workload instead of reaching the subcommand.
+
+Names are checked when the config loads. A bad name in the global config or an include stops activation before any shell code is written; one in a project file makes activation skip that file, as described below. A name must be a bare word of `[A-Za-z0-9_-]` that does not start with `-` and does not end in `-no-ds`, the suffix reserved for bypass functions. It cannot be `devsandbox` or a supported agent, compared case-insensitively. Agents go through `--agents`, which keeps herdr's resume guards in front of them. Shell keywords (including zsh's reserved declaration words such as `typeset`, which zsh parses as syntax before any function is looked up), names fish refuses for a function, and the builtins the snippet relies on are refused as well: `_`, `alias`, `and`, `argparse`, `begin`, `break`, `builtin`, `case`, `command`, `continue`, `coproc`, `declare`, `do`, `done`, `elif`, `else`, `end`, `esac`, `eval`, `exec`, `export`, `fi`, `float`, `for`, `foreach`, `function`, `functions`, `if`, `in`, `integer`, `local`, `nocorrect`, `noglob`, `not`, `or`, `printf`, `read`, `readonly`, `repeat`, `return`, `select`, `set`, `source`, `status`, `string`, `switch`, `test`, `then`, `time`, `type`, `typeset`, `unalias`, `unset`, `until` and `while`.
+
+**Project lists need trust.** The command list is read the way a launch in the current directory reads it: the global config, matching `[[include]]` files and the project's `.devsandbox.toml` combine into one list with duplicates removed. A project file's commands reach your host shell only once the file is [trusted](configuration.md#local-config-files). Activation never asks: it runs at shell start, where a question would swallow the next line typed into the terminal, such as the resume command herdr types into a restored pane. An untrusted or changed file is skipped with a note on stderr, and only the global and include commands are wrapped. Review and approve it at the prompt a launch in that directory shows, then run activation again. `devsandbox trust add` approves the file as it is on disk without showing it, so use it only for a file you have already read: a changed file may be one sandboxed code edited. The protection a project list gets also rests on the sandbox being unable to edit that file, which `sandbox.config_visibility` guarantees unless you set it to `readwrite`. With `readwrite`, sandboxed code can change the file, leaving it untrusted so its commands stop being wrapped at the next activation. List a command in the global config when it must stay wrapped.
+
+A project file that cannot be read or parsed, is not a regular file, is larger than 1 MiB, or fails validation, is skipped the same way, with a warning on stderr, and the agents and the global and include commands are still wrapped. The project directory is writable from inside the sandbox, so that file must not be able to leave a host shell without wrappers. For the same reason, activation in a current directory that no longer exists, such as a project subdirectory removed from inside the sandbox, wraps the agents and the global commands with a warning on stderr. A global config or include that fails to load stops activation with no output.
+
+**Activation takes a snapshot, so refresh it after `cd`.** The wrappers reflect the config as it was when activation ran. There is no directory hook: a shell started in a project gets that project's commands, and moving to another project or editing a config changes nothing until you run activation again in the new directory:
+
+| Shell | Refresh the current shell |
+| ------- | ------------- |
+| fish | `devsandbox shell-wrappers activate fish \| source` |
+| bash | `eval "$(devsandbox shell-wrappers activate bash)"` |
+| zsh | `eval "$(devsandbox shell-wrappers activate zsh)"` |
+
+Each activation first removes the wrappers and `-no-ds` functions the previous one defined, then defines the current set, so a command that left the list stops being wrapped. The names are tracked in a shell variable that is not exported, so the sandbox never inherits it, and no function activation did not define is touched. The one exception is a function of your own that has a wrapped name: activation replaces it, and it does not come back when the name leaves the list. `command <name>` reaches the binary either way.
+
 **Two guards, and why the line carries one of its own.** The emitted snippet wraps every definition in a `DEVSANDBOX` test, so nothing is wrapped inside a sandbox and a wrapper cannot recurse. The line you paste repeats that test: startup files are mounted into the sandbox while devsandbox itself need not exist in there, so an unguarded line would fail with command-not-found on every in-sandbox shell start.
 
-**Scope, stated exactly.** fish sources `config.fish` for non-interactive `fish -c` invocations too, so a fish script calling `claude` gets the wrapper. bash and zsh only source their rc file for interactive shells, so scripts there are unaffected.
+**Scope, stated exactly.** fish sources `config.fish` for non-interactive `fish -c` invocations too, so a fish script calling `claude`, or a configured `npm`, gets the wrapper. bash and zsh only source their rc file for interactive shells, so scripts there are unaffected. They also expand an alias before looking up any function, so an alias with a wrapped name, such as `alias npm=pnpm`, runs instead of the wrapper and stays unsandboxed; remove the alias to use the wrapper.
 
-Each wrapper calls `devsandbox run-agent <agent>`, which decides what to do: inside a sandbox it runs the real agent, and outside it re-enters devsandbox in the current directory.
+Agent wrappers call `devsandbox run-agent <agent>` and command wrappers call `devsandbox run-command <command>`. Both decide the same way: inside a sandbox they run the real program, and outside they re-enter devsandbox in the current directory. A command `run-command` cannot find inside a sandbox exits 127, the status a shell gives a missing command.
 
-**PATH resolution, exactly where it is safe.** The activation line resolves `devsandbox` through `PATH`, because it runs once per shell start and an absolute path there would break on every upgrade that moved the binary. The snippet that command emits bakes in the absolute path it resolved for itself, so no agent invocation goes through `PATH`: a project-local bin directory on `PATH` is writable by the sandbox, and resolving devsandbox through it would run that binary on the host. If the baked path disappears mid-session, the wrapper fails closed with `devsandbox: no executable at <path> - reinstall devsandbox, then start a new shell to refresh the wrappers` and exits 127 rather than falling back to a lookup.
+**PATH resolution, exactly where it is safe.** The activation line resolves `devsandbox` through `PATH`, because it runs once per shell start and an absolute path there would break on every upgrade that moved the binary. The snippet that command emits bakes in the absolute path it resolved for itself, so no wrapper invocation goes through `PATH`: a project-local bin directory on `PATH` is writable by the sandbox, and resolving devsandbox through it would run that binary on the host. If the baked path disappears mid-session, the wrapper fails closed with `devsandbox: no executable at <path> - reinstall devsandbox, then start a new shell to refresh the wrappers` and exits 127 rather than falling back to a lookup.
 
 The wrappers are a standalone feature, independent of herdr. herdr's native session restore builds on them, which means the line has to be in the startup file of the shell herdr opens panes with (`[terminal] default_shell`, falling back to `$SHELL`) - not only your login shell. See [Agent session capture and restore](#agent-session-capture-and-restore).
 
@@ -1060,7 +1098,7 @@ herdr can remember which agent a pane was running and, after the server restarts
 
 **Setting up restore.** Capture alone is not enough: herdr's resume command is compiled into its binary as a bare `claude --resume <id>`, which would run the host agent against a different, host-side session store. herdr delivers that command as typed input to the pane's shell, so the [shell wrappers](#shell-wrappers-run-agents-sandboxed-by-default) intercept it and re-enter the sandbox.
 
-1. Add the activation line to the startup file of **the shell herdr starts panes with**, which is not necessarily your login shell - herdr uses `[terminal] default_shell`, falling back to `$SHELL`. `devsandbox agent-wrappers activate <shell>` prints the definitions for any supported shell, and the line to add is in `devsandbox agent-wrappers --help`.
+1. Add the activation line to the startup file of **the shell herdr starts panes with**, which is not necessarily your login shell - herdr uses `[terminal] default_shell`, falling back to `$SHELL`. `devsandbox shell-wrappers activate <shell>` prints the definitions for any supported shell, and the line to add is in `devsandbox shell-wrappers --help`.
 2. Restart the herdr server so new panes pick up the wrappers.
 
 **What is written on the host.** Launching an agent from a herdr pane records one JSON file per pane under `$XDG_STATE_HOME/devsandbox/herdr-panes/` (`~/.local/state/devsandbox/herdr-panes/` when unset), directory `0700`, files `0600`. Each record names the pane, the agent, the project directory and the sandbox state root that launch used - it is what the restore guard below compares against. The pane ID is hashed into the filename, so an opaque herdr-supplied string never influences a path, and the store lives outside every path mounted into the sandbox, so sandboxed code cannot read or write it. `devsandbox sandboxes prune` removes a record once the sandbox state root it names no longer exists - after a `--rm`, a prune of that sandbox or a `scratchpad rm`. The check runs before that run's own removals, so a record whose sandbox this very prune deletes is reclaimed by the next one. A record whose sandbox still exists is kept however old it is: herdr panes routinely stay open for weeks, and removing the record of a live pane would silently disable the restore guard below. Delete the directory to clear them all.

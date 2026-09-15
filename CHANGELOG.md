@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.21.0...HEAD)
 
+### Added
+
+- Added `[shell_wrappers] commands`, which makes commands you name, such as `npm`, `bun` or `node`, run inside devsandbox when you type them in a host shell. A forgotten `devsandbox` prefix no longer lets `npm install` run dependency install scripts on your host, and `npm-no-ds` or `command npm` still reaches the host binary. Nothing is wrapped unless you list it. The global config, matching includes and a trusted project `.devsandbox.toml` add to one list, and the commands need not be installed on the host. See [Tools: Wrapping other commands](docs/tools.md#wrapping-other-commands).
+
+### Changed
+
+- The activation command is now `devsandbox shell-wrappers activate`. `agent-wrappers activate` remains an alias, so existing startup lines keep working and pick up configured commands too. Running activation again removes the wrappers the previous run defined before defining the current set, so after `cd` into a project, or after editing its config, re-running it replaces the old wrappers instead of leaving stale ones behind. Activation now reads your config the way a launch in the current directory does. It never asks for trust at shell start: an untrusted or changed `.devsandbox.toml` is skipped with a note on stderr until you approve it at the prompt of a launch in that directory, and a project file that fails to load, or a current directory that no longer exists, falls back to the host-owned config with a warning rather than leaving the shell without wrappers. A `.devsandbox.toml` that is not a regular file, such as a FIFO or a link to a terminal device, or is larger than 1 MiB, is now refused with an error instead of stalling the shell or a launch or reading your terminal input. See [Tools: Shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default).
+
+### Fixed
+
+- On bwrap, command arguments now reach the command unchanged when your shell is fish or zsh. Before, fish turned `\\` into `\` inside an argument and failed with "quotes are not balanced" (exit 127) on one ending in `\`, and zsh expanded an argument starting with `=` into a command path. That affected every `devsandbox <command>` launch, including the new wrapped commands, whose `node -e` scripts, regexes and JSON often contain backslashes.
+- `sandbox.config_visibility` now applies on Docker and krun, not only bwrap. Before, sandboxed code on those backends could read and edit the project's `.devsandbox.toml` whatever the setting said. With the default `hidden` the file is replaced with `/dev/null`, and `readonly` mounts it read-only. On every backend the setting covers a file that exists when the sandbox starts. A container kept with `keep_container` is recreated once on the next launch to pick up the mount. On every backend, `readonly` now hides a `.devsandbox.toml` that is a symlink instead of mounting its target: sandboxed code could point the link at a host file, such as a registry token, and read it in the next session. See [Sandbox Settings](docs/configuration.md#sandbox-settings).
+
 ## [v0.21.0](https://github.com/zekker6/devsandbox/releases/tag/v0.21.0) - 2026-09-11
 
 ### Breaking Changes

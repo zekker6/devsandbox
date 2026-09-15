@@ -168,7 +168,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine ([coverage](docs/proxy.md#redaction-coverage))
 - **Resource limits** - optional memory, CPU and process caps that apply to every backend ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited
-- **Agent shell wrappers** - opt-in shell functions so `claude` means `devsandbox claude`, with `claude-no-ds` and `command claude` as escape hatches; `--agents` wraps only the agents you name ([details](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default))
+- **Shell wrappers** - opt-in shell functions so `claude` means `devsandbox claude`, and commands you list in [`[shell_wrappers]`](docs/configuration.md#shell-wrappers), such as `npm`, run sandboxed too; `<name>-no-ds` and `command <name>` are the escape hatches, and `--agents` wraps only the agents you name ([details](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default))
 - **herdr agent session restore** - a sandboxed agent reports its native session through the filtered herdr proxy, and a restored pane resumes it back inside the sandbox ([details](docs/tools.md#agent-session-capture-and-restore))
 - **Agent sessions survive the sandbox** - `claude`, `codex`, `copilot`, `pi` and `opencode` keep their native session stores on the host, so `--resume` / `--continue` finds conversations started in an earlier run ([details](docs/tools.md#ai-coding-assistants))
 - **Dev tool integrations** - `rtk` keeps its filters and tracking database ([details](docs/tools.md#rtk-cli-proxy)), `revdiff` opens review overlays in kitty or herdr, and the Docker socket is proxied read-only
@@ -218,11 +218,19 @@ devsandbox --isolation=docker npm install
 devsandbox --rm
 
 # Make supported agents sandboxed by default: `claude` becomes `devsandbox claude`.
-# Add to ~/.bashrc (fish and zsh forms: devsandbox agent-wrappers --help)
-if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash)"; fi
+# Add to ~/.bashrc (fish and zsh forms: devsandbox shell-wrappers --help)
+if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash)"; fi
 
 # ...or wrap only the agents you name, leaving the rest to run unsandboxed
-if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash --agents claude,codex)"; fi
+if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash --agents claude,codex)"; fi
+```
+
+The same activation line wraps package tooling you list, so `npm install` runs its dependencies' install scripts inside the sandbox instead of on your host:
+
+```toml
+# ~/.config/devsandbox/config.toml
+[shell_wrappers]
+commands = ["bun", "node", "npm"]
 ```
 
 ## Git Integration
@@ -417,8 +425,9 @@ devsandbox tools list               # List available tools
 devsandbox tools check              # Verify tool setup
 devsandbox trust add <path>         # Trust a local .devsandbox.toml
 devsandbox overlay migrate          # Promote overlay contents to the host path
-devsandbox agent-wrappers activate  # Print wrappers to eval from your startup file
-devsandbox run-agent claude ...     # Wrapper entrypoint: re-enter the sandbox
+devsandbox shell-wrappers activate  # Print wrappers to eval from your startup file
+devsandbox run-agent claude ...     # Agent wrapper entrypoint: re-enter the sandbox
+devsandbox run-command npm ...      # Command wrapper entrypoint: re-enter the sandbox
 devsandbox image build              # Build Docker image (macOS)
 ```
 
