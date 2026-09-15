@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"devsandbox/internal/cgroups"
@@ -1554,6 +1556,7 @@ func LoadConfigWithOptions(opts *LoadOptions) (*Config, *TrustStore, string, err
 	merged := &LoadOptions{TrustStore: trustStore}
 	if opts != nil {
 		merged.SkipLocalConfig = opts.SkipLocalConfig
+		merged.OnLocalConfigPrompt = opts.OnLocalConfigPrompt
 		// TrustStore from caller takes precedence if provided.
 		if opts.TrustStore != nil {
 			merged.TrustStore = opts.TrustStore
@@ -1694,7 +1697,7 @@ func loadIncludeFile(path string) (*Config, error) {
 func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
 	localPath := filepath.Join(projectDir, LocalConfigFile)
 
-	data, err := os.ReadFile(localPath)
+	data, err := readLocalConfigFile(localPath)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -1746,6 +1749,67 @@ func loadLocalConfig(projectDir string, opts *LoadOptions) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// maxLocalConfigBytes bounds how much of a project config is read.
+const maxLocalConfigBytes = 1 << 20
+
+// readLocalConfigFile reads a project config, refusing anything that is not a
+// regular file after symlinks are followed and anything over
+// maxLocalConfigBytes.
+//
+// The project directory is writable from inside the sandbox, and shell wrapper
+// activation reads this file unattended at every host shell start. A FIFO would
+// block the open until a writer appeared, and a link to /dev/tty or /dev/stdin
+// would consume the line herdr types into a restored pane - neither fails, so
+// the fallback that keeps a broken project file from costing the shell its
+// wrappers would never run. O_NONBLOCK keeps the open from waiting, and the
+// check runs on the opened descriptor so a swap after it cannot change what is
+// read.
+func readLocalConfigFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		if isNullDevice(fi) {
+			return nil, os.ErrNotExist
+		}
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxLocalConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxLocalConfigBytes {
+		return nil, fmt.Errorf("%s exceeds the %d-byte limit", path, maxLocalConfigBytes)
+	}
+	return data, nil
+}
+
+// isNullDevice reports whether fi is the null device. The default
+// config_visibility binds /dev/null over the project config inside the sandbox,
+// so that file is hidden rather than refused - refusing it would fail every
+// config load a nested devsandbox command makes. Pointing the file at
+// /dev/null grants nothing deleting it would not. The device number is compared
+// instead of the inode, because the sandbox's /dev is its own mount.
+func isNullDevice(fi os.FileInfo) bool {
+	if fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	null, err := os.Stat(os.DevNull)
+	if err != nil {
+		return false
+	}
+	got, ok := fi.Sys().(*syscall.Stat_t)
+	want, nullOK := null.Sys().(*syscall.Stat_t)
+	return ok && nullOK && got.Rdev == want.Rdev
 }
 
 // ensureTrusted verifies trust for a local config, prompting if needed.

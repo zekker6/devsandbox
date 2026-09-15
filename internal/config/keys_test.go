@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"devsandbox/internal/notice"
 	"github.com/BurntSushi/toml"
@@ -689,6 +691,121 @@ func TestLocalConfig_TrustIsRecordedForWholeFile(t *testing.T) {
 
 	if prompts != 2 {
 		t.Errorf("prompt count = %d, want 2 (trust covers the whole file)", prompts)
+	}
+}
+
+// Shell wrapper activation reads the project file unattended at every host shell
+// start, and the sandbox can create it. Anything but a bounded regular file must
+// fail the load promptly, never block on or drain what it names.
+func TestLocalConfig_NonRegularOrOversizedFileIsRefused(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+		want  string
+	}{
+		{
+			name: "fifo",
+			setup: func(t *testing.T, path string) {
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+			},
+			want: "not a regular file",
+		},
+		{
+			name: "symlink to a fifo",
+			setup: func(t *testing.T, path string) {
+				fifo := filepath.Join(filepath.Dir(path), "fifo")
+				if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+				if err := os.Symlink(fifo, path); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+			want: "not a regular file",
+		},
+		{
+			name: "symlink to a device",
+			setup: func(t *testing.T, path string) {
+				if err := os.Symlink("/dev/zero", path); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+			want: "not a regular file",
+		},
+		{
+			name: "oversized",
+			setup: func(t *testing.T, path string) {
+				data := strings.Repeat("#\n", maxLocalConfigBytes/2+1)
+				if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+					t.Fatalf("write local config: %v", err)
+				}
+			},
+			want: "byte limit",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			projectDir := filepath.Join(tmpDir, "project")
+			if err := os.MkdirAll(projectDir, 0o755); err != nil {
+				t.Fatalf("mkdir project: %v", err)
+			}
+			tt.setup(t, filepath.Join(projectDir, LocalConfigFile))
+
+			trustStore, err := LoadTrustStore(filepath.Join(tmpDir, "trusted-configs.toml"))
+			if err != nil {
+				t.Fatalf("LoadTrustStore: %v", err)
+			}
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := LoadWithProjectDir("", projectDir, &LoadOptions{
+					TrustStore: trustStore,
+					OnLocalConfigPrompt: func(string, string, bool) (bool, error) {
+						t.Error("trust must not be requested for a file that was refused")
+						return false, nil
+					},
+				})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Errorf("error = %v, want one containing %q", err, tt.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("loading the local config blocked")
+			}
+		})
+	}
+}
+
+func TestLocalConfig_NullDeviceIsAbsent(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := os.Symlink(os.DevNull, filepath.Join(projectDir, LocalConfigFile)); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	trustStore, err := LoadTrustStore(filepath.Join(tmpDir, "trusted-configs.toml"))
+	if err != nil {
+		t.Fatalf("LoadTrustStore: %v", err)
+	}
+
+	_, err = LoadWithProjectDir("", projectDir, &LoadOptions{
+		TrustStore: trustStore,
+		OnLocalConfigPrompt: func(string, string, bool) (bool, error) {
+			t.Error("trust must not be requested for a config hidden behind the null device")
+			return false, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadWithProjectDir: %v", err)
 	}
 }
 

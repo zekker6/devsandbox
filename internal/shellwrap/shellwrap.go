@@ -1,9 +1,10 @@
 // Package shellwrap generates the host shell snippets that make supported AI
-// agents run inside devsandbox by default: typing `claude` runs
-// `devsandbox run-agent claude`, while `claude-no-ds` and `command claude`
-// still reach the real binary.
+// agents and configured commands run inside devsandbox by default: typing
+// `claude` runs `devsandbox run-agent claude` and a configured `npm` runs
+// `devsandbox run-command npm`, while `claude-no-ds` and `command claude` still
+// reach the real binary.
 //
-// Nothing is written to disk. `devsandbox agent-wrappers activate <shell>`
+// Nothing is written to disk. `devsandbox shell-wrappers activate <shell>`
 // prints the snippet and the user evaluates it from their own startup file, the
 // way `mise activate` works. That makes the snippet a function of the machine as
 // it is at shell start rather than of the machine as it was at install time: an
@@ -72,7 +73,18 @@ func IsSupportedShell(shell string) bool {
 // escapes by default and bash's does under xpg_echo, so a path containing `\c`
 // would truncate the message before the reinstall command it exists to name.
 // printf expands escapes in its format string only, never in a %s argument.
-func Snippet(shell, devsandboxPath string, agents []string) (string, error) {
+//
+// agents route through `run-agent`, which keeps the resume and worktree guards;
+// commands are configured custom names and route through `run-command`. Either
+// list may be empty, and duplicates within a list are emitted once.
+//
+// Each snippet replaces the previous one. It records the public names it defines
+// in a shell variable, and the next snippet removes exactly those functions and
+// their bypasses before defining its own, so re-sourcing after a config change
+// drops wrappers the config no longer names. Nothing unrecorded is ever removed.
+// The record is never exported: a child shell has none of the functions, so an
+// inherited record could only name functions its own startup files defined.
+func Snippet(shell, devsandboxPath string, agents, commands []string) (string, error) {
 	if !IsSupportedShell(shell) {
 		return "", fmt.Errorf("unsupported shell %q: supported shells are %s",
 			shell, strings.Join(SupportedShells(), ", "))
@@ -80,50 +92,128 @@ func Snippet(shell, devsandboxPath string, agents []string) (string, error) {
 	if !filepath.IsAbs(devsandboxPath) {
 		return "", fmt.Errorf("devsandbox path %q must be absolute", devsandboxPath)
 	}
-	if len(agents) == 0 {
-		return "", fmt.Errorf("no agents to wrap")
-	}
-	for _, a := range agents {
-		if err := validateAgentName(a); err != nil {
-			return "", err
-		}
+	wrappers, err := wrapperSet(agents, commands)
+	if err != nil {
+		return "", err
 	}
 
 	if shell == ShellFish {
-		return fishSnippet(devsandboxPath, agents), nil
+		return fishSnippet(devsandboxPath, wrappers), nil
 	}
-	return posixSnippet(devsandboxPath, agents), nil
+	return posixSnippet(devsandboxPath, wrappers), nil
 }
 
-func fishSnippet(devsandboxPath string, agents []string) string {
+// snapshotVar records the public names the last evaluated snippet defined.
+const snapshotVar = "__devsandbox_wrappers"
+
+// wrapper is one generated public function and the devsandbox subcommand it
+// routes through.
+type wrapper struct {
+	name       string
+	subcommand string
+}
+
+// wrapperSet validates both lists and returns the wrappers in emission order:
+// agents, then commands, each deduplicated in first-seen order.
+//
+// ValidateCommandName reserves the bypass suffix and agent names, but agent
+// names are only charset-checked, so the complete namespace of public and
+// bypass functions is checked as well: two wrappers generating one function
+// would leave whichever is defined last in charge of the other's name.
+func wrapperSet(agents, commands []string) ([]wrapper, error) {
+	var wrappers []wrapper
+	add := func(subcommand string, names []string, validate func(string) error) error {
+		seen := make(map[string]bool, len(names))
+		for _, name := range names {
+			if err := validate(name); err != nil {
+				return err
+			}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			wrappers = append(wrappers, wrapper{name: name, subcommand: subcommand})
+		}
+		return nil
+	}
+	if err := add("run-agent", agents, validateAgentName); err != nil {
+		return nil, err
+	}
+	if err := add("run-command", commands, ValidateCommandName); err != nil {
+		return nil, err
+	}
+
+	owners := make(map[string]wrapper, 2*len(wrappers))
+	for _, w := range wrappers {
+		for _, fn := range []string{w.name, w.name + BypassSuffix} {
+			if prev, ok := owners[fn]; ok {
+				return nil, fmt.Errorf("wrapper function %q is generated for both %s %q and %s %q",
+					fn, prev.subcommand, prev.name, w.subcommand, w.name)
+			}
+			owners[fn] = w
+		}
+	}
+	return wrappers, nil
+}
+
+func fishSnippet(devsandboxPath string, wrappers []wrapper) string {
 	var b strings.Builder
 	b.WriteString("if test -z \"$DEVSANDBOX\"\n")
+	fmt.Fprintf(&b, "    for __devsandbox_name in $%s\n", snapshotVar)
+	fmt.Fprintf(&b, "        functions -e $__devsandbox_name $__devsandbox_name%s\n", BypassSuffix)
+	b.WriteString("    end\n")
+	b.WriteString("    set -e __devsandbox_name\n")
 	q := fishQuote(devsandboxPath)
-	for _, a := range agents {
-		fmt.Fprintf(&b, "    function %s --wraps %s\n", a, a)
+	for _, w := range wrappers {
+		fmt.Fprintf(&b, "    function %s --wraps %s\n", w.name, w.name)
 		fmt.Fprintf(&b, "        if test -x %s\n", q)
-		fmt.Fprintf(&b, "            %s run-agent %s $argv\n", q, a)
+		fmt.Fprintf(&b, "            %s %s %s $argv\n", q, w.subcommand, w.name)
 		b.WriteString("        else\n")
 		fmt.Fprintf(&b, "            printf '%%s %%s %%s\\n' \"devsandbox: no executable at\" %s \"- reinstall devsandbox, then start a new shell to refresh the wrappers\" >&2\n", q)
 		b.WriteString("            return 127\n")
 		b.WriteString("        end\n")
 		b.WriteString("    end\n")
-		fmt.Fprintf(&b, "    function %s-no-ds --wraps %s\n", a, a)
-		fmt.Fprintf(&b, "        command %s $argv\n", a)
+		fmt.Fprintf(&b, "    function %s%s --wraps %s\n", w.name, BypassSuffix, w.name)
+		fmt.Fprintf(&b, "        command %s $argv\n", w.name)
 		b.WriteString("    end\n")
 	}
-	b.WriteString("end\n")
+	// -u unexports a record inherited from the environment as well.
+	b.WriteString("    set -gu " + snapshotVar)
+	for _, w := range wrappers {
+		b.WriteString(" " + w.name)
+	}
+	b.WriteString("\nend\n")
 	return b.String()
 }
 
-func posixSnippet(devsandboxPath string, agents []string) string {
+// posixSnippet generates for bash and zsh.
+//
+// The record is walked with parameter expansion rather than word splitting:
+// zsh does not split an unquoted expansion, and bash splits on a user-settable
+// IFS. It is unset before being reassigned, which drops an export attribute an
+// inherited value carries, and assigned with allexport off: under `set -a` the
+// assignment would export it again, and zsh does not export the functions with
+// it, so a child shell would inherit a record naming functions it never had.
+//
+// Definitions use the function keyword because both shells alias-expand the
+// name in `name() {`, so an alias such as `alias npm=pnpm` would make the whole
+// snippet a syntax error.
+func posixSnippet(devsandboxPath string, wrappers []wrapper) string {
 	var b strings.Builder
 	b.WriteString("if [ -n \"${DEVSANDBOX:-}\" ]; then :; else\n")
+	fmt.Fprintf(&b, "  __devsandbox_rest=${%s-}\n", snapshotVar)
+	fmt.Fprintf(&b, "  unset %s\n", snapshotVar)
+	fmt.Fprintf(&b, "  while [ -n \"$__devsandbox_rest\" ]; do __devsandbox_name=${__devsandbox_rest%%%% *}; __devsandbox_rest=${__devsandbox_rest#\"$__devsandbox_name\"}; __devsandbox_rest=${__devsandbox_rest# }; unset -f \"$__devsandbox_name\" \"${__devsandbox_name}%s\" 2>/dev/null; done\n", BypassSuffix)
+	b.WriteString("  unset __devsandbox_rest __devsandbox_name\n")
 	q := posixQuote(devsandboxPath)
-	for _, a := range agents {
-		fmt.Fprintf(&b, "  %s() { if [ -x %s ]; then %s run-agent %s \"$@\"; else printf '%%s %%s %%s\\n' \"devsandbox: no executable at\" %s \"- reinstall devsandbox, then start a new shell to refresh the wrappers\" >&2; return 127; fi; }\n", a, q, q, a, q)
-		fmt.Fprintf(&b, "  %s-no-ds() { command %s \"$@\"; }\n", a, a)
+	names := make([]string, 0, len(wrappers))
+	for _, w := range wrappers {
+		fmt.Fprintf(&b, "  function %s { if [ -x %s ]; then %s %s %s \"$@\"; else printf '%%s %%s %%s\\n' \"devsandbox: no executable at\" %s \"- reinstall devsandbox, then start a new shell to refresh the wrappers\" >&2; return 127; fi; }\n", w.name, q, q, w.subcommand, w.name, q)
+		fmt.Fprintf(&b, "  function %s%s { command %s \"$@\"; }\n", w.name, BypassSuffix, w.name)
+		names = append(names, w.name)
 	}
+	record := snapshotVar + "=" + posixQuote(strings.Join(names, " "))
+	fmt.Fprintf(&b, "  case $- in *a*) set +a; %s; set -a ;; *) %s ;; esac\n", record, record)
 	b.WriteString("fi\n")
 	return b.String()
 }
@@ -134,7 +224,7 @@ func posixSnippet(devsandboxPath string, agents []string) string {
 // an upgrade moved the binary (`mise use -g` installs into a version-scoped
 // directory). The snippet that command emits still bakes in the absolute path it
 // resolved for itself, so no agent invocation goes through PATH.
-const ActivateCommand = "devsandbox agent-wrappers activate"
+const ActivateCommand = "devsandbox shell-wrappers activate"
 
 // ActivateLine returns the line the user adds to their startup file. It is empty
 // for an unsupported shell.

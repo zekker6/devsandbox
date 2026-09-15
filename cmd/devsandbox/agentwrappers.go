@@ -12,7 +12,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"devsandbox/internal/agentid"
+	"devsandbox/internal/config"
 	"devsandbox/internal/shellwrap"
+	"devsandbox/internal/termsafe"
 )
 
 // wrapperEnv is everything activate operates on, resolved once so the command
@@ -31,33 +33,64 @@ type wrapperEnv struct {
 	selected []string
 	// agents are the selected agents actually installed on this host.
 	agents []string
-	out    io.Writer
+	// commands are the configured shell_wrappers.commands. They are not
+	// filtered by host discovery: they resolve inside the sandbox.
+	commands []string
+	out      io.Writer
 }
 
-func newAgentWrappersCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "agent-wrappers",
-		Short: "Shell wrappers that run supported AI agents inside devsandbox",
-		Long: `Shell wrappers that run supported AI agents inside devsandbox.
+// wrapperTrustPrompt answers for a project .devsandbox.toml that is not already
+// trusted. Tests replace it; nil is declineProjectTrust.
+var wrapperTrustPrompt func(projectDir, content string, changed bool) (bool, error)
 
-Once activated, typing ` + "`claude`" + ` runs ` + "`devsandbox claude`" + ` in the current
-directory. Two escape hatches always reach the real, unsandboxed binary:
-` + "`claude-no-ds`" + ` and the shell builtin ` + "`command claude`" + `.
+// shellWrappersHelp is the explanation shared by the parent command and
+// activate, which is where a user reading about the startup line lands.
+const shellWrappersHelp = `Supported agents are wrapped when installed on this host: typing ` + "`claude`" + ` runs
+` + "`devsandbox run-agent claude`" + ` in the current directory. Commands listed in
+shell_wrappers.commands are wrapped whether or not the host has them, since they
+resolve inside the sandbox: with commands = ["npm"], typing ` + "`npm install`" + ` runs
+` + "`devsandbox run-command npm install`" + `. Nothing is wrapped by that list by default.
+Two escape hatches always reach the real, unsandboxed binary: ` + "`npm-no-ds`" + ` and
+the shell builtin ` + "`command npm`" + `.
+
+The command list is read the way a launch in the current directory reads it: the
+global config, matching includes, and a .devsandbox.toml you have trusted, all
+combined. Activation never asks for trust, because it runs at shell start where
+a question would swallow the next typed line: an untrusted or changed project
+file is skipped with a note on stderr until you approve it at the prompt of a
+launch in that directory, which shows the file first.
+
+The wrappers are a snapshot of that config, taken when activation is evaluated.
+Changing the config, or moving to a project with its own list, changes nothing
+until you evaluate activation again in that directory; doing so removes the
+wrappers the previous activation defined before defining the current set, and
+leaves your own functions alone.`
+
+func newShellWrappersCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "shell-wrappers",
+		Aliases: []string{"agent-wrappers"},
+		Short:   "Shell wrappers that run supported AI agents and configured commands inside devsandbox",
+		Long: `Shell wrappers that run supported AI agents and configured commands inside devsandbox.
+
+` + shellWrappersHelp + `
 
 Nothing is installed and no startup file is ever edited. ` + "`activate`" + ` prints the
 wrapper definitions and you evaluate them from your own startup file, when and
 where you see fit:
 
-` + activationExamples() + `Because the snippet is generated at every shell start, it never goes stale: a
-newly installed agent or an upgrade that moved the devsandbox binary is picked
-up by the next shell.
+` + activationExamples() + `Because the snippet is generated at every shell start, a newly installed agent
+or an upgrade that moved the devsandbox binary is picked up by the next shell.
+
+` + "`agent-wrappers`" + ` is the previous name of this command and remains an alias, so
+existing startup lines keep working and produce the same snippet.
 
 The wrappers are independent of herdr: they are useful on their own, and herdr's
 native session restore builds on them - which means the line has to be in the
 startup file of the shell herdr opens panes with, not only your login shell.`,
 	}
 
-	cmd.AddCommand(newAgentWrappersActivateCmd())
+	cmd.AddCommand(newWrappersActivateCmd())
 
 	return cmd
 }
@@ -73,7 +106,7 @@ func activationExamples() string {
 	return b.String()
 }
 
-func newAgentWrappersActivateCmd() *cobra.Command {
+func newWrappersActivateCmd() *cobra.Command {
 	var agents []string
 
 	cmd := &cobra.Command{
@@ -83,9 +116,18 @@ func newAgentWrappersActivateCmd() *cobra.Command {
 
 The output is shell code meant to be evaluated, not read:
 
-` + activationExamples() + `The shell defaults to the base name of $SHELL. Only agents actually installed
-on this host are wrapped; with none installed the output is a comment saying so,
-so a startup file that evaluates it keeps working.
+` + activationExamples() + `The shell defaults to the base name of $SHELL.
+
+` + shellWrappersHelp + `
+
+With no agent installed the output opens with a comment saying so, and still
+removes the previous activation's wrappers, so a startup file that evaluates it
+keeps working. A global config or include that fails to load, or an unsupported
+shell, stops before any shell code is written. A project .devsandbox.toml that
+fails to load is skipped with a warning on stderr instead: the sandbox can write
+that file, and it must not be able to leave a host shell without wrappers. For
+the same reason a current directory that no longer exists applies the global
+config alone, with a warning on stderr.
 
 --agents narrows what is wrapped to the agents you name, leaving the rest to run
 unsandboxed as usual. Values are given comma-separated, by repeating the flag,
@@ -94,14 +136,15 @@ same pair. Omit the flag to wrap every supported agent (` + strings.Join(agentid
 which is what activate did before the flag existed. An unsupported name fails
 before any shell code is written, so a startup file never evaluates half a
 snippet; a selected agent that is merely not installed is not an error, and is
-picked up by the next shell once you install it.
+picked up by the next shell once you install it. --agents does not affect
+configured commands.
 
 Inside a sandbox the definitions are inert - the whole snippet is guarded on
 DEVSANDBOX - so a wrapper cannot recurse.`,
-		Example: `  devsandbox agent-wrappers activate fish | source
-  eval "$(devsandbox agent-wrappers activate bash)"
-  devsandbox agent-wrappers activate fish --agents claude,codex | source
-  eval "$(devsandbox agent-wrappers activate bash --agents claude --agents codex)"`,
+		Example: `  devsandbox shell-wrappers activate fish | source
+  eval "$(devsandbox shell-wrappers activate bash)"
+  devsandbox shell-wrappers activate fish --agents claude,codex | source
+  eval "$(devsandbox shell-wrappers activate bash --agents claude --agents codex)"`,
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -116,7 +159,8 @@ DEVSANDBOX - so a wrapper cannot recurse.`,
 			if err != nil {
 				return err
 			}
-			env, err := resolveWrapperEnv(shellArg, selected, exec.LookPath, cmd.OutOrStdout())
+			loadCommands := func() ([]string, error) { return configuredCommands(cmd.ErrOrStderr()) }
+			env, err := resolveWrapperEnv(shellArg, selected, loadCommands, exec.LookPath, cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -130,10 +174,77 @@ DEVSANDBOX - so a wrapper cannot recurse.`,
 	return cmd
 }
 
+// configuredCommands returns the effective shell_wrappers.commands for the
+// current directory. The project file applies only once trusted, because its
+// commands become host shell definitions.
+//
+// A project file that fails to load is skipped with a warning instead of
+// failing activation. The project directory is writable from inside the
+// sandbox, and the file is parsed before trust is checked, so failing here
+// would let sandboxed code leave the next host shell with no wrappers at all -
+// agents included. Only a failure of the host-owned layers is returned.
+//
+// The same holds for a working directory that no longer resolves: the loader
+// needs it even to skip the project file, and sandboxed code can remove the
+// project subdirectory a host shell sits in. With no directory no include can
+// match, so the global config alone is what applies. A removed directory never
+// resolves again, so checking it after the loads cannot race them.
+func configuredCommands(stderr io.Writer) ([]string, error) {
+	onPrompt := wrapperTrustPrompt
+	if onPrompt == nil {
+		onPrompt = declineProjectTrust(stderr)
+	}
+	cfg, _, _, err := config.LoadConfigWithOptions(&config.LoadOptions{OnLocalConfigPrompt: onPrompt})
+	if err == nil {
+		return cfg.ShellWrappers.EffectiveCommands(), nil
+	}
+	hostCfg, _, _, hostErr := config.LoadConfigWithOptions(&config.LoadOptions{SkipLocalConfig: true})
+	if hostErr == nil {
+		_, _ = fmt.Fprintf(stderr, "devsandbox: shell wrappers skip %s: %s\n", config.LocalConfigFile, termsafe.Escape(err.Error()))
+		return hostCfg.ShellWrappers.EffectiveCommands(), nil
+	}
+	_, wdErr := os.Getwd()
+	if wdErr == nil {
+		return nil, hostErr
+	}
+	globalCfg, globalErr := config.LoadFrom(config.ConfigPath())
+	if globalErr != nil {
+		return nil, fmt.Errorf("failed to load config: %w", globalErr)
+	}
+	_, _ = fmt.Fprintf(stderr, "devsandbox: shell wrappers use the global config only, the current directory cannot be resolved: %s\n",
+		termsafe.Escape(wdErr.Error()))
+	return globalCfg.ShellWrappers.EffectiveCommands(), nil
+}
+
+// declineProjectTrust is activation's answer for a project file that is not
+// already trusted. It never reads stdin: activation runs at shell start, where
+// the next line on the terminal may be the `claude --resume` herdr types into a
+// restored pane, and a prompt would consume it as the answer. The project
+// directory is sandbox-writable, so a stale hash is something sandboxed code
+// can arrange at will - which is why the note points at a launch, whose prompt
+// shows the file, and not at `trust add`, which approves it unseen.
+func declineProjectTrust(stderr io.Writer) func(projectDir, content string, changed bool) (bool, error) {
+	return func(projectDir, _ string, changed bool) (bool, error) {
+		state := "untrusted"
+		if changed {
+			state = "changed"
+		}
+		_, _ = fmt.Fprintf(stderr, "devsandbox: shell wrappers skip %s %s in %s; review and approve it at the prompt of a devsandbox launch in that directory, then run activation again\n",
+			state, config.LocalConfigFile, termsafe.Escape(projectDir))
+		return false, nil
+	}
+}
+
 // resolveWrapperEnv gathers the host facts activate operates on, over the
-// already-validated selection.
-func resolveWrapperEnv(shellArg string, selected []string, lookPath func(string) (string, error), out io.Writer) (wrapperEnv, error) {
+// already-validated selection. The shell is checked before loadCommands runs,
+// so an unsupported shell never reads the project config.
+func resolveWrapperEnv(shellArg string, selected []string, loadCommands func() ([]string, error), lookPath func(string) (string, error), out io.Writer) (wrapperEnv, error) {
 	shell, err := detectShell(shellArg, os.Getenv("SHELL"))
+	if err != nil {
+		return wrapperEnv{}, err
+	}
+
+	commands, err := loadCommands()
 	if err != nil {
 		return wrapperEnv{}, err
 	}
@@ -151,6 +262,7 @@ func resolveWrapperEnv(shellArg string, selected []string, lookPath func(string)
 		devsandboxPath: exe,
 		selected:       selected,
 		agents:         installedAgents(selected, lookPath),
+		commands:       commands,
 		out:            out,
 	}, nil
 }
@@ -191,9 +303,12 @@ func installedAgents(names []string, lookPath func(string) (string, error)) []st
 
 // activateWrappers writes the snippet to env.out.
 //
+// The snippet is generated even when nothing is wrapped: its cleanup is what
+// removes the wrappers a previous activation defined.
+//
 // Having no agent installed is not an error: this runs on every shell start,
 // and there is nothing to wrap when none of the binaries exist. It is still
-// said out loud, in the output itself, rather than emitting nothing.
+// said out loud, in a leading comment, rather than left implicit.
 // The comment names env.selected rather than every known agent: with --agents
 // it would otherwise report on agents the user deliberately left out. Only the
 // full set may be called "supported" - a narrowed selection worded that way
@@ -201,23 +316,26 @@ func installedAgents(names []string, lookPath func(string) (string, error)) []st
 // --agents did - and the flag-omitted wording is unchanged because the two
 // lists are identical then.
 func activateWrappers(env wrapperEnv) error {
-	scope := "selected"
-	if slices.Equal(env.selected, agentid.KnownAgents()) {
-		scope = "supported"
+	snippet, err := shellwrap.Snippet(env.shell, env.devsandboxPath, env.agents, env.commands)
+	if err != nil {
+		return err
 	}
-	snippet := fmt.Sprintf("# none of the %s agents (%s) are installed on this host; nothing wrapped\n",
-		scope, strings.Join(env.selected, ", "))
-	if len(env.agents) > 0 {
-		generated, err := shellwrap.Snippet(env.shell, env.devsandboxPath, env.agents)
-		if err != nil {
-			return err
+	if len(env.agents) == 0 {
+		scope := "selected"
+		if slices.Equal(env.selected, agentid.KnownAgents()) {
+			scope = "supported"
 		}
-		snippet = generated
+		outcome := "nothing wrapped"
+		if len(env.commands) > 0 {
+			outcome = "no agent wrapped"
+		}
+		snippet = fmt.Sprintf("# none of the %s agents (%s) are installed on this host; %s\n",
+			scope, strings.Join(env.selected, ", "), outcome) + snippet
 	}
 
-	// A write error is reported rather than swallowed: the output is the whole
-	// deliverable here, and a shell that evaluates a truncated snippet gets
-	// wrappers for some agents and not others.
+	// A write error is reported rather than swallowed. It may arrive after a
+	// prefix was already written - a stream cannot be written atomically - so
+	// the error is the only signal that the shell evaluated a truncated snippet.
 	if _, err := io.WriteString(env.out, snippet); err != nil {
 		return fmt.Errorf("write wrapper snippet: %w", err)
 	}

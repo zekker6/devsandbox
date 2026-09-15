@@ -129,7 +129,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newNSDialCmd())
 	rootCmd.AddCommand(newRunAgentCmd())
 	rootCmd.AddCommand(newRunCommandCmd())
-	rootCmd.AddCommand(newAgentWrappersCmd())
+	rootCmd.AddCommand(newShellWrappersCmd())
 
 	versionTpl := fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date)
 	if runtime.GOOS == "linux" {

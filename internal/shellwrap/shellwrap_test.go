@@ -10,13 +10,25 @@ import (
 
 const testDevsandbox = "/usr/local/bin/devsandbox"
 
+const fishCleanup = `    for __devsandbox_name in $__devsandbox_wrappers
+        functions -e $__devsandbox_name $__devsandbox_name-no-ds
+    end
+    set -e __devsandbox_name
+`
+
+const posixCleanup = `  __devsandbox_rest=${__devsandbox_wrappers-}
+  unset __devsandbox_wrappers
+  while [ -n "$__devsandbox_rest" ]; do __devsandbox_name=${__devsandbox_rest%% *}; __devsandbox_rest=${__devsandbox_rest#"$__devsandbox_name"}; __devsandbox_rest=${__devsandbox_rest# }; unset -f "$__devsandbox_name" "${__devsandbox_name}-no-ds" 2>/dev/null; done
+  unset __devsandbox_rest __devsandbox_name
+`
+
 func TestSnippetFishExactOutput(t *testing.T) {
-	got, err := Snippet(ShellFish, testDevsandbox, []string{"claude"})
+	got, err := Snippet(ShellFish, testDevsandbox, []string{"claude"}, nil)
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
 	want := `if test -z "$DEVSANDBOX"
-    function claude --wraps claude
+` + fishCleanup + `    function claude --wraps claude
         if test -x '/usr/local/bin/devsandbox'
             '/usr/local/bin/devsandbox' run-agent claude $argv
         else
@@ -27,6 +39,7 @@ func TestSnippetFishExactOutput(t *testing.T) {
     function claude-no-ds --wraps claude
         command claude $argv
     end
+    set -gu __devsandbox_wrappers claude
 end
 `
 	if got != want {
@@ -34,13 +47,171 @@ end
 	}
 }
 
-func TestSnippetFishSeveralAgents(t *testing.T) {
-	got, err := Snippet(ShellFish, testDevsandbox, []string{"claude", "codex"})
+func TestSnippetFishMixedAgentsAndCommands(t *testing.T) {
+	got, err := Snippet(ShellFish, testDevsandbox, []string{"claude"}, []string{"npm", "bun"})
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
 	want := `if test -z "$DEVSANDBOX"
-    function claude --wraps claude
+` + fishCleanup + `    function claude --wraps claude
+        if test -x '/usr/local/bin/devsandbox'
+            '/usr/local/bin/devsandbox' run-agent claude $argv
+        else
+            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2
+            return 127
+        end
+    end
+    function claude-no-ds --wraps claude
+        command claude $argv
+    end
+    function npm --wraps npm
+        if test -x '/usr/local/bin/devsandbox'
+            '/usr/local/bin/devsandbox' run-command npm $argv
+        else
+            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2
+            return 127
+        end
+    end
+    function npm-no-ds --wraps npm
+        command npm $argv
+    end
+    function bun --wraps bun
+        if test -x '/usr/local/bin/devsandbox'
+            '/usr/local/bin/devsandbox' run-command bun $argv
+        else
+            printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2
+            return 127
+        end
+    end
+    function bun-no-ds --wraps bun
+        command bun $argv
+    end
+    set -gu __devsandbox_wrappers claude npm bun
+end
+`
+	if got != want {
+		t.Errorf("fish snippet mismatch:\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestSnippetBashMixedAgentsAndCommands(t *testing.T) {
+	got, err := Snippet(ShellBash, testDevsandbox, []string{"claude"}, []string{"npm"})
+	if err != nil {
+		t.Fatalf("Snippet: %v", err)
+	}
+	want := `if [ -n "${DEVSANDBOX:-}" ]; then :; else
+` + posixCleanup + `  function claude { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function claude-no-ds { command claude "$@"; }
+  function npm { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-command npm "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function npm-no-ds { command npm "$@"; }
+  case $- in *a*) set +a; __devsandbox_wrappers='claude npm'; set -a ;; *) __devsandbox_wrappers='claude npm' ;; esac
+fi
+`
+	if got != want {
+		t.Errorf("bash snippet mismatch:\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestSnippetZshMixedAgentsAndCommands(t *testing.T) {
+	got, err := Snippet(ShellZsh, testDevsandbox, []string{"claude", "codex"}, []string{"node"})
+	if err != nil {
+		t.Fatalf("Snippet: %v", err)
+	}
+	want := `if [ -n "${DEVSANDBOX:-}" ]; then :; else
+` + posixCleanup + `  function claude { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function claude-no-ds { command claude "$@"; }
+  function codex { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent codex "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function codex-no-ds { command codex "$@"; }
+  function node { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-command node "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function node-no-ds { command node "$@"; }
+  case $- in *a*) set +a; __devsandbox_wrappers='claude codex node'; set -a ;; *) __devsandbox_wrappers='claude codex node' ;; esac
+fi
+`
+	if got != want {
+		t.Errorf("zsh snippet mismatch:\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// An empty snapshot is not an error: it is what re-sourcing after leaving a
+// project with wrapped commands produces, and its whole job is the cleanup.
+func TestSnippetEmptySnapshotOnlyCleansUp(t *testing.T) {
+	posixEmpty := "if [ -n \"${DEVSANDBOX:-}\" ]; then :; else\n" + posixCleanup +
+		"  case $- in *a*) set +a; __devsandbox_wrappers=''; set -a ;; *) __devsandbox_wrappers='' ;; esac\nfi\n"
+	tests := map[string]string{
+		ShellFish: "if test -z \"$DEVSANDBOX\"\n" + fishCleanup + "    set -gu __devsandbox_wrappers\nend\n",
+		ShellBash: posixEmpty,
+		ShellZsh:  posixEmpty,
+	}
+	for shell, want := range tests {
+		got, err := Snippet(shell, testDevsandbox, nil, nil)
+		if err != nil {
+			t.Fatalf("Snippet(%s): %v", shell, err)
+		}
+		if got != want {
+			t.Errorf("%s snippet mismatch:\n got:\n%s\nwant:\n%s", shell, got, want)
+		}
+	}
+}
+
+// Agents keep going through run-agent, which applies the resume and worktree
+// guards; only configured commands take run-command.
+func TestSnippetRoutesAgentsAndCommandsSeparately(t *testing.T) {
+	for _, shell := range SupportedShells() {
+		got, err := Snippet(shell, testDevsandbox, []string{"claude"}, []string{"npm"})
+		if err != nil {
+			t.Fatalf("Snippet(%s): %v", shell, err)
+		}
+		for _, want := range []string{"run-agent claude", "run-command npm"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s snippet does not contain %q:\n%s", shell, want, got)
+			}
+		}
+		for _, bad := range []string{"run-command claude", "run-agent npm"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("%s snippet contains %q:\n%s", shell, bad, got)
+			}
+		}
+	}
+}
+
+func TestSnippetDeduplicatesInFirstSeenOrder(t *testing.T) {
+	got, err := Snippet(ShellBash, testDevsandbox, []string{"codex", "claude", "codex"}, []string{"npm", "bun", "npm"})
+	if err != nil {
+		t.Fatalf("Snippet: %v", err)
+	}
+	if !strings.Contains(got, "*) __devsandbox_wrappers='codex claude npm bun' ;;") {
+		t.Errorf("snapshot does not record each name once in first-seen order:\n%s", got)
+	}
+	if n := strings.Count(got, "function npm {"); n != 1 {
+		t.Errorf("npm defined %d times, want 1:\n%s", n, got)
+	}
+}
+
+func TestSnippetZshSeveralAgents(t *testing.T) {
+	got, err := Snippet(ShellZsh, testDevsandbox, []string{"claude", "codex"}, nil)
+	if err != nil {
+		t.Fatalf("Snippet: %v", err)
+	}
+	want := `if [ -n "${DEVSANDBOX:-}" ]; then :; else
+` + posixCleanup + `  function claude { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function claude-no-ds { command claude "$@"; }
+  function codex { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent codex "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function codex-no-ds { command codex "$@"; }
+  case $- in *a*) set +a; __devsandbox_wrappers='claude codex'; set -a ;; *) __devsandbox_wrappers='claude codex' ;; esac
+fi
+`
+	if got != want {
+		t.Errorf("zsh snippet mismatch:\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestSnippetFishSeveralAgents(t *testing.T) {
+	got, err := Snippet(ShellFish, testDevsandbox, []string{"claude", "codex"}, nil)
+	if err != nil {
+		t.Fatalf("Snippet: %v", err)
+	}
+	want := `if test -z "$DEVSANDBOX"
+` + fishCleanup + `    function claude --wraps claude
         if test -x '/usr/local/bin/devsandbox'
             '/usr/local/bin/devsandbox' run-agent claude $argv
         else
@@ -62,6 +233,7 @@ func TestSnippetFishSeveralAgents(t *testing.T) {
     function codex-no-ds --wraps codex
         command codex $argv
     end
+    set -gu __devsandbox_wrappers claude codex
 end
 `
 	if got != want {
@@ -70,34 +242,18 @@ end
 }
 
 func TestSnippetBashExactOutput(t *testing.T) {
-	got, err := Snippet(ShellBash, testDevsandbox, []string{"claude"})
+	got, err := Snippet(ShellBash, testDevsandbox, []string{"claude"}, nil)
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
 	want := `if [ -n "${DEVSANDBOX:-}" ]; then :; else
-  claude() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
-  claude-no-ds() { command claude "$@"; }
+` + posixCleanup + `  function claude { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
+  function claude-no-ds { command claude "$@"; }
+  case $- in *a*) set +a; __devsandbox_wrappers='claude'; set -a ;; *) __devsandbox_wrappers='claude' ;; esac
 fi
 `
 	if got != want {
 		t.Errorf("bash snippet mismatch:\n got:\n%s\nwant:\n%s", got, want)
-	}
-}
-
-func TestSnippetZshSeveralAgents(t *testing.T) {
-	got, err := Snippet(ShellZsh, testDevsandbox, []string{"claude", "codex"})
-	if err != nil {
-		t.Fatalf("Snippet: %v", err)
-	}
-	want := `if [ -n "${DEVSANDBOX:-}" ]; then :; else
-  claude() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent claude "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
-  claude-no-ds() { command claude "$@"; }
-  codex() { if [ -x '/usr/local/bin/devsandbox' ]; then '/usr/local/bin/devsandbox' run-agent codex "$@"; else printf '%s %s %s\n' "devsandbox: no executable at" '/usr/local/bin/devsandbox' "- reinstall devsandbox, then start a new shell to refresh the wrappers" >&2; return 127; fi; }
-  codex-no-ds() { command codex "$@"; }
-fi
-`
-	if got != want {
-		t.Errorf("zsh snippet mismatch:\n got:\n%s\nwant:\n%s", got, want)
 	}
 }
 
@@ -106,7 +262,7 @@ fi
 func TestSnippetGuardWrapsEveryDefinition(t *testing.T) {
 	for _, shell := range SupportedShells() {
 		t.Run(shell, func(t *testing.T) {
-			got, err := Snippet(shell, testDevsandbox, []string{"claude", "codex"})
+			got, err := Snippet(shell, testDevsandbox, []string{"claude", "codex"}, nil)
 			if err != nil {
 				t.Fatalf("Snippet: %v", err)
 			}
@@ -137,7 +293,7 @@ func TestSnippetGuardWrapsEveryDefinition(t *testing.T) {
 // Empty and unset must mean the same thing in every shell, which is why the
 // guard tests non-emptiness rather than using fish's `set -q`.
 func TestSnippetGuardUsesNonEmptySemantics(t *testing.T) {
-	fish, err := Snippet(ShellFish, testDevsandbox, []string{"claude"})
+	fish, err := Snippet(ShellFish, testDevsandbox, []string{"claude"}, nil)
 	if err != nil {
 		t.Fatalf("Snippet: %v", err)
 	}
@@ -148,7 +304,7 @@ func TestSnippetGuardUsesNonEmptySemantics(t *testing.T) {
 		t.Errorf("fish guard uses set -q, which is true for an empty value:\n%s", fish)
 	}
 	for _, shell := range []string{ShellBash, ShellZsh} {
-		got, err := Snippet(shell, testDevsandbox, []string{"claude"})
+		got, err := Snippet(shell, testDevsandbox, []string{"claude"}, nil)
 		if err != nil {
 			t.Fatalf("Snippet(%s): %v", shell, err)
 		}
@@ -160,7 +316,7 @@ func TestSnippetGuardUsesNonEmptySemantics(t *testing.T) {
 
 func TestSnippetUsesAbsolutePathNotCommandLookup(t *testing.T) {
 	for _, shell := range SupportedShells() {
-		got, err := Snippet(shell, testDevsandbox, []string{"claude"})
+		got, err := Snippet(shell, testDevsandbox, []string{"claude"}, nil)
 		if err != nil {
 			t.Fatalf("Snippet(%s): %v", shell, err)
 		}
@@ -188,7 +344,7 @@ func TestSnippetFailsClosedWhenBakedPathIsGone(t *testing.T) {
 		{ShellZsh, "if [ -x '" + testDevsandbox + "' ]"},
 	}
 	for _, tt := range tests {
-		got, err := Snippet(tt.shell, testDevsandbox, []string{"claude"})
+		got, err := Snippet(tt.shell, testDevsandbox, []string{"claude"}, nil)
 		if err != nil {
 			t.Fatalf("Snippet(%s): %v", tt.shell, err)
 		}
@@ -215,7 +371,7 @@ func TestSnippetFailsClosedWhenBakedPathIsGone(t *testing.T) {
 func TestSnippetQuotesPathInExistenceGuard(t *testing.T) {
 	const awkward = "/opt/dev sandbox/dev'sandbox"
 	for _, shell := range SupportedShells() {
-		got, err := Snippet(shell, awkward, []string{"claude"})
+		got, err := Snippet(shell, awkward, []string{"claude"}, nil)
 		if err != nil {
 			t.Fatalf("Snippet(%s): %v", shell, err)
 		}
@@ -227,25 +383,34 @@ func TestSnippetQuotesPathInExistenceGuard(t *testing.T) {
 
 func TestSnippetErrors(t *testing.T) {
 	tests := []struct {
-		name    string
-		shell   string
-		path    string
-		agents  []string
-		wantSub string
+		name     string
+		shell    string
+		path     string
+		agents   []string
+		commands []string
+		wantSub  string
 	}{
-		{"unsupported shell", "nu", testDevsandbox, []string{"claude"}, "unsupported shell"},
-		{"empty shell", "", testDevsandbox, []string{"claude"}, "unsupported shell"},
-		{"relative path", ShellBash, "devsandbox", []string{"claude"}, "must be absolute"},
-		{"empty path", ShellBash, "", []string{"claude"}, "must be absolute"},
-		{"no agents", ShellBash, testDevsandbox, nil, "no agents"},
-		{"empty agent name", ShellBash, testDevsandbox, []string{""}, "empty agent name"},
-		{"agent with space", ShellBash, testDevsandbox, []string{"cl aude"}, "invalid agent name"},
-		{"agent with metachar", ShellFish, testDevsandbox, []string{"claude;rm -rf /"}, "invalid agent name"},
-		{"agent leading hyphen", ShellBash, testDevsandbox, []string{"-claude"}, "invalid agent name"},
+		{"unsupported shell", "nu", testDevsandbox, []string{"claude"}, nil, "unsupported shell"},
+		{"empty shell", "", testDevsandbox, []string{"claude"}, nil, "unsupported shell"},
+		{"relative path", ShellBash, "devsandbox", []string{"claude"}, nil, "must be absolute"},
+		{"empty path", ShellBash, "", []string{"claude"}, nil, "must be absolute"},
+		{"empty agent name", ShellBash, testDevsandbox, []string{""}, nil, "empty agent name"},
+		{"agent with space", ShellBash, testDevsandbox, []string{"cl aude"}, nil, "invalid agent name"},
+		{"agent with metachar", ShellFish, testDevsandbox, []string{"claude;rm -rf /"}, nil, "invalid agent name"},
+		{"agent leading hyphen", ShellBash, testDevsandbox, []string{"-claude"}, nil, "invalid agent name"},
+		{"empty command name", ShellBash, testDevsandbox, nil, []string{""}, "empty command name"},
+		{"command path", ShellFish, testDevsandbox, nil, []string{"/usr/bin/npm"}, "not a path"},
+		{"command metachar", ShellBash, testDevsandbox, nil, []string{"npm;id"}, "invalid command name"},
+		{"command reserved word", ShellZsh, testDevsandbox, nil, []string{"command"}, "reserved shell word"},
+		{"command is an agent", ShellBash, testDevsandbox, nil, []string{"claude"}, "supported agent"},
+		{"command beside its own bypass", ShellBash, testDevsandbox, nil, []string{"npm", "npm-no-ds"}, `"npm-no-ds"`},
+		{"agent beside its own bypass", ShellFish, testDevsandbox, []string{"claude", "claude-no-ds"}, nil, `wrapper function "claude-no-ds" is generated for both run-agent "claude" and run-agent "claude-no-ds"`},
+		{"agent named after a command bypass", ShellBash, testDevsandbox, []string{"npm-no-ds"}, []string{"npm"}, `wrapper function "npm-no-ds" is generated for both run-agent "npm-no-ds" and run-command "npm"`},
+		{"agent and command with one name", ShellBash, testDevsandbox, []string{"tool"}, []string{"tool"}, `wrapper function "tool" is generated for both run-agent "tool" and run-command "tool"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Snippet(tt.shell, tt.path, tt.agents)
+			got, err := Snippet(tt.shell, tt.path, tt.agents, tt.commands)
 			if err == nil {
 				t.Fatalf("expected an error, got snippet:\n%s", got)
 			}
@@ -262,7 +427,7 @@ func TestSnippetErrors(t *testing.T) {
 func TestSnippetQuotesPathWithSpaces(t *testing.T) {
 	const p = "/opt/my tools/devsandbox"
 	for _, shell := range SupportedShells() {
-		got, err := Snippet(shell, p, []string{"claude"})
+		got, err := Snippet(shell, p, []string{"claude"}, nil)
 		if err != nil {
 			t.Fatalf("Snippet(%s): %v", shell, err)
 		}
@@ -274,9 +439,9 @@ func TestSnippetQuotesPathWithSpaces(t *testing.T) {
 
 func TestActivateLine(t *testing.T) {
 	tests := map[string]string{
-		ShellFish: `if test -z "$DEVSANDBOX"; devsandbox agent-wrappers activate fish | source; end`,
-		ShellBash: `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate bash)"; fi`,
-		ShellZsh:  `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox agent-wrappers activate zsh)"; fi`,
+		ShellFish: `if test -z "$DEVSANDBOX"; devsandbox shell-wrappers activate fish | source; end`,
+		ShellBash: `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash)"; fi`,
+		ShellZsh:  `if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate zsh)"; fi`,
 	}
 	for shell, want := range tests {
 		if got := ActivateLine(shell); got != want {
@@ -347,7 +512,35 @@ func fakeBin(t *testing.T) (dir, devsandbox string) {
 	}
 	write(devsandbox, "#!/bin/sh\nfor a in \"$@\"; do printf 'arg:%s\\n' \"$a\"; done\n")
 	write(filepath.Join(dir, "claude"), "#!/bin/sh\necho real-claude\n")
+	write(filepath.Join(dir, "npm"), "#!/bin/sh\necho real-npm\n")
 	return dir, devsandbox
+}
+
+// writeSnippet stores snippet in a file a driver script can source.
+func writeSnippet(t *testing.T, shell, snippet string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "snippet."+shell)
+	if err := os.WriteFile(path, []byte(snippet), 0o644); err != nil {
+		t.Fatalf("write snippet: %v", err)
+	}
+	return path
+}
+
+// functionProbe is a statement printing "fn:<name>" when name is defined as a
+// shell function.
+func functionProbe(shell, name string) string {
+	if shell == ShellFish {
+		return "functions -q " + name + "; and echo fn:" + name + "\n"
+	}
+	return "typeset -f " + name + " >/dev/null 2>&1 && echo fn:" + name + "\n"
+}
+
+// userFunction defines a function devsandbox did not generate.
+func userFunction(shell, name string) string {
+	if shell == ShellFish {
+		return "function " + name + "; echo user; end\n"
+	}
+	return "function " + name + " { echo user; }\n"
 }
 
 // runShell sources the generated snippet and runs body under shell, failing the
@@ -365,12 +558,7 @@ func runShell(t *testing.T, shell, snippet, body string, env []string) string {
 // the behavior under test.
 func runShellAllowingFailure(t *testing.T, shell, snippet, body string, env []string) (string, error) {
 	t.Helper()
-	dir := t.TempDir()
-	snippetPath := filepath.Join(dir, "snippet."+shell)
-	if err := os.WriteFile(snippetPath, []byte(snippet), 0o644); err != nil {
-		t.Fatalf("write snippet: %v", err)
-	}
-	return runShellBody(t, shell, "source '"+snippetPath+"'\n"+body, env)
+	return runShellBody(t, shell, "source '"+writeSnippet(t, shell, snippet)+"'\n"+body, env)
 }
 
 // runShellBody runs script under shell, returning its combined output and exit
@@ -407,7 +595,7 @@ func TestSnippetBehavior(t *testing.T) {
 	for _, shell := range SupportedShells() {
 		t.Run(shell, func(t *testing.T) {
 			binDir, devsandbox := fakeBin(t)
-			snippet, err := Snippet(shell, devsandbox, []string{"claude"})
+			snippet, err := Snippet(shell, devsandbox, []string{"claude"}, nil)
 			if err != nil {
 				t.Fatalf("Snippet: %v", err)
 			}
@@ -465,6 +653,152 @@ func TestSnippetBehavior(t *testing.T) {
 	}
 }
 
+// A configured command is wrapped whether or not the host has it: it is
+// resolved inside the sandbox, which is the point of wrapping package tooling
+// the host never needs to install.
+func TestSnippetBehaviorCustomCommand(t *testing.T) {
+	for _, shell := range SupportedShells() {
+		t.Run(shell, func(t *testing.T) {
+			binDir, devsandbox := fakeBin(t)
+			snippet, err := Snippet(shell, devsandbox, nil, []string{"npm", "node"})
+			if err != nil {
+				t.Fatalf("Snippet: %v", err)
+			}
+			baseEnv := []string{"PATH=" + binDir + ":/usr/bin:/bin", "HOME=" + t.TempDir()}
+
+			tests := []struct {
+				name string
+				body string
+				env  []string
+				want string
+			}{
+				{"routes through run-command with arguments intact", "npm install 'a b' --proxy 'c;d'\n", baseEnv,
+					"arg:run-command\narg:npm\narg:install\narg:a b\narg:--proxy\narg:c;d\n"},
+				{"host-missing command still routes", "node x\n", baseEnv, "arg:run-command\narg:node\narg:x\n"},
+				{"no-ds companion reaches the host binary", "npm-no-ds\n", baseEnv, "real-npm\n"},
+				{"command escape hatch reaches the host binary", "command npm\n", baseEnv, "real-npm\n"},
+				{"inert inside the sandbox", "npm\n", append(append([]string{}, baseEnv...), "DEVSANDBOX=1"), "real-npm\n"},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					if out := runShell(t, shell, snippet, tt.body, tt.env); out != tt.want {
+						t.Errorf("output = %q, want %q", out, tt.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Re-sourcing activation is how a shell picks up a different project's
+// wrappers, so a snapshot has to take down the one before it: a wrapper left
+// behind would keep sandboxing a command the current config no longer names,
+// and a bypass left behind would keep pointing at it. Only recorded names may
+// go, and the record must not reach a child process - a child shell has none of
+// the functions, so an inherited list would only name its own.
+func TestSnippetBehaviorSnapshotsReconcile(t *testing.T) {
+	names := []string{"claude", "claude-no-ds", "npm", "npm-no-ds", "bun", "bun-no-ds", "node", "node-no-ds", "userfn"}
+
+	for _, shell := range SupportedShells() {
+		t.Run(shell, func(t *testing.T) {
+			binDir, devsandbox := fakeBin(t)
+			snapshot := func(agents, commands []string) string {
+				s, err := Snippet(shell, devsandbox, agents, commands)
+				if err != nil {
+					t.Fatalf("Snippet: %v", err)
+				}
+				return writeSnippet(t, shell, s)
+			}
+			first := snapshot([]string{"claude"}, []string{"npm", "bun"})
+			// An inherited, exported record is what a leak would look like;
+			// activation has to leave it unexported either way.
+			env := []string{"PATH=" + binDir + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "__devsandbox_wrappers=stale"}
+
+			run := func(t *testing.T, second, calls string) string {
+				t.Helper()
+				script := userFunction(shell, "userfn") +
+					"source '" + first + "'\n" +
+					"source '" + second + "'\n"
+				for _, n := range names {
+					script += functionProbe(shell, n)
+				}
+				script += calls + "env\ntrue\n"
+				out, err := runShellBody(t, shell, script, env)
+				if err != nil {
+					t.Fatalf("%s failed: %v\noutput:\n%s", shell, err, out)
+				}
+				if strings.Contains(out, "__devsandbox_wrappers=") {
+					t.Errorf("snapshot record is exported to a child process:\n%s", out)
+				}
+				return out
+			}
+
+			t.Run("second snapshot replaces the first", func(t *testing.T) {
+				out := run(t, snapshot(nil, []string{"node"}), "node x 'a b'\nnpm\n")
+				want := "fn:node\nfn:node-no-ds\nfn:userfn\narg:run-command\narg:node\narg:x\narg:a b\nreal-npm\n"
+				if !strings.HasPrefix(out, want) {
+					t.Errorf("output = %q, want prefix %q", out, want)
+				}
+			})
+
+			t.Run("same snapshot twice keeps every wrapper", func(t *testing.T) {
+				out := run(t, first, "npm i\n")
+				want := "fn:claude\nfn:claude-no-ds\nfn:npm\nfn:npm-no-ds\nfn:bun\nfn:bun-no-ds\nfn:userfn\narg:run-command\narg:npm\narg:i\n"
+				if !strings.HasPrefix(out, want) {
+					t.Errorf("output = %q, want prefix %q", out, want)
+				}
+			})
+
+			t.Run("empty snapshot removes every wrapper", func(t *testing.T) {
+				out := run(t, snapshot(nil, nil), "claude\n")
+				want := "fn:userfn\nreal-claude\n"
+				if !strings.HasPrefix(out, want) {
+					t.Errorf("output = %q, want prefix %q", out, want)
+				}
+			})
+
+			// allexport exports every assignment, the record's included.
+			if shell != ShellFish {
+				t.Run("record stays unexported under allexport", func(t *testing.T) {
+					out := run(t, first, "set -a\nsource '"+first+"'\ncase $- in *a*) echo allexport-on ;; esac\n")
+					if !strings.Contains(out, "allexport-on\n") {
+						t.Errorf("allexport was not restored after activation:\n%s", out)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Users alias package tooling (alias npm=pnpm). bash and zsh alias-expand the
+// name in `name() {`, which would turn the whole snippet into a syntax error and
+// leave the shell with no wrappers at all.
+func TestSnippetBehaviorSurvivesAliasOnWrappedName(t *testing.T) {
+	aliases := map[string]string{
+		ShellFish: "alias npm 'echo aliased'\n",
+		ShellBash: "shopt -s expand_aliases\nalias npm='echo aliased'\n",
+		ShellZsh:  "alias npm='echo aliased'\n",
+	}
+	for _, shell := range SupportedShells() {
+		t.Run(shell, func(t *testing.T) {
+			binDir, devsandbox := fakeBin(t)
+			snippet, err := Snippet(shell, devsandbox, []string{"claude"}, []string{"npm"})
+			if err != nil {
+				t.Fatalf("Snippet: %v", err)
+			}
+			env := []string{"PATH=" + binDir + ":/usr/bin:/bin", "HOME=" + t.TempDir()}
+			script := aliases[shell] + "source '" + writeSnippet(t, shell, snippet) + "'\nclaude x\nnpm-no-ds\n"
+			out, err := runShellBody(t, shell, script, env)
+			if err != nil {
+				t.Fatalf("%s failed: %v\noutput:\n%s", shell, err, out)
+			}
+			if want := "arg:run-agent\narg:claude\narg:x\nreal-npm\n"; out != want {
+				t.Errorf("output = %q, want %q", out, want)
+			}
+		})
+	}
+}
+
 // The upgrade case, run for real: the baked path is gone while a devsandbox
 // sits in PATH. The wrapper must refuse rather than execute it - PATH is the
 // one input the sandbox can influence from inside, via a project-local bin
@@ -484,7 +818,7 @@ func TestSnippetBehaviorBakedPathMissing(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					binDir, _ := fakeBin(t)
 					gone := filepath.Join(t.TempDir(), leaf, "devsandbox")
-					snippet, err := Snippet(shell, gone, []string{"claude"})
+					snippet, err := Snippet(shell, gone, []string{"claude"}, nil)
 					if err != nil {
 						t.Fatalf("Snippet: %v", err)
 					}
@@ -541,7 +875,7 @@ func TestSnippetBehaviorPathNeedingQuoting(t *testing.T) {
 					if err := os.WriteFile(devsandbox, []byte("#!/bin/sh\nfor a in \"$@\"; do printf 'arg:%s\\n' \"$a\"; done\n"), 0o755); err != nil {
 						t.Fatalf("write: %v", err)
 					}
-					snippet, err := Snippet(shell, devsandbox, []string{"claude"})
+					snippet, err := Snippet(shell, devsandbox, []string{"claude"}, nil)
 					if err != nil {
 						t.Fatalf("Snippet: %v", err)
 					}
@@ -585,7 +919,7 @@ func TestActivateLineBehavior(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read marker: %v", err)
 			}
-			if want := "agent-wrappers activate " + shell + "\n"; string(args) != want {
+			if want := "shell-wrappers activate " + shell + "\n"; string(args) != want {
 				t.Errorf("devsandbox invoked as %q, want %q", args, want)
 			}
 
