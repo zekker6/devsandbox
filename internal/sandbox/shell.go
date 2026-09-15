@@ -3,6 +3,8 @@ package sandbox
 import (
 	"fmt"
 	"strings"
+
+	"devsandbox/internal/shellwrap"
 )
 
 // escapeForShellDoubleQuote escapes a string for safe inclusion inside
@@ -30,16 +32,14 @@ func escapeForFishDoubleQuote(s string) string {
 	return replacer.Replace(s)
 }
 
-// shellQuote quotes a string for safe use in a shell command.
+// shellQuote quotes a string for safe use in a shell command run by shell.
 // Returns the string unchanged if it's safe, otherwise wraps in single quotes.
-func shellQuote(s string) string {
-	// If the string is empty, return quoted empty string
-	if s == "" {
-		return "''"
-	}
-
-	// Characters that require quoting in shell
-	needsQuoting := false
+// Fish needs its own quoting: it still treats \\ and \' as escapes inside
+// single quotes, so POSIX quoting alters backslashes and a trailing backslash
+// leaves the quote unbalanced.
+func shellQuote(s string, shell Shell) string {
+	// A leading = is zsh's EQUALS expansion (=cmd becomes the path of cmd).
+	needsQuoting := s == "" || strings.HasPrefix(s, "=")
 	for _, c := range s {
 		switch c {
 		case ' ', '\t', '\n', '"', '\'', '`', '$', '\\', '!', '*', '?', '[', ']', '(', ')', '{', '}', '<', '>', '|', '&', ';', '#', '~':
@@ -50,11 +50,10 @@ func shellQuote(s string) string {
 	if !needsQuoting {
 		return s
 	}
-
-	// Use single quotes and escape any single quotes within
-	// In shell, 'foo'\''bar' produces foo'bar
-	escaped := strings.ReplaceAll(s, "'", "'\\''")
-	return "'" + escaped + "'"
+	if shell == ShellFish {
+		return shellwrap.FishQuote(s)
+	}
+	return shellwrap.PosixQuote(s)
 }
 
 // BuildShellCommand creates the command to run inside the sandbox
@@ -78,7 +77,7 @@ func buildFishCommand(cfg *Config, args []string) []string {
 		return []string{cfg.ShellPath, "-c", fishInit}
 	}
 
-	cmdString := shellJoinArgs(args)
+	cmdString := shellJoinArgs(args, cfg.Shell)
 	fishCmd := miseActivation + "; " + cmdString
 	return []string{cfg.ShellPath, "-c", fishCmd}
 }
@@ -93,7 +92,7 @@ func buildBashCommand(cfg *Config, args []string) []string {
 		return []string{cfg.ShellPath, "-c", bashInit}
 	}
 
-	cmdString := shellJoinArgs(args)
+	cmdString := shellJoinArgs(args, cfg.Shell)
 	bashCmd := miseActivation + "; " + cmdString
 	return []string{cfg.ShellPath, "-c", bashCmd}
 }
@@ -108,16 +107,16 @@ func buildZshCommand(cfg *Config, args []string) []string {
 		return []string{cfg.ShellPath, "-c", zshInit}
 	}
 
-	cmdString := shellJoinArgs(args)
+	cmdString := shellJoinArgs(args, cfg.Shell)
 	zshCmd := miseActivation + "; " + cmdString
 	return []string{cfg.ShellPath, "-c", zshCmd}
 }
 
 // shellJoinArgs joins arguments with proper shell quoting.
-func shellJoinArgs(args []string) string {
+func shellJoinArgs(args []string, shell Shell) string {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
-		quoted[i] = shellQuote(arg)
+		quoted[i] = shellQuote(arg, shell)
 	}
 	return strings.Join(quoted, " ")
 }

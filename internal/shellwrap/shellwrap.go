@@ -163,7 +163,7 @@ func fishSnippet(devsandboxPath string, wrappers []wrapper) string {
 	fmt.Fprintf(&b, "        functions -e $__devsandbox_name $__devsandbox_name%s\n", BypassSuffix)
 	b.WriteString("    end\n")
 	b.WriteString("    set -e __devsandbox_name\n")
-	q := fishQuote(devsandboxPath)
+	q := FishQuote(devsandboxPath)
 	for _, w := range wrappers {
 		fmt.Fprintf(&b, "    function %s --wraps %s\n", w.name, w.name)
 		fmt.Fprintf(&b, "        if test -x %s\n", q)
@@ -205,14 +205,14 @@ func posixSnippet(devsandboxPath string, wrappers []wrapper) string {
 	fmt.Fprintf(&b, "  unset %s\n", snapshotVar)
 	fmt.Fprintf(&b, "  while [ -n \"$__devsandbox_rest\" ]; do __devsandbox_name=${__devsandbox_rest%%%% *}; __devsandbox_rest=${__devsandbox_rest#\"$__devsandbox_name\"}; __devsandbox_rest=${__devsandbox_rest# }; unset -f \"$__devsandbox_name\" \"${__devsandbox_name}%s\" 2>/dev/null; done\n", BypassSuffix)
 	b.WriteString("  unset __devsandbox_rest __devsandbox_name\n")
-	q := posixQuote(devsandboxPath)
+	q := PosixQuote(devsandboxPath)
 	names := make([]string, 0, len(wrappers))
 	for _, w := range wrappers {
 		fmt.Fprintf(&b, "  function %s { if [ -x %s ]; then %s %s %s \"$@\"; else printf '%%s %%s %%s\\n' \"devsandbox: no executable at\" %s \"- reinstall devsandbox, then start a new shell to refresh the wrappers\" >&2; return 127; fi; }\n", w.name, q, q, w.subcommand, w.name, q)
 		fmt.Fprintf(&b, "  function %s%s { command %s \"$@\"; }\n", w.name, BypassSuffix, w.name)
 		names = append(names, w.name)
 	}
-	record := snapshotVar + "=" + posixQuote(strings.Join(names, " "))
+	record := snapshotVar + "=" + PosixQuote(strings.Join(names, " "))
 	fmt.Fprintf(&b, "  case $- in *a*) set +a; %s; set -a ;; *) %s ;; esac\n", record, record)
 	b.WriteString("fi\n")
 	return b.String()
@@ -264,14 +264,14 @@ func validateAgentName(name string) error {
 	return validateWord("agent", name)
 }
 
-// posixQuote single-quotes s for bash, zsh, and any POSIX shell.
-func posixQuote(s string) string {
+// PosixQuote single-quotes s for bash, zsh, and any POSIX shell.
+func PosixQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// fishQuote single-quotes s for fish, where only backslash and the quote
+// FishQuote single-quotes s for fish, where only backslash and the quote
 // itself are escapable inside single quotes.
-func fishQuote(s string) string {
+func FishQuote(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
 	return "'" + r.Replace(s) + "'"
 }

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -362,7 +363,7 @@ func TestShellQuote(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := shellQuote(tt.input)
+			result := shellQuote(tt.input, ShellBash)
 			if result != tt.expected {
 				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
@@ -400,9 +401,46 @@ func TestShellJoinArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := shellJoinArgs(tt.args)
+			result := shellJoinArgs(tt.args, ShellBash)
 			if result != tt.expected {
 				t.Errorf("shellJoinArgs(%v) = %q, want %q", tt.args, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestBuildShellCommand_ArgsSurviveRealShell runs the generated -c string
+// through each real shell and checks every argument arrives byte for byte.
+func TestBuildShellCommand_ArgsSurviveRealShell(t *testing.T) {
+	args := []string{
+		"plain", "", "two words", `a\b`, `a\\b`, `trailing\`, `\'`, "it's",
+		"=ls", "--opt=val", "$HOME", "`id`", "*", "~", "line\nbreak", `"dq"`,
+	}
+	for _, shell := range []Shell{ShellFish, ShellBash, ShellZsh} {
+		t.Run(string(shell), func(t *testing.T) {
+			bin, err := exec.LookPath(string(shell))
+			if err != nil {
+				t.Skipf("%s not installed", shell)
+			}
+			cfg := &Config{ProjectName: "testproject", Shell: shell, ShellPath: bin}
+			argv := BuildShellCommand(cfg, append([]string{"printf", `<%s>\n`}, args...))
+
+			home := t.TempDir()
+			cmd := exec.Command(argv[0], argv[1:]...)
+			cmd.Env = []string{"PATH=", "HOME=" + home, "XDG_CONFIG_HOME=" + home, "ZDOTDIR=" + home}
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s failed: %v\nstdout:\n%s\nstderr:\n%s", shell, err, out, stderr.String())
+			}
+
+			var want strings.Builder
+			for _, a := range args {
+				want.WriteString("<" + a + ">\n")
+			}
+			if string(out) != want.String() {
+				t.Errorf("%s altered arguments:\ngot:\n%s\nwant:\n%s", shell, out, want.String())
 			}
 		})
 	}
