@@ -17,7 +17,8 @@
 // uses non-empty semantics in every shell: an empty DEVSANDBOX means "outside
 // the sandbox" everywhere, matching what the run-agent entrypoint checks in Go.
 //
-// The package is a stdlib-only leaf so both the wrapper CLI and run-agent can
+// The package depends only on the stdlib and the dependency-free
+// internal/agentid, so the wrapper CLI, run-agent and config validation can
 // import it without dragging in the tool registry.
 package shellwrap
 
@@ -168,24 +169,9 @@ func StartupFile(shell string) string {
 }
 
 // validateAgentName rejects anything that is not a bare shell-safe word. Agent
-// names are host-derived, but the generated text is executed by a shell, so
-// the charset is pinned rather than assumed.
+// names are host-derived, but the generated text is executed by a shell.
 func validateAgentName(name string) error {
-	if name == "" {
-		return fmt.Errorf("empty agent name")
-	}
-	if name[0] == '-' {
-		return fmt.Errorf("invalid agent name %q: must not start with %q", name, "-")
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
-		default:
-			return fmt.Errorf("invalid agent name %q: only [A-Za-z0-9_-] is allowed", name)
-		}
-	}
-	return nil
+	return validateWord("agent", name)
 }
 
 // posixQuote single-quotes s for bash, zsh, and any POSIX shell.

@@ -2230,3 +2230,146 @@ func TestMergeConfigs_TrustedOverlayMayRaiseLimits(t *testing.T) {
 		t.Errorf("project file raised max_log_body_bytes, merged = %d, want 1024", got)
 	}
 }
+
+func TestDefaultConfig_ShellWrappersEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ShellWrappers.Commands != nil {
+		t.Errorf("default shell_wrappers.commands = %v, want nil", cfg.ShellWrappers.Commands)
+	}
+	if got := cfg.ShellWrappers.EffectiveCommands(); len(got) != 0 {
+		t.Errorf("default EffectiveCommands() = %v, want empty", got)
+	}
+}
+
+func TestLoadFrom_ShellWrappers(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"absent section", "[proxy]\nport = 8080\n", nil},
+		{"empty section", "[shell_wrappers]\n", nil},
+		{"empty list", "[shell_wrappers]\ncommands = []\n", nil},
+		{"commands", "[shell_wrappers]\ncommands = [\"npm\", \"bun\", \"node\"]\n", []string{"bun", "node", "npm"}},
+		{"duplicates", "[shell_wrappers]\ncommands = [\"npm\", \"node\", \"npm\"]\n", []string{"node", "npm"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := LoadFrom(path)
+			if err != nil {
+				t.Fatalf("LoadFrom: %v", err)
+			}
+			if got := cfg.ShellWrappers.EffectiveCommands(); !slices.Equal(got, tt.want) {
+				t.Errorf("EffectiveCommands() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShellWrappersConfig_EffectiveCommandsDoesNotMutate(t *testing.T) {
+	s := ShellWrappersConfig{Commands: []string{"npm", "bun", "npm"}}
+	got := s.EffectiveCommands()
+	if !slices.Equal(got, []string{"bun", "npm"}) {
+		t.Fatalf("EffectiveCommands() = %v, want [bun npm]", got)
+	}
+	if !slices.Equal(s.Commands, []string{"npm", "bun", "npm"}) {
+		t.Errorf("EffectiveCommands mutated Commands to %v", s.Commands)
+	}
+}
+
+func TestValidate_ShellWrappersCommands(t *testing.T) {
+	tests := []struct {
+		name     string
+		commands []string
+		wantErr  []string
+	}{
+		{"valid", []string{"npm", "bun", "config"}, nil},
+		{"empty name", []string{"npm", ""}, []string{"shell_wrappers.commands[1]", "empty command name"}},
+		{"path", []string{"/usr/bin/npm"}, []string{"shell_wrappers.commands[0]", `"/usr/bin/npm"`}},
+		{"reserved word", []string{"npm", "bun", "exec"}, []string{"shell_wrappers.commands[2]", `"exec"`}},
+		{"bypass suffix", []string{"npm-no-ds"}, []string{"shell_wrappers.commands[0]", `"npm-no-ds"`}},
+		{"agent", []string{"claude"}, []string{"shell_wrappers.commands[0]", `"claude"`}},
+		{"devsandbox", []string{"devsandbox"}, []string{"shell_wrappers.commands[0]", `"devsandbox"`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ShellWrappers.Commands = tt.commands
+			err := cfg.Validate()
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() = nil, want error containing %v", tt.wantErr)
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Validate() error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadFrom_ShellWrappersInvalidRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[shell_wrappers]\ncommands = [\"npm\", \"npm-no-ds\"]\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := LoadFrom(path)
+	if err == nil || !strings.Contains(err.Error(), "shell_wrappers.commands[1]") {
+		t.Fatalf("LoadFrom error = %v, want shell_wrappers.commands[1] rejection", err)
+	}
+}
+
+// generatedShellWrappersBlock is the documented [shell_wrappers] example. It is
+// pinned verbatim so the template keeps showing the section as opt-in.
+const generatedShellWrappersBlock = `# Shell command wrappers
+# Commands listed here run inside devsandbox when typed in a host shell that
+# evaluates "devsandbox shell-wrappers activate". Nothing is wrapped by default.
+# Lists from this file, matching includes, and a trusted .devsandbox.toml are
+# combined. "<name>-no-ds" or "command <name>" still runs the host command.
+#
+# [shell_wrappers]
+# commands = ["npm", "bun", "node"]
+`
+
+func TestGenerateDefault_ShellWrappersExampleEnablesNothing(t *testing.T) {
+	output := GenerateDefault()
+	if !strings.Contains(output, generatedShellWrappersBlock) {
+		t.Fatalf("generated config does not contain the [shell_wrappers] example:\n%s", generatedShellWrappersBlock)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(output), 0o644); err != nil {
+		t.Fatalf("write generated config: %v", err)
+	}
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("generated config failed to load: %v", err)
+	}
+	if got := cfg.ShellWrappers.EffectiveCommands(); len(got) != 0 {
+		t.Errorf("generated config wraps %v by default, want nothing", got)
+	}
+
+	var uncommented Config
+	if _, err := toml.Decode(uncommentTemplate(output), &uncommented); err != nil {
+		t.Fatalf("decode uncommented template: %v", err)
+	}
+	// Only the section under test: other commented examples, such as a
+	// "~"-relative base_path, are valid solely after LoadFrom expands them.
+	example := Config{ShellWrappers: uncommented.ShellWrappers}
+	if err := example.Validate(); err != nil {
+		t.Errorf("uncommented [shell_wrappers] example fails validation: %v", err)
+	}
+	if got := uncommented.ShellWrappers.EffectiveCommands(); !slices.Equal(got, []string{"bun", "node", "npm"}) {
+		t.Errorf("uncommented example commands = %v, want [bun node npm]", got)
+	}
+}

@@ -2,6 +2,7 @@
 package config
 
 import (
+	"slices"
 	"testing"
 
 	"devsandbox/internal/source"
@@ -473,6 +474,71 @@ func Test_mergeConfigs_SandboxResources(t *testing.T) {
 
 			if result.Sandbox.Resources != tt.expected {
 				t.Errorf("resources = %+v, want %+v", result.Sandbox.Resources, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMergeConfigs_ShellWrappersUnion(t *testing.T) {
+	global := &Config{ShellWrappers: ShellWrappersConfig{Commands: []string{"npm", "node"}}}
+	include := &Config{ShellWrappers: ShellWrappersConfig{Commands: []string{"bun", "npm"}}}
+	project := &Config{ShellWrappers: ShellWrappersConfig{Commands: []string{"pnpm", "node", "bun"}}}
+
+	withInclude := mergeConfigs(global, include)
+	if want := []string{"bun", "node", "npm"}; !slices.Equal(withInclude.ShellWrappers.Commands, want) {
+		t.Errorf("global+include commands = %v, want %v", withInclude.ShellWrappers.Commands, want)
+	}
+
+	merged := mergeProjectConfig(withInclude, project)
+	if want := []string{"bun", "node", "npm", "pnpm"}; !slices.Equal(merged.ShellWrappers.Commands, want) {
+		t.Errorf("global+include+project commands = %v, want %v", merged.ShellWrappers.Commands, want)
+	}
+
+	if want := []string{"npm", "node"}; !slices.Equal(global.ShellWrappers.Commands, want) {
+		t.Errorf("merge mutated global commands to %v, want %v", global.ShellWrappers.Commands, want)
+	}
+	if want := []string{"bun", "npm"}; !slices.Equal(include.ShellWrappers.Commands, want) {
+		t.Errorf("merge mutated include commands to %v, want %v", include.ShellWrappers.Commands, want)
+	}
+	if want := []string{"pnpm", "node", "bun"}; !slices.Equal(project.ShellWrappers.Commands, want) {
+		t.Errorf("merge mutated project commands to %v, want %v", project.ShellWrappers.Commands, want)
+	}
+	if want := []string{"bun", "node", "npm"}; !slices.Equal(withInclude.ShellWrappers.Commands, want) {
+		t.Errorf("project merge mutated its base commands to %v, want %v", withInclude.ShellWrappers.Commands, want)
+	}
+}
+
+func TestMergeConfigs_ShellWrappersResultDoesNotAliasInputs(t *testing.T) {
+	base := &Config{ShellWrappers: ShellWrappersConfig{Commands: []string{"bun", "npm"}}}
+	overlay := &Config{ShellWrappers: ShellWrappersConfig{Commands: []string{"node"}}}
+
+	result := mergeConfigs(base, overlay)
+	result.ShellWrappers.Commands[0] = "changed"
+
+	if base.ShellWrappers.Commands[0] != "bun" || overlay.ShellWrappers.Commands[0] != "node" {
+		t.Errorf("merged slice aliases an input: base=%v overlay=%v", base.ShellWrappers.Commands, overlay.ShellWrappers.Commands)
+	}
+}
+
+func TestMergeConfigs_ShellWrappersEmptyLayers(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    []string
+		overlay []string
+		want    []string
+	}{
+		{"both empty", nil, nil, nil},
+		{"base only", []string{"npm", "bun", "npm"}, nil, []string{"bun", "npm"}},
+		{"overlay only", nil, []string{"node"}, []string{"node"}},
+		{"empty overlay list keeps base", []string{"npm"}, []string{}, []string{"npm"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &Config{ShellWrappers: ShellWrappersConfig{Commands: tt.base}}
+			overlay := &Config{ShellWrappers: ShellWrappersConfig{Commands: tt.overlay}}
+			got := mergeConfigs(base, overlay).ShellWrappers.Commands
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("merged commands = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package config
 
 import (
 	"maps"
+	"slices"
 
 	"devsandbox/internal/notice"
 	"devsandbox/internal/source"
@@ -174,6 +175,8 @@ func mergeConfigs(base, overlay *Config) *Config {
 		)
 	}
 
+	result.ShellWrappers.Commands = sortedUnion(base.ShellWrappers.Commands, overlay.ShellWrappers.Commands)
+
 	// Overlay settings
 	if overlay.Overlay.Default != "" {
 		result.Overlay.Default = overlay.Overlay.Default
@@ -300,6 +303,15 @@ func mergeProjectConfig(base, local *Config) *Config {
 	merged.Sandbox.BasePath = base.Sandbox.BasePath
 
 	return merged
+}
+
+// sortedUnion returns the distinct names of a and b in sorted order, in a new
+// slice, or nil when there are none.
+func sortedUnion(a, b []string) []string {
+	if len(a)+len(b) == 0 {
+		return nil
+	}
+	return slices.Compact(slices.Sorted(slices.Values(slices.Concat(a, b))))
 }
 
 // mergeStringMap merges two string maps, overlay wins for conflicts.

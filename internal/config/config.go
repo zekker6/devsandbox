@@ -17,6 +17,7 @@ import (
 
 	"devsandbox/internal/cgroups"
 	"devsandbox/internal/notice"
+	"devsandbox/internal/shellwrap"
 	"devsandbox/internal/source"
 	"github.com/BurntSushi/toml"
 )
@@ -66,6 +67,10 @@ type Config struct {
 
 	// PortForwarding contains port forwarding settings.
 	PortForwarding PortForwardingConfig `toml:"port_forwarding"`
+
+	// ShellWrappers selects extra commands the host shell wrappers route
+	// through devsandbox.
+	ShellWrappers ShellWrappersConfig `toml:"shell_wrappers"`
 
 	// Include contains conditional config includes.
 	Include []Include `toml:"include"`
@@ -649,6 +654,20 @@ type PortForwardingRule struct {
 	SandboxPort int `toml:"sandbox_port"`
 }
 
+// ShellWrappersConfig configures the host shell wrappers for commands that are
+// not supported agents.
+type ShellWrappersConfig struct {
+	// Commands are the names wrapped to run as `devsandbox run-command <name>`.
+	// Empty by default; every config layer adds to the set.
+	Commands []string `toml:"commands"`
+}
+
+// EffectiveCommands returns Commands deduplicated and sorted, so the generated
+// wrappers do not depend on the order names were listed in.
+func (s ShellWrappersConfig) EffectiveCommands() []string {
+	return sortedUnion(s.Commands, nil)
+}
+
 // DefaultConfig returns a Config with default values.
 func DefaultConfig() *Config {
 	return &Config{
@@ -892,6 +911,12 @@ func (c *Config) Validate() error {
 	// Validate port forwarding rules
 	if err := c.validatePortForwarding(); err != nil {
 		return err
+	}
+
+	for i, name := range c.ShellWrappers.Commands {
+		if err := shellwrap.ValidateCommandName(name); err != nil {
+			return fmt.Errorf("shell_wrappers.commands[%d]: %w", i, err)
+		}
 	}
 
 	// Validate isolation backend
@@ -1475,6 +1500,15 @@ ignore_global_config = false
 # direction = "outbound"
 # host_port = 5432
 # sandbox_port = 5432
+
+# Shell command wrappers
+# Commands listed here run inside devsandbox when typed in a host shell that
+# evaluates "devsandbox shell-wrappers activate". Nothing is wrapped by default.
+# Lists from this file, matching includes, and a trusted .devsandbox.toml are
+# combined. "<name>-no-ds" or "command <name>" still runs the host command.
+#
+# [shell_wrappers]
+# commands = ["npm", "bun", "node"]
 `
 }
 
