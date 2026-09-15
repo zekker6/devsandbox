@@ -128,6 +128,7 @@ Proxy Mode (--proxy):
 	rootCmd.AddCommand(newForwardCmd())
 	rootCmd.AddCommand(newNSDialCmd())
 	rootCmd.AddCommand(newRunAgentCmd())
+	rootCmd.AddCommand(newRunCommandCmd())
 	rootCmd.AddCommand(newAgentWrappersCmd())
 
 	versionTpl := fmt.Sprintf("devsandbox %s (built: %s)\n", version.FullVersion(), version.Date)
