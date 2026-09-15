@@ -116,6 +116,46 @@ func TestSandboxGetConfigVisibility(t *testing.T) {
 	}
 }
 
+func TestProjectConfigMountSource(t *testing.T) {
+	regular := t.TempDir()
+	regularPath := filepath.Join(regular, LocalConfigFile)
+	if err := os.WriteFile(regularPath, []byte("[sandbox]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The link names a host file the sandbox cannot otherwise reach.
+	secret := filepath.Join(t.TempDir(), "credentials.toml")
+	if err := os.WriteFile(secret, []byte("token = \"secret\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := t.TempDir()
+	if err := os.Symlink(secret, filepath.Join(linked, LocalConfigFile)); err != nil {
+		t.Fatal(err)
+	}
+	absent := t.TempDir()
+
+	tests := []struct {
+		name       string
+		projectDir string
+		visibility ConfigVisibility
+		want       string
+	}{
+		{"absent", absent, ConfigVisibilityHidden, ""},
+		{"empty is hidden", regular, "", os.DevNull},
+		{"hidden", regular, ConfigVisibilityHidden, os.DevNull},
+		{"readonly", regular, ConfigVisibilityReadOnly, regularPath},
+		{"readwrite", regular, ConfigVisibilityReadWrite, ""},
+		{"readonly symlink is hidden", linked, ConfigVisibilityReadOnly, os.DevNull},
+		{"hidden symlink", linked, ConfigVisibilityHidden, os.DevNull},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProjectConfigMountSource(tt.projectDir, tt.visibility); got != tt.want {
+				t.Errorf("ProjectConfigMountSource() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // emptyTrustStore returns an empty trust store for tests that don't involve local configs.
 func emptyTrustStore() *TrustStore {
 	return &TrustStore{}

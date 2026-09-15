@@ -1063,18 +1063,8 @@ func (b *Builder) AddProjectBindings() *Builder {
 	b.Chdir(b.cfg.ProjectDir)
 
 	// Handle .devsandbox.toml visibility
-	configPath := filepath.Join(b.cfg.ProjectDir, config.LocalConfigFile)
-	if _, err := os.Stat(configPath); err == nil {
-		switch b.cfg.ConfigVisibility {
-		case string(config.ConfigVisibilityHidden), "":
-			// Hide config file (default)
-			b.ROBind("/dev/null", configPath)
-		case string(config.ConfigVisibilityReadOnly):
-			// Expose as read-only (re-bind as read-only over the read-write project bind)
-			b.ROBind(configPath, configPath)
-		case string(config.ConfigVisibilityReadWrite):
-			// Already writable from project bind, nothing to do
-		}
+	if source := config.ProjectConfigMountSource(b.cfg.ProjectDir, config.ConfigVisibility(b.cfg.ConfigVisibility)); source != "" {
+		b.ROBind(source, filepath.Join(b.cfg.ProjectDir, config.LocalConfigFile))
 	}
 
 	// Apply custom mount rules for paths inside the project directory

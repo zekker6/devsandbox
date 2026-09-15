@@ -144,6 +144,9 @@ type Config struct {
 	DefaultMountMode string
 	// HideEnvFiles controls whether .env files are hidden from the sandbox.
 	HideEnvFiles bool
+	// ConfigVisibility controls how .devsandbox.toml is exposed to the sandbox
+	// (hidden, readonly, readwrite).
+	ConfigVisibility string
 }
 
 // Binding represents a filesystem mount.

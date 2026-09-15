@@ -435,6 +435,30 @@ func (s SandboxConfig) GetConfigVisibility() ConfigVisibility {
 	return s.ConfigVisibility
 }
 
+// ProjectConfigMountSource returns the host path every backend binds read-only
+// over the project's .devsandbox.toml to apply visibility, or "" when nothing
+// is mounted: the file is absent or visibility is readwrite.
+//
+// readonly exposes the file only when it is a regular file, not a symlink. The
+// project directory is sandbox-writable, so a link's target is whatever
+// sandboxed code named, and binding it would hand the next launch any host file
+// that parses as TOML. Such a file is hidden instead.
+func ProjectConfigMountSource(projectDir string, visibility ConfigVisibility) string {
+	path := filepath.Join(projectDir, LocalConfigFile)
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	switch visibility {
+	case ConfigVisibilityReadWrite:
+		return ""
+	case ConfigVisibilityReadOnly:
+		if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+			return path
+		}
+	}
+	return os.DevNull
+}
+
 // GetIsolation returns the isolation backend (defaults to auto).
 func (s SandboxConfig) GetIsolation() IsolationBackend {
 	if s.Isolation == "" {

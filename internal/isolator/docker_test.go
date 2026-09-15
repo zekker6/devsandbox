@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"devsandbox/internal/config"
 	"devsandbox/internal/sandbox/tools"
 )
 
@@ -1342,6 +1343,88 @@ func TestBuildCommonArgs_EnvFilesNotHiddenWhenDisabled(t *testing.T) {
 
 	if strings.Contains(argsStr, "/dev/null:") {
 		t.Error("no /dev/null mounts expected when env hiding is disabled")
+	}
+}
+
+// config_visibility used to apply on bwrap only, so a Docker or krun sandbox
+// could edit the project's .devsandbox.toml under the default "hidden".
+func TestBuildCommonArgs_ConfigVisibility(t *testing.T) {
+	projectDir := t.TempDir()
+	configPath := filepath.Join(projectDir, config.LocalConfigFile)
+	if err := os.WriteFile(configPath, []byte("[sandbox]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		visibility string
+		want       string
+	}{
+		{visibility: "", want: "/dev/null:" + configPath + ":ro"},
+		{visibility: string(config.ConfigVisibilityHidden), want: "/dev/null:" + configPath + ":ro"},
+		{visibility: string(config.ConfigVisibilityReadOnly), want: configPath + ":" + configPath + ":ro"},
+		{visibility: string(config.ConfigVisibilityReadWrite), want: ""},
+	}
+	for _, tt := range tests {
+		t.Run("visibility="+tt.visibility, func(t *testing.T) {
+			iso := NewDockerIsolator(DockerConfig{})
+			iso.imageTag = "test:latest"
+			cfg := &Config{
+				ProjectDir:       projectDir,
+				SandboxHome:      "/tmp/test-sandbox",
+				HomeDir:          "/home/testuser",
+				Shell:            "/bin/bash",
+				ConfigVisibility: tt.visibility,
+			}
+			args, err := iso.buildCommonArgs(cfg)
+			if err != nil {
+				t.Fatalf("buildCommonArgs failed: %v", err)
+			}
+			var got []string
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "-v" && strings.Contains(args[i+1], config.LocalConfigFile) {
+					got = append(got, args[i+1])
+				}
+			}
+			switch {
+			case tt.want == "" && len(got) != 0:
+				t.Errorf("config mounts = %q, want none", got)
+			case tt.want != "" && (len(got) != 1 || got[0] != tt.want):
+				t.Errorf("config mounts = %q, want [%q]", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildCommonArgs_ConfigVisibilityWithoutConfigFile(t *testing.T) {
+	iso := NewDockerIsolator(DockerConfig{})
+	iso.imageTag = "test:latest"
+	cfg := &Config{
+		ProjectDir:  t.TempDir(),
+		SandboxHome: "/tmp/test-sandbox",
+		HomeDir:     "/home/testuser",
+		Shell:       "/bin/bash",
+	}
+	args, err := iso.buildCommonArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildCommonArgs failed: %v", err)
+	}
+	if argsStr := strings.Join(args, " "); strings.Contains(argsStr, config.LocalConfigFile) {
+		t.Errorf("args = %q, want no %s mount when the file is absent", argsStr, config.LocalConfigFile)
+	}
+}
+
+// A kept container bakes its mounts in at creation, so a visibility change
+// must recreate it.
+func TestDockerIsolator_ConfigHash_ChangesOnConfigVisibility(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, config.LocalConfigFile), []byte("[sandbox]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	iso := NewDockerIsolator(DockerConfig{})
+	hidden := &Config{ProjectDir: projectDir, ConfigVisibility: string(config.ConfigVisibilityHidden)}
+	readWrite := &Config{ProjectDir: projectDir, ConfigVisibility: string(config.ConfigVisibilityReadWrite)}
+	if iso.configHash(hidden) == iso.configHash(readWrite) {
+		t.Error("configHash should change when config_visibility changes")
 	}
 }
 

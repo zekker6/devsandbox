@@ -351,6 +351,7 @@ func (d *DockerIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 		ToolsConfig:      sandboxCfg.ToolsConfig,
 		DefaultMountMode: sandboxCfg.DefaultMountMode,
 		HideEnvFiles:     sandboxCfg.HideEnvFiles,
+		ConfigVisibility: sandboxCfg.ConfigVisibility,
 	}
 
 	// Add CA path if proxy is enabled and MITM generated a CA
@@ -1352,6 +1353,10 @@ func (d *DockerIsolator) buildCommonArgs(cfg *Config) ([]string, error) {
 		}
 	}
 
+	if mount := configVisibilityMount(cfg); mount != "" {
+		args = append(args, "-v", mount)
+	}
+
 	// On Linux, add host.docker.internal mapping for proxy access.
 	// Use the per-session network gateway IP (where the proxy binds) instead of
 	// host-gateway, which resolves to the default bridge (docker0) gateway —
@@ -1885,6 +1890,17 @@ func (d *DockerIsolator) getContainerState(ctx context.Context, name string) (ex
 	return true, isRunning
 }
 
+// configVisibilityMount returns the -v value that applies sandbox.config_visibility
+// to the project's .devsandbox.toml, mirroring the bwrap builder's
+// AddProjectBindings, or "" when the file is absent or left writable.
+func configVisibilityMount(cfg *Config) string {
+	source := config.ProjectConfigMountSource(cfg.ProjectDir, config.ConfigVisibility(cfg.ConfigVisibility))
+	if source == "" {
+		return ""
+	}
+	return source + ":" + filepath.Join(cfg.ProjectDir, config.LocalConfigFile) + ":ro"
+}
+
 // configHash computes a hash of the container-creation-time settings that cannot
 // be changed after `docker create`. When any of these change, the container must
 // be recreated. This includes network/proxy settings, resource limits, volume
@@ -1933,6 +1949,7 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 	for _, f := range envFiles {
 		_, _ = fmt.Fprintf(h, "envhide=%s\n", f)
 	}
+	_, _ = fmt.Fprintf(h, "configvisibility=%s\n", configVisibilityMount(cfg))
 
 	// Tool mounts — the resolved mount strings, not just the config inputs that
 	// feed them. A tool's destination or the set of files it copies in can
