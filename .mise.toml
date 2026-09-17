@@ -2,7 +2,7 @@
 go = "1.27.1"
 task = "3.53.1"
 golangci-lint = "2.13.2"
-goreleaser = "2.18.1"
+goreleaser = "2.18.2"
 pre-commit = "4.6.2"
 python = "3.14"
 "pipx:zensical" = "0.0.62"
