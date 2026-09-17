@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.21.0...HEAD)
+## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.22.0...HEAD)
+
+## [v0.22.0](https://github.com/zekker6/devsandbox/releases/tag/v0.22.0) - 2026-09-17
 
 ### Added
 
