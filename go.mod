@@ -7,7 +7,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/elazarl/goproxy v1.9.1
 	github.com/google/uuid v1.6.0
-	github.com/olekukonko/tablewriter v1.1.4
+	github.com/olekukonko/tablewriter v1.1.5
 	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/proto/otlp v1.11.0
 	golang.org/x/sync v0.23.0
