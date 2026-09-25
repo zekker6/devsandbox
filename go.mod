@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/bmatcuk/doublestar/v4 v4.10.1
 	github.com/elazarl/goproxy v1.9.1
 	github.com/google/uuid v1.6.0
 	github.com/olekukonko/tablewriter v1.1.5
