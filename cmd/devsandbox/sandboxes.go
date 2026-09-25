@@ -181,7 +181,7 @@ behind the confirmation prompt, which gates removing sandboxes only. --keep and
 			// every location and then report the command as failed.
 			var duration time.Duration
 			if olderThan != "" {
-				duration, err = parseDuration(olderThan)
+				duration, err = config.ParseDuration(olderThan)
 				if err != nil {
 					return fmt.Errorf("invalid duration %q: %w", olderThan, err)
 				}
@@ -639,34 +639,4 @@ func printTable(sandboxes []*sandbox.Metadata, showSize bool) error {
 	}
 
 	return table.Render()
-}
-
-// parseDuration parses a human-friendly duration like "30d", "2w", "1h"
-func parseDuration(s string) (time.Duration, error) {
-	if len(s) < 2 {
-		return 0, fmt.Errorf("duration too short")
-	}
-
-	// Try standard Go duration first
-	if d, err := time.ParseDuration(s); err == nil {
-		return d, nil
-	}
-
-	// Parse custom formats (days, weeks)
-	unit := s[len(s)-1]
-	valueStr := s[:len(s)-1]
-
-	var value int
-	if _, err := fmt.Sscanf(valueStr, "%d", &value); err != nil {
-		return 0, fmt.Errorf("invalid number: %s", valueStr)
-	}
-
-	switch unit {
-	case 'd':
-		return time.Duration(value) * 24 * time.Hour, nil
-	case 'w':
-		return time.Duration(value) * 7 * 24 * time.Hour, nil
-	default:
-		return 0, fmt.Errorf("unknown unit: %c (use h, d, or w)", unit)
-	}
 }

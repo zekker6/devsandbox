@@ -114,6 +114,9 @@ func mergeConfigs(base, overlay *Config) *Config {
 	if overlay.Sandbox.Isolation != "" {
 		result.Sandbox.Isolation = overlay.Sandbox.Isolation
 	}
+	if overlay.Sandbox.MaxAge != "" {
+		result.Sandbox.MaxAge = overlay.Sandbox.MaxAge
+	}
 
 	// Sandbox Docker settings
 	if overlay.Sandbox.Docker.Dockerfile != "" {
@@ -301,6 +304,15 @@ func mergeProjectConfig(base, local *Config) *Config {
 			"read from %s only", LocalConfigFile, ConfigPath())
 	}
 	merged.Sandbox.BasePath = base.Sandbox.BasePath
+
+	// max_age removes every idle sandbox on the host that has outlived it, so
+	// the file the sandbox can write must not choose it: `max_age = "1s"` in a
+	// project would have the next launch of any project delete all the others.
+	if local.Sandbox.MaxAge != "" && local.Sandbox.MaxAge != base.Sandbox.MaxAge {
+		notice.Warn("sandbox.max_age in %s is ignored; it is a host-level setting, "+
+			"read from %s and its includes only", LocalConfigFile, ConfigPath())
+	}
+	merged.Sandbox.MaxAge = base.Sandbox.MaxAge
 
 	return merged
 }

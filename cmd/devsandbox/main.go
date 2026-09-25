@@ -327,6 +327,12 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		return nil
 	}
 
+	// Before anything below creates or touches this project's sandbox, so an
+	// expired one is removed here and recreated empty by EnsureSandboxDirs.
+	if maxAge := appCfg.Sandbox.GetMaxAge(); maxAge > 0 {
+		expireSandboxes(cfg.SandboxBase, appCfg.Sandbox.MaxAge, maxAge)
+	}
+
 	// Resolve --worktree. Validation happens up-front; the actual
 	// `git worktree add` is deferred until after validation succeeds.
 	worktreeRaw, _ := cmd.Flags().GetString("worktree")
@@ -838,7 +844,25 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	return iso.Run(cmd.Context(), runCfg)
 }
 
-// removeSandboxOnExit implements --rm: it drops this launch's hold on the
+// expireSandboxes applies sandbox.max_age. A failure is a warning rather than
+// an error: the launch itself does not depend on another sandbox going away,
+// and an expired sandbox that stays is used as it is.
+func expireSandboxes(baseDir, spelled string, maxAge time.Duration) {
+	res, err := sandbox.RemoveExpired(baseDir, maxAge, time.Now())
+	if err != nil {
+		notice.Warn("sandbox.max_age: %v", err)
+	}
+	if len(res.Removed) > 0 {
+		notice.Info("sandbox.max_age: removed %d sandbox(es) older than %s: %s",
+			len(res.Removed), spelled, strings.Join(res.Removed, ", "))
+	}
+	if len(res.Kept) > 0 {
+		notice.Info("sandbox.max_age: kept %d expired sandbox(es) holding a worktree or Docker state: %s "+
+			"(remove them with `devsandbox sandboxes prune`)", len(res.Kept), strings.Join(res.Kept, ", "))
+	}
+}
+
+// removeSandboxOnExit implements --rm:it drops this launch's hold on the
 // sandbox and removes the state, unless another session is still holding it.
 // A concurrent session that started after this one is still live at exit and
 // its overlay lower layers are exactly the state --rm would delete.

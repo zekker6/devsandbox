@@ -50,8 +50,14 @@ func AutoBranchNameAt(session string, now time.Time) string {
 	return AutoBranchPrefix + now.Format("20060102-150405")
 }
 
+// WorktreesDir returns the directory every worktree of the given
+// sandbox-project root lives under.
+func WorktreesDir(sandboxRoot string) string {
+	return filepath.Join(sandboxRoot, "worktrees")
+}
+
 // WorktreePath returns the directory where a worktree for branch lives
 // under the given sandbox-project root.
 func WorktreePath(sandboxRoot, branch string) string {
-	return filepath.Join(sandboxRoot, "worktrees", SanitizeLeaf(branch))
+	return filepath.Join(WorktreesDir(sandboxRoot), SanitizeLeaf(branch))
 }

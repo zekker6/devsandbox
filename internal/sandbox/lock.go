@@ -312,13 +312,30 @@ func stagedPID(name string) (int, bool) {
 // between the liveness answer and the work that depends on it, and it is not
 // reached at all when the sandbox is busy or already gone.
 func RemoveSandboxIfIdle(sandboxRoot string, beforeRemove func()) (bool, error) {
-	res, err := stageForRemoval(sandboxRoot, beforeRemove)
+	return removeIfIdle(sandboxRoot, nil, beforeRemove)
+}
+
+// RemoveSandboxIfIdleWhen is RemoveSandboxIfIdle with a condition judged under
+// the exclusive lock: when it answers false the sandbox is kept and nothing
+// is removed. A condition read before the lock is stale by the time the lock
+// is held - a launch can remove and recreate the sandbox in between, and the
+// fresh one would be removed on the old one's facts.
+func RemoveSandboxIfIdleWhen(sandboxRoot string, when func() bool) (bool, error) {
+	return removeIfIdle(sandboxRoot, when, nil)
+}
+
+// errRemovalDeclined reports that the condition passed to stageForRemoval
+// answered false under the lock.
+var errRemovalDeclined = errors.New("sandbox removal declined")
+
+func removeIfIdle(sandboxRoot string, when func() bool, beforeRemove func()) (bool, error) {
+	res, err := stageForRemoval(sandboxRoot, when, beforeRemove)
 	// Both trees are deleted off the lock, and whatever stageForRemoval
 	// returned: a staging that got as far as renaming the shared temp
 	// directory aside and then failed still has that directory to take away.
 	sharedErr := errors.Join(res.sharedErr, removeStagedSharedTmp(res.sharedPath))
 	if err != nil {
-		if errors.Is(err, ErrSandboxBusy) {
+		if errors.Is(err, ErrSandboxBusy) || errors.Is(err, errRemovalDeclined) {
 			return false, nil
 		}
 		return false, errors.Join(err, sharedErr)
@@ -366,7 +383,8 @@ type stagedRemoval struct {
 }
 
 // stageForRemoval is the half of RemoveSandboxIfIdle that runs under the
-// exclusive lock: it confirms the sandbox is idle, runs beforeRemove, renames
+// exclusive lock: it confirms the sandbox is idle and that when (if non-nil)
+// still answers true, runs beforeRemove, renames
 // the shared temp directory aside, renames the root aside under StagingDir and
 // stamps the staged tree. It returns an error wrapping ErrSandboxBusy when
 // another holder has the sandbox. Split out so the stamp can be observed in a
@@ -374,7 +392,7 @@ type stagedRemoval struct {
 //
 // Every path out of it returns what it staged, error or not, so the caller
 // deletes both renamed trees whatever went wrong in between.
-func stageForRemoval(sandboxRoot string, beforeRemove func()) (stagedRemoval, error) {
+func stageForRemoval(sandboxRoot string, when func() bool, beforeRemove func()) (stagedRemoval, error) {
 	if _, err := os.Stat(sandboxRoot); err != nil {
 		if os.IsNotExist(err) {
 			return stagedRemoval{}, nil
@@ -385,6 +403,11 @@ func stageForRemoval(sandboxRoot string, beforeRemove func()) (stagedRemoval, er
 	lock, err := acquireExclusiveLock(filepath.Join(sandboxRoot, LockFileName))
 	if err != nil {
 		return stagedRemoval{}, err
+	}
+
+	if when != nil && !when() {
+		_ = lock.Close()
+		return stagedRemoval{}, errRemovalDeclined
 	}
 
 	if beforeRemove != nil {

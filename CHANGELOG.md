@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.22.0...HEAD)
 
+### Added
+
+- Added `sandbox.max_age`, which removes sandboxes older than the age you set (for example `"30d"`) at every launch. Sandboxes left behind by e2e runs and throwaway projects no longer pile up, and the one you launch into is recreated empty once per period, so mise installs and caches in its overlay stop growing without bound. Sandboxes in use, holding a `--worktree` checkout, or on the Docker backend are kept. The key is read from the global config only. See [Automatic Expiry](docs/sandboxing.md#automatic-expiry).
+
 ## [v0.22.0](https://github.com/zekker6/devsandbox/releases/tag/v0.22.0) - 2026-09-17
 
 ### Added

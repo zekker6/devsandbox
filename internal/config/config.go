@@ -397,6 +397,13 @@ type SandboxConfig struct {
 	// Resources contains backend-neutral sandbox resource limits honored by
 	// all isolation backends.
 	Resources ResourcesConfig `toml:"resources"`
+
+	// MaxAge bounds how long a sandbox lives after it was created ("30d",
+	// "2w", "12h"). Each launch removes every idle sandbox older than this,
+	// including the one it is about to use, which is then recreated empty.
+	// Empty disables expiry. Host-level: a project .devsandbox.toml cannot
+	// set it, because it decides the fate of every project's sandbox.
+	MaxAge string `toml:"max_age"`
 }
 
 // ResolvedResources merges the backend-neutral [sandbox.resources] section over the
@@ -473,6 +480,47 @@ func (s SandboxConfig) IsUseEmbeddedEnabled() bool {
 		return true
 	}
 	return *s.UseEmbedded
+}
+
+// GetMaxAge returns the sandbox expiry age, or 0 when expiry is disabled. The
+// value is checked by Validate, so an unparsable one reads as disabled here.
+func (s SandboxConfig) GetMaxAge() time.Duration {
+	if s.MaxAge == "" {
+		return 0
+	}
+	d, err := ParseDuration(s.MaxAge)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// ParseDuration parses a human-friendly duration: anything time.ParseDuration
+// accepts, or a whole number of days or weeks ("30d", "2w").
+func ParseDuration(s string) (time.Duration, error) {
+	if len(s) < 2 {
+		return 0, fmt.Errorf("duration too short")
+	}
+
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, nil
+	}
+
+	unit := s[len(s)-1]
+	valueStr := s[:len(s)-1]
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number: %s", valueStr)
+	}
+
+	switch unit {
+	case 'd':
+		return time.Duration(value) * 24 * time.Hour, nil
+	case 'w':
+		return time.Duration(value) * 7 * 24 * time.Hour, nil
+	default:
+		return 0, fmt.Errorf("unknown unit: %c (use h, d, or w)", unit)
+	}
 }
 
 // IsHideEnvFilesEnabled returns whether .env file hiding is enabled (defaults to true).
@@ -845,6 +893,16 @@ func (c *Config) Validate() error {
 	if c.Sandbox.BasePath != "" {
 		if err := validatePath(c.Sandbox.BasePath); err != nil {
 			return fmt.Errorf("sandbox.base_path: %w", err)
+		}
+	}
+
+	if c.Sandbox.MaxAge != "" {
+		d, err := ParseDuration(c.Sandbox.MaxAge)
+		if err != nil {
+			return fmt.Errorf("sandbox.max_age: invalid duration %q: %w", c.Sandbox.MaxAge, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("sandbox.max_age must be positive, got %q", c.Sandbox.MaxAge)
 		}
 	}
 

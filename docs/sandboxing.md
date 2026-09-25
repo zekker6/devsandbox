@@ -448,6 +448,33 @@ those locations. It is removed once the teardown's process is gone, or once it h
 30 days when that cannot be confirmed - it is not a sandbox, so `--keep` and `--older-than` do not
 select it, and `sandboxes list` does not show it.
 
+### Automatic Expiry
+
+Set `sandbox.max_age` in `~/.config/devsandbox/config.toml` to have every launch remove the sandboxes
+created longer ago than that:
+
+```toml
+[sandbox]
+max_age = "30d"   # also "2w", "12h"; unset (the default) disables expiry
+```
+
+The age is counted from when the sandbox was created, not from its last use, so a sandbox you use
+every day is still rebuilt once per period. That bounds the persistent overlay: tool installs, caches
+and anything else the sandbox home accumulated start over. The launching project's own sandbox is
+included - an expired one is removed and recreated empty before the session starts - along with every
+other project's.
+
+A launch removes a sandbox only when no session holds it, and re-checks its age under the sandbox's
+lock, so a concurrent launch that just recreated it keeps the new one. It never removes a sandbox
+that holds a `--worktree` checkout, which can carry uncommitted work, or one on the Docker backend,
+whose volumes it does not decide about: those are named in a notice at launch and left for
+`devsandbox sandboxes prune`. A sandbox whose metadata is missing or unreadable is never expired,
+because its age is unknown.
+
+`max_age` is read from the global config and its `[[include]]` files. A project `.devsandbox.toml`
+that sets it is ignored with a warning: the file is writable from inside the sandbox, and the key
+decides the fate of every project's sandbox.
+
 ## Port Forwarding
 
 ### Runtime Port Forwarding

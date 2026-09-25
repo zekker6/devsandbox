@@ -295,7 +295,7 @@ func TestRemoveSandboxIfIdle_StampsStagedTreeAtStaging(t *testing.T) {
 	}
 
 	before := time.Now().Truncate(time.Second)
-	res, err := stageForRemoval(root, nil)
+	res, err := stageForRemoval(root, nil, nil)
 	if err != nil {
 		t.Fatalf("stageForRemoval failed: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestStageForRemoval_RemovesSharedTmpUnderTheLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := stageForRemoval(root, nil)
+	res, err := stageForRemoval(root, nil, nil)
 	if err != nil {
 		t.Fatalf("stageForRemoval failed: %v", err)
 	}

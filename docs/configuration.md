@@ -22,7 +22,7 @@ This creates `~/.config/devsandbox/config.toml` with documented defaults.
 | `[proxy.credentials.<name>]` | `enabled`, `source.env/file/value` | [Proxy Credentials](#proxy-credentials) |
 | `[proxy.redaction]` | `enabled`, `default_action`, `max_scan_bytes`, `rules` | [Content Redaction](#content-redaction) |
 | `[proxy.filter]` | `default_action`, `ask_timeout`, `cache_decisions`, `rules` | [Proxy Mode docs](proxy.md#http-filtering) |
-| `[sandbox]` | `isolation`, `base_path`, `use_embedded`, `hide_env_files`, `config_visibility` | [Sandbox Settings](#sandbox-settings) |
+| `[sandbox]` | `isolation`, `base_path`, `max_age`, `use_embedded`, `hide_env_files`, `config_visibility` | [Sandbox Settings](#sandbox-settings) |
 | `[sandbox.docker]` | `dockerfile`, `keep_container`, `resources` (deprecated) | [Isolation Backend](#isolation-backend) |
 | `[sandbox.resources]` | `memory`, `cpus`, `pids` | [Resource Limits](#resource-limits) |
 | `[sandbox.mounts.rules]` | `pattern`, `mode` | [Custom Mounts](#custom-mounts) |
@@ -552,6 +552,10 @@ as a shell does.
 # Read from this file only - see the note below
 # base_path = "~/.local/share/devsandbox"
 
+# Remove sandboxes created longer ago than this, at every launch ("30d", "2w", "12h").
+# Unset (default) disables expiry. Ignored in a project .devsandbox.toml.
+# max_age = "30d"
+
 # Use embedded bwrap and pasta binaries (Linux only, default: true)
 # When false, only system-installed binaries are used.
 # use_embedded = true
@@ -580,6 +584,13 @@ they cannot resolve. A sandbox they cannot see is not merely missing from the li
 finds an orphaned shared `$TMPDIR` directory by elimination against the sandboxes it can see, and
 those directories live under your home rather than under the base, so such a sandbox could have its
 live `$TMPDIR` reclaimed as an orphan. See [Pruning Sandboxes](sandboxing.md#pruning-sandboxes).
+
+**`max_age`** bounds how long a sandbox lives after it was created. Each launch removes every idle
+sandbox older than that, including its own, which is then recreated empty - so the persistent
+overlay (mise installs, caches) starts over once per period. Sandboxes holding a `--worktree`
+checkout or Docker state are kept and named in a notice. The key is read from the global config and
+its includes; a project `.devsandbox.toml` that sets it is ignored with a warning. See
+[Automatic Expiry](sandboxing.md#automatic-expiry).
 
 **`hide_env_files`** (default `true`) is the setting behind the [`.env` row of the Security
 Model](sandboxing.md#security-model): files matching `.env` and `.env.*` in the project are overlaid
@@ -1524,9 +1535,9 @@ Settings are merged in this order (later overrides earlier):
 4. Local config (`.devsandbox.toml`)
 5. Command line flags (highest priority)
 
-Two exceptions to that order, both because the layer above is selected by the working directory:
+Three exceptions to that order, because those layers are selected by the working directory or writable from inside the sandbox:
 `sandbox.base_path` is taken from the global config whatever layers 3 and 4 say (see [Sandbox
-Settings](#sandbox-settings)), and the request-size limits `proxy.max_log_body_bytes` and
+Settings](#sandbox-settings)), `sandbox.max_age` ignores layer 4, and the request-size limits `proxy.max_log_body_bytes` and
 `proxy.redaction.max_scan_bytes` may be tightened but not raised by layer 4 (see
 [Content Redaction](#content-redaction)).
 
