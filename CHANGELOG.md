@@ -2,11 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.22.0...HEAD)
+## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.0...HEAD)
+
+## [v0.23.0](https://github.com/zekker6/devsandbox/releases/tag/v0.23.0) - 2026-09-30
 
 ### Added
 
 - Added `sandbox.max_age`, which removes sandboxes older than the age you set (for example `"30d"`) at every launch. Sandboxes left behind by e2e runs and throwaway projects no longer pile up, and the one you launch into is recreated empty once per period, so mise installs and caches in its overlay stop growing without bound. Sandboxes in use, holding a `--worktree` checkout, or on the Docker backend are kept. The key is read from the global config only. See [Automatic Expiry](docs/sandboxing.md#automatic-expiry).
+
+### Changed
+
+- Updated embedded bubblewrap to 0.13.0.
+- Embedded `pasta` upgraded to passt `2026_09_25.df90211` (from `2026_07_28.f8df3f1`).
 
 ### Fixed
 
