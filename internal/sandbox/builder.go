@@ -473,14 +473,51 @@ func (b *Builder) AddLocaleBindings() *Builder {
 }
 
 func (b *Builder) AddCABindings() *Builder {
-	caPaths := []string{
+	return b.addCABindings([]string{
 		"/etc/ca-certificates",
-		"/etc/pki/tls/certs",
+		"/etc/pki/tls",
+		"/etc/pki/ca-trust",
 		"/etc/ssl/certs",
-	}
+	})
+}
 
+// addCABindings binds each CA directory read-only.
+//
+// A path whose final component is a symlink is bound at what it points to
+// instead: bubblewrap refuses to mount over a symlink destination ("Can't mount
+// on symlink destination"), and the symlink is already visible in the sandbox
+// through its parent bind - AddNetworkBindings binds /etc/ssl whole. On Fedora,
+// /etc/ssl/certs points at /etc/pki/tls/certs.
+//
+// Resolving the directory is not enough on its own: the certificate files
+// *inside* it are symlinks too. On the Fedora/RHEL family /etc/pki/tls/certs
+// holds ca-bundle.crt and the hashed *.0 names, all pointing into
+// /etc/pki/ca-trust/extracted/, so the real store has to be bound as well or
+// they dangle and curl fails with "error setting certificate file". /etc/pki/tls
+// is bound in place of /etc/pki/tls/certs so cert.pem, a sibling of certs, comes
+// along too.
+//
+// A path that exists but cannot be resolved is a build error, not a skip: the
+// directory is one the launch is configured to bind, and silently dropping it
+// would leave the sandbox without the certificates it promises.
+func (b *Builder) addCABindings(caPaths []string) *Builder {
+	applied := make(map[string]bool, len(caPaths))
 	for _, p := range caPaths {
-		b.ROBindIfExists(p, p)
+		if _, err := os.Lstat(p); err != nil {
+			continue // CA directory this distribution does not have
+		}
+
+		resolved, err := resolveMountRulePath(p)
+		if err != nil {
+			b.err = fmt.Errorf("resolve CA path %q: %w", p, err)
+			return b
+		}
+
+		if applied[resolved] {
+			continue
+		}
+		applied[resolved] = true
+		b.ROBindIfExists(resolved, resolved)
 	}
 
 	return b

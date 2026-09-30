@@ -153,6 +153,82 @@ func TestBuilder_AddBaseArgs(t *testing.T) {
 	}
 }
 
+// TestAddCABindings_SymlinkedPathBindsResolvedTarget pins the fix for hosts
+// where a CA directory is a symlink - Fedora has /etc/ssl/certs ->
+// /etc/pki/tls/certs. bubblewrap refuses to mount over a symlink destination
+// ("Can't mount on symlink destination"), and the symlink is already visible in
+// the sandbox through its parent bind, so the resolved target is what has to be
+// mounted or the link dangles.
+func TestAddCABindings_SymlinkedPathBindsResolvedTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "certs")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "ssl-certs")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewBuilder(&Config{}).addCABindings([]string{link})
+
+	want := []string{"--ro-bind", target, target}
+	if got := b.Build(); !reflect.DeepEqual(got, want) {
+		t.Errorf("args = %v, want %v", got, want)
+	}
+}
+
+// TestAddCABindings_TargetListedOnce covers the Fedora layout, where the
+// symlinked path and its target are both in the list: resolving the symlink must
+// not emit a second mount of the target.
+func TestAddCABindings_TargetListedOnce(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "certs")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "ssl-certs")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewBuilder(&Config{}).addCABindings([]string{target, link})
+
+	want := []string{"--ro-bind", target, target}
+	if got := b.Build(); !reflect.DeepEqual(got, want) {
+		t.Errorf("args = %v, want %v", got, want)
+	}
+}
+
+// TestAddCABindings_MissingPathIsSkipped keeps the optional-path behavior: a CA
+// directory this distribution does not have must not become a mount at all.
+func TestAddCABindings_MissingPathIsSkipped(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+
+	b := NewBuilder(&Config{}).addCABindings([]string{missing})
+
+	if got := b.Build(); len(got) != 0 {
+		t.Errorf("args = %v, want none", got)
+	}
+}
+
+// TestAddCABindings_BrokenSymlinkFailsBuild pins that a CA path which exists but
+// cannot be resolved is reported instead of silently skipped. A skip would let a
+// launch run without the certificate directory it was configured to bind.
+func TestAddCABindings_BrokenSymlinkFailsBuild(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "missing"), link); err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewBuilder(&Config{}).addCABindings([]string{link})
+
+	if err := b.Err(); err == nil {
+		t.Fatal("expected an error for an unresolvable CA path, got nil")
+	}
+}
+
 func TestBuilder_OverlaySrc(t *testing.T) {
 	cfg := &Config{}
 	b := NewBuilder(cfg)

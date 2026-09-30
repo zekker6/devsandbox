@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Launching a sandbox on a host with oh-my-zsh no longer aborts with `builder: ambiguous mount` (or a duplicate mount point on Docker). Both the `oh-my-zsh` and `shell-zsh` tools mounted `~/.oh-my-zsh`, and the second mount panicked before the workload started. The `oh-my-zsh` tool now mounts the framework alone, which also makes `[tools.oh-my-zsh] mount_mode = "disabled"` actually hide it instead of `shell-zsh` mounting it anyway.
+- bwrap launches no longer abort with `bwrap: Can't mount on symlink destination /etc/ssl/certs` on distributions where `/etc/ssl/certs` is a symlink, such as the Fedora/RHEL family where it points at `/etc/pki/tls/certs`. bubblewrap refuses to mount over a symlink destination, so the CA directory is bound at its resolved target when the path is a symlink. On the Fedora/RHEL family `/etc/pki/tls` and `/etc/pki/ca-trust` are bound as well: the certificate files in `/etc/pki/tls/certs` are themselves symlinks into `/etc/pki/ca-trust/extracted/`, so without the latter the certificates stayed dangling and HTTPS failed with `curl: (77) error setting certificate file`. A CA path that exists but cannot be resolved now fails the launch instead of being skipped silently.
 
 ## [v0.22.0](https://github.com/zekker6/devsandbox/releases/tag/v0.22.0) - 2026-09-17
 
