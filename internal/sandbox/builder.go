@@ -500,8 +500,13 @@ func (b *Builder) AddCABindings() *Builder {
 // A path that exists but cannot be resolved is a build error, not a skip: the
 // directory is one the launch is configured to bind, and silently dropping it
 // would leave the sandbox without the certificates it promises.
+//
+// A resolved target can land inside another entry - Fedora's /etc/ssl/certs
+// resolves into /etc/pki/tls - so targets are bound in sorted order and one
+// already covered by a bound parent is skipped. The sort puts a parent before
+// its children, which trackMount requires regardless of list order.
 func (b *Builder) addCABindings(caPaths []string) *Builder {
-	applied := make(map[string]bool, len(caPaths))
+	resolvedPaths := make([]string, 0, len(caPaths))
 	for _, p := range caPaths {
 		if _, err := os.Lstat(p); err != nil {
 			continue // CA directory this distribution does not have
@@ -512,12 +517,17 @@ func (b *Builder) addCABindings(caPaths []string) *Builder {
 			b.err = fmt.Errorf("resolve CA path %q: %w", p, err)
 			return b
 		}
+		resolvedPaths = append(resolvedPaths, resolved)
+	}
+	slices.Sort(resolvedPaths)
 
-		if applied[resolved] {
+	var applied []string
+	for _, p := range resolvedPaths {
+		if slices.ContainsFunc(applied, func(a string) bool { return a == p || isParentPath(a, p) }) {
 			continue
 		}
-		applied[resolved] = true
-		b.ROBindIfExists(resolved, resolved)
+		applied = append(applied, p)
+		b.ROBindIfExists(p, p)
 	}
 
 	return b

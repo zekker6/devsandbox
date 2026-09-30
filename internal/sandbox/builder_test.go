@@ -200,6 +200,37 @@ func TestAddCABindings_TargetListedOnce(t *testing.T) {
 	}
 }
 
+// TestAddCABindings_TargetUnderBoundParent covers the Fedora layout as it is
+// listed: /etc/ssl/certs resolves to /etc/pki/tls/certs, which sits inside the
+// /etc/pki/tls bind. The parent already carries it, so binding it again is
+// redundant, and a link listed before the parent must not mount the child first -
+// trackMount panics on a parent mounted after its child.
+func TestAddCABindings_TargetUnderBoundParent(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "tls")
+	target := filepath.Join(parent, "certs")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "ssl-certs")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"--ro-bind", parent, parent}
+	for name, paths := range map[string][]string{
+		"parent first": {parent, link},
+		"link first":   {link, parent},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := NewBuilder(&Config{}).addCABindings(paths)
+			if got := b.Build(); !reflect.DeepEqual(got, want) {
+				t.Errorf("args = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // TestAddCABindings_MissingPathIsSkipped keeps the optional-path behavior: a CA
 // directory this distribution does not have must not become a mount at all.
 func TestAddCABindings_MissingPathIsSkipped(t *testing.T) {
