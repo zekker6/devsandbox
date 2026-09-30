@@ -1,29 +1,10 @@
 # Installation
 
-devsandbox runs on Linux and macOS. Pick your platform.
+devsandbox is a single binary for Linux and macOS. Check the platform requirements, install the binary, then run `devsandbox doctor`.
 
-## Prerequisites
-
-devsandbox requires [mise](https://mise.jdx.dev/) for tool version management. Install it first.
+## Platform requirements
 
 ### Linux
-
-```bash
-curl https://mise.jdx.dev/install.sh | sh
-```
-
-Activate mise in your shell ([setup guide](https://mise.jdx.dev/getting-started.html)):
-
-```bash
-# bash
-echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
-
-# zsh
-echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc
-
-# fish
-echo '~/.local/bin/mise activate fish | source' >> ~/.config/fish/config.fish
-```
 
 Your kernel must support unprivileged user namespaces. Verify with:
 
@@ -44,11 +25,7 @@ No system packages are required - `bwrap` and `pasta` binaries ship embedded in 
 
 ### macOS
 
-```bash
-brew install mise
-```
-
-A Docker runtime is also required:
+A Docker runtime is required, and it must be running before you start devsandbox:
 
 - [OrbStack](https://orbstack.dev/) - recommended for Apple Silicon (fastest startup, lowest resource usage)
 - [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) - most widely tested
@@ -56,23 +33,64 @@ A Docker runtime is also required:
 
 ## Install devsandbox
 
-The recommended path is via mise:
+### With mise (recommended)
+
+[mise](https://mise.jdx.dev/) is optional. devsandbox runs without it. It is the recommended install path for two reasons:
+
+- One command installs the right binary for your OS and architecture, and `mise upgrade` picks up new releases.
+- devsandbox shares your mise-managed tools (Go, Node, Python, kubectl, ...) with the sandbox read-only, so they work inside without a reinstall. See [Tool management with mise](../tools.md#tool-management-with-mise).
+
+If you don't have mise yet, install and activate it ([mise getting started](https://mise.jdx.dev/getting-started.html)):
+
+```bash
+# Linux
+curl https://mise.jdx.dev/install.sh | sh
+
+# macOS
+brew install mise
+```
+
+```bash
+# bash
+echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+
+# zsh
+echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc
+
+# fish
+echo '~/.local/bin/mise activate fish | source' >> ~/.config/fish/config.fish
+```
+
+Then install devsandbox:
 
 ```bash
 mise use -g github:zekker6/devsandbox
 ```
 
-After install, verify:
+### Direct binary download
 
-```bash
-devsandbox doctor
-```
-
-### Direct binary download (Linux)
+Every [release](https://github.com/zekker6/devsandbox/releases/latest) ships `devsandbox_<OS>_<arch>.tar.gz` for `Linux` and `Darwin`, on `x86_64` and `arm64`. For Linux on x86_64:
 
 ```bash
 curl -L https://github.com/zekker6/devsandbox/releases/latest/download/devsandbox_Linux_x86_64.tar.gz | tar xz
 sudo mv devsandbox /usr/local/bin/
+```
+
+Without mise, devsandbox works the same, but your toolchain is whatever the sandbox already sees: system packages on Linux, the container image on macOS. Install anything else inside the sandbox.
+
+### Build from source
+
+Requires Go 1.26+ and [Task](https://taskfile.dev/). With mise installed, `mise install` provides both:
+
+```bash
+mise install
+task build
+```
+
+## Verify
+
+```bash
+devsandbox doctor
 ```
 
 ### Optional system packages (Linux fallback)
@@ -91,15 +109,6 @@ sudo dnf install bubblewrap passt
 ```
 
 To prefer system binaries over embedded, set `use_embedded = false` in [Configuration](../configuration.md).
-
-### Build from source
-
-Requires Go 1.26+ and [Task](https://taskfile.dev/). With mise installed, `mise install` handles both:
-
-```bash
-mise install
-task build
-```
 
 ## Next step
 

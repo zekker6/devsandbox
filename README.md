@@ -17,55 +17,43 @@ The isolation boundary is still real. Inside the sandbox, the agent sees the pro
 
 ## Prerequisites
 
-devsandbox runs without [mise](https://mise.jdx.dev/), but the recommended install method uses it, and it is what makes your host toolchain (Go, Node, Python, kubectl) available inside the sandbox. Without it, everything else still works - you just bring your own tools.
-
-**Linux:**
-
-```bash
-curl https://mise.jdx.dev/install.sh | sh
-```
-
-After installing, activate mise in your shell ([setup guide](https://mise.jdx.dev/getting-started.html)):
-
-```bash
-# bash
-echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
-
-# zsh
-echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc
-
-# fish
-echo '~/.local/bin/mise activate fish | source' >> ~/.config/fish/config.fish
-```
-
-**Required on Linux:** your kernel must support unprivileged user namespaces. Verify with:
+**Linux:** your kernel must support unprivileged user namespaces. Verify with:
 
 ```bash
 unshare --user true
 # Should succeed silently. If it fails, see Limitations.
 ```
 
-**macOS:**
-
-```bash
-brew install mise
-```
-
-A Docker runtime is also required (ensure it is running before using devsandbox):
+**macOS:** a Docker runtime is required (ensure it is running before using devsandbox):
 
 - [OrbStack](https://orbstack.dev/) - recommended for Apple Silicon (fastest startup, lowest resource usage)
 - [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) - most widely tested
 - [Colima](https://github.com/abiosoft/colima) - free and open-source
 
+**Recommended: [mise](https://mise.jdx.dev/).** It is optional, and devsandbox runs without it. With it, installing and upgrading devsandbox is one command, and your mise-managed tools (Go, Node, Python, kubectl) work inside the sandbox without a reinstall. To set it up ([getting started](https://mise.jdx.dev/getting-started.html)):
+
+```bash
+# Linux
+curl https://mise.jdx.dev/install.sh | sh
+
+# macOS
+brew install mise
+
+# Activate it in your shell
+echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc                 # bash
+echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc                   # zsh
+echo '~/.local/bin/mise activate fish | source' >> ~/.config/fish/config.fish # fish
+```
+
 ## Quickstart
 
-**Install:**
+**Install with mise (recommended):**
 
 ```bash
 mise use -g github:zekker6/devsandbox
 ```
 
-> Homebrew is not currently available. For direct binary download, see [Installation Details](#installation-details).
+> Without mise, download a release binary instead - see [Installation Details](#installation-details). Homebrew is not currently available.
 
 **Sandbox your AI agent:**
 
@@ -83,6 +71,21 @@ devsandbox --info
 devsandbox sandboxes the current working directory - `cd` into your project first, then run `devsandbox`. Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts - safe inside the sandbox because devsandbox provides the security boundary.
 
 **Works with:** Claude Code, Codex CLI, GitHub Copilot, Pi, OpenCode, aider, and any other CLI-based development tool. The first five also get [shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default) and session persistence across sandbox restarts.
+
+**Sandbox agents by default (optional):** typing `devsandbox` first is easy to forget. Shell wrappers make `claude`, `codex` and the other supported agents run through devsandbox in every new shell. Add the line for your shell to its startup file:
+
+```bash
+# fish: ~/.config/fish/config.fish
+if test -z "$DEVSANDBOX"; devsandbox shell-wrappers activate fish | source; end
+
+# bash: ~/.bashrc
+if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash)"; fi
+
+# zsh: ~/.zshrc
+if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate zsh)"; fi
+```
+
+`claude-no-ds` or `command claude` runs the real binary unsandboxed. See [Usage Examples](#usage-examples) for wrapping only some agents or commands like `npm`.
 
 That's it. No config files needed. On Linux the default sandbox needs no system packages - bwrap and pasta are embedded. Proxy mode (`--proxy`) is the one exception: it needs `iproute2` and `nft` or `iptables` on the host for its egress lockdown, and aborts rather than starting with open egress. On macOS, a Docker runtime is required (see [Installation Details](#installation-details)).
 
@@ -217,11 +220,8 @@ devsandbox --isolation=docker npm install
 # same project is still using it - see docs/sandboxing.md#container-persistence)
 devsandbox --rm
 
-# Make supported agents sandboxed by default: `claude` becomes `devsandbox claude`.
+# Shell wrappers (see Quickstart) for only the agents you name, leaving the rest unsandboxed.
 # Add to ~/.bashrc (fish and zsh forms: devsandbox shell-wrappers --help)
-if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash)"; fi
-
-# ...or wrap only the agents you name, leaving the rest to run unsandboxed
 if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash --agents claude,codex)"; fi
 ```
 
@@ -342,10 +342,10 @@ Requirements:
 - Proxy mode only: `iproute2` and `nft` (or `iptables`), with the `nf_tables`/`nf_conntrack` kernel modules loadable - a `--proxy` launch aborts without them
 
 ```bash
-# Option 1: mise
+# Option 1 (recommended): mise
 mise use -g github:zekker6/devsandbox
 
-# Option 2: Download binary
+# Option 2: download a release binary (Linux/Darwin, x86_64/arm64 archives on every release)
 curl -L https://github.com/zekker6/devsandbox/releases/latest/download/devsandbox_Linux_x86_64.tar.gz | tar xz
 sudo mv devsandbox /usr/local/bin/
 ```

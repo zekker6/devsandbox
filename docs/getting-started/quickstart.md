@@ -4,11 +4,13 @@ Five minutes from install to first sandboxed AI run.
 
 ## 1. Install
 
+The recommended way is [mise](https://mise.jdx.dev/):
+
 ```bash
 mise use -g github:zekker6/devsandbox
 ```
 
-(See [Installation](install.md) for prerequisites and alternatives.)
+mise is optional. Without it, download a release binary instead. [Installation](install.md) covers both, plus the platform requirements.
 
 ## 2. Sandbox an AI agent
 
@@ -29,6 +31,23 @@ devsandbox --info
 ```
 
 This prints the sandbox configuration: which directories are mounted read-only, which are blocked, what network mode is active.
+
+## 4. Sandbox agents by default (optional)
+
+Typing `devsandbox` first is easy to forget. Shell wrappers make `claude` run as `devsandbox claude` in every new shell. They cover `claude`, `pi`, `codex`, `opencode` and `copilot`, whichever are installed. Add the line for your shell to its startup file:
+
+```bash
+# fish: ~/.config/fish/config.fish
+if test -z "$DEVSANDBOX"; devsandbox shell-wrappers activate fish | source; end
+
+# bash: ~/.bashrc
+if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate bash)"; fi
+
+# zsh: ~/.zshrc
+if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate zsh)"; fi
+```
+
+Open a new shell, `cd` into a project and run `claude` as usual. `claude-no-ds` or `command claude` runs the real binary unsandboxed. `--agents claude,codex` wraps only the agents you name, and `[shell_wrappers]` in the config wraps other commands such as `npm`. See [Shell wrappers](../tools.md#shell-wrappers-run-agents-sandboxed-by-default).
 
 ## What just happened
 
