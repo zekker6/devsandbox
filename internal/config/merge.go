@@ -2,6 +2,7 @@
 package config
 
 import (
+	"cmp"
 	"maps"
 	"slices"
 
@@ -171,6 +172,13 @@ func mergeConfigs(base, overlay *Config) *Config {
 	if overlay.PortForwarding.Enabled != nil {
 		result.PortForwarding.Enabled = overlay.PortForwarding.Enabled
 	}
+	if overlay.PortForwarding.AutoDetect != nil {
+		result.PortForwarding.AutoDetect = overlay.PortForwarding.AutoDetect
+	}
+	if overlay.PortForwarding.ScanInterval != "" {
+		result.PortForwarding.ScanInterval = overlay.PortForwarding.ScanInterval
+	}
+	result.PortForwarding.ExcludePorts = sortedUnion(base.PortForwarding.ExcludePorts, overlay.PortForwarding.ExcludePorts)
 	if len(overlay.PortForwarding.Rules) > 0 {
 		result.PortForwarding.Rules = append(
 			overlay.PortForwarding.Rules,
@@ -317,9 +325,9 @@ func mergeProjectConfig(base, local *Config) *Config {
 	return merged
 }
 
-// sortedUnion returns the distinct names of a and b in sorted order, in a new
+// sortedUnion returns the distinct values of a and b in sorted order, in a new
 // slice, or nil when there are none.
-func sortedUnion(a, b []string) []string {
+func sortedUnion[T cmp.Ordered](a, b []T) []T {
 	if len(a)+len(b) == 0 {
 		return nil
 	}

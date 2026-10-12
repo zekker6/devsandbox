@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// NamespaceDialReady is the private helper protocol's readiness byte, emitted
+// only after the helper has connected to the requested TCP endpoint.
+const NamespaceDialReady byte = 0
+
 // Dialer creates connections, optionally in a different network namespace.
 type Dialer interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
@@ -50,6 +54,10 @@ func NewNamespaceDialer(pid int) *NamespaceDialer {
 // DialContext launches the namespace-entering helper and returns a net.Conn
 // backed by its stdio. Closing the returned conn kills the helper.
 func (d *NamespaceDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return d.dialContext(ctx, network, address, 10*time.Second)
+}
+
+func (d *NamespaceDialer) dialContext(ctx context.Context, network, address string, readyTimeout time.Duration) (net.Conn, error) {
 	if network != "tcp" && network != "tcp4" && network != "tcp6" {
 		return nil, fmt.Errorf("namespace dialer only supports tcp, got %q", network)
 	}
@@ -80,6 +88,8 @@ func (d *NamespaceDialer) DialContext(ctx context.Context, network, address stri
 		helper, "__nsdial", address,
 	}
 	cmd := exec.CommandContext(ctx, nsenter, args...)
+	// Bound Wait even if a failed helper leaves a descendant holding stderr.
+	cmd.WaitDelay = time.Second
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -100,7 +110,7 @@ func (d *NamespaceDialer) DialContext(ctx context.Context, network, address stri
 		return nil, fmt.Errorf("start helper: %w", err)
 	}
 
-	return &helperConn{
+	conn := &helperConn{
 		cmd:       cmd,
 		stdin:     stdin,
 		stdout:    stdout,
@@ -109,7 +119,45 @@ func (d *NamespaceDialer) DialContext(ctx context.Context, network, address stri
 		remoteAddr: helperAddr{
 			label: fmt.Sprintf("pid=%d %s", d.pid, address),
 		},
-	}, nil
+	}
+	if err := waitHelperReady(ctx, stdout, readyTimeout); err != nil {
+		// Close stdout before Wait, and kill before reaping: a helper may be
+		// blocked on stdin or streaming output instead of sending readiness.
+		_ = conn.Close()
+		if stderr := stderrBuf.String(); stderr != "" {
+			return nil, fmt.Errorf("helper readiness: %w: %s", err, stderr)
+		}
+		return nil, fmt.Errorf("helper readiness: %w", err)
+	}
+	return conn, nil
+}
+
+func waitHelperReady(ctx context.Context, stdout io.Reader, timeout time.Duration) error {
+	ready := make(chan error, 1)
+	go func() {
+		var b [1]byte
+		_, err := io.ReadFull(stdout, b[:])
+		if err == nil && b[0] != NamespaceDialReady {
+			err = fmt.Errorf("invalid readiness byte %#02x", b[0])
+		}
+		ready <- err
+	}()
+
+	// This timer covers readiness only. A deadline on the command context
+	// would also kill an established connection after the deadline elapsed.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-ready:
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("timed out waiting for readiness: %w", context.DeadlineExceeded)
+	}
 }
 
 // helperConn adapts a running helper subprocess's stdio to the net.Conn
@@ -228,15 +276,11 @@ func (b *cappedBuffer) String() string {
 
 // onceErr runs an action at most once and caches its error.
 type onceErr struct {
-	done bool
+	once sync.Once
 	err  error
 }
 
 func (o *onceErr) Do(f func() error) error {
-	if o.done {
-		return o.err
-	}
-	o.done = true
-	o.err = f()
+	o.once.Do(func() { o.err = f() })
 	return o.err
 }

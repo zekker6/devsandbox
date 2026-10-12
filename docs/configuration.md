@@ -735,14 +735,16 @@ Inside sandbox, connect to `10.0.2.2:5432` (pasta gateway IP on Linux) or `host.
 # Automatically detect and forward listening ports inside the sandbox
 auto_detect = false
 
-# How often to scan for new listening ports
+# How often to scan for new listening ports (must be greater than zero)
 scan_interval = "2s"
 
 # Ports to never auto-forward (e.g., internal services)
 exclude_ports = [22, 80, 443]
 ```
 
-Ports can also be forwarded on-the-fly to running sandboxes. See [Sandboxing: Runtime Port Forwarding](sandboxing.md#runtime-port-forwarding) for `devsandbox forward` and auto-detect behavior.
+These settings work in the global config, matching includes, and trusted project `.devsandbox.toml` files. An explicitly set `auto_detect` overrides the earlier value, including `false`; a non-empty `scan_interval` overrides the earlier interval. `exclude_ports` combines and deduplicates exclusions across files, so a project cannot remove an inherited exclusion.
+
+Ports can also be forwarded on-the-fly to running sandboxes. See [Sandboxing: Runtime Port Forwarding](sandboxing.md#runtime-port-forwarding) for `devsandbox forward`, IPv4/IPv6 discovery, retries, and diagnostics.
 
 ### Overlay Settings
 

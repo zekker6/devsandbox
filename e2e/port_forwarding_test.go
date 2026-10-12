@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"devsandbox/internal/portforward"
+	"devsandbox/internal/session"
 )
 
 // TestPortForwarding_RequiresNetworkIsolation verifies that port forwarding
@@ -559,6 +560,15 @@ sandbox_port = 8500
 //  5. A TCP dial inside the ns to 127.0.0.1:<sandboxPort> succeeds and we
 //     get the expected response.
 func TestPortForwarding_DynamicForward(t *testing.T) {
+	testDynamicForward(t, false)
+}
+
+func TestPortForwarding_AutoDetect(t *testing.T) {
+	testDynamicForward(t, true)
+}
+
+func testDynamicForward(t *testing.T, autoDetect bool) {
+	t.Helper()
 	requireProxySandbox(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available on host")
@@ -597,6 +607,9 @@ func TestPortForwarding_DynamicForward(t *testing.T) {
 enabled = true
 port = 17180
 `
+	if autoDetect {
+		configContent += "\n[port_forwarding]\nauto_detect = true\nscan_interval = \"100ms\"\n"
+	}
 	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -694,11 +707,7 @@ finally:
 	if err != nil {
 		t.Fatalf("read session file: %v", err)
 	}
-	var sess struct {
-		Name      string `json:"name"`
-		PID       int    `json:"pid"`
-		NetworkNS string `json:"network_ns"`
-	}
+	var sess session.Session
 	if err := json.Unmarshal(raw, &sess); err != nil {
 		t.Fatalf("parse session file: %v\nraw=%s", err, raw)
 	}
@@ -746,12 +755,36 @@ finally:
 	dialer.HelperBinary = binaryPath
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", sandboxPort))
+	var conn net.Conn
+	if autoDetect {
+		store := session.NewStore(sessDir)
+		var hostPort int
+		for ctx.Err() == nil && hostPort == 0 {
+			record, readErr := store.Get(sess.Name)
+			if readErr != nil {
+				t.Fatalf("read auto-forward mapping: %v", readErr)
+			}
+			for _, p := range record.ForwardedPorts {
+				if p.SandboxPort == sandboxPort {
+					hostPort = p.HostPort
+				}
+			}
+			if hostPort == 0 {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		if hostPort == 0 {
+			t.Fatal("auto-detection never recorded a forwarded port")
+		}
+		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", hostPort))
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", sandboxPort))
+	}
 	if err != nil {
-		t.Fatalf("stage 4/5 FAIL: dial via NamespaceDialer: %v", err)
+		t.Fatalf("stage 4/5 FAIL: connect to sandbox: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
-	t.Logf("stage 4/5 OK: dial via NamespaceDialer succeeded")
+	t.Logf("stage 4/5 OK: sandbox connection established (auto-detect=%v)", autoDetect)
 
 	// Read PONG.
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))

@@ -2,41 +2,39 @@ package portforward
 
 import (
 	"context"
+	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 )
 
-// Monitor periodically scans for listening ports and fires callbacks when
-// ports appear or disappear.
+// Monitor periodically scans for listening ports and reconciles forwards.
+// Callbacks run serially on the scanning goroutine.
 type Monitor struct {
-	Scanner       PortScanner // From procnet.go
+	Scanner       PortScanner
 	Interval      time.Duration
-	ExcludePorts  map[int]bool // Ports to never auto-forward
-	ManualPorts   map[int]bool // Ports already manually forwarded (skip these)
-	OnPortAdded   func(port int)
+	ExcludePorts  map[int]bool
+	ManualPorts   map[int]bool
+	OnPortAdded   func(entry ListenEntry) error
 	OnPortRemoved func(port int)
+	OnError       func(error)
 
-	mu    sync.Mutex
-	known map[int]bool
-	wg    sync.WaitGroup
+	mu            sync.Mutex
+	known         map[int]ListenEntry
+	failed        map[int]string
+	lastScanError string
+	wg            sync.WaitGroup
 }
 
-// Start initialises the known port set and starts the background scanning goroutine.
 func (m *Monitor) Start(ctx context.Context) {
-	m.known = make(map[int]bool)
-	m.wg.Go(func() {
-		m.loop(ctx)
-	})
+	m.known = make(map[int]ListenEntry)
+	m.failed = make(map[int]string)
+	m.wg.Go(func() { m.loop(ctx) })
 }
 
-// Wait blocks until the background goroutine exits.
-func (m *Monitor) Wait() {
-	m.wg.Wait()
-}
+func (m *Monitor) Wait() { m.wg.Wait() }
 
-// SetManualPort marks or unmarks a port as manually forwarded. Ports marked
-// manual are skipped during auto-forward decisions but are still removed from
-// known when they disappear.
+// SetManualPort marks or unmarks a port as manually forwarded.
 func (m *Monitor) SetManualPort(port int, active bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -67,35 +65,31 @@ func (m *Monitor) loop(ctx context.Context) {
 func (m *Monitor) scan() {
 	entries, err := m.Scanner.ListeningPorts()
 	if err != nil {
-		// Sandbox may have exited; silently return.
+		if msg := err.Error(); msg != m.lastScanError {
+			m.report(fmt.Errorf("scan listening ports: %w", err))
+			m.lastScanError = msg
+		}
 		return
 	}
+	m.lastScanError = ""
 
+	current := make(map[int]ListenEntry, len(entries))
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	current := make(map[int]bool, len(entries))
-	for _, e := range entries {
-		current[e.Port] = true
-	}
-
-	// Detect new ports.
-	for port := range current {
-		if m.known[port] {
+	for _, entry := range entries {
+		if m.ExcludePorts[entry.Port] || m.ManualPorts[entry.Port] {
 			continue
 		}
-		if m.ExcludePorts[port] || m.ManualPorts[port] {
-			continue
-		}
-		m.known[port] = true
-		if m.OnPortAdded != nil {
-			m.OnPortAdded(port)
+		entry = dialableEntry(entry)
+		previous, exists := current[entry.Port]
+		if !exists || preferEntry(entry, previous) {
+			current[entry.Port] = entry
 		}
 	}
+	m.mu.Unlock()
 
-	// Detect removed ports.
-	for port := range m.known {
-		if current[port] {
+	// An address change on an existing port needs a new destination too.
+	for port, entry := range m.known {
+		if current[port] == entry {
 			continue
 		}
 		delete(m.known, port)
@@ -103,4 +97,56 @@ func (m *Monitor) scan() {
 			m.OnPortRemoved(port)
 		}
 	}
+	for port := range m.failed {
+		if _, exists := current[port]; !exists {
+			delete(m.failed, port)
+		}
+	}
+	for port, entry := range current {
+		if m.known[port] == entry {
+			continue
+		}
+		if m.OnPortAdded != nil {
+			if err := m.OnPortAdded(entry); err != nil {
+				if msg := err.Error(); m.failed[port] != msg {
+					m.report(fmt.Errorf("forward port %d: %w; retrying on the next scan", port, err))
+					m.failed[port] = msg
+				}
+				continue
+			}
+		}
+		delete(m.failed, port)
+		m.known[port] = entry
+	}
+}
+
+func (m *Monitor) report(err error) {
+	if m.OnError != nil {
+		m.OnError(err)
+	}
+}
+
+// Wildcard listeners are reached through loopback in their own address family.
+func dialableEntry(entry ListenEntry) ListenEntry {
+	switch entry.IP {
+	case "", "0.0.0.0":
+		entry.IP = "127.0.0.1"
+	case "::":
+		entry.IP = "::1"
+	}
+	return entry
+}
+
+// One host port can serve only one listener. Prefer IPv4, then loopback, and
+// finally lexical address order so procfs enumeration cannot flap the target.
+func preferEntry(a, b ListenEntry) bool {
+	ap, _ := netip.ParseAddr(a.IP)
+	bp, _ := netip.ParseAddr(b.IP)
+	if ap.Is4() != bp.Is4() {
+		return ap.Is4()
+	}
+	if ap.IsLoopback() != bp.IsLoopback() {
+		return ap.IsLoopback()
+	}
+	return a.IP < b.IP
 }

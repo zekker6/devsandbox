@@ -168,6 +168,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Per-project isolation** - each project gets its own sandbox home, caches, and logs
 - **Zero-config security baseline** - SSH keys, cloud credentials, `.env` files ([scan limits](docs/sandboxing.md#security-model)), and git credentials blocked by default
 - **MITM proxy** - optional traffic inspection with log viewing, filtering, and export
+- **Opt-in port auto-forwarding** - reach sandbox IPv4 and IPv6 TCP listeners through host loopback, with retries and restart cleanup ([details](docs/sandboxing.md#runtime-port-forwarding))
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine ([coverage](docs/proxy.md#redaction-coverage))
 - **Resource limits** - optional memory, CPU and process caps that apply to every backend ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited

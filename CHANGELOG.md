@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.0...HEAD)
 
+### Fixed
+
+- Port auto-forwarding now honors project and include settings, detects IPv6 listeners, and reaches apps bound to a specific sandbox address. Failed setup is retried, and idle client connections no longer stall discovery after an app stops. Runtime failures reach the terminal instead of silently dropping connections. See [Runtime Port Forwarding](docs/sandboxing.md#runtime-port-forwarding).
+
 ## [v0.23.0](https://github.com/zekker6/devsandbox/releases/tag/v0.23.0) - 2026-09-30
 
 ### Added

@@ -1862,11 +1862,35 @@ func TestPortForwardingConfig_AutoDetectDefaults(t *testing.T) {
 }
 
 func TestValidate_PortForwardingScanInterval(t *testing.T) {
-	cfg := &Config{}
-	cfg.PortForwarding.ScanInterval = "invalid"
-	err := cfg.Validate()
-	if err == nil {
-		t.Error("expected validation error for invalid scan_interval")
+	for _, tt := range []struct {
+		interval string
+		wantErr  string
+	}{
+		{"", ""},
+		{"2s", ""},
+		{"1ns", ""},
+		{"invalid", "invalid duration"},
+		{"0", "must be positive"},
+		{"0s", "must be positive"},
+		{"-1s", "must be positive"},
+		{"-1ns", "must be positive"},
+	} {
+		t.Run(tt.interval, func(t *testing.T) {
+			cfg := &Config{PortForwarding: PortForwardingConfig{ScanInterval: tt.interval}}
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate: %v", err)
+				}
+				if cfg.PortForwarding.GetScanInterval() <= 0 {
+					t.Error("validated scan interval must be positive")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "port_forwarding.scan_interval") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate = %v, want scan_interval error containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

@@ -22,7 +22,12 @@ func (d *localDialer) DialContext(ctx context.Context, network, address string) 
 // listener (caller must close) and the port it is listening on.
 func startEchoServer(t *testing.T) (net.Listener, int) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return startEchoServerAt(t, "127.0.0.1:0")
+}
+
+func startEchoServerAt(t *testing.T, addr string) (net.Listener, int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("echo server listen: %v", err)
 	}

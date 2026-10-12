@@ -181,6 +181,7 @@ func runForward(_ context.Context, name, bind string, portSpecs []string) error 
 			SandboxPort: m.sandboxPort,
 			Bind:        bind,
 			Dialer:      dialer,
+			OnError:     reportForwardError,
 		}
 		if err := fwd.Start(ctx); err != nil {
 			for _, started := range forwarders {

@@ -2,6 +2,8 @@ package portforward
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -37,10 +39,11 @@ func TestMonitor_DetectsNewPort(t *testing.T) {
 	mon := &Monitor{
 		Scanner:  scanner,
 		Interval: 50 * time.Millisecond,
-		OnPortAdded: func(port int) {
-			if port == 3000 {
+		OnPortAdded: func(entry ListenEntry) error {
+			if entry.Port == 3000 {
 				added.Add(1)
 			}
+			return nil
 		},
 	}
 	mon.Start(ctx)
@@ -75,7 +78,7 @@ func TestMonitor_DetectsRemovedPort(t *testing.T) {
 	mon := &Monitor{
 		Scanner:     scanner,
 		Interval:    50 * time.Millisecond,
-		OnPortAdded: func(port int) {},
+		OnPortAdded: func(ListenEntry) error { return nil },
 		OnPortRemoved: func(port int) {
 			if port == 3000 {
 				removed.Add(1)
@@ -117,10 +120,11 @@ func TestMonitor_ExcludePorts(t *testing.T) {
 		Scanner:      scanner,
 		Interval:     50 * time.Millisecond,
 		ExcludePorts: map[int]bool{22: true},
-		OnPortAdded: func(port int) {
+		OnPortAdded: func(entry ListenEntry) error {
 			mu.Lock()
-			addedPorts = append(addedPorts, port)
+			addedPorts = append(addedPorts, entry.Port)
 			mu.Unlock()
+			return nil
 		},
 	}
 	mon.Start(ctx)
@@ -161,8 +165,9 @@ func TestMonitor_SkipsManuallyForwarded(t *testing.T) {
 		Scanner:     scanner,
 		Interval:    50 * time.Millisecond,
 		ManualPorts: map[int]bool{3000: true},
-		OnPortAdded: func(port int) {
+		OnPortAdded: func(ListenEntry) error {
 			added.Add(1)
+			return nil
 		},
 	}
 	mon.Start(ctx)
@@ -173,5 +178,80 @@ func TestMonitor_SkipsManuallyForwarded(t *testing.T) {
 
 	if added.Load() != 0 {
 		t.Fatalf("expected no callbacks for manually-forwarded port, got %d", added.Load())
+	}
+}
+
+func TestMonitor_RetriesFailedForward(t *testing.T) {
+	scanner := &mockScanner{ports: []ListenEntry{{IP: "127.0.0.1", Port: 3000}}}
+	attempts, reports := 0, 0
+	mon := &Monitor{
+		Scanner: scanner,
+		known:   make(map[int]ListenEntry),
+		failed:  make(map[int]string),
+		OnPortAdded: func(ListenEntry) error {
+			attempts++
+			if attempts < 3 {
+				return errors.New("temporary bind failure")
+			}
+			return nil
+		},
+		OnError: func(error) { reports++ },
+	}
+	for range 4 {
+		mon.scan()
+	}
+	if attempts != 3 || reports != 1 {
+		t.Fatalf("attempts=%d reports=%d, want 3 and 1", attempts, reports)
+	}
+	if mon.known[3000].IP != "127.0.0.1" {
+		t.Fatal("successful retry was not recorded")
+	}
+}
+
+func TestMonitor_DestinationsAndAddressChanges(t *testing.T) {
+	scanner := &mockScanner{}
+	var added []ListenEntry
+	var removed []int
+	mon := &Monitor{
+		Scanner:       scanner,
+		known:         make(map[int]ListenEntry),
+		failed:        make(map[int]string),
+		OnPortAdded:   func(entry ListenEntry) error { added = append(added, entry); return nil },
+		OnPortRemoved: func(port int) { removed = append(removed, port) },
+	}
+	for _, entries := range [][]ListenEntry{
+		{{IP: "::", Port: 3000}},
+		{{IP: "127.0.0.2", Port: 3000}},
+		{{IP: "::1", Port: 3000}, {IP: "0.0.0.0", Port: 3000}},
+		{{IP: "0.0.0.0", Port: 3000}, {IP: "::1", Port: 3000}},
+	} {
+		scanner.setPorts(entries)
+		mon.scan()
+	}
+	want := []ListenEntry{{IP: "::1", Port: 3000}, {IP: "127.0.0.2", Port: 3000}, {IP: "127.0.0.1", Port: 3000}}
+	if !reflect.DeepEqual(added, want) || !reflect.DeepEqual(removed, []int{3000, 3000}) {
+		t.Fatalf("added=%v removed=%v", added, removed)
+	}
+}
+
+type errorScanner struct{ err error }
+
+func (s *errorScanner) ListeningPorts() ([]ListenEntry, error) { return nil, s.err }
+
+func TestMonitor_ReportsScanErrorsAndRecovery(t *testing.T) {
+	scanner := &errorScanner{err: errors.New("procfs unavailable")}
+	reports := 0
+	mon := &Monitor{Scanner: scanner, OnError: func(error) { reports++ }}
+	mon.scan()
+	mon.scan()
+	if reports != 1 {
+		t.Fatalf("reports=%d, want 1", reports)
+	}
+	scanner.err = nil
+	mon.scan()
+	scanner.err = errors.New("procfs unavailable")
+	mon.scan()
+	if reports != 2 {
+		t.Fatalf("reports after recovery=%d, want 2", reports)
 	}
 }

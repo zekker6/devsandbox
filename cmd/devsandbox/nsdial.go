@@ -6,6 +6,9 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
+
+	"devsandbox/internal/portforward"
 
 	"github.com/spf13/cobra"
 )
@@ -32,11 +35,19 @@ func newNSDialCmd() *cobra.Command {
 }
 
 func runNSDial(addr string) error {
-	conn, err := net.Dial("tcp", addr)
+	return runNSDialIO(addr, os.Stdin, os.Stdout)
+}
+
+func runNSDialIO(addr string, stdin io.Reader, stdout io.WriteCloser) error {
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer func() { _ = conn.Close() }()
+
+	if _, err := stdout.Write([]byte{portforward.NamespaceDialReady}); err != nil {
+		return fmt.Errorf("write readiness: %w", err)
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -44,7 +55,7 @@ func runNSDial(addr string) error {
 	// stdin → conn
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(conn, os.Stdin)
+		_, _ = io.Copy(conn, stdin)
 		if tc, ok := conn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
@@ -53,8 +64,8 @@ func runNSDial(addr string) error {
 	// conn → stdout
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(os.Stdout, conn)
-		_ = os.Stdout.Close()
+		_, _ = io.Copy(stdout, conn)
+		_ = stdout.Close()
 	}()
 
 	wg.Wait()

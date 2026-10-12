@@ -495,7 +495,11 @@ scan_interval = "2s"
 exclude_ports = [22, 80, 443]
 ```
 
-When `auto_detect = true`, devsandbox monitors the sandbox for new TCP listeners and automatically forwards them to the same port on `127.0.0.1`. Auto-detect requires proxy mode: without an isolated network namespace the sandbox and host share the same kernel port space, so a userland forwarder would collide with the sandbox listener on the same port (and the port is already directly accessible on `127.0.0.1` anyway). If auto-detect is enabled without proxy mode, devsandbox logs a notice and skips auto-forward at session start. When the preferred host port is already in use, devsandbox falls back to an ephemeral host port chosen by the OS and logs the mapping; the actual host port is recorded in the session registry and visible via `devsandbox sessions`. Ports below 1024 are always excluded.
+When `auto_detect = true`, devsandbox monitors IPv4 and IPv6 TCP listeners inside the sandbox and forwards them through the same port on the host's `127.0.0.1`. It connects to the address the app actually listens on, using family-matched loopback for wildcard listeners. If several addresses listen on one port, it prefers IPv4, then loopback within that family, then lexical address order. This does not enable IPv6 egress in proxy mode. UDP and ports below 1024 are not auto-forwarded.
+
+On bwrap, auto-detect requires proxy mode. Without it, sandbox listeners already use the host network stack and need no forwarding. When the preferred host port is occupied, devsandbox chooses an ephemeral host port. Run `devsandbox sessions` to see the actual mapping; normal mapping announcements go to `wrapper.log` unless `--verbose` is set.
+
+Failed forwarding setup is retried on subsequent scans. Scan and connection failures reach the terminal even while the workload runs; identical scan or setup errors are reported once until recovery. Stopping an app closes its forwarded connections and removes its mapping, without preventing other ports from being discovered. Changes to the listening address are picked up on the next scan. A mapping means the host listener is open; the sandbox connection is established only when a client connects.
 
 **Manual forwarding to a running sandbox:**
 

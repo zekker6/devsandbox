@@ -714,10 +714,11 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		SandboxName:    sandboxName,
 	}
 
+	var stopAutoForward func()
 	runCfg.OnSandboxStart = func(nsPID int, nsPath string) {
 		sessionStore, err := session.DefaultStore()
 		if err != nil {
-			notice.Warn("[devsandbox] failed to create session store: %v", err)
+			notice.Alert("[devsandbox] failed to create session store: %v", err)
 			return
 		}
 
@@ -739,7 +740,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		if err := sessionStore.Register(sess); err != nil {
-			notice.Warn("[devsandbox] failed to register session: %v", err)
+			notice.Alert("[devsandbox] failed to register session: %v", err)
 			return
 		}
 
@@ -757,7 +758,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		if appCfg.PortForwarding.IsAutoDetectEnabled() {
 			shared, err := portforward.SharesHostNetNS(nsPath)
 			if err != nil {
-				notice.Warn("[devsandbox] cannot determine sandbox network namespace (%v); skipping port auto-detect", err)
+				notice.Alert("[devsandbox] cannot determine sandbox network namespace (%v); skipping port auto-detect", err)
 				return
 			}
 			if shared {
@@ -765,62 +766,8 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 				return
 			}
 
-			dialer := portforward.NewNamespaceDialer(nsPID)
-			scanner := portforward.NewProcNetScanner(nsPID)
-
-			excludePorts := make(map[int]bool)
-			for _, p := range appCfg.PortForwarding.ExcludePorts {
-				excludePorts[p] = true
-			}
-
-			forwarders := make(map[int]*portforward.Forwarder)
-			var fwdMu sync.Mutex
-
-			mon := &portforward.Monitor{
-				Scanner:      scanner,
-				Interval:     appCfg.PortForwarding.GetScanInterval(),
-				ExcludePorts: excludePorts,
-				OnPortAdded: func(port int) {
-					fwd := &portforward.Forwarder{
-						HostPort:    port,
-						SandboxPort: port,
-						Bind:        "127.0.0.1",
-						Dialer:      dialer,
-					}
-					hostPort, fellBack, err := fwd.StartWithFallback(cmd.Context())
-					if err != nil {
-						notice.Warn("[devsandbox] cannot forward port %d: %v (try: devsandbox forward %d:<alt_port>)", port, err, port)
-						return
-					}
-					fwdMu.Lock()
-					forwarders[port] = fwd
-					fwdMu.Unlock()
-
-					if fellBack {
-						notice.Info("[devsandbox] auto-forwarding port %d → 127.0.0.1:%d (host port %d was in use)", port, hostPort, port)
-					} else {
-						notice.Info("[devsandbox] auto-forwarding port %d → 127.0.0.1:%d", port, hostPort)
-					}
-
-					// Update session registry
-					sess.ForwardedPorts = append(sess.ForwardedPorts, session.ForwardedPort{
-						HostPort: hostPort, SandboxPort: port, Bind: "127.0.0.1", Protocol: "tcp",
-					})
-					_ = sessionStore.Update(sess)
-				},
-				OnPortRemoved: func(port int) {
-					fwdMu.Lock()
-					if fwd, ok := forwarders[port]; ok {
-						fwd.Stop()
-						delete(forwarders, port)
-					}
-					fwdMu.Unlock()
-
-					notice.Info("[devsandbox] stopped forwarding port %d", port)
-				},
-			}
-
-			mon.Start(cmd.Context())
+			stopAutoForward = startAutoForward(cmd.Context(), appCfg.PortForwarding, sess, sessionStore,
+				portforward.NewProcNetScanner(nsPID), portforward.NewNamespaceDialer(nsPID))
 		}
 	}
 
@@ -831,6 +778,12 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 			}
 		}()
 	}
+
+	defer func() {
+		if stopAutoForward != nil {
+			stopAutoForward()
+		}
+	}()
 
 	// Last gate before the workload takes the terminal: anything that went
 	// wrong during setup is still on screen here, and unread a second later.

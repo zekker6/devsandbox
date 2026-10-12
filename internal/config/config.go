@@ -1068,8 +1068,12 @@ func validateResources(r ResourcesConfig, section string) error {
 // validatePortForwarding validates port forwarding configuration.
 func (c *Config) validatePortForwarding() error {
 	if c.PortForwarding.ScanInterval != "" {
-		if _, err := time.ParseDuration(c.PortForwarding.ScanInterval); err != nil {
+		interval, err := time.ParseDuration(c.PortForwarding.ScanInterval)
+		if err != nil {
 			return fmt.Errorf("port_forwarding.scan_interval: invalid duration %q: %w", c.PortForwarding.ScanInterval, err)
+		}
+		if interval <= 0 {
+			return fmt.Errorf("port_forwarding.scan_interval: must be positive, got %q", c.PortForwarding.ScanInterval)
 		}
 	}
 
