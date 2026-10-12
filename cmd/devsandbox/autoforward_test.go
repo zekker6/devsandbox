@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,6 +57,10 @@ func waitAutoPorts(t *testing.T, store *session.Store, count int) []session.Forw
 
 func TestAutoForward_RestartWithIdleClient(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.2:0")
+	// macOS assigns only 127.0.0.1 to lo0, unlike Linux which routes all of 127/8.
+	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		t.Skipf("127.0.0.2 not assigned to loopback: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -18,6 +19,16 @@ func TestForwarder_UsesListenerAddress(t *testing.T) {
 				probe, err := net.Listen("tcp6", "[::1]:0")
 				if err != nil {
 					t.Skipf("IPv6 loopback unavailable: %v", err)
+				}
+				_ = probe.Close()
+			} else {
+				probe, err := net.Listen("tcp4", net.JoinHostPort(ip, "0"))
+				// macOS assigns only 127.0.0.1 to lo0, unlike Linux which routes all of 127/8.
+				if errors.Is(err, syscall.EADDRNOTAVAIL) {
+					t.Skipf("%s not assigned to loopback: %v", ip, err)
+				}
+				if err != nil {
+					t.Fatal(err)
 				}
 				_ = probe.Close()
 			}
