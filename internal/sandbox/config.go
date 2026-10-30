@@ -4,12 +4,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"devsandbox/internal/config"
 	"devsandbox/internal/sandbox/mounts"
@@ -18,6 +20,10 @@ import (
 const (
 	// SandboxBaseDir is the directory under ~/.local/share for sandbox data
 	SandboxBaseDir = "devsandbox"
+
+	// Leave room for home/.run/<pid> sockets under the default sandbox base.
+	// This is a soft limit: an unusually long base can still exceed sun_path.
+	maxSandboxNameBytes = 24
 )
 
 // Shell represents a supported shell type
@@ -140,9 +146,12 @@ func NewConfig(opts *Options) (*Config, error) {
 		baseDir = opts.BasePath
 	}
 
-	projectName := GenerateSandboxName(projectDir)
+	projectName := GenerateProjectName(projectDir)
 
-	sandboxRoot := filepath.Join(baseDir, projectName)
+	sandboxRoot, err := ResolveSandboxRoot(baseDir, projectDir)
+	if err != nil {
+		return nil, err
+	}
 	sandboxHome := SandboxHomePath(sandboxRoot)
 
 	xdgRuntime := os.Getenv("XDG_RUNTIME_DIR")
@@ -193,13 +202,46 @@ func SanitizeProjectName(name string) string {
 	return nonAlphanumericRe.ReplaceAllString(name, "_")
 }
 
-// GenerateSandboxName creates a unique sandbox name from project path.
-// Format: <basename>-<short-hash> (e.g., "myproject-a1b2c3d4")
-func GenerateSandboxName(projectDir string) string {
+// GenerateProjectName returns the full display name retained in metadata and prompts.
+// Format: <basename>-<short-hash> (e.g., "myproject-a1b2c3d4").
+func GenerateProjectName(projectDir string) string {
 	basename := SanitizeProjectName(filepath.Base(projectDir))
 	hash := sha256.Sum256([]byte(projectDir))
 	shortHash := hex.EncodeToString(hash[:])[:8]
 	return basename + "-" + shortHash
+}
+
+// GenerateSandboxName returns the directory name for a project. Names exceeding
+// the soft byte limit use only the hash to leave room for Unix socket paths.
+func GenerateSandboxName(projectDir string) string {
+	name := GenerateProjectName(projectDir)
+	if len(name) > maxSandboxNameBytes {
+		return name[len(name)-8:]
+	}
+	return name
+}
+
+// ResolveSandboxRoot preserves existing legacy directories before applying the
+// shorter naming scheme. Every current-project lookup must use the same choice.
+func ResolveSandboxRoot(baseDir, projectDir string) (string, error) {
+	name := GenerateSandboxName(projectDir)
+	legacyName := GenerateProjectName(projectDir)
+	if name != legacyName {
+		legacyRoot := filepath.Join(baseDir, legacyName)
+		info, err := os.Stat(legacyRoot)
+		switch {
+		case err == nil:
+			if !info.IsDir() {
+				return "", fmt.Errorf("legacy sandbox path %q is not a directory", legacyRoot)
+			}
+			return legacyRoot, nil
+		case os.IsNotExist(err), errors.Is(err, syscall.ENAMETOOLONG):
+			// A legacy name too long for the filesystem could never hold state.
+		default:
+			return "", fmt.Errorf("inspect legacy sandbox %q: %w", legacyRoot, err)
+		}
+	}
+	return filepath.Join(baseDir, name), nil
 }
 
 func (c *Config) EnsureSandboxDirs() error {

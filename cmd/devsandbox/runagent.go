@@ -165,7 +165,11 @@ func checkHerdrWorktreeGuard(agent string, args []string, ctx herdrRestoreContex
 		return fmt.Errorf("refusing to resume %s: the current directory could not be determined, so the sandbox recorded for this pane cannot be verified", agent)
 	}
 	cwd := filepath.Clean(ctx.Cwd)
-	if cwd == filepath.Clean(rec.ProjectDir) && herdrstate.DerivesSameSandboxRoot(rec, cwd) {
+	sameRoot, err := herdrstate.DerivesSameSandboxRoot(rec, rec.ProjectDir)
+	if err != nil {
+		return fmt.Errorf("refusing to resume %s: the sandbox recorded for this pane could not be verified: %w", agent, err)
+	}
+	if cwd == filepath.Clean(rec.ProjectDir) && sameRoot {
 		return nil
 	}
 
@@ -174,7 +178,7 @@ func checkHerdrWorktreeGuard(agent string, args []string, ctx herdrRestoreContex
 	// point: standing in the worktree (where re-entry derives a different root)
 	// and standing in the repo root (where it derives the same root but the
 	// wrong project). Naming the cause is what makes the error actionable.
-	if !herdrstate.DerivesSameSandboxRoot(rec, rec.ProjectDir) {
+	if !sameRoot {
 		return fmt.Errorf("refusing to resume %s: this pane's session was launched with --worktree, so it ran in %s "+
 			"with its sandbox state in %s - re-entering from %s would open a different agent session store "+
 			"and silently begin a new session instead. "+

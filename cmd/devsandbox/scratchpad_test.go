@@ -177,6 +177,59 @@ func TestCollectScratchpads_HonorsConfiguredBase(t *testing.T) {
 	}
 }
 
+func TestCollectScratchpads_LegacySandbox(t *testing.T) {
+	home := t.TempDir()
+	workDir := sandbox.ScratchpadDir(home, "long-project-name")
+	base := filepath.Join(home, "sandboxes")
+	legacyName := sandbox.GenerateProjectName(workDir)
+	legacyRoot := filepath.Join(base, legacyName)
+	for _, dir := range []string{workDir, legacyRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := collectScratchpads(home, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[0].HasState || got[0].SandboxName != legacyName {
+		t.Fatalf("legacy scratchpad state not found: %+v", got)
+	}
+}
+
+func TestScratchpadRm_LegacySandbox(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		name := "single"
+		if all {
+			name = "all"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := prepareHome(t)
+			workDir := sandbox.ScratchpadDir(home, "long-project-name")
+			root := filepath.Join(sandbox.SandboxBasePath(home), sandbox.GenerateProjectName(workDir))
+			for _, dir := range []string{workDir, root} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := newScratchpadRmCmd()
+			args := []string{"--force", "long-project-name"}
+			if all {
+				args = []string{"--force", "--all"}
+			}
+			cmd.SetArgs(args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range []string{workDir, root} {
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Errorf("scratchpad rm left %q behind: %v", dir, err)
+				}
+			}
+		})
+	}
+}
+
 func TestScratchpadRmCmd_FlagsAndSubcommand(t *testing.T) {
 	rm := newScratchpadRmCmd()
 	if rm.Use != "rm <name>" {

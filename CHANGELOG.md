@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- New sandboxes use only the project hash when their directory name would exceed 24 bytes, reducing Unix socket path failures such as herdr startup on macOS. Existing sandboxes keep their paths and state, and full names remain in metadata and listings. See [Project Naming](docs/sandboxing.md#project-naming).
 - Reduced the default Docker and krun image size without removing bundled tools, so first launches download less and the image takes less disk space. See [Docker Image](docs/sandboxing.md#docker-image).
 - Port auto-forwarding now honors project and include settings, detects IPv6 listeners, and reaches apps bound to a specific sandbox address. Failed setup is retried, and idle client connections no longer stall discovery after an app stops. Runtime failures reach the terminal instead of silently dropping connections. See [Runtime Port Forwarding](docs/sandboxing.md#runtime-port-forwarding).
 

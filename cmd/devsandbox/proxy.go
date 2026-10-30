@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -125,8 +124,7 @@ func resolveSandboxBase() (string, error) {
 		basePath = sandbox.SandboxBasePath(home)
 	}
 
-	projectName := sandbox.GenerateSandboxName(projectDir)
-	return filepath.Join(basePath, projectName), nil
+	return sandbox.ResolveSandboxRoot(basePath, projectDir)
 }
 
 // dialAskSocket connects to the ask socket. A dial nothing answers is the

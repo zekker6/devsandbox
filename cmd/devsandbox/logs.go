@@ -52,6 +52,18 @@ Subcommands:
 	return cmd
 }
 
+func resolveLogsSandboxRoot(homeDir, name string) (string, error) {
+	baseDir := sandbox.SandboxBasePath(homeDir)
+	if name != "" {
+		return filepath.Join(baseDir, name), nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return sandbox.ResolveSandboxRoot(baseDir, cwd)
+}
+
 // ProxyLogFilter defines filters for proxy log entries.
 type ProxyLogFilter struct {
 	URL        string
@@ -313,16 +325,11 @@ Status filters support:
 			if len(args) > 0 {
 				name = args[0]
 			}
-			if name == "" {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				name = sandbox.GenerateSandboxName(cwd)
+			sandboxRoot, err := resolveLogsSandboxRoot(homeDir, name)
+			if err != nil {
+				return err
 			}
-
-			baseDir := sandbox.SandboxBasePath(homeDir)
-			sandboxRoot := filepath.Join(baseDir, name)
+			name = filepath.Base(sandboxRoot)
 			logDir := filepath.Join(sandboxRoot, proxy.LogBaseDirName, proxy.ProxyLogDirName)
 
 			// Check if log directory exists
@@ -1098,16 +1105,11 @@ Log types:
 			if len(args) > 0 {
 				name = args[0]
 			}
-			if name == "" {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				name = sandbox.GenerateSandboxName(cwd)
+			sandboxRoot, err := resolveLogsSandboxRoot(homeDir, name)
+			if err != nil {
+				return err
 			}
-
-			baseDir := sandbox.SandboxBasePath(homeDir)
-			sandboxRoot := filepath.Join(baseDir, name)
+			name = filepath.Base(sandboxRoot)
 			logDir := filepath.Join(sandboxRoot, proxy.LogBaseDirName, proxy.InternalLogDirName)
 
 			// Check if log directory exists

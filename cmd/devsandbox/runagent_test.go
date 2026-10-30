@@ -255,8 +255,8 @@ func TestResolveAgentRunWorktreeMappingFailsClosedFromRepoRoot(t *testing.T) {
 		Load:   paneStore(t, rec),
 	}
 
-	if !herdrstate.DerivesSameSandboxRoot(rec, repoRoot) {
-		t.Fatal("precondition: the repo root must re-derive the recorded sandbox root")
+	if same, err := herdrstate.DerivesSameSandboxRoot(rec, repoRoot); err != nil || !same {
+		t.Fatalf("precondition: the repo root must re-derive the recorded sandbox root: same=%v, err=%v", same, err)
 	}
 
 	inv, err := resolveAgentRun("claude", []string{"--resume", "0d4c2b1e"}, "", guard,
@@ -278,6 +278,43 @@ func TestResolveAgentRunWorktreeMappingFailsClosedFromRepoRoot(t *testing.T) {
 // A resume typed from an unrelated directory is refused too, but must not be
 // blamed on --worktree: the remedy there is to change directory, not to re-run
 // a worktree invocation.
+func TestResolveAgentRunLegacySandbox(t *testing.T) {
+	for _, lookupFails := range []bool{false, true} {
+		name := "existing directory"
+		if lookupFails {
+			name = "lookup failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			projectDir := filepath.Join(t.TempDir(), "victorialogs-datasource")
+			if err := os.Mkdir(projectDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(t.TempDir(), sandbox.GenerateProjectName(projectDir))
+			if lookupFails {
+				if err := os.WriteFile(root, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			rec := herdrstate.Record{
+				Version: herdrstate.Version, PaneID: "w1F:p1C", Agent: "claude",
+				ProjectDir: projectDir, SandboxRoot: root,
+			}
+			guard := herdrRestoreContext{PaneID: rec.PaneID, Cwd: projectDir, Load: paneStore(t, rec)}
+			inv, err := resolveAgentRun("claude", []string{"--resume", "ID"}, "", guard,
+				fakeSelf("/usr/bin/devsandbox"), fakeLookPath(nil))
+			if lookupFails {
+				if err == nil || !strings.Contains(err.Error(), "could not be verified") || inv.Path != "" {
+					t.Fatalf("lookup failure must refuse resume and report the cause: inv=%+v, err=%v", inv, err)
+				}
+			} else if err != nil || inv.Path != "/usr/bin/devsandbox" {
+				t.Fatalf("legacy sandbox resume failed: inv=%+v, err=%v", inv, err)
+			}
+		})
+	}
+}
+
 func TestResolveAgentRunRefusesResumeFromAnotherDirectory(t *testing.T) {
 	projectDir := t.TempDir()
 	rec := herdrstate.Record{

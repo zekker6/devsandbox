@@ -122,6 +122,9 @@ func TestCheckSocketPath(t *testing.T) {
 	if !strings.Contains(err.Error(), "unix socket limit") {
 		t.Errorf("expected the error to explain the limit, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "shorter sandbox.base_path") {
+		t.Errorf("expected the error to suggest a shorter base path, got %v", err)
+	}
 
 	exact := "/" + strings.Repeat("a", maxUnixSocketPath()-1)
 	if err := checkSocketPath(exact); err != nil {

@@ -57,11 +57,11 @@ func maxUnixSocketPath() int {
 }
 
 // checkSocketPath rejects a socket path the kernel cannot bind. Sandbox home is
-// already long, so overshooting is reachable with a long project directory name;
+// already long, so overshooting is still reachable with a long sandbox base;
 // bind(2) reports only "invalid argument", which says nothing about the cause.
 func checkSocketPath(path string) error {
 	if max := maxUnixSocketPath(); len(path) > max {
-		return fmt.Errorf("socket path %q is %d bytes, over this platform's %d-byte unix socket limit: use a shorter project directory name", path, len(path), max)
+		return fmt.Errorf("socket path %q is %d bytes, over this platform's %d-byte unix socket limit: configure a shorter sandbox.base_path", path, len(path), max)
 	}
 	return nil
 }

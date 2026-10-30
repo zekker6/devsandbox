@@ -168,11 +168,15 @@ func resolveLogDir(fromLogs, project string) (string, error) {
 		basePath = sandbox.SandboxBasePath(home)
 	}
 
+	sandboxRoot := filepath.Join(basePath, project)
 	if project == "" {
-		project = sandbox.GenerateSandboxName(projectDir)
+		sandboxRoot, err = sandbox.ResolveSandboxRoot(basePath, projectDir)
+		if err != nil {
+			return "", err
+		}
 	}
 
-	return filepath.Join(basePath, project, "logs", "proxy"), nil
+	return filepath.Join(sandboxRoot, "logs", "proxy"), nil
 }
 
 func writeOutput(output, outputFile string) error {

@@ -307,11 +307,20 @@ Sandbox data follows XDG conventions:
 
 ### Project Naming
 
-Sandbox directories are named `<project-basename>-<hash>` where the hash is derived from the full project path. This
-ensures:
+New sandbox directories are named `<project-basename>-<hash>` where the hash is derived from the full project path. When
+that name exceeds 24 bytes after sanitization, a new directory uses only the same 8-character hash. This leaves more room
+for Unix socket paths, including on macOS. The limit is internal and requires no configuration; an unusually long
+`sandbox.base_path` can still exceed the platform's socket limit.
 
-- Unique sandboxes for projects with the same name in different locations
-- Predictable directory names for the same project
+The full `<project-basename>-<hash>` name and project path remain in `metadata.json`, so `devsandbox sandboxes list`
+still identifies hash-only directories by their full names. Shell prompts keep the full name too.
+
+Projects with the same basename in different locations get different hashes.
+
+Existing directories keep their original names, even above the limit. Launches, logs, scratchpad management and session
+restore checks continue to use that state without renaming or migrating it. If both the original and hash-only directory
+exist, the original takes precedence. The shorter naming scheme applies only when no original directory exists.
+Docker container and volume names are unchanged.
 
 ## Environment Variables
 

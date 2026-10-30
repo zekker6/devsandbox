@@ -196,8 +196,11 @@ func collectScratchpads(homeDir, sandboxBase string) ([]ScratchpadInfo, error) {
 		}
 		name := strings.TrimPrefix(basename, sandbox.ScratchpadPrefix)
 		workDir := filepath.Join(baseDir, basename)
-		sandboxName := sandbox.GenerateSandboxName(workDir)
-		sandboxRoot := filepath.Join(sandboxBase, sandboxName)
+		sandboxRoot, err := sandbox.ResolveSandboxRoot(sandboxBase, workDir)
+		if err != nil {
+			return nil, err
+		}
+		sandboxName := filepath.Base(sandboxRoot)
 
 		hasState := false
 		if info, err := os.Stat(sandboxRoot); err == nil && info.IsDir() {
@@ -268,8 +271,11 @@ Refuses to remove scratchpads with an active session.`,
 					return err
 				}
 				workDir := sandbox.ScratchpadDir(homeDir, name)
-				sandboxName := sandbox.GenerateSandboxName(workDir)
-				sandboxRoot := filepath.Join(sandboxBase, sandboxName)
+				sandboxRoot, err := sandbox.ResolveSandboxRoot(sandboxBase, workDir)
+				if err != nil {
+					return err
+				}
+				sandboxName := filepath.Base(sandboxRoot)
 				hasWork := false
 				if info, err := os.Stat(workDir); err == nil && info.IsDir() {
 					hasWork = true

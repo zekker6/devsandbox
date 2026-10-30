@@ -1,9 +1,12 @@
 package sandbox
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -126,6 +129,168 @@ func TestGenerateSandboxName(t *testing.T) {
 	// Name should contain hash suffix
 	if len(name) < 12 { // basename + "-" + 8 char hash
 		t.Errorf("Name should include hash suffix: %s", name)
+	}
+}
+
+func TestGenerateSandboxName_SoftLimit(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		basename string
+		hashOnly bool
+	}{
+		{name: "below limit", basename: strings.Repeat("a", 14)},
+		{name: "at limit", basename: strings.Repeat("a", 15)},
+		{name: "over limit", basename: strings.Repeat("a", 16), hashOnly: true},
+		{name: "reported project", basename: "victorialogs-datasource", hashOnly: true},
+		{name: "very long", basename: strings.Repeat("a", 256), hashOnly: true},
+		{name: "sanitized unicode", basename: strings.Repeat("界", 15)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			projectDir := filepath.Join("/projects", tt.basename)
+			hash := sha256.Sum256([]byte(projectDir))
+			shortHash := hex.EncodeToString(hash[:4])
+			want := shortHash
+			if !tt.hashOnly {
+				want = SanitizeProjectName(tt.basename) + "-" + shortHash
+			}
+			if got := GenerateSandboxName(projectDir); got != want {
+				t.Errorf("GenerateSandboxName(%q) = %q, want %q", projectDir, got, want)
+			}
+			if got := GenerateSandboxName(filepath.Join("/other", tt.basename)); got == want {
+				t.Errorf("different project paths share name %q", got)
+			}
+		})
+	}
+}
+
+func TestGenerateSandboxName_MacOSSocketPath(t *testing.T) {
+	const home = "/Users/arturminchukov"
+	name := GenerateSandboxName(filepath.Join(home, "projects", "victorialogs-datasource"))
+	root := filepath.Join(SandboxBasePath(home), name)
+	socket := filepath.Join(SandboxHomePath(root), ".run", "2147483647", "herdr.sock")
+	if len(socket) > 103 {
+		t.Fatalf("socket path is %d bytes, exceeds macOS limit: %s", len(socket), socket)
+	}
+}
+
+func TestNewConfig_HashOnlyRootPreservesMetadata(t *testing.T) {
+	base := t.TempDir()
+	projectDir := filepath.Join(t.TempDir(), "victorialogs-datasource")
+	if err := os.Mkdir(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(projectDir)
+	cfg, err := NewConfig(&Options{BasePath: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte(cfg.ProjectDir))
+	shortHash := hex.EncodeToString(hash[:4])
+	if want := filepath.Join(base, shortHash); cfg.SandboxRoot != want {
+		t.Fatalf("SandboxRoot = %q, want %q", cfg.SandboxRoot, want)
+	}
+	fullName := "victorialogs-datasource-" + shortHash
+	if cfg.ProjectName != fullName {
+		t.Errorf("ProjectName = %q, want %q", cfg.ProjectName, fullName)
+	}
+	if err := cfg.EnsureSandboxDirs(); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := ListSandboxes(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("listed %d sandboxes, want 1", len(listed))
+	}
+	if m := listed[0]; m.Name != fullName || m.ProjectDir != cfg.ProjectDir || m.SandboxRoot != cfg.SandboxRoot || m.Orphaned {
+		t.Errorf("hash-only sandbox lost project metadata: %+v", m)
+	}
+}
+
+func TestNewConfig_ReusesLegacySandbox(t *testing.T) {
+	for _, compactExists := range []bool{false, true} {
+		t.Run(strconv.FormatBool(compactExists), func(t *testing.T) {
+			base := t.TempDir()
+			projectDir := filepath.Join(t.TempDir(), "victorialogs-datasource")
+			if err := os.Mkdir(projectDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(projectDir)
+			cwd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacyRoot := filepath.Join(base, GenerateProjectName(cwd))
+			legacyHome := SandboxHomePath(legacyRoot)
+			if err := os.MkdirAll(legacyHome, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(legacyHome, "keep")
+			if err := os.WriteFile(marker, []byte("persistent state"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			compactRoot := filepath.Join(base, GenerateSandboxName(cwd))
+			if compactExists {
+				if err := os.Mkdir(compactRoot, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := NewConfig(&Options{BasePath: base})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.SandboxRoot != legacyRoot || cfg.SandboxHome != legacyHome {
+				t.Fatalf("legacy sandbox not reused: root=%q, home=%q", cfg.SandboxRoot, cfg.SandboxHome)
+			}
+			if err := cfg.EnsureSandboxDirs(); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "persistent state" {
+				t.Fatalf("legacy state changed: data=%q, err=%v", data, err)
+			}
+			if !compactExists {
+				if _, err := os.Stat(compactRoot); !os.IsNotExist(err) {
+					t.Fatalf("created a second sandbox: stat err=%v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveSandboxRoot_UnrepresentableLegacyName(t *testing.T) {
+	base := t.TempDir()
+	projectDir := filepath.Join("/projects", strings.Repeat("a", 255))
+	root, err := ResolveSandboxRoot(base, projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(base, GenerateSandboxName(projectDir)); root != want {
+		t.Errorf("root = %q, want %q", root, want)
+	}
+}
+
+func TestResolveSandboxRoot_LegacyLookupErrors(t *testing.T) {
+	for _, symlinkLoop := range []bool{false, true} {
+		t.Run(strconv.FormatBool(symlinkLoop), func(t *testing.T) {
+			base := t.TempDir()
+			projectDir := "/projects/victorialogs-datasource"
+			legacyRoot := filepath.Join(base, GenerateProjectName(projectDir))
+			if symlinkLoop {
+				if err := os.Symlink(legacyRoot, legacyRoot); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(legacyRoot, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			root, err := ResolveSandboxRoot(base, projectDir)
+			if err == nil || root != "" {
+				t.Fatalf("legacy lookup failure must not select fresh state: root=%q, err=%v", root, err)
+			}
+			if !strings.Contains(err.Error(), legacyRoot) {
+				t.Errorf("error does not identify legacy path: %v", err)
+			}
+		})
 	}
 }
 

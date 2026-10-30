@@ -301,11 +301,14 @@ func Validate(rec Record, paneID, agent string) error {
 //
 // The base directory is taken from the record rather than recomputed, so a
 // session launched with a custom sandbox base path still compares correctly.
-func DerivesSameSandboxRoot(rec Record, cwd string) bool {
+func DerivesSameSandboxRoot(rec Record, cwd string) (bool, error) {
 	if !filepath.IsAbs(rec.SandboxRoot) || !filepath.IsAbs(cwd) {
-		return false
+		return false, nil
 	}
 	root := filepath.Clean(rec.SandboxRoot)
-	derived := filepath.Join(filepath.Dir(root), sandbox.GenerateSandboxName(filepath.Clean(cwd)))
-	return derived == root
+	derived, err := sandbox.ResolveSandboxRoot(filepath.Dir(root), filepath.Clean(cwd))
+	if err != nil {
+		return false, err
+	}
+	return derived == root, nil
 }

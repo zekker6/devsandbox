@@ -93,8 +93,8 @@ func TestRecordHerdrPaneMappingWritesRecord(t *testing.T) {
 	if rec.SandboxRoot != cfg.SandboxRoot {
 		t.Errorf("SandboxRoot = %q, want %q", rec.SandboxRoot, cfg.SandboxRoot)
 	}
-	if !herdrstate.DerivesSameSandboxRoot(rec, projectDir) {
-		t.Error("a plain launch should derive the same sandbox root from its project dir")
+	if same, err := herdrstate.DerivesSameSandboxRoot(rec, projectDir); err != nil || !same {
+		t.Errorf("a plain launch should derive the same sandbox root: same=%v, err=%v", same, err)
 	}
 }
 
@@ -186,10 +186,10 @@ func TestRecordHerdrPaneMappingWorktreeRoot(t *testing.T) {
 	if err := herdrstate.Validate(rec, "w1F:p2C", "claude"); err != nil {
 		t.Fatalf("validate record: %v", err)
 	}
-	if herdrstate.DerivesSameSandboxRoot(rec, worktreePath) {
-		t.Error("a worktree launch must not derive its sandbox root from the worktree path")
+	if same, err := herdrstate.DerivesSameSandboxRoot(rec, worktreePath); err != nil || same {
+		t.Errorf("a worktree launch must not derive its sandbox root from the worktree path: same=%v, err=%v", same, err)
 	}
-	if !herdrstate.DerivesSameSandboxRoot(rec, repoRoot) {
-		t.Error("the recorded sandbox root should be the repo-root-derived one")
+	if same, err := herdrstate.DerivesSameSandboxRoot(rec, repoRoot); err != nil || !same {
+		t.Errorf("the recorded sandbox root should be the repo-root-derived one: same=%v, err=%v", same, err)
 	}
 }
