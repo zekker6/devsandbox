@@ -230,6 +230,8 @@ const baseProfile = `(version 1)
   (sysctl-name "hw.memsize")
   (sysctl-name "hw.ncpu")
   (sysctl-name "hw.pagesize")
+  ; libc getpagesize/sysconf uses numeric HW_PAGESIZE, named pagesize_compat.
+  (sysctl-name "hw.pagesize_compat")
   (sysctl-name "hw.physicalcpu")
   (sysctl-name "hw.physicalcpu_max")
   (sysctl-name-prefix "hw.optional.arm.")

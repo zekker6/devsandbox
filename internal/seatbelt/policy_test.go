@@ -201,6 +201,18 @@ func TestProfileBaselineRootDirectory(t *testing.T) {
 	}
 }
 
+func TestProfileBaselinePageSize(t *testing.T) {
+	profile := mustProfile(t, Policy{})
+	for _, name := range []string{"hw.pagesize", "hw.pagesize_compat"} {
+		if !strings.Contains(profile, `(sysctl-name "`+name+`")`) {
+			t.Errorf("missing page-size query: %s", name)
+		}
+	}
+	if strings.Contains(profile, "(allow sysctl-read)") {
+		t.Fatal("page-size support must not grant unrestricted sysctl reads")
+	}
+}
+
 func TestProfileBaselineDoesNotExposeHostData(t *testing.T) {
 	profile := mustProfile(t, Policy{})
 	if !strings.HasPrefix(profile, "(version 1)\n(deny default)\n") {

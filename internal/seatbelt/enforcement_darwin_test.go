@@ -602,13 +602,18 @@ func TestCheckBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		program, arg, output string
+		program string
+		args    []string
+		output  string
 	}{
-		{"/bin/echo", "seatbelt-started", "seatbelt-started\n"},
-		{"/usr/bin/uname", "-s", "Darwin\n"},
+		{"/bin/echo", []string{"seatbelt-started"}, "seatbelt-started\n"},
+		{"/usr/bin/uname", []string{"-s"}, "Darwin\n"},
+		// getconf exercises libc's numeric HW_PAGESIZE query, not sysctlbyname.
+		{"/usr/bin/getconf", []string{"PAGESIZE"}, strconv.Itoa(os.Getpagesize()) + "\n"},
+		{"/bin/zsh", []string{"-fc", "echo seatbelt-started"}, "seatbelt-started\n"},
 	} {
 		t.Run(filepath.Base(tc.program), func(t *testing.T) {
-			output, err := nativeCommand(t, profile, tc.program, tc.arg)
+			output, err := nativeCommand(t, profile, append([]string{tc.program}, tc.args...)...)
 			if err != nil || string(output) != tc.output {
 				t.Fatalf("system program startup: %v; output %q, want %q", err, output, tc.output)
 			}

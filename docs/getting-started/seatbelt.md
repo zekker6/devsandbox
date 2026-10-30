@@ -22,6 +22,8 @@ isolation = "seatbelt"
 
 [OpenAI Codex](https://github.com/openai/codex) and [Anthropic sandbox-runtime](https://github.com/anthropics/sandbox-runtime) also use Seatbelt for native macOS sandboxing. They are useful implementation references, not evidence that devsandbox's policy has the same permissions or guarantees.
 
+The startup policy permits both `hw.pagesize` and `hw.pagesize_compat`. macOS libc uses the latter for `getpagesize()` and `sysconf(_SC_PAGESIZE)`; denying it can make zsh exit with status 1 or Rust tools such as mise panic while allocating a guard page. These are named read-only grants, not unrestricted sysctl access.
+
 Linux tests can compile both Darwin architectures, but cannot validate macOS enforcement. Actual filesystem, network, service-access and process behavior must be tested on macOS before relying on this experimental backend.
 
 ## Files and private home
