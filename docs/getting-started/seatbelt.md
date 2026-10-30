@@ -24,13 +24,15 @@ isolation = "seatbelt"
 
 The startup policy permits both `hw.pagesize` and `hw.pagesize_compat`. macOS libc uses the latter for `getpagesize()` and `sysconf(_SC_PAGESIZE)`; denying it can make zsh exit with status 1 or Rust tools such as mise panic while allocating a guard page. These are named read-only grants, not unrestricted sysctl access.
 
-The system shell and Apple developer-tool launchers can read `/var/select/sh` and `/var/select/developer_dir`, including their `/private/var` spellings. The developer-selector paths also permit `file-test-existence`: when no selector exists, Apple's launcher must receive "not found" rather than a sandbox permission error so it can use its fallback. These read-only rules do not expose the surrounding directory tree or grant ancestor-path access. Blocking the selectors can prevent `/bin/sh` from starting and make Apple's Git launcher report missing developer tools even when they are installed.
+The baseline includes read-only grants for `/var/select/sh` and `/var/select/developer_dir`, including their `/private/var` spellings, plus `file-test-existence` for the developer selectors. These rules do not expose the surrounding directory tree. Shell selection works with these grants, but developer selection remains a known limitation: on macOS 15.7.3, Apple's launcher still receives a permission error for an absent selector instead of falling back to the installed Command Line Tools. Passing the host-selected `DEVELOPER_DIR` through `/usr/bin/env` inside the sandbox bypasses that lookup, but does not resolve unrelated filesystem denials.
 
 Linux tests can compile both Darwin architectures, but cannot validate macOS enforcement. Actual filesystem, network, service-access and process behavior must be tested on macOS before relying on this experimental backend.
 
 ## Files and private home
 
 System roots and selected tool sources are readable. The root directory `/` itself is readable for macOS dyld/libignition startup; this permits listing its entries, not recursively reading their contents. Without that literal-directory grant, the preflight can abort before `/usr/bin/true` starts. The project and a private native `HOME` are writable, subject to the denials below. The rest of your host home is not generally accessible. Selected host tool sources remain accessible read-only at their original paths so absolute shebangs can find their interpreters.
+
+Ancestors of explicitly readable or writable paths permit metadata queries so tools such as Git can resolve absolute paths. For example, a project under `/Users/name/projects/repo` permits metadata queries on `/Users`, `/Users/name`, and `/Users/name/projects`. These literal grants do not permit listing those directories, reading sibling files, or writing outside the existing writable roots. Explicit read denials still override ancestor metadata grants.
 
 The native home lives in separate sandbox state whose name ends in `-seatbelt`. It does not reuse a Docker volume or bwrap home. This is a copied home, not a mount namespace or a kernel overlay filesystem:
 

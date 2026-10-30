@@ -42,6 +42,10 @@ func TestSeatbeltHelper(t *testing.T) {
 		}
 	case "read-dir":
 		_, err = os.ReadDir(args[2])
+	case "stat":
+		_, err = os.Stat(args[2])
+	case "lstat":
+		_, err = os.Lstat(args[2])
 	case "readlink-missing":
 		_, err = os.Readlink(args[2])
 		if errors.Is(err, os.ErrNotExist) {
@@ -269,6 +273,42 @@ func TestEnforcementFilesystem(t *testing.T) {
 	if data, err := os.ReadFile(secret); err != nil || string(data) != "fixture" {
 		t.Fatalf("host sibling was changed: %q, %v", data, err)
 	}
+}
+
+func TestEnforcementAncestorMetadata(t *testing.T) {
+	root := nativeRoot(t)
+	work := filepath.Join(root, "host", "projects", "repo")
+	source := filepath.Join(root, "host", "tools", "install", "data")
+	sibling := filepath.Join(root, "host", "private", "secret")
+	blocked := filepath.Join(work, "blocked")
+	for _, name := range []string{filepath.Join(work, "file"), source, sibling, filepath.Join(blocked, "data")} {
+		nativeFile(t, name)
+	}
+	profile, exe := nativeProfile(t, Policy{
+		Writable: []string{work},
+		// The nested grant must not make even the denied ancestor's metadata visible.
+		ReadOnly: []string{source, filepath.Join(blocked, "data")},
+		DenyRead: []string{blocked},
+	})
+	for _, name := range []string{filepath.Dir(work), filepath.Dir(source), filepath.Dir(filepath.Dir(source)), filepath.Join(root, "host")} {
+		t.Run(name, func(t *testing.T) {
+			nativeOperation(t, profile, exe, true, "stat", name)
+			nativeOperation(t, profile, exe, true, "lstat", name)
+			nativeOperation(t, profile, exe, false, "read-dir", name)
+			nativeOperation(t, profile, exe, false, "chmod", name)
+			nativeOperation(t, profile, exe, false, "write", filepath.Join(name, "new-file"))
+			nativeOperation(t, profile, exe, false, "rename", name, name+"-moved")
+		})
+	}
+	for _, operation := range []string{"stat", "lstat", "read", "write"} {
+		nativeOperation(t, profile, exe, false, operation, sibling)
+	}
+	nativeOperation(t, profile, exe, false, "lstat", blocked)
+	nativeOperation(t, profile, exe, false, "read", filepath.Join(blocked, "data"))
+	nativeOperation(t, profile, exe, true, "read", source)
+	nativeOperation(t, profile, exe, false, "write", source)
+	nativeOperation(t, profile, exe, true, "read", filepath.Join(work, "file"))
+	nativeOperation(t, profile, exe, true, "write", filepath.Join(work, "file"))
 }
 
 func TestEnforcementWritableRootsCannotBeReplaced(t *testing.T) {

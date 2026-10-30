@@ -54,8 +54,10 @@ func Check(ctx context.Context, profile string) error {
 
 // Policy describes the filesystem and networking available to a workload.
 // Paths must be clean, absolute POSIX paths. ReadOnly paths remain read-only
-// even beneath Writable paths. DenyRead also forbids writing, and all denials
-// override grants. Writable roots, UnixSocketRoots, ReadOnly paths, and denied
+// even beneath Writable paths. Ancestors of ReadOnly and Writable paths allow
+// metadata queries, not directory listings or file contents. DenyRead also
+// forbids writing, and all denials override grants. Writable roots,
+// UnixSocketRoots, ReadOnly paths, and denied
 // paths cannot be moved by renaming an ancestor. Network permits outbound IP
 // connections only.
 // A nonzero ProxyPort restricts them to IPv4 TCP on that localhost port.
@@ -106,12 +108,18 @@ func (p Policy) Profile() (string, error) {
 
 	var b strings.Builder
 	b.WriteString(baseProfile)
+	var readableParents []string
 	for _, name := range p.ReadOnly {
 		pathRule(&b, "allow", "file-read*", "subpath", name)
+		readableParents = append(readableParents, path.Dir(name))
 	}
 	for _, name := range p.Writable {
 		pathRule(&b, "allow", "file-read* file-write*", "subpath", name)
+		readableParents = append(readableParents, path.Dir(name))
 	}
+	// Git canonicalizes absolute paths by inspecting each ancestor. Subtree
+	// grants do not authorize those queries outside the granted root.
+	ancestorRules(&b, "allow", "file-read-metadata", readableParents)
 	if len(p.UnixSocketRoots) > 0 {
 		// socket() has no path to filter. Bind/connect/accept remain confined
 		// to explicit Unix paths; none of these rules grants IP listening.
@@ -132,23 +140,9 @@ func (p Policy) Profile() (string, error) {
 
 	// Explicit denials come last, including ancestor unlink rules. Protecting
 	// only the named entry leaves it movable through a writable parent.
-	ancestors := make(map[string]struct{})
-	protectAncestors := func(name string) {
-		for {
-			ancestors[name] = struct{}{}
-			if name == "/" {
-				break
-			}
-			name = path.Dir(name)
-		}
-	}
 	// A writable root is persistent sandbox state, not a replaceable entry.
-	for _, name := range p.Writable {
-		protectAncestors(name)
-	}
-	for _, name := range p.UnixSocketRoots {
-		protectAncestors(name)
-	}
+	ancestors := append([]string(nil), p.Writable...)
+	ancestors = append(ancestors, p.UnixSocketRoots...)
 	for _, list := range []struct {
 		operations string
 		paths      []string
@@ -159,17 +153,10 @@ func (p Policy) Profile() (string, error) {
 	} {
 		for _, name := range list.paths {
 			pathRule(&b, "deny", list.operations, "subpath", name)
-			protectAncestors(path.Dir(name))
+			ancestors = append(ancestors, path.Dir(name))
 		}
 	}
-	parents := make([]string, 0, len(ancestors))
-	for name := range ancestors {
-		parents = append(parents, name)
-	}
-	sort.Strings(parents)
-	for _, name := range parents {
-		pathRule(&b, "deny", "file-write-unlink", "literal", name)
-	}
+	ancestorRules(&b, "deny", "file-write-unlink", ancestors)
 	if p.HideEnvFiles {
 		b.WriteString("(deny file-read* file-write* (regex #\"(^|/)[.][eE][nN][vV]([.][^/]*)?(/|$)\"))\n")
 	}
@@ -206,6 +193,31 @@ func sbplString(s string) string {
 
 func pathRule(b *strings.Builder, action, operations, filter, name string) {
 	fmt.Fprintf(b, "(%s %s (%s %s))\n", action, operations, filter, sbplString(name))
+}
+
+// Include each starting path and its ancestors, emitting shared ancestors once.
+func ancestorRules(b *strings.Builder, action, operations string, roots []string) {
+	ancestors := make(map[string]struct{})
+	for _, name := range roots {
+		for {
+			if _, exists := ancestors[name]; exists {
+				break
+			}
+			ancestors[name] = struct{}{}
+			if name == "/" {
+				break
+			}
+			name = path.Dir(name)
+		}
+	}
+	parents := make([]string, 0, len(ancestors))
+	for name := range ancestors {
+		parents = append(parents, name)
+	}
+	sort.Strings(parents)
+	for _, name := range parents {
+		pathRule(b, action, operations, "literal", name)
+	}
 }
 
 // No home, temporary directory, volume, Mach service, keychain, or broad

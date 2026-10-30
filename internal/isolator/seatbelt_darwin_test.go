@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,19 +30,35 @@ func TestSeatbeltSharedInstallReadOnly(t *testing.T) {
 }
 
 func TestSeatbeltAppleGitLog(t *testing.T) {
-	cfg := nativeMiseTestConfig(t)
-	// Exercise Apple's launcher rather than a Homebrew Git that bypasses
-	// xcode-select. Keep the fixture's no-op mise ahead of system tools.
-	t.Setenv("PATH", filepath.Join(cfg.HomeDir, ".local", "bin")+":/usr/bin:/bin:/usr/sbin:/sbin")
-	cfg.ToolsConfig["git"] = map[string]any{"mode": "readonly"}
-	nativeGitFixture(t, cfg.ProjectDir, "main")
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
-	if err := NewSeatbeltIsolator(SeatbeltConfig{}).Run(ctx, &RunConfig{
-		SandboxCfg: cfg,
-		Command:    []string{"/bin/sh", "-c", `test "$(git --no-pager log -1 --format=%s)" = fixture`},
-	}); err != nil {
-		t.Fatalf("Apple Git could not read the native snapshot: %v", err)
+	for _, selection := range []string{"system", "explicit"} {
+		t.Run(selection, func(t *testing.T) {
+			cfg := nativeMiseTestConfig(t)
+			// Exercise Apple's launcher rather than a Homebrew Git that bypasses
+			// xcode-select. Keep the fixture's no-op mise ahead of system tools.
+			t.Setenv("PATH", filepath.Join(cfg.HomeDir, ".local", "bin")+":/usr/bin:/bin:/usr/sbin:/sbin")
+			cfg.ToolsConfig["git"] = map[string]any{"mode": "readonly"}
+			nativeGitFixture(t, cfg.ProjectDir, "main")
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			command := []string{"/bin/sh", "-c", `test "$(git --no-pager log -1 --format=%s)" = fixture`}
+			if selection == "explicit" {
+				// Isolate Git path traversal from the separate selector-policy failure.
+				output, err := exec.CommandContext(ctx, "/usr/bin/xcode-select", "-p").CombinedOutput()
+				if err != nil {
+					t.Fatalf("host developer-directory selection: %v; %s", err, output)
+				}
+				developerDir := strings.TrimSpace(string(output))
+				if !filepath.IsAbs(developerDir) {
+					t.Fatalf("host developer directory is not absolute: %q", developerDir)
+				}
+				command = append([]string{"/usr/bin/env", "DEVELOPER_DIR=" + developerDir}, command...)
+			}
+			if err := NewSeatbeltIsolator(SeatbeltConfig{}).Run(ctx, &RunConfig{
+				SandboxCfg: cfg, Command: command,
+			}); err != nil {
+				t.Fatalf("Apple Git could not read the native snapshot: %v", err)
+			}
+		})
 	}
 }
 

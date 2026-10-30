@@ -83,6 +83,47 @@ func TestProfileGrantsThenDenies(t *testing.T) {
 	}
 }
 
+func TestProfileAncestorMetadata(t *testing.T) {
+	p := Policy{
+		Writable:        []string{"/Users/dev/projects/repo"},
+		ReadOnly:        []string{"/Users/dev/tools/git", "/Users/dev/tools/helper"},
+		DenyRead:        []string{"/denied/private/token"},
+		DenyWrite:       []string{"/protected/state/file"},
+		UnixSocketRoots: []string{"/sockets/private"},
+	}
+	profile := mustProfile(t, p)
+	var grants []string
+	for line := range strings.SplitSeq(profile, "\n") {
+		if strings.HasPrefix(line, "(allow file-read-metadata ") {
+			grants = append(grants, line)
+		}
+	}
+	want := []string{
+		`(allow file-read-metadata (literal "/"))`,
+		`(allow file-read-metadata (literal "/Users"))`,
+		`(allow file-read-metadata (literal "/Users/dev"))`,
+		`(allow file-read-metadata (literal "/Users/dev/projects"))`,
+		`(allow file-read-metadata (literal "/Users/dev/tools"))`,
+	}
+	if !reflect.DeepEqual(grants, want) {
+		t.Fatalf("ancestor metadata grants = %q, want %q", grants, want)
+	}
+	for _, name := range []string{"/Users", "/Users/dev", "/Users/dev/projects", "/Users/dev/tools"} {
+		for _, operations := range []string{"file-read*", "file-read* file-write*", "file-read-data"} {
+			for _, filter := range []string{"literal", "subpath"} {
+				if strings.Contains(profile, "(allow "+operations+" ("+filter+" "+sbplString(name)+"))") {
+					t.Fatalf("ancestor gained content access: %s", name)
+				}
+			}
+		}
+	}
+	for range 10 {
+		if got := mustProfile(t, p); got != profile {
+			t.Fatal("ancestor metadata grants are nondeterministic")
+		}
+	}
+}
+
 func TestProfileWritableRootCannotBeReplaced(t *testing.T) {
 	profile := mustProfile(t, Policy{Writable: []string{"/sandbox/home"}})
 	lastGrant := strings.LastIndex(profile, "(allow ")
