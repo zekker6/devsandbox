@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -64,7 +65,9 @@ func TestSeatbeltHelper(t *testing.T) {
 			t.Fatal("missing destination")
 		}
 		if args[1] == "rename" {
-			err = os.Rename(args[2], args[3])
+			// os.Rename rejects an existing directory destination before the
+			// syscall. Exercise the kernel policy, including directory replacement.
+			err = syscall.Rename(args[2], args[3])
 		} else {
 			err = os.Link(args[2], args[3])
 		}
@@ -363,15 +366,19 @@ func TestEnforcementWritableRootsCannotBeReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := filepath.Join(root, "other")
-	if err := os.Mkdir(other, 0700); err != nil {
-		t.Fatal(err)
+	moved := filepath.Join(root, "moved-other")
+	for _, name := range []string{other, moved} {
+		if err := os.Mkdir(name, 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	profile, exe := nativeProfile(t, Policy{Writable: []string{root, home}})
 	nativeOperation(t, profile, exe, false, "remove", home)
 	nativeOperation(t, profile, exe, false, "rename", home, filepath.Join(root, "moved-home"))
 	nativeOperation(t, profile, exe, false, "rename", parent, filepath.Join(root, "moved-parent"))
 	nativeOperation(t, profile, exe, false, "rename", other, home)
-	nativeOperation(t, profile, exe, true, "rename", other, filepath.Join(root, "moved-other"))
+	// The same syscall may replace an empty directory that is not a protected root.
+	nativeOperation(t, profile, exe, true, "rename", other, moved)
 	nativeOperation(t, profile, exe, true, "write", filepath.Join(home, "new"))
 	nativeOperation(t, profile, exe, true, "remove", filepath.Join(home, "new"))
 }
@@ -723,7 +730,10 @@ func TestEnforcementBaselineRootDirectory(t *testing.T) {
 }
 
 func TestEnforcementMissingDeveloperSelector(t *testing.T) {
-	missing := filepath.Join(nativeRoot(t), "developer_dir")
+	root := nativeRoot(t)
+	missing := filepath.Join(root, "developer_dir")
+	secret := filepath.Join(root, "host-secret")
+	nativeFile(t, secret)
 	profile, exe := nativeProfile(t, Policy{})
 	// Exercise the production grants against an absent fixture without
 	// creating or removing the host's developer-tool selection.
@@ -731,8 +741,11 @@ func TestEnforcementMissingDeveloperSelector(t *testing.T) {
 		profile = strings.ReplaceAll(profile, sbplString(selector), sbplString(missing))
 	}
 	nativeOperation(t, profile, exe, true, "readlink-missing", missing)
-	readOnly := strings.ReplaceAll(profile, " file-test-existence", "")
-	nativeOperation(t, readOnly, exe, false, "readlink-missing", missing)
+	// This canonical-path fixture can return ENOENT without the existence
+	// grant, unlike Apple's /var lookup. Use existing paths as negative controls.
+	nativeOperation(t, profile, exe, false, "read", secret)
+	nativeOperation(t, profile, exe, false, "write", secret)
+	nativeOperation(t, profile, exe, false, "read-dir", root)
 }
 
 func TestCheckRejectsInvalidProfile(t *testing.T) {
