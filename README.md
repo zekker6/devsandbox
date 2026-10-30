@@ -70,7 +70,7 @@ devsandbox --info
 
 devsandbox sandboxes the current working directory - `cd` into your project first, then run `devsandbox`. Everything after `devsandbox` is passed to the sandboxed command. `--dangerously-skip-permissions` is a Claude Code flag that skips permission prompts - safe inside the sandbox because devsandbox provides the security boundary.
 
-**Works with:** Claude Code, Codex CLI, GitHub Copilot, Pi, OpenCode, aider, and any other CLI-based development tool. The first five also get [shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default) and session persistence across sandbox restarts.
+**Works with:** Claude Code, Codex CLI, GitHub Copilot, Pi, OpenCode, aider, and any other CLI-based development tool. The first five also get [shell wrappers](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default) and session persistence across sandbox restarts. [Pi](docs/tools.md#pi-coding-agent) is preinstalled in the default Docker image.
 
 **Sandbox agents by default (optional):** typing `devsandbox` first is easy to forget. Shell wrappers make `claude`, `codex` and the other supported agents run through devsandbox in every new shell. Add the line for your shell to its startup file:
 

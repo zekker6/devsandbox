@@ -214,7 +214,7 @@ tasks:
     desc: Test the devsandbox Docker image
     deps: [docker:build]
     cmds:
-      - docker run --rm -v "{{.PWD}}:/workspace" -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) devsandbox:local bash -c "whoami && mise --version"
+      - docker run --rm -v "{{.PWD}}:/workspace" -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) devsandbox:local bash -c "whoami && mise --version && pi --version"
 
   # --- Embed builder images ---
 

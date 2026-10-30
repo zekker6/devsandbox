@@ -462,17 +462,17 @@ devsandbox opencode
 
 ### Pi Coding Agent
 
-[Pi](https://github.com/badlogic/pi-mono) is fully supported:
+[Pi](https://github.com/earendil-works/pi) is fully supported and preinstalled in the default Docker image used by the Docker and krun backends:
 
 ```bash
 # Run pi in sandbox
 devsandbox pi
 ```
 
-Install via mise:
+For bwrap, install Pi on the host via mise:
 
 ```bash
-mise install npm:@mariozechner/pi-coding-agent
+mise install npm:@earendil-works/pi-coding-agent
 ```
 
 Configuration directories are mounted with credential protection:

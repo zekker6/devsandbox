@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.0...HEAD)
 
+### Added
+
+- Pi is now preinstalled in the default Docker image, so Docker and krun users can run `devsandbox pi` without installing it themselves. See [Pi Coding Agent](docs/tools.md#pi-coding-agent).
+
 ### Fixed
 
 - Port auto-forwarding now honors project and include settings, detects IPv6 listeners, and reaches apps bound to a specific sandbox address. Failed setup is retried, and idle client connections no longer stall discovery after an app stops. Runtime failures reach the terminal instead of silently dropping connections. See [Runtime Port Forwarding](docs/sandboxing.md#runtime-port-forwarding).

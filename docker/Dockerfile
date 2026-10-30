@@ -93,6 +93,16 @@ RUN npm install -g @anthropic-ai/claude-code && \
         echo "ERROR: claude binary not found at $CLAUDE_BIN after npm install" >&2 && exit 1; \
     fi
 
+# Install Pi Coding Agent
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent && \
+    PI_BIN="$(npm prefix -g)/bin/pi" && \
+    if [ -e "$PI_BIN" ]; then \
+        ln -sf "$PI_BIN" /usr/local/bin/pi; \
+    else \
+        echo "ERROR: pi binary not found at $PI_BIN after npm install" >&2 && exit 1; \
+    fi && \
+    pi --version
+
 # Install GitHub CLI (for Copilot). Optional: off by default, enable with
 # --build-arg INSTALL_GH=true.
 RUN if [ "$INSTALL_GH" = "true" ]; then \
