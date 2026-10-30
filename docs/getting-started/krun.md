@@ -97,7 +97,7 @@ Or make it the default in `~/.config/devsandbox/config.toml`:
 isolation = "krun"
 ```
 
-**First run is slow.** krun uses `podman`, which keeps an image store separate from Docker's, so the base image (`ghcr.io/zekker6/devsandbox:latest`, ~2.5 GB) is pulled and the local image built from scratch the first time - expect a few minutes. Subsequent runs reuse the podman image and boot in seconds.
+**First run is slow.** krun uses `podman`, which keeps an image store separate from Docker's, so the base image (`ghcr.io/zekker6/devsandbox:latest`) is pulled and the local image built from scratch the first time - expect a few minutes. Subsequent runs reuse the podman image and boot in seconds.
 
 **Ephemeral by design.** Each launch boots a fresh microVM (a clean guest kernel every run); there is no `keep_container` reuse. Files the workload writes to your project come back owned by you (rootless `podman` with `--userns=keep-id`).
 

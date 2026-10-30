@@ -91,7 +91,7 @@ That's it. No config files needed. On Linux the default sandbox needs no system 
 
 Run `devsandbox doctor` to verify your setup.
 
-> **macOS:** devsandbox runs your code inside a lightweight Linux container (Debian slim) via Docker. Your project files are mounted into the container, so edits sync bidirectionally. Ensure your Docker runtime is running before using devsandbox. The first start downloads a base Docker image (~200MB); subsequent starts reuse Docker layer caching and complete in 1-2 seconds.
+> **macOS:** devsandbox runs your code inside a lightweight Linux container (Debian slim) via Docker. Your project files are mounted into the container, so edits sync bidirectionally. Ensure your Docker runtime is running before using devsandbox. The first start downloads the base Docker image, including Node.js and the bundled coding agents but no npm or mise installation caches; subsequent starts reuse Docker layer caching and complete in 1-2 seconds.
 
 ## Scratchpads
 

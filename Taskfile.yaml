@@ -214,7 +214,26 @@ tasks:
     desc: Test the devsandbox Docker image
     deps: [docker:build]
     cmds:
-      - docker run --rm -v "{{.PWD}}:/workspace" -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) devsandbox:local bash -c "whoami && mise --version && pi --version"
+      - |
+        docker run --rm --network none -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) devsandbox:local bash -euc '
+          test "$(id -u)" -eq "$HOST_UID"
+          mise --version
+          node --version
+          npm --version
+          claude --version
+          pi --version
+          codex --version
+          opencode --version
+          docker --version
+          test -w /opt/mise
+          test -w "$(mise where node)/lib/node_modules"
+        '
+      - |
+        docker run --rm --network none --user 0:0 --entrypoint /bin/sh devsandbox:local -ec '
+          test ! -e /root/.npm
+          test ! -e /opt/mise/cache
+          test ! -e /tmp/node-compile-cache
+        '
 
   # --- Embed builder images ---
 

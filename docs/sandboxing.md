@@ -970,9 +970,14 @@ The base image (`ghcr.io/zekker6/devsandbox:latest`) includes:
 
 - Debian slim base
 - mise for tool management
+- Node.js and the bundled coding agents (Claude Code, Pi, Codex, OpenCode)
 - Common development tools (git, curl, bash, zsh)
 - `devsandbox-shim`, which drops from container root to the sandbox user itself
 - passt/pasta for network isolation (if needed)
+
+Build-time npm and mise download caches are excluded from the image. Tools and caches created
+inside the sandbox still use its persistent home. When building a derived image, clean download
+caches in the same `RUN` instruction that installs the tools so they do not remain in earlier layers.
 
 ### Customizing the Image
 

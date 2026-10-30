@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reduced the default Docker and krun image size without removing bundled tools, so first launches download less and the image takes less disk space. See [Docker Image](docs/sandboxing.md#docker-image).
 - Port auto-forwarding now honors project and include settings, detects IPv6 listeners, and reaches apps bound to a specific sandbox address. Failed setup is retried, and idle client connections no longer stall discovery after an app stops. Runtime failures reach the terminal instead of silently dropping connections. See [Runtime Port Forwarding](docs/sandboxing.md#runtime-port-forwarding).
 
 ## [v0.23.0](https://github.com/zekker6/devsandbox/releases/tag/v0.23.0) - 2026-09-30

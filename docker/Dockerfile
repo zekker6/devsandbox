@@ -63,11 +63,32 @@ RUN curl https://mise.run | sh && \
 # is the persistent sandbox home, into which the in-guest shim seeds this node.
 ENV MISE_DATA_DIR=/opt/mise
 ENV MISE_CACHE_DIR=/opt/mise/cache
-RUN mise install node@${NODE_VERSION} && \
-    mise use --global node@${NODE_VERSION}
-
-# Add mise shims to PATH for subsequent commands
 ENV PATH="/opt/mise/shims:${PATH}"
+
+# Install and set ownership in one layer: a later recursive chown copies the
+# entire toolchain into another layer and can split hard-linked agent binaries.
+# Remove download caches before committing this layer; runtime mise uses the
+# persistent sandbox home rather than these build-time caches.
+RUN mise install node@${NODE_VERSION} && \
+    mise use --global node@${NODE_VERSION} && \
+    npm install -g @anthropic-ai/claude-code && \
+    CLAUDE_BIN="$(npm prefix -g)/bin/claude" && \
+    if [ -e "$CLAUDE_BIN" ]; then \
+        ln -sf "$CLAUDE_BIN" /usr/local/bin/claude; \
+    else \
+        echo "ERROR: claude binary not found at $CLAUDE_BIN after npm install" >&2 && exit 1; \
+    fi && \
+    npm install -g --ignore-scripts @earendil-works/pi-coding-agent && \
+    PI_BIN="$(npm prefix -g)/bin/pi" && \
+    if [ -e "$PI_BIN" ]; then \
+        ln -sf "$PI_BIN" /usr/local/bin/pi; \
+    else \
+        echo "ERROR: pi binary not found at $PI_BIN after npm install" >&2 && exit 1; \
+    fi && \
+    pi --version && \
+    (npm install -g @openai/codex || echo "Warning: codex package install failed, skipping" >&2) && \
+    rm -rf /root/.npm /opt/mise/cache /tmp/node-compile-cache && \
+    chown -R ${SANDBOX_UID}:${SANDBOX_GID} /opt/mise
 
 # Install neovim from GitHub releases (multi-arch: amd64 and arm64). Optional:
 # off by default, enable with --build-arg INSTALL_NVIM=true.
@@ -83,25 +104,6 @@ RUN if [ "$INSTALL_NVIM" = "true" ]; then \
         NVIM_DIR=$(ls -d /opt/nvim-linux-* | head -1) && \
         ln -s "${NVIM_DIR}/bin/nvim" /usr/local/bin/nvim; \
     fi
-
-# Install Claude Code
-RUN npm install -g @anthropic-ai/claude-code && \
-    CLAUDE_BIN="$(npm prefix -g)/bin/claude" && \
-    if [ -e "$CLAUDE_BIN" ]; then \
-        ln -sf "$CLAUDE_BIN" /usr/local/bin/claude; \
-    else \
-        echo "ERROR: claude binary not found at $CLAUDE_BIN after npm install" >&2 && exit 1; \
-    fi
-
-# Install Pi Coding Agent
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent && \
-    PI_BIN="$(npm prefix -g)/bin/pi" && \
-    if [ -e "$PI_BIN" ]; then \
-        ln -sf "$PI_BIN" /usr/local/bin/pi; \
-    else \
-        echo "ERROR: pi binary not found at $PI_BIN after npm install" >&2 && exit 1; \
-    fi && \
-    pi --version
 
 # Install GitHub CLI (for Copilot). Optional: off by default, enable with
 # --build-arg INSTALL_GH=true.
@@ -132,16 +134,9 @@ RUN ARCH=$(dpkg --print-architecture) && \
     rm -rf /root/.opencode && \
     opencode --help >/dev/null 2>&1 || (echo "ERROR: opencode is not functional" >&2 && exit 1)
 
-# Install codex (OpenAI Codex CLI)
-RUN npm install -g @openai/codex || echo "Warning: codex package install failed, skipping" >&2
-
 # Create sandbox user directory structure
 RUN mkdir -p ${SANDBOX_HOME} && \
     chmod 755 ${SANDBOX_HOME}
-
-# Grant the sandbox user ownership of mise directories so they can use/install tools.
-# 775 allows owner+group full access; others can read+execute but not write.
-RUN chown -R ${SANDBOX_UID}:${SANDBOX_GID} /opt/mise && chmod -R 775 /opt/mise
 
 # Create system-level mise config for container tools
 # This ensures container-installed tools are available regardless of host config
