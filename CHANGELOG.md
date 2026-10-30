@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Fixed Seatbelt exposing metadata for denied paths that also contain a readable tool source. Metadata denials also cover hidden `.env` and `.devsandbox.toml` paths. See [Seatbelt filesystem access](docs/getting-started/seatbelt.md#files-and-private-home).
 - Fixed native Git failing to resolve project paths with `Invalid path '/Users': Operation not permitted`. Ancestor metadata is accessible without exposing directory listings or sibling files. See [Seatbelt filesystem access](docs/getting-started/seatbelt.md#files-and-private-home).
 - Fixed native `/bin/sh` startup when its system selector was unreadable. Apple developer-tool selection remains a known limitation. See [Seatbelt startup requirements](docs/getting-started/seatbelt.md#experimental-status).
 - Fixed native zsh exiting silently and Rust tools such as mise panicking during guard-page allocation when Seatbelt blocked macOS's compatibility page-size query. See [Seatbelt startup requirements](docs/getting-started/seatbelt.md#experimental-status).

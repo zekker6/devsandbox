@@ -241,7 +241,7 @@ func TestNativeGitLinkedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(profile, `(deny file-read* file-write* (subpath "`+common+`"))`) {
+	if !strings.Contains(profile, `(deny file-read* file-read-metadata file-write* (subpath "`+common+`"))`) {
 		t.Fatal("raw common metadata lacks explicit policy denial")
 	}
 }

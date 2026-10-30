@@ -303,12 +303,56 @@ func TestEnforcementAncestorMetadata(t *testing.T) {
 	for _, operation := range []string{"stat", "lstat", "read", "write"} {
 		nativeOperation(t, profile, exe, false, operation, sibling)
 	}
+	nativeOperation(t, profile, exe, false, "stat", blocked)
 	nativeOperation(t, profile, exe, false, "lstat", blocked)
 	nativeOperation(t, profile, exe, false, "read", filepath.Join(blocked, "data"))
 	nativeOperation(t, profile, exe, true, "read", source)
 	nativeOperation(t, profile, exe, false, "write", source)
 	nativeOperation(t, profile, exe, true, "read", filepath.Join(work, "file"))
 	nativeOperation(t, profile, exe, true, "write", filepath.Join(work, "file"))
+}
+
+func TestEnforcementHiddenAncestorMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		p        Policy
+		readable bool
+	}{
+		{name: "blocked"},
+		{name: ".env", p: Policy{HideEnvFiles: true}},
+		{name: ".ENV.private", p: Policy{HideEnvFiles: true}},
+		{name: ".devsandbox.toml", p: Policy{ConfigHidden: true}},
+		{name: ".DEVSANDBOX.TOML", p: Policy{ConfigHidden: true}},
+		{name: "readonly-config/.devsandbox.toml", p: Policy{ProtectConfig: true}, readable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := nativeRoot(t)
+			blocked := filepath.Join(root, tc.name)
+			nested := filepath.Join(blocked, "nested")
+			data := filepath.Join(nested, "data")
+			visible := filepath.Join(root, "visible")
+			nativeFile(t, data)
+			nativeFile(t, visible)
+			p := tc.p
+			p.Writable = []string{root}
+			p.ReadOnly = []string{data}
+			if tc.name == "blocked" {
+				p.DenyRead = []string{blocked}
+			}
+			profile, exe := nativeProfile(t, p)
+			for _, name := range []string{blocked, nested, data} {
+				for _, operation := range []string{"stat", "lstat"} {
+					nativeOperation(t, profile, exe, tc.readable, operation, name)
+				}
+			}
+			nativeOperation(t, profile, exe, tc.readable, "read-dir", blocked)
+			nativeOperation(t, profile, exe, tc.readable, "read", data)
+			nativeOperation(t, profile, exe, false, "write", data)
+			for _, operation := range []string{"stat", "lstat", "read", "write"} {
+				nativeOperation(t, profile, exe, true, operation, visible)
+			}
+		})
+	}
 }
 
 func TestEnforcementWritableRootsCannotBeReplaced(t *testing.T) {

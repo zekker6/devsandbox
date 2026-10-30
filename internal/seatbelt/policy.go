@@ -138,6 +138,11 @@ func (p Policy) Profile() (string, error) {
 		}
 	}
 
+	// Concrete-operation rules take precedence over operation-class rules in
+	// SBPL, regardless of order. Read denials must explicitly counter the
+	// file-read-metadata grants above; file-read* alone does not suffice.
+	const denyReadOperations = "file-read* file-read-metadata file-write*"
+
 	// Explicit denials come last, including ancestor unlink rules. Protecting
 	// only the named entry leaves it movable through a writable parent.
 	// A writable root is persistent sandbox state, not a replaceable entry.
@@ -148,7 +153,7 @@ func (p Policy) Profile() (string, error) {
 		paths      []string
 	}{
 		{"file-write*", p.ReadOnly},
-		{"file-read* file-write*", p.DenyRead},
+		{denyReadOperations, p.DenyRead},
 		{"file-write*", p.DenyWrite},
 	} {
 		for _, name := range list.paths {
@@ -158,12 +163,12 @@ func (p Policy) Profile() (string, error) {
 	}
 	ancestorRules(&b, "deny", "file-write-unlink", ancestors)
 	if p.HideEnvFiles {
-		b.WriteString("(deny file-read* file-write* (regex #\"(^|/)[.][eE][nN][vV]([.][^/]*)?(/|$)\"))\n")
+		fmt.Fprintf(&b, "(deny %s (regex #\"(^|/)[.][eE][nN][vV]([.][^/]*)?(/|$)\"))\n", denyReadOperations)
 	}
 	if p.ProtectConfig || p.ConfigHidden {
 		operations := "file-write*"
 		if p.ConfigHidden {
-			operations = "file-read* file-write*"
+			operations = denyReadOperations
 		}
 		fmt.Fprintf(&b, "(deny %s (regex #\"(^|/)[.][dD][eE][vV][sS][aA][nN][dD][bB][oO][xX][.][tT][oO][mM][lL](/|$)\"))\n", operations)
 	}

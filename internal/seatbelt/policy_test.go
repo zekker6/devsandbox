@@ -57,13 +57,13 @@ func TestProfileGrantsThenDenies(t *testing.T) {
 	lastGrant := strings.LastIndex(profile, "(allow ")
 	for _, rule := range []string{
 		`(deny file-write* (subpath "/work/config"))`,
-		`(deny file-read* file-write* (subpath "/secrets/token"))`,
+		`(deny file-read* file-read-metadata file-write* (subpath "/secrets/token"))`,
 		`(deny file-write* (subpath "/work/repo/.git"))`,
 		`(deny file-write-unlink (literal "/"))`,
 		`(deny file-write-unlink (literal "/work"))`,
 		`(deny file-write-unlink (literal "/work/repo"))`,
 		`(deny file-write-unlink (literal "/secrets"))`,
-		`(deny file-read* file-write* (regex #"(^|/)[.][eE][nN][vV]([.][^/]*)?(/|$)"))`,
+		`(deny file-read* file-read-metadata file-write* (regex #"(^|/)[.][eE][nN][vV]([.][^/]*)?(/|$)"))`,
 		`(deny file-write* (regex #"(^|/)[.][dD][eE][vV][sS][aA][nN][dD][bB][oO][xX][.][tT][oO][mM][lL](/|$)"))`,
 	} {
 		if i := strings.Index(profile, rule); i <= lastGrant {
@@ -294,7 +294,7 @@ func TestProfileConfigVisibility(t *testing.T) {
 		profile := mustProfile(t, p)
 		operations := "file-write*"
 		if p.ConfigHidden {
-			operations = "file-read* file-write*"
+			operations = "file-read* file-read-metadata file-write*"
 		}
 		want := `(deny ` + operations + ` (regex #"(^|/)[.][dD][eE][vV][sS][aA][nN][dD][bB][oO][xX][.][tT][oO][mM][lL](/|$)"))`
 		if !strings.Contains(profile, want) {
