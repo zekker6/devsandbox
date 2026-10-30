@@ -245,6 +245,11 @@ const baseProfile = `(version 1)
   (sysctl-name "kern.usrstack64"))
 ; dyld/libignition needs root-directory reads during startup, not recursive access.
 (allow file-read* (literal "/"))
+; System sh and developer-tool launchers consult these host-owned selectors.
+(allow file-read* (literal "/var/select/sh"))
+(allow file-read* (literal "/private/var/select/sh"))
+(allow file-read* (literal "/var/select/developer_dir"))
+(allow file-read* (literal "/private/var/select/developer_dir"))
 (allow file-read*
   (subpath "/System")
   (subpath "/usr")

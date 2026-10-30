@@ -27,6 +27,23 @@ func TestSeatbeltSharedInstallReadOnly(t *testing.T) {
 	}
 }
 
+func TestSeatbeltAppleGitLog(t *testing.T) {
+	cfg := nativeMiseTestConfig(t)
+	// Exercise Apple's launcher rather than a Homebrew Git that bypasses
+	// xcode-select. Keep the fixture's no-op mise ahead of system tools.
+	t.Setenv("PATH", filepath.Join(cfg.HomeDir, ".local", "bin")+":/usr/bin:/bin:/usr/sbin:/sbin")
+	cfg.ToolsConfig["git"] = map[string]any{"mode": "readonly"}
+	nativeGitFixture(t, cfg.ProjectDir, "main")
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := NewSeatbeltIsolator(SeatbeltConfig{}).Run(ctx, &RunConfig{
+		SandboxCfg: cfg,
+		Command:    []string{"/bin/sh", "-c", `test "$(git --no-pager log -1 --format=%s)" = fixture`},
+	}); err != nil {
+		t.Fatalf("Apple Git could not read the native snapshot: %v", err)
+	}
+}
+
 func TestSeatbeltRunExitStatus(t *testing.T) {
 	for _, code := range []int{0, 37} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {

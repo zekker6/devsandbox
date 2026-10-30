@@ -213,12 +213,27 @@ func TestProfileBaselinePageSize(t *testing.T) {
 	}
 }
 
+func TestProfileBaselineSystemSelectors(t *testing.T) {
+	profile := mustProfile(t, Policy{})
+	for _, dir := range []string{"/var/select", "/private/var/select"} {
+		for _, name := range []string{"sh", "developer_dir"} {
+			literal := `(literal "` + dir + `/` + name + `")`
+			if !strings.Contains(profile, "(allow file-read* "+literal+")\n") {
+				t.Errorf("missing read-only selector grant: %s/%s", dir, name)
+			}
+			if strings.Count(profile, literal) != 1 {
+				t.Errorf("selector must have only its read-only grant: %s/%s", dir, name)
+			}
+		}
+	}
+}
+
 func TestProfileBaselineDoesNotExposeHostData(t *testing.T) {
 	profile := mustProfile(t, Policy{})
 	if !strings.HasPrefix(profile, "(version 1)\n(deny default)\n") {
 		t.Fatal("profile is not deny-by-default")
 	}
-	for _, name := range []string{"/", "/Users", "/home", "/private", "/private/var", "/private/etc", "/tmp", "/private/tmp", "/Volumes", "/dev"} {
+	for _, name := range []string{"/", "/Users", "/home", "/private", "/var", "/var/select", "/private/var", "/private/var/select", "/private/etc", "/tmp", "/private/tmp", "/Volumes", "/dev"} {
 		if strings.Contains(profile, `(subpath "`+name+`")`) {
 			t.Errorf("broad baseline filesystem grant: %s", name)
 		}

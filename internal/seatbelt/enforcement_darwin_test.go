@@ -611,6 +611,7 @@ func TestCheckBaseline(t *testing.T) {
 		// getconf exercises libc's numeric HW_PAGESIZE query, not sysctlbyname.
 		{"/usr/bin/getconf", []string{"PAGESIZE"}, strconv.Itoa(os.Getpagesize()) + "\n"},
 		{"/bin/zsh", []string{"-fc", "echo seatbelt-started"}, "seatbelt-started\n"},
+		{"/bin/sh", []string{"-c", "echo seatbelt-started"}, "seatbelt-started\n"},
 	} {
 		t.Run(filepath.Base(tc.program), func(t *testing.T) {
 			output, err := nativeCommand(t, profile, append([]string{tc.program}, tc.args...)...)
