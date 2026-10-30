@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Fixed native Git and shell launches failing with selector permission errors or misleading missing-Xcode messages. Seatbelt now permits reads of the shell and developer-tool selectors without exposing the surrounding directory tree. See [Seatbelt startup requirements](docs/getting-started/seatbelt.md#experimental-status).
+- Fixed native Git and shell launches failing with selector permission errors or misleading missing-Xcode messages. Seatbelt now permits selector reads and missing-developer-selector checks, allowing Apple's fallback selection without exposing the surrounding directory tree. See [Seatbelt startup requirements](docs/getting-started/seatbelt.md#experimental-status).
 - Fixed native zsh exiting silently and Rust tools such as mise panicking during guard-page allocation when Seatbelt blocked macOS's compatibility page-size query. See [Seatbelt startup requirements](docs/getting-started/seatbelt.md#experimental-status).
 - Fixed Seatbelt's `signal: abort trap` preflight failure when the macOS loader could not read the root directory. The fix permits root-directory reads without granting recursive host-file access. See [Seatbelt filesystem access](docs/getting-started/seatbelt.md#files-and-private-home).
 - Read-only Git now strips embedded credentials from quoted and continued remote URLs, including URLs on the same line as a section header. See [Safe Git configuration](docs/configuration.md#what-the-safe-copy-carries).

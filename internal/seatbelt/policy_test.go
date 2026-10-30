@@ -216,13 +216,16 @@ func TestProfileBaselinePageSize(t *testing.T) {
 func TestProfileBaselineSystemSelectors(t *testing.T) {
 	profile := mustProfile(t, Policy{})
 	for _, dir := range []string{"/var/select", "/private/var/select"} {
-		for _, name := range []string{"sh", "developer_dir"} {
-			literal := `(literal "` + dir + `/` + name + `")`
-			if !strings.Contains(profile, "(allow file-read* "+literal+")\n") {
-				t.Errorf("missing read-only selector grant: %s/%s", dir, name)
+		for _, selector := range []struct{ name, operations string }{
+			{"sh", "file-read*"},
+			{"developer_dir", "file-read* file-test-existence"},
+		} {
+			literal := `(literal "` + dir + `/` + selector.name + `")`
+			if !strings.Contains(profile, "(allow "+selector.operations+" "+literal+")\n") {
+				t.Errorf("missing read-only selector grant: %s/%s", dir, selector.name)
 			}
 			if strings.Count(profile, literal) != 1 {
-				t.Errorf("selector must have only its read-only grant: %s/%s", dir, name)
+				t.Errorf("selector must have only its read-only grant: %s/%s", dir, selector.name)
 			}
 		}
 	}
@@ -238,7 +241,7 @@ func TestProfileBaselineDoesNotExposeHostData(t *testing.T) {
 			t.Errorf("broad baseline filesystem grant: %s", name)
 		}
 	}
-	for _, forbidden := range []string{"mach-lookup", "iokit-open", "ipc-posix", "AppleEvents", "lsopen", "trustd", "SecurityServer", "sysctl-write"} {
+	for _, forbidden := range []string{"mach-lookup", "iokit-open", "ipc-posix", "AppleEvents", "lsopen", "trustd", "SecurityServer", "sysctl-write", "(allow file-test-existence)", "(allow file-read* file-test-existence)"} {
 		if strings.Contains(profile, forbidden) {
 			t.Errorf("unexpected baseline capability: %s", forbidden)
 		}

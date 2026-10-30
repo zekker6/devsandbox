@@ -248,8 +248,9 @@ const baseProfile = `(version 1)
 ; System sh and developer-tool launchers consult these host-owned selectors.
 (allow file-read* (literal "/var/select/sh"))
 (allow file-read* (literal "/private/var/select/sh"))
-(allow file-read* (literal "/var/select/developer_dir"))
-(allow file-read* (literal "/private/var/select/developer_dir"))
+; An absent developer selector must return ENOENT so the launcher can fall back.
+(allow file-read* file-test-existence (literal "/var/select/developer_dir"))
+(allow file-read* file-test-existence (literal "/private/var/select/developer_dir"))
 (allow file-read*
   (subpath "/System")
   (subpath "/usr")

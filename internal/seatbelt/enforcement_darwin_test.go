@@ -42,6 +42,13 @@ func TestSeatbeltHelper(t *testing.T) {
 		}
 	case "read-dir":
 		_, err = os.ReadDir(args[2])
+	case "readlink-missing":
+		_, err = os.Readlink(args[2])
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		} else if err == nil {
+			err = errors.New("expected a missing symbolic link")
+		}
 	case "write":
 		err = os.WriteFile(args[2], []byte("written"), 0600)
 	case "chmod":
@@ -629,6 +636,19 @@ func TestEnforcementBaselineRootDirectory(t *testing.T) {
 	nativeOperation(t, profile, exe, true, "read-dir", "/")
 	nativeOperation(t, profile, exe, false, "read", secret)
 	nativeOperation(t, profile, exe, false, "write", secret)
+}
+
+func TestEnforcementMissingDeveloperSelector(t *testing.T) {
+	missing := filepath.Join(nativeRoot(t), "developer_dir")
+	profile, exe := nativeProfile(t, Policy{})
+	// Exercise the production grants against an absent fixture without
+	// creating or removing the host's developer-tool selection.
+	for _, selector := range []string{"/var/select/developer_dir", "/private/var/select/developer_dir"} {
+		profile = strings.ReplaceAll(profile, sbplString(selector), sbplString(missing))
+	}
+	nativeOperation(t, profile, exe, true, "readlink-missing", missing)
+	readOnly := strings.ReplaceAll(profile, " file-test-existence", "")
+	nativeOperation(t, readOnly, exe, false, "readlink-missing", missing)
 }
 
 func TestCheckRejectsInvalidProfile(t *testing.T) {

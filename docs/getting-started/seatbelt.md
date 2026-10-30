@@ -24,7 +24,7 @@ isolation = "seatbelt"
 
 The startup policy permits both `hw.pagesize` and `hw.pagesize_compat`. macOS libc uses the latter for `getpagesize()` and `sysconf(_SC_PAGESIZE)`; denying it can make zsh exit with status 1 or Rust tools such as mise panic while allocating a guard page. These are named read-only grants, not unrestricted sysctl access.
 
-The system shell and Apple developer-tool launchers can read `/var/select/sh` and `/var/select/developer_dir`, including their `/private/var` spellings. These read-only rules do not expose the surrounding directory tree. Blocking the selectors can prevent `/bin/sh` from starting and make Apple's Git launcher report missing developer tools even when they are installed.
+The system shell and Apple developer-tool launchers can read `/var/select/sh` and `/var/select/developer_dir`, including their `/private/var` spellings. The developer-selector paths also permit `file-test-existence`: when no selector exists, Apple's launcher must receive "not found" rather than a sandbox permission error so it can use its fallback. These read-only rules do not expose the surrounding directory tree or grant ancestor-path access. Blocking the selectors can prevent `/bin/sh` from starting and make Apple's Git launcher report missing developer tools even when they are installed.
 
 Linux tests can compile both Darwin architectures, but cannot validate macOS enforcement. Actual filesystem, network, service-access and process behavior must be tested on macOS before relying on this experimental backend.
 
