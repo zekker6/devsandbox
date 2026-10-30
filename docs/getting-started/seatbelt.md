@@ -24,7 +24,11 @@ isolation = "seatbelt"
 
 The startup policy permits both `hw.pagesize` and `hw.pagesize_compat`. macOS libc uses the latter for `getpagesize()` and `sysconf(_SC_PAGESIZE)`; denying it can make zsh exit with status 1 or Rust tools such as mise panic while allocating a guard page. These are named read-only grants, not unrestricted sysctl access.
 
-The baseline includes read-only grants for `/var/select/sh` and `/var/select/developer_dir`, including their `/private/var` spellings, plus `file-test-existence` for the developer selectors. These rules do not expose the surrounding directory tree. Shell selection works with these grants, but developer selection remains a known limitation: on macOS 15.7.3, Apple's launcher still receives a permission error for an absent selector instead of falling back to the installed Command Line Tools. Passing the host-selected `DEVELOPER_DIR` through `/usr/bin/env` inside the sandbox bypasses that lookup, but does not resolve unrelated filesystem denials.
+The baseline includes read-only grants for `/var/select/sh` and `/var/select/developer_dir`, including their `/private/var` spellings, plus `file-test-existence` for the developer selectors. These rules do not expose the surrounding directory tree. Apple's in-sandbox developer-selector lookup can still fail on macOS 15.7.3 even when Command Line Tools are installed.
+
+To avoid that lookup, devsandbox queries `/usr/bin/xcode-select -p` on the host before each launch and passes the selected directory as `DEVELOPER_DIR` into the sandbox. The query has a five-second timeout and a scrubbed environment, retaining only standard PATH/locale settings and the host's `DEVELOPER_DIR` override. An explicit sandbox environment setting or passthrough for `DEVELOPER_DIR` takes precedence, including an explicitly empty value. No system selection is changed, no developer tools are installed, and no additional filesystem permissions are granted. A custom toolchain outside the existing readable paths remains inaccessible.
+
+If discovery fails, devsandbox reports it as an informational message and continues so non-developer commands can still run. Apple developer tools may then fail during selection. Use verbose output or the wrapper log to inspect the discovery error.
 
 Linux tests can compile both Darwin architectures, but cannot validate macOS enforcement. Actual filesystem, network, service-access and process behavior must be tested on macOS before relying on this experimental backend.
 

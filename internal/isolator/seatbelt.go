@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"devsandbox/internal/cgroups"
 	"devsandbox/internal/cmdpattern"
@@ -135,6 +136,21 @@ func (s *SeatbeltIsolator) Run(ctx context.Context, cfg *RunConfig) error {
 			notice.Alert("seatbelt: remove setup files: %v", err)
 		}
 	}()
+	// Resolve Apple's toolchain before applying Seatbelt: its in-sandbox
+	// selector lookup can fail even when Command Line Tools are installed.
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	probeErr := prepareNativeDeveloperDir(plan.env, nativeDeveloperDirCommand(probeCtx))
+	if err := probeCtx.Err(); probeErr != nil && err != nil {
+		probeErr = err
+	}
+	cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if probeErr != nil {
+		// Developer tools are optional for workloads such as /bin/echo.
+		notice.Info("seatbelt: developer-directory discovery unavailable; Apple tools may fail: %v", probeErr)
+	}
 	profile, err := plan.policy.Profile()
 	if err != nil {
 		return fmt.Errorf("seatbelt policy: %w", err)

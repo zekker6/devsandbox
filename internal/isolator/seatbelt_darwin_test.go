@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -30,9 +28,10 @@ func TestSeatbeltSharedInstallReadOnly(t *testing.T) {
 }
 
 func TestSeatbeltAppleGitLog(t *testing.T) {
-	for _, selection := range []string{"system", "explicit"} {
+	for _, selection := range []string{"automatic", "configured"} {
 		t.Run(selection, func(t *testing.T) {
 			cfg := nativeMiseTestConfig(t)
+			t.Setenv("DEVELOPER_DIR", "")
 			// Exercise Apple's launcher rather than a Homebrew Git that bypasses
 			// xcode-select. Keep the fixture's no-op mise ahead of system tools.
 			t.Setenv("PATH", filepath.Join(cfg.HomeDir, ".local", "bin")+":/usr/bin:/bin:/usr/sbin:/sbin")
@@ -40,18 +39,12 @@ func TestSeatbeltAppleGitLog(t *testing.T) {
 			nativeGitFixture(t, cfg.ProjectDir, "main")
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
-			command := []string{"/bin/sh", "-c", `test "$(git --no-pager log -1 --format=%s)" = fixture`}
-			if selection == "explicit" {
-				// Isolate Git path traversal from the separate selector-policy failure.
-				output, err := exec.CommandContext(ctx, "/usr/bin/xcode-select", "-p").CombinedOutput()
-				if err != nil {
-					t.Fatalf("host developer-directory selection: %v; %s", err, output)
+			command := []string{"/bin/sh", "-c", `test -n "$DEVELOPER_DIR" && test "$(git --no-pager log -1 --format=%s)" = fixture`}
+			if selection == "configured" {
+				cfg.EnvVars = make(map[string]string)
+				if err := prepareNativeDeveloperDir(cfg.EnvVars, nativeDeveloperDirCommand(ctx)); err != nil {
+					t.Fatal(err)
 				}
-				developerDir := strings.TrimSpace(string(output))
-				if !filepath.IsAbs(developerDir) {
-					t.Fatalf("host developer directory is not absolute: %q", developerDir)
-				}
-				command = append([]string{"/usr/bin/env", "DEVELOPER_DIR=" + developerDir}, command...)
 			}
 			if err := NewSeatbeltIsolator(SeatbeltConfig{}).Run(ctx, &RunConfig{
 				SandboxCfg: cfg, Command: command,
@@ -63,6 +56,8 @@ func TestSeatbeltAppleGitLog(t *testing.T) {
 }
 
 func TestSeatbeltRunExitStatus(t *testing.T) {
+	// A failed developer-directory query must not block ordinary workloads.
+	t.Setenv("DEVELOPER_DIR", filepath.Join(t.TempDir(), "missing"))
 	for _, code := range []int{0, 37} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
 			cfg := nativeTestConfig(t)

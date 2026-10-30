@@ -493,6 +493,7 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 - No IP listeners, host sockets, Mach services, host Keychain, GUI integrations or SSH-agent attachment; Unix sockets work in the private temporary and runtime directories
 - No resource caps, custom mounts, port forwarding, `--worktree` creation or concurrent native sessions per project; existing linked worktrees support read-only Git
 - Read-only installations are shared where possible; copied writable state can still use substantial disk space and does not merge later host changes
+- Apple developer-directory selection is resolved on the host and passed into the sandbox automatically, without granting access to additional toolchain paths
 - Native launches appear in `devsandbox sessions`, with forwarding marked unavailable
 - See [Seatbelt limitations](docs/getting-started/seatbelt.md) before use
 
