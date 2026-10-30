@@ -40,7 +40,11 @@ type Config struct {
 	Shell       Shell  // Detected shell (fish, bash, zsh)
 	ShellPath   string // Full path to shell binary
 
-	// Isolation backend ("bwrap", "docker", or "krun")
+	// CommandPathPrefix is a backend-owned command directory restored after
+	// shell and mise initialization. It is not a user configuration setting.
+	CommandPathPrefix string
+
+	// Isolation backend ("bwrap", "docker", "krun", or "seatbelt")
 	Isolation IsolationType
 
 	// Proxy settings
@@ -214,9 +218,15 @@ func (c *Config) EnsureSandboxDirs() error {
 		filepath.Join(c.SandboxHome, "go"), // GOPATH (isolated)
 	}
 
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	if c.Isolation == IsolationSeatbelt {
+		if err := c.ensureNativeHomeDirs(dirs); err != nil {
 			return err
+		}
+	} else {
+		for _, dir := range dirs {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
 		}
 	}
 

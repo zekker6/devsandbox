@@ -149,6 +149,7 @@ func (c *Claude) Bindings(homeDir, sandboxHome string) []Binding {
 		// that would mask the real host binary in future sessions.
 		Binding{
 			Source:   filepath.Join(homeDir, ".local", "share", "claude"),
+			Category: CategoryData,
 			Type:     MountBind,
 			ReadOnly: true,
 			Optional: true,

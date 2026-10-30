@@ -390,13 +390,11 @@ func setupDirectories(uid, gid int) {
 // The number of symlinks created is returned so the caller can regenerate the
 // mise shims only when something new appeared.
 func seedMiseInstalls(srcInstalls, miseDataDir string, uid, gid int) int {
-	tools, err := os.ReadDir(srcInstalls)
+	tools, err := fsutil.ReadMiseInstalls(srcInstalls)
 	if err != nil {
-		// No source installs (or unreadable): nothing to seed. Only surface a real
-		// error, not the expected "nothing mounted here" case.
-		if !errors.Is(err, fs.ErrNotExist) {
-			warn("seed mise installs %s: read: %v", srcInstalls, err)
-		}
+		warn("seed mise installs %s: %v", srcInstalls, err)
+	}
+	if tools == nil {
 		return 0
 	}
 
@@ -413,11 +411,8 @@ func seedMiseInstalls(srcInstalls, miseDataDir string, uid, gid int) int {
 
 	created := 0
 	for _, tool := range tools {
-		if !tool.IsDir() {
-			continue
-		}
-		srcToolDir := filepath.Join(srcInstalls, tool.Name())
-		dstToolDir := filepath.Join(installsDir, tool.Name())
+		srcToolDir := filepath.Join(srcInstalls, tool.Name)
+		dstToolDir := filepath.Join(installsDir, tool.Name)
 
 		if err := os.MkdirAll(dstToolDir, 0o755); err != nil {
 			warn("seed mise installs %s: mkdir %s: %v", srcInstalls, dstToolDir, err)
@@ -425,19 +420,9 @@ func seedMiseInstalls(srcInstalls, miseDataDir string, uid, gid int) int {
 		}
 		_ = os.Lchown(dstToolDir, uid, gid)
 
-		entries, err := os.ReadDir(srcToolDir)
-		if err != nil {
-			warn("seed mise installs %s: read %s: %v", srcInstalls, srcToolDir, err)
-			continue
-		}
-		for _, e := range entries {
+		for _, e := range tool.Entries {
 			srcPath := filepath.Join(srcToolDir, e.Name())
 			dstPath := filepath.Join(dstToolDir, e.Name())
-
-			if e.Type()&fs.ModeSymlink != 0 {
-				// Version alias (latest, major.minor, ...): skip, see doc comment.
-				continue
-			}
 
 			if !e.IsDir() {
 				// Tool-level metadata file: symlink if absent.

@@ -55,10 +55,11 @@ func (t *Tmux) Bindings(homeDir, sandboxHome string) []Binding {
 	// Use sandbox tmux config if setup ran successfully
 	if _, err := os.Stat(sandboxTmuxConf); err == nil {
 		bindings = append(bindings, Binding{
-			Source:   sandboxTmuxConf,
-			Dest:     filepath.Join(homeDir, ".tmux.conf"),
-			Category: CategoryConfig,
-			Optional: true,
+			Source:           sandboxTmuxConf,
+			Dest:             filepath.Join(homeDir, ".tmux.conf"),
+			HomeRelativeDest: true,
+			Category:         CategoryConfig,
+			Optional:         true,
 		})
 	} else {
 		// Fall back to original configs

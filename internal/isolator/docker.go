@@ -1858,6 +1858,12 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 // (MISE_TRUSTED_CONFIG_PATHS, for a project under $HOME) must reach the guest
 // unchanged, or it names a directory nothing mounts.
 func remapEnvValue(value, homeDir, projectDir string) string {
+	return remapEnvHome(value, homeDir, projectDir, containerHome)
+}
+
+// remapEnvHome is shared by container and native backends. A tool may export
+// a socket URI, a path list, or a project path that must retain its identity.
+func remapEnvHome(value, homeDir, projectDir, targetHome string) string {
 	if projectDir != "" {
 		path := value
 		for _, scheme := range []string{"unix:path=", "unix://", "unix:"} {
@@ -1870,7 +1876,10 @@ func remapEnvValue(value, homeDir, projectDir string) string {
 			return value
 		}
 	}
-	return strings.ReplaceAll(value, homeDir, containerHome)
+	if homeDir == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, homeDir, targetHome)
 }
 
 // containerName generates a Docker container name for the sandbox.

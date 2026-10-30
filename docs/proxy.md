@@ -6,7 +6,8 @@ Proxy mode routes HTTP/HTTPS traffic through a local MITM (Man-in-the-Middle) pr
 
 How strongly that routing is enforced depends on the isolation backend. bwrap and krun both confine the sandbox behind a
 deny-by-default egress firewall and fail closed if it cannot be applied; Docker only points the container at the proxy
-through environment variables, which a process is free to ignore. The sections below describe bwrap backend behavior by
+through environment variables, which a process is free to ignore. Seatbelt restricts direct outbound connections to the
+actual authenticated localhost proxy port through its native policy. The sections below describe bwrap backend behavior by
 default - read [Backend-Specific Behavior](#backend-specific-behavior) before relying on proxy mode as a security
 boundary.
 
@@ -177,8 +178,18 @@ If you're running AI coding assistants (Claude Code, aider, etc.), keep MITM ena
 
 ## Backend-Specific Behavior
 
-All three backends point the sandbox at the same proxy and intercept what reaches it, but they differ in the mechanism -
+All four backends point the sandbox at the same proxy and intercept what reaches it, but they differ in the mechanism -
 and, more importantly, in whether a process inside the sandbox can bypass the proxy and reach the network directly.
+
+### Seatbelt backend
+
+The experimental native macOS backend needs neither pasta nor a container network. With `--proxy`, its policy permits direct outbound connections only to the actual authenticated proxy port on localhost. Ignoring the proxy environment variables does not open another direct route. The proxy credential is passed in the child environment, never in process arguments.
+
+This restricts the route, not the proxy's destination. [HTTP filtering](#http-filtering) still decides what the proxy may contact, including host loopback and LAN addresses. Set `default_action = "block"` and allow rules if those destinations must be refused.
+
+Without proxy mode, ordinary outbound IP is allowed. In either mode, Unix sockets are limited to the private temporary and runtime directories; the workload cannot bind or listen on IP ports, connect to host sockets or access Mach services. Port forwarding and auto-detection are rejected. Native launches appear in `devsandbox sessions`, but forwarding is explicitly unavailable.
+
+Node and OpenSSL clients may use the exported CA variables. Clients requiring macOS `trustd` or other services can fail; there is no weaker-policy opt-out. See [Seatbelt setup and limitations](getting-started/seatbelt.md).
 
 ### bwrap backend
 

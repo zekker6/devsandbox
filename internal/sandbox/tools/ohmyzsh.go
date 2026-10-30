@@ -40,10 +40,11 @@ func (o *OhMyZsh) Bindings(homeDir, sandboxHome string) []Binding {
 	// Use sandbox custom dir if setup ran successfully
 	if _, err := os.Stat(sandboxCustom); err == nil {
 		bindings = append(bindings, Binding{
-			Source:   sandboxCustom,
-			Dest:     filepath.Join(homeDir, ".oh-my-zsh", "custom"),
-			Category: CategoryData,
-			Optional: true,
+			Source:           sandboxCustom,
+			Dest:             filepath.Join(homeDir, ".oh-my-zsh", "custom"),
+			HomeRelativeDest: true,
+			Category:         CategoryData,
+			Optional:         true,
 		})
 	}
 

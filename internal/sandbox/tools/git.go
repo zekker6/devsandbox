@@ -3,6 +3,7 @@ package tools
 import (
 	"bufio"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -888,30 +889,67 @@ func generateSafeRepoConfig(src, dst string) error {
 	}
 	defer func() { _ = file.Close() }()
 
+	data, err := SanitizeRepoConfig(file, false)
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(dst, data, 0o644)
+}
+
+// SanitizeRepoConfig removes credential sections and remote URL credentials.
+// dropIncludes also removes include/includeIf sections, for backends which
+// cannot overlay every included file with sanitized bytes. It never resolves
+// includes or runs Git. Callers must open and validate their own source files.
+func SanitizeRepoConfig(reader io.Reader, dropIncludes bool) ([]byte, error) {
 	var out strings.Builder
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 
 	inRemote := false
-	inCredential := false
+	dropSection := false
+	firstLine := true
 
 	for scanner.Scan() {
 		raw := scanner.Text()
+		if firstLine {
+			raw = strings.TrimPrefix(raw, "\ufeff")
+			firstLine = false
+		}
+		// A continued value is one logical line. In particular, a URL split
+		// before its userinfo must not leave the credential in the output.
+		for repoConfigContinues(raw) {
+			if !scanner.Scan() {
+				return nil, errors.New("unterminated Git config continuation")
+			}
+			raw = strings.TrimSuffix(raw, "\\") + scanner.Text()
+		}
 		trimmed := strings.TrimSpace(raw)
 
 		if strings.HasPrefix(trimmed, "[") {
-			lower := strings.ToLower(trimmed)
-			inRemote = strings.HasPrefix(lower, "[remote")
-			inCredential = strings.HasPrefix(lower, "[credential")
-			if inCredential {
-				continue // drop the section header itself
+			headerEnd := repoConfigHeaderEnd(trimmed)
+			if headerEnd < 0 {
+				return nil, errors.New("unterminated Git config section")
 			}
-			out.WriteString(raw)
+			header := trimmed[:headerEnd+1]
+			name := strings.ToLower(strings.TrimSpace(header[1:headerEnd]))
+			if i := strings.IndexAny(name, " \t\"."); i >= 0 {
+				name = name[:i]
+			}
+			inRemote = name == "remote"
+			dropSection = name == "credential" || dropIncludes && (name == "include" || name == "includeif")
+			if dropSection {
+				continue
+			}
+			out.WriteString(header)
 			out.WriteByte('\n')
-			continue
+			raw = strings.TrimSpace(trimmed[headerEnd+1:])
+			if raw == "" {
+				continue
+			}
+			trimmed = raw
 		}
 
-		if inCredential {
-			continue // drop section body
+		if dropSection {
+			continue
 		}
 
 		if inRemote {
@@ -922,7 +960,11 @@ func generateSafeRepoConfig(src, dst string) error {
 					out.WriteString(indent)
 					out.WriteString(key)
 					out.WriteString(" = ")
-					out.WriteString(stripURLCredentials(value))
+					clean := stripURLCredentials(parseConfigValue(value))
+					if strings.ContainsAny(clean, " \t\n\"\\#;") {
+						clean = quoteGitConfigValue(clean)
+					}
+					out.WriteString(clean)
 					out.WriteByte('\n')
 					continue
 				}
@@ -934,10 +976,53 @@ func generateSafeRepoConfig(src, dst string) error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
-	return fsutil.WriteFileAtomic(dst, []byte(out.String()), 0o644)
+	return []byte(out.String()), nil
+}
+
+func repoConfigContinues(line string) bool {
+	quoted, escaped := false, false
+	for _, c := range line {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch c {
+		case '\\':
+			escaped = true
+		case '"':
+			quoted = !quoted
+		case '#', ';':
+			if !quoted {
+				return false
+			}
+		}
+	}
+	return escaped
+}
+
+// repoConfigHeaderEnd ignores brackets inside quoted subsection names.
+func repoConfigHeaderEnd(line string) int {
+	quoted, escaped := false, false
+	for i := 1; i < len(line); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch line[i] {
+		case '\\':
+			escaped = true
+		case '"':
+			quoted = !quoted
+		case ']':
+			if !quoted {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // splitConfigKV splits a "key = value" line. Returns ok=false if there's no '='.

@@ -908,6 +908,45 @@ func TestStripURLCredentials(t *testing.T) {
 	}
 }
 
+func TestSanitizeRepoConfig(t *testing.T) {
+	input := "\ufeff[credential]\nhelper = bom-secret\n" + `[ core ]
+ repositoryformatversion = 0
+[remote "origin]name"] url = "https://user:secret@example.test/repo"
+ pushurl = https://user:\
+secret@example.test/push
+# A comment ending in a backslash does not consume the next header. \
+[ credential "https://example.test"] helper = secret-helper
+[ include ] path = /private/unchecked
+[includeIf "gitdir:*/"]
+ path = /private/conditional
+[branch "main"]
+ merge = refs/heads/main
+`
+	for _, dropIncludes := range []bool{false, true} {
+		data, err := SanitizeRepoConfig(strings.NewReader(input), dropIncludes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(data)
+		if strings.Contains(got, "secret") || strings.Contains(got, "credential") {
+			t.Fatalf("credentials retained: %s", got)
+		}
+		for _, want := range []string{"https://example.test/repo", "https://example.test/push", "refs/heads/main"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("missing %q: %s", want, got)
+			}
+		}
+		if strings.Contains(got, "/private/") == dropIncludes {
+			t.Fatalf("include filtering = %v: %s", dropIncludes, got)
+		}
+	}
+	for _, malformed := range []string{"[remote", "[remote \"origin\"]\nurl = https://user:secret@\\"} {
+		if _, err := SanitizeRepoConfig(strings.NewReader(malformed), true); err == nil {
+			t.Fatalf("accepted malformed config: %q", malformed)
+		}
+	}
+}
+
 func TestGenerateSafeRepoConfig(t *testing.T) {
 	tests := []struct {
 		name           string

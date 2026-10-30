@@ -24,7 +24,9 @@ unshare --user true
 # Should succeed silently. If it fails, see Limitations.
 ```
 
-**macOS:** a Docker runtime is required (ensure it is running before using devsandbox):
+**macOS:** the default backend requires a running Docker runtime. The experimental [Seatbelt backend](docs/getting-started/seatbelt.md) runs native host binaries without Docker when explicitly selected with `--isolation=seatbelt`.
+
+For the default Docker backend:
 
 - [OrbStack](https://orbstack.dev/) - recommended for Apple Silicon (fastest startup, lowest resource usage)
 - [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) - most widely tested
@@ -87,11 +89,11 @@ if [ -z "${DEVSANDBOX:-}" ]; then eval "$(devsandbox shell-wrappers activate zsh
 
 `claude-no-ds` or `command claude` runs the real binary unsandboxed. See [Usage Examples](#usage-examples) for wrapping only some agents or commands like `npm`.
 
-That's it. No config files needed. On Linux the default sandbox needs no system packages - bwrap and pasta are embedded. Proxy mode (`--proxy`) is the one exception: it needs `iproute2` and `nft` or `iptables` on the host for its egress lockdown, and aborts rather than starting with open egress. On macOS, a Docker runtime is required (see [Installation Details](#installation-details)).
+That's it. No config files needed. On Linux the default sandbox needs no system packages - bwrap and pasta are embedded. Proxy mode (`--proxy`) is the one exception: it needs `iproute2` and `nft` or `iptables` on the host for its egress lockdown, and aborts rather than starting with open egress. On macOS, the default backend requires Docker; [Seatbelt](docs/getting-started/seatbelt.md) is an explicit, experimental native alternative.
 
 Run `devsandbox doctor` to verify your setup.
 
-> **macOS:** devsandbox runs your code inside a lightweight Linux container (Debian slim) via Docker. Your project files are mounted into the container, so edits sync bidirectionally. Ensure your Docker runtime is running before using devsandbox. The first start downloads the base Docker image, including Node.js and the bundled coding agents but no npm or mise installation caches; subsequent starts reuse Docker layer caching and complete in 1-2 seconds.
+> **macOS default:** devsandbox runs your code inside a lightweight Linux container (Debian slim) via Docker. Your project files are mounted into the container, so edits sync bidirectionally. Ensure your Docker runtime is running before using devsandbox. The first start downloads the base Docker image, including Node.js and the bundled coding agents but no npm or mise installation caches; subsequent starts reuse Docker layer caching and complete in 1-2 seconds.
 
 ## Scratchpads
 
@@ -145,6 +147,8 @@ DX is the headline; isolation is the floor. The defaults are tuned so an agent i
 
 ### Resource access defaults
 
+The table describes bwrap and container backends. [Seatbelt](docs/getting-started/seatbelt.md) uses policy denials instead of file masks, a private home, and per-repository read-only Git snapshots. It permits private Unix sockets but denies IP listeners, host sockets and Mach services, and rejects resource caps and host credential sharing.
+
 | Resource | Default Access |
 | --- | --- |
 | Project directory | Read/Write |
@@ -171,7 +175,7 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 - **Opt-in port auto-forwarding** - reach sandbox IPv4 and IPv6 TCP listeners through host loopback, with retries and restart cleanup ([details](docs/sandboxing.md#runtime-port-forwarding))
 - **HTTP filtering** - whitelist/blacklist domains, or interactively approve requests one at a time
 - **Content redaction** - scan outgoing requests for secrets, block or replace them before they leave your machine ([coverage](docs/proxy.md#redaction-coverage))
-- **Resource limits** - optional memory, CPU and process caps that apply to every backend ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited
+- **Resource limits** - optional memory, CPU and process caps for bwrap and container backends ([`[sandbox.resources]`](docs/configuration.md#resource-limits)); a limit that cannot be enforced aborts the launch instead of running unlimited
 - **Shell wrappers** - opt-in shell functions so `claude` means `devsandbox claude`, and commands you list in [`[shell_wrappers]`](docs/configuration.md#shell-wrappers), such as `npm`, run sandboxed too; `<name>-no-ds` and `command <name>` are the escape hatches, and `--agents` wraps only the agents you name ([details](docs/tools.md#shell-wrappers-run-agents-sandboxed-by-default))
 - **herdr agent session restore** - a sandboxed agent reports its native session through the filtered herdr proxy, and a restored pane resumes it back inside the sandbox ([details](docs/tools.md#agent-session-capture-and-restore))
 - **Agent sessions survive the sandbox** - `claude`, `codex`, `copilot`, `pi` and `opencode` keep their native session stores on the host, so `--resume` / `--continue` finds conversations started in an earlier run ([details](docs/tools.md#ai-coding-assistants))
@@ -183,9 +187,11 @@ Everything is configurable. See [Configuration](docs/configuration.md) for detai
 
 **Linux:** Uses [bubblewrap](https://github.com/containers/bubblewrap) to create namespace-based isolation. No root privileges, no Docker, no system packages required for the default sandbox - bwrap and pasta binaries are embedded. Startup is sub-second. Proxy mode (`--proxy`) additionally needs `iproute2` and `nft` or `iptables` on the host for its egress lockdown; see [proxy mode](docs/proxy.md#requirements-bwrap-backend).
 
-**macOS:** Uses Docker containers with volume mounts that mirror the bwrap behavior. Named volumes provide near-native filesystem performance. Containers are cached for 1-2 second restarts.
+**macOS default:** Uses Docker containers with volume mounts that mirror the bwrap behavior. Named volumes provide near-native filesystem performance. Containers are cached for 1-2 second restarts.
 
-All backends automatically detect your shell, tools, and editor configs and make them available read-only inside the sandbox. On a Linux host, the container backends additionally share the host's mise installs, so your toolchain resolves in-guest without a reinstall; a macOS host shares nothing, so tools are installed inside the sandbox there ([details](docs/tools.md#tool-management-with-mise)).
+**macOS native, experimental:** `devsandbox --isolation=seatbelt --proxy pi` runs your host's macOS binaries under Seatbelt, with no Docker, VM or images. It uses deprecated `sandbox-exec` and unsupported SBPL policies, and has fewer integrations. See [Seatbelt setup and limitations](docs/getting-started/seatbelt.md). Automatic selection remains Docker on macOS and bwrap on Linux.
+
+The bwrap and container backends automatically detect your shell, tools, and editor configs and make them available inside the sandbox. On a Linux host, the container backends additionally share the host's mise installs, so your toolchain resolves in-guest without a reinstall; macOS container backends install tools inside the sandbox instead ([details](docs/tools.md#tool-management-with-mise)).
 
 **Untrusted code (experimental):** bwrap and Docker share the host kernel, so a kernel-level exploit escapes both. The opt-in `krun` backend (`--isolation krun`) runs the same sandbox image inside a [libkrun](https://github.com/containers/libkrun) microVM via `podman --runtime krun`, giving the workload its own guest kernel behind a hardware virtualization boundary (KVM on Linux, HVF on macOS). Requires `podman`, a libkrun-enabled `crun`, and `/dev/kvm` on Linux or Apple Silicon on macOS (plus `nft` or `iptables` for proxy mode on Linux, usually already present). See [Isolation Backend](docs/configuration.md#krun-microvm-backend-experimental).
 
@@ -236,7 +242,7 @@ commands = ["bun", "node", "npm"]
 
 ## Git Integration
 
-By default, `.git` is mounted read-only - you can view history, diff, and status, but commits are blocked and no credentials are exposed.
+By default, `.git` is mounted read-only - you can view history, diff, and status, but commits are blocked and no credentials are exposed. Seatbelt instead routes Git commands to sanitized read-only snapshots, including for nested repositories and existing linked worktrees. It rejects `readwrite` and permits regular local repository writes with `disabled`. See [Seatbelt Git behavior](docs/getting-started/seatbelt.md#git). The mount and worktree behavior below applies to bwrap and container backends.
 
 | Mode | `.git` | Commits | Credentials | gitconfig |
 | --- | --- | --- | --- | --- |
@@ -309,7 +315,7 @@ Known limitations:
 
 ## Proxy Mode - Monitor Your AI Agent's Network Activity
 
-Route HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request. How strongly the routing is enforced depends on the backend - bwrap and krun both fail closed behind a deny-by-default egress firewall (requires `nft` or `iptables`), Docker is env-var routing only; see [per-backend behavior](docs/proxy.md#backend-specific-behavior).
+Route HTTP/HTTPS traffic through a local MITM proxy. See every API call your AI agent makes in real-time, block suspicious domains, or interactively approve each request. How strongly the routing is enforced depends on the backend - bwrap and krun both fail closed behind a deny-by-default egress firewall (requires `nft` or `iptables`), Seatbelt restricts direct outbound connections to the localhost proxy port, and Docker is env-var routing only; see [per-backend behavior](docs/proxy.md#backend-specific-behavior).
 
 ```bash
 # Enable proxy
@@ -326,7 +332,7 @@ devsandbox --proxy --filter-default=ask
 devsandbox proxy monitor
 ```
 
-On Linux, proxy mode uses [pasta](https://passt.top/) for network namespace isolation (embedded, no install needed). On macOS, it uses per-session Docker networks.
+On bwrap, proxy mode uses [pasta](https://passt.top/) for network namespace isolation, with an embedded binary. Docker uses per-session networks. Seatbelt uses native policy rules and has no network namespace.
 
 The proxy URL handed to the sandbox carries a per-session credential, so no other local process can use the proxy or the credentials it injects. Debug output omits that credential from wrapper logs and audit receivers; see [Proxy authentication](docs/proxy.md#proxy-authentication).
 
@@ -366,7 +372,7 @@ sudo apt install bubblewrap passt
 sudo dnf install bubblewrap passt
 ```
 
-**macOS:** Requires a Docker runtime - see [Prerequisites](#prerequisites) for options.
+**macOS:** The default backend requires a Docker runtime. See [Prerequisites](#prerequisites) for options or [Seatbelt](docs/getting-started/seatbelt.md) for the experimental native backend.
 
 **Build from source:**
 
@@ -455,6 +461,7 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 
 | Page | Contents |
 | --- | --- |
+| [Seatbelt](docs/getting-started/seatbelt.md) | Experimental native macOS setup, copied-home behavior, network policy and limitations |
 | [Sandboxing](docs/sandboxing.md) | Isolation backends, security model, filesystem layout, overlay mounts, custom mounts, Docker backend details |
 | [Proxy Mode](docs/proxy.md) | Traffic inspection, log viewing/filtering/export, HTTP filtering, ask mode, content redaction, credential injection, remote logging |
 | [Tools](docs/tools.md) | mise integration, shell/editor/prompt setup, AI assistant configs and shell wrappers, rtk, Git modes, Docker socket proxy, kitty/herdr/zellij terminal integration, XDG desktop portal |
@@ -479,6 +486,15 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 - File watching (hot reload) may require polling mode. See [File Watching Limitations](docs/sandboxing.md#file-watching-limitations) for workarounds.
 - Network isolation uses HTTP_PROXY instead of pasta
 
+**macOS (Seatbelt, experimental):**
+
+- Explicit-only native backend using deprecated `sandbox-exec` and unsupported SBPL policies; actual enforcement needs macOS validation
+- No IP listeners, host sockets, Mach services, host Keychain, GUI integrations or SSH-agent attachment; Unix sockets work in the private temporary and runtime directories
+- No resource caps, custom mounts, port forwarding, `--worktree` creation or concurrent native sessions per project; existing linked worktrees support read-only Git
+- Read-only installations are shared where possible; copied writable state can still use substantial disk space and does not merge later host changes
+- Native launches appear in `devsandbox sessions`, with forwarding marked unavailable
+- See [Seatbelt limitations](docs/getting-started/seatbelt.md) before use
+
 **krun (microVM, experimental):**
 
 - Proxy-mode egress lockdown is applied host-side in the VMM's pasta network namespace and needs `nft` or `iptables` on the host
@@ -488,7 +504,7 @@ The second stays quiet until a command fails on something the sandbox blocks - a
 - `pids` from `[sandbox.resources]` is not enforceable - the container is the libkrun VMM process and the guest kernel owns its own PID space, so krun skips the flag and warns; `memory` and `cpus` apply normally (defaulting to `4g`/`2`)
 - Every launch boots a fresh microVM - no `keep_container` reuse, and no online boot-time install of the project's mise tools (see [krun backend](docs/getting-started/krun.md))
 
-**Both:**
+**bwrap and container backends:**
 
 - Docker socket access is read-only (no container creation/deletion) - see [Tools docs](docs/tools.md#docker)
 - No nested Docker (cannot run Docker inside the sandbox)

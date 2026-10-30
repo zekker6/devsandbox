@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -441,6 +443,58 @@ func TestBuildShellCommand_ArgsSurviveRealShell(t *testing.T) {
 			}
 			if string(out) != want.String() {
 				t.Errorf("%s altered arguments:\ngot:\n%s\nwant:\n%s", shell, out, want.String())
+			}
+		})
+	}
+}
+
+func TestBuildShellCommand_CommandPathPrefix(t *testing.T) {
+	for _, shell := range []Shell{ShellBash, ShellZsh, ShellFish} {
+		t.Run(string(shell), func(t *testing.T) {
+			path, err := exec.LookPath(string(shell))
+			if err != nil {
+				t.Skipf("shell unavailable: %v", err)
+			}
+			base := t.TempDir()
+			prefix, hijack := filepath.Join(base, "private' commands"), filepath.Join(base, "mise-bin")
+			for _, dir := range []string{prefix, hijack} {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write := func(name, text string) {
+				t.Helper()
+				if err := os.WriteFile(name, []byte(text), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(filepath.Join(prefix, "prefix-probe"), "#!/bin/sh\nprintf protected")
+			write(filepath.Join(hijack, "prefix-probe"), "#!/bin/sh\nprintf bypassed")
+			activation := "export PATH=" + shellQuote(hijack, ShellBash) + ":\"$PATH\""
+			if shell == ShellFish {
+				activation = "set -gx PATH " + shellQuote(hijack, ShellFish) + " $PATH"
+			}
+			write(filepath.Join(base, "mise"), "#!/bin/sh\nprintf '%s\\n' "+shellQuote(activation, ShellBash))
+			cfg := &Config{Shell: shell, ShellPath: path, CommandPathPrefix: prefix}
+			args := BuildShellCommand(cfg, []string{"prefix-probe"})
+			cmd := exec.Command(args[0], args[1:]...)
+			cmd.Env = []string{"PATH=" + base + ":" + os.Getenv("PATH"), "HOME=" + base, "XDG_CONFIG_HOME=" + base, "ZDOTDIR=" + base}
+			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "protected" {
+				t.Fatalf("mise overrode command prefix: %s: %v", out, err)
+			}
+			if shell != ShellFish {
+				return
+			}
+			if err := os.MkdirAll(filepath.Join(base, "fish"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			write(filepath.Join(base, "fish/config.fish"), activation)
+			args = BuildShellCommand(cfg, nil)
+			interactive := exec.Command(args[0], args[1:]...)
+			interactive.Env = cmd.Env
+			interactive.Stdin = strings.NewReader("prefix-probe\nexit\n")
+			if out, err := interactive.CombinedOutput(); err != nil || string(out) != "protected" {
+				t.Fatalf("fish rc overrode command prefix: %s: %v", out, err)
 			}
 		})
 	}

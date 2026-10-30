@@ -56,10 +56,11 @@ func (p *Powerlevel10k) Bindings(homeDir, sandboxHome string) []Binding {
 	// Use sandbox p10k config if setup ran successfully
 	if _, err := os.Stat(sandboxP10k); err == nil {
 		bindings = append(bindings, Binding{
-			Source:   sandboxP10k,
-			Dest:     filepath.Join(homeDir, ".p10k.zsh"),
-			Category: CategoryConfig,
-			Optional: true,
+			Source:           sandboxP10k,
+			Dest:             filepath.Join(homeDir, ".p10k.zsh"),
+			HomeRelativeDest: true,
+			Category:         CategoryConfig,
+			Optional:         true,
 		})
 	} else {
 		// Fall back to original config

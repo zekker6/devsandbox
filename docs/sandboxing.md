@@ -2,22 +2,23 @@
 
 How filesystem, process, and network isolation works in devsandbox.
 
-devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux or Docker containers on macOS to create
+By default, devsandbox uses [bubblewrap](https://github.com/containers/bubblewrap) on Linux or Docker containers on macOS to create
 isolated environments for running untrusted code. On Linux, bwrap and pasta binaries are embedded - no system packages
 required. To use system-installed binaries instead, see [configuration](configuration.md). Proxy mode is the one
 exception: its egress lockdown needs `iproute2` and `nft`/`iptables` on the host, and a `--proxy` launch aborts without
 them (see [proxy mode](proxy.md#requirements-bwrap-backend)).
 
-> **macOS users:** devsandbox uses the Docker backend on macOS. Skip to [How It Works (Docker)](#how-it-works-docker) for platform-relevant details, or see [Platform Differences](#platform-differences) for a comparison table.
+> **macOS users:** Docker remains the default. The explicit, experimental [Seatbelt backend](getting-started/seatbelt.md) runs native host tools without Docker or a VM. For Docker, see [How It Works (Docker)](#how-it-works-docker) and [Platform Differences](#platform-differences).
 
 ## Isolation Backends
 
-devsandbox supports three isolation backends:
+devsandbox supports four isolation backends:
 
 | Backend | Platform | Description |
 | --------- | ---------- | ------------- |
 | `bwrap` | Linux only | Uses bubblewrap for namespace-based isolation. Preferred on Linux. |
-| `docker` | Linux, macOS | Uses Docker containers. Required for macOS, optional on Linux. |
+| `docker` | Linux, macOS | Uses Docker containers. Default on macOS, optional on Linux. |
+| `seatbelt` | macOS only | **Experimental, explicit-only.** Native host binaries under a Seatbelt policy, with no container image or VM. See [Seatbelt](getting-started/seatbelt.md). |
 | `krun` | Linux, macOS | **Experimental.** Runs the sandbox image inside a libkrun microVM (`podman --runtime krun`) for hardware-level isolation. Opt-in only. See [krun microVM backend](configuration.md#krun-microvm-backend-experimental). |
 
 `bwrap` and `docker` share the host kernel; a kernel-level exploit escapes both. `krun` puts the workload behind a hardware virtualization boundary with its own guest kernel - the right choice for genuinely untrusted code.
@@ -29,7 +30,7 @@ By default (`--isolation=auto`), devsandbox selects the best backend for your pl
 - **Linux**: Uses `bwrap` (bubblewrap)
 - **macOS**: Uses `docker`
 
-`krun` is never auto-selected; it must be requested explicitly.
+`krun` and `seatbelt` are never auto-selected; request either explicitly.
 
 ### Manual Override
 
@@ -44,13 +45,16 @@ devsandbox --isolation=bwrap
 
 # Use the krun microVM backend (requires podman + libkrun + /dev/kvm)
 devsandbox --isolation=krun
+
+# Native macOS tools under Seatbelt (experimental)
+devsandbox --isolation=seatbelt --proxy pi
 ```
 
 Or configure in `~/.config/devsandbox/config.toml`:
 
 ```toml
 [sandbox]
-isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
+isolation = "docker"  # "auto", "bwrap", "docker", "krun", or "seatbelt"
 ```
 
 ### Choosing a Backend (Linux)
@@ -63,6 +67,10 @@ isolation = "docker"  # "auto", "bwrap", "docker", or "krun"
 | You're on a standard kernel with user namespaces | You prefer container-based isolation |
 
 ## Security Model
+
+The table and mount behavior below describe bwrap and container backends. Seatbelt uses a private copied home and path denials, not a mount namespace. Its system roots and selected tool sources are readable, and the project and private home are writable. `.env` hiding and `.devsandbox.toml` policy return permission errors rather than empty masked files. See [Seatbelt files and private home](getting-started/seatbelt.md#files-and-private-home).
+
+Seatbelt permits Unix sockets only in its private temporary and runtime directories, and denies IP listeners, host sockets and Mach services. It allows ordinary outbound IP without proxy mode and restricts direct outbound to the actual authenticated localhost proxy port with `--proxy`. It has no VM or PID namespace boundary. See [Seatbelt network and service restrictions](getting-started/seatbelt.md#network-and-macos-services).
 
 | Resource                          | Access                              |
 |-----------------------------------|-------------------------------------|
@@ -534,6 +542,8 @@ devsandbox --proxy --name myapp
 
 If omitted, the name is auto-generated from the working directory basename.
 
+Seatbelt launches are listed with or without `--proxy`. Their backend is `seatbelt`, forwarding is marked unavailable, and `devsandbox forward` refuses them because they have no network namespace. JSON records include a `backend` field and omit `network_ns` for native launches. Existing namespace records without `backend` remain usable for forwarding.
+
 Each session is recorded as a JSON file under `$XDG_STATE_HOME/devsandbox/sessions/` (`~/.local/state/devsandbox/sessions/` when unset). The record is removed once its process is gone. A record whose process cannot be confirmed gone - a process id since reused by another user - is kept until nothing has written it for 30 days, and holds its session name for that long.
 
 **List running sessions:**
@@ -649,6 +659,8 @@ devsandbox does not include SELinux or AppArmor handling. On systems with these 
 **Fallback:** If security module restrictions cannot be resolved, use the Docker backend (`--isolation=docker`) which avoids direct namespace creation.
 
 ## Overlay Filesystem
+
+Seatbelt uses [copies rather than overlays](getting-started/seatbelt.md#files-and-private-home). Under `split`, config refresh preserves nested persistent caches and data. Persistent copies are seeded once, never merge later host changes, and can take significant disk space. Read-only installations and data can use host-backed links; default `split` mode seeds mise versions this way while preserving existing private versions. Configuration still refreshes as copies, file overlays become read-only, and missing optional paths are not copied. The overlayfs mechanics below apply to bwrap; Seatbelt rejects `readwrite` and multi-layer overlays.
 
 By default, tool directories use the `split` mount mode: config paths get a tmpoverlay (discarded on exit) while caches and data get a persistent overlay. This protects host configs from supply chain attacks while preserving expensive caches across sessions. Use the `[overlay]` section to change the global default, or per-tool `mount_mode` overrides to fine-tune individual tools.
 
@@ -1015,6 +1027,8 @@ devsandbox image build
 ```
 
 ### Platform Differences
+
+This table compares bwrap with Docker. For native macOS behavior, see [Seatbelt setup and limitations](getting-started/seatbelt.md).
 
 | Feature | Linux (bwrap) | Linux (docker) | macOS (docker) |
 | --------- | --------------- | ---------------- | ---------------- |

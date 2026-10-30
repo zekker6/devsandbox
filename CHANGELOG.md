@@ -6,10 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added an explicit, experimental macOS Seatbelt backend to run native host tools without Docker or a VM. It supports private Unix sockets, read-only Git in existing linked worktrees and nested repositories, shared read-only tool installations, and native session listing. See [Seatbelt setup and limitations](docs/getting-started/seatbelt.md).
 - Pi is now preinstalled in the default Docker image, so Docker and krun users can run `devsandbox pi` without installing it themselves. See [Pi Coding Agent](docs/tools.md#pi-coding-agent).
 
 ### Fixed
 
+- Read-only Git now strips embedded credentials from quoted and continued remote URLs, including URLs on the same line as a section header. See [Safe Git configuration](docs/configuration.md#what-the-safe-copy-carries).
+- Generated Starship, tmux, Oh My Zsh and Powerlevel10k configuration now reaches the correct sandbox home on Docker and krun instead of being mounted where the tools never read it. See [Prompt tools](docs/tools.md#prompt-tools).
 - Reduced the default Docker and krun image size without removing bundled tools, so first launches download less and the image takes less disk space. See [Docker Image](docs/sandboxing.md#docker-image).
 - Port auto-forwarding now honors project and include settings, detects IPv6 listeners, and reaches apps bound to a specific sandbox address. Failed setup is retried, and idle client connections no longer stall discovery after an app stops. Runtime failures reach the terminal instead of silently dropping connections. See [Runtime Port Forwarding](docs/sandboxing.md#runtime-port-forwarding).
 

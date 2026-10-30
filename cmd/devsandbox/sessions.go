@@ -57,7 +57,7 @@ func newSessionsCmd() *cobra.Command {
 
 func printSessionsTable(sessions []*session.Session) error {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.Header("NAME", "PID", "STARTED", "WORK DIR", "FORWARDED PORTS")
+	table.Header("NAME", "BACKEND", "PID", "STARTED", "WORK DIR", "FORWARDED PORTS")
 
 	for _, s := range sessions {
 		workDir := s.WorkDir
@@ -65,12 +65,22 @@ func printSessionsTable(sessions []*session.Session) error {
 			workDir = "..." + workDir[len(workDir)-37:]
 		}
 
+		backend := s.Backend
+		if backend == "" {
+			backend = "(unknown)"
+		}
+		ports := "(unavailable)"
+		if s.CanForward() {
+			ports = formatPorts(s.ForwardedPorts)
+		}
+
 		_ = table.Append(
 			s.Name,
+			backend,
 			strconv.Itoa(s.PID),
 			formatTimeAgo(s.StartedAt),
 			workDir,
-			formatPorts(s.ForwardedPorts),
+			ports,
 		)
 	}
 

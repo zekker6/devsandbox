@@ -52,7 +52,7 @@ func addSandboxFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("block-domain", nil, "Block domain pattern (can be repeated)")
 
 	// Isolation backend flag
-	cmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker, krun")
+	cmd.Flags().String("isolation", "", "Isolation backend: auto, bwrap, docker, krun, seatbelt")
 
 	// Sandbox lifecycle flag
 	cmd.Flags().Bool("rm", false, "Remove sandbox state after exit (ephemeral mode)")
@@ -322,6 +322,24 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		cfg.HideEnvFiles = !noHideEnv
 	}
 
+	if iso.Name() == isolator.BackendSeatbelt {
+		// A native home contains copies, not mount targets. Keep it separate
+		// from container homes and their persistent overlay state.
+		cfg.ProjectName += "-seatbelt"
+		cfg.SandboxRoot = filepath.Join(cfg.SandboxBase, cfg.ProjectName)
+		cfg.SandboxHome = sandbox.SandboxHomePath(cfg.SandboxRoot)
+		if cmd.Flags().Changed("worktree") {
+			return errors.New("seatbelt does not yet support --worktree; use a regular checkout or another backend")
+		}
+	}
+	if validator, ok := iso.(interface {
+		ValidateConfig(*sandbox.Config, *config.Config) error
+	}); ok {
+		if err := validator.ValidateConfig(cfg, appCfg); err != nil {
+			return err
+		}
+	}
+
 	if showInfo {
 		printInfo(cfg)
 		return nil
@@ -447,37 +465,15 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	defer func() { _ = sessionHandle.Release() }()
 
+	if iso.Name() == isolator.BackendSeatbelt && !sessionHandle.IsPrimary() {
+		return errors.New("seatbelt already has an active session for this project; private configuration copies cannot be refreshed while it runs")
+	}
+
 	if cfg.IsConcurrent {
 		notice.Info("Another session is active. Running in concurrent mode (overlay changes will be discarded on exit).")
 	}
 
-	// Primary session: clean up stale session overlay dirs from crashed
-	// concurrent sessions.
-	//
-	// Gated on the designation, not on IsConcurrent. DesignateSession only
-	// reroutes bwrap launches, so a docker or krun launch is IsConcurrent=false
-	// even when it lost the designation to a live bwrap session - and the
-	// sandbox home is derived from the project name, so both launches share one.
-	// Reading that as "primary" sent CleanupStaleSessionDirs, which removes every
-	// directory under overlay/sessions/ unconditionally, through the live
-	// session's own upper and work dirs.
-	if sessionHandle.IsPrimary() {
-		if removed, err := sandbox.CleanupStaleSessionDirs(cfg.SandboxHome); err != nil {
-			notice.Warn("failed to clean stale session dirs: %v", err)
-		} else if removed > 0 {
-			notice.Info("cleaned up %d stale session overlay dir(s)", removed)
-		}
-
-		// Clean up overlay upper-dirs left behind when ~/.local/bin and
-		// ~/.local/share/claude were migrated from persistent overlays to
-		// read-only bind mounts. Stale shadow files in those upper-dirs can
-		// mask real host binaries (see CHANGELOG Unreleased / Fixed).
-		if removed, err := sandbox.CleanupLegacyReadonlyBindOverlays(cfg.SandboxHome, cfg.HomeDir); err != nil {
-			notice.Warn("failed to clean legacy overlay dirs: %v", err)
-		} else if removed > 0 {
-			notice.Info("cleaned up %d legacy overlay dir(s)", removed)
-		}
-	}
+	cleanupPrimaryOverlays(cfg, sessionHandle.IsPrimary())
 
 	// When --rm is set, remove sandbox state after exit (both backends).
 	// Concurrent sessions skip this — they only clean their own session overlay dirs
@@ -633,19 +629,25 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Start active tools (e.g., docker proxy)
-	startActiveTools, cleanupActiveTools := createActiveToolsRunner(cfg)
-	defer cleanupActiveTools()
-	hasActiveTools, err := startActiveTools(cmd.Context())
-	if err != nil {
-		return err
+	var hasActiveTools bool
+	if iso.Name() != isolator.BackendSeatbelt {
+		startActiveTools, cleanupActiveTools := createActiveToolsRunner(cfg)
+		defer cleanupActiveTools()
+		hasActiveTools, err = startActiveTools(cmd.Context())
+		if err != nil {
+			return err
+		}
 	}
 
 	// The session lock is already held: DesignateSession took it above, before
 	// the concurrent-session designation that reads it.
 
-	// Resolve session name for port forwarding registry
-	if cfg.ProxyEnabled {
+	// Native sessions are visible even without a proxy or network namespace.
+	if cfg.ProxyEnabled || iso.Name() == isolator.BackendSeatbelt {
 		sessionStore, storeErr := session.DefaultStore()
+		if storeErr != nil && iso.Name() == isolator.BackendSeatbelt {
+			return fmt.Errorf("create native session store: %w", storeErr)
+		}
 		if storeErr == nil {
 			sessionStore.CleanStale()
 			if sandboxName == "" {
@@ -656,7 +658,7 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Audit logging: build session context AFTER AutoName resolves so
 	// sandbox_name is populated, then attach to dispatcher and notice.
-	// When proxy is disabled, sandbox_name may be empty; that's intentional.
+	// Non-native launches without a proxy may have no sandbox_name.
 	sessionCtx, err := buildSessionContext(sandboxName, cfg.SandboxRoot, projectDir, string(isolation))
 	if err != nil {
 		return fmt.Errorf("build session context: %w", err)
@@ -715,20 +717,23 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	var stopAutoForward func()
-	runCfg.OnSandboxStart = func(nsPID int, nsPath string) {
+	var registeredStore *session.Store
+	registerSession := func(pid int, nsPath string) (*session.Session, error) {
 		sessionStore, err := session.DefaultStore()
 		if err != nil {
-			notice.Alert("[devsandbox] failed to create session store: %v", err)
-			return
+			return nil, fmt.Errorf("create session store: %w", err)
 		}
 
 		sess := &session.Session{
 			Name:      sandboxName,
-			PID:       nsPID,
+			PID:       pid,
+			Backend:   string(iso.Name()),
 			NetworkNS: nsPath,
 			StartedAt: time.Now(),
 			WorkDir:   projectDir,
-			ProxyPort: cfg.ProxyPort,
+		}
+		if cfg.ProxyEnabled {
+			sess.ProxyPort = cfg.ProxyPort
 		}
 		if worktreeHandle != nil {
 			sess.Worktree = &session.WorktreeInfo{
@@ -740,44 +745,63 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		if err := sessionStore.Register(sess); err != nil {
-			notice.Alert("[devsandbox] failed to register session: %v", err)
-			return
+			return nil, fmt.Errorf("register session: %w", err)
 		}
+		registeredStore = sessionStore
+		return sess, nil
+	}
 
-		notice.Info("Session: %s (use 'devsandbox forward %s <port>' to forward ports)", sandboxName, sandboxName)
-
-		// Start port auto-detection if enabled.
-		//
-		// Only meaningful when the sandbox has its own network namespace (i.e.
-		// proxy mode via pasta). If the sandbox shares the host netns, a tool
-		// listener inside the sandbox and a forwarder bind on the host are the
-		// same kernel socket — trying to "forward" produces an EADDRINUSE
-		// collision against the very tool we detected. In that configuration
-		// the sandbox port is already directly accessible on 127.0.0.1, so
-		// skip auto-forwarding entirely rather than fail loudly on each port.
-		if appCfg.PortForwarding.IsAutoDetectEnabled() {
-			shared, err := portforward.SharesHostNetNS(nsPath)
+	if iso.Name() == isolator.BackendSeatbelt {
+		runCfg.OnNativeStart = func(pid int) error {
+			if _, err := registerSession(pid, ""); err != nil {
+				return err
+			}
+			notice.Info("Session: %s (seatbelt; port forwarding unavailable)", sandboxName)
+			return nil
+		}
+	} else {
+		runCfg.OnSandboxStart = func(nsPID int, nsPath string) {
+			sess, err := registerSession(nsPID, nsPath)
 			if err != nil {
-				notice.Alert("[devsandbox] cannot determine sandbox network namespace (%v); skipping port auto-detect", err)
-				return
-			}
-			if shared {
-				notice.Info("[devsandbox] port auto-detect skipped: sandbox shares host network namespace; sandbox listeners are already accessible on 127.0.0.1 (enable proxy mode for netns isolation and auto-forward)")
+				notice.Alert("[devsandbox] failed to register session: %v", err)
 				return
 			}
 
-			stopAutoForward = startAutoForward(cmd.Context(), appCfg.PortForwarding, sess, sessionStore,
-				portforward.NewProcNetScanner(nsPID), portforward.NewNamespaceDialer(nsPID))
+			notice.Info("Session: %s (use 'devsandbox forward %s <port>' to forward ports)", sandboxName, sandboxName)
+
+			// Start port auto-detection if enabled.
+			//
+			// Only meaningful when the sandbox has its own network namespace (i.e.
+			// proxy mode via pasta). If the sandbox shares the host netns, a tool
+			// listener inside the sandbox and a forwarder bind on the host are the
+			// same kernel socket - trying to "forward" produces an EADDRINUSE
+			// collision against the very tool we detected. In that configuration
+			// the sandbox port is already directly accessible on 127.0.0.1, so
+			// skip auto-forwarding entirely rather than fail loudly on each port.
+			if sess.CanForward() && appCfg.PortForwarding.IsAutoDetectEnabled() {
+				shared, err := portforward.SharesHostNetNS(nsPath)
+				if err != nil {
+					notice.Alert("[devsandbox] cannot determine sandbox network namespace (%v); skipping port auto-detect", err)
+					return
+				}
+				if shared {
+					notice.Info("[devsandbox] port auto-detect skipped: sandbox shares host network namespace; sandbox listeners are already accessible on 127.0.0.1 (enable proxy mode for netns isolation and auto-forward)")
+					return
+				}
+
+				stopAutoForward = startAutoForward(cmd.Context(), appCfg.PortForwarding, sess, registeredStore,
+					portforward.NewProcNetScanner(nsPID), portforward.NewNamespaceDialer(nsPID))
+			}
 		}
 	}
 
-	if cfg.ProxyEnabled && sandboxName != "" {
-		defer func() {
-			if store, err := session.DefaultStore(); err == nil {
-				_ = store.Remove(sandboxName)
+	defer func() {
+		if registeredStore != nil {
+			if err := registeredStore.Remove(sandboxName); err != nil && !errors.Is(err, os.ErrNotExist) {
+				retErr = errors.Join(retErr, fmt.Errorf("remove session record: %w", err))
 			}
-		}()
-	}
+		}
+	}()
 
 	defer func() {
 		if stopAutoForward != nil {
@@ -795,6 +819,27 @@ func runSandbox(cmd *cobra.Command, args []string) (retErr error) {
 	notice.SetRunning()
 	defer notice.SetTeardown()
 	return iso.Run(cmd.Context(), runCfg)
+}
+
+// cleanupPrimaryOverlays requires designation, not !IsConcurrent: container
+// launches can share a home with a live bwrap session without being concurrent.
+// Seatbelt has no overlays. Its raw home is sandbox-writable, so treating an
+// attacker-created overlay/sessions symlink as host bookkeeping is unsafe.
+func cleanupPrimaryOverlays(cfg *sandbox.Config, primary bool) {
+	if !primary || cfg.Isolation == sandbox.IsolationSeatbelt {
+		return
+	}
+	if removed, err := sandbox.CleanupStaleSessionDirs(cfg.SandboxHome); err != nil {
+		notice.Warn("failed to clean stale session dirs: %v", err)
+	} else if removed > 0 {
+		notice.Info("cleaned up %d stale session overlay dir(s)", removed)
+	}
+	// These old uppers can shadow host binaries now bound read-only.
+	if removed, err := sandbox.CleanupLegacyReadonlyBindOverlays(cfg.SandboxHome, cfg.HomeDir); err != nil {
+		notice.Warn("failed to clean legacy overlay dirs: %v", err)
+	} else if removed > 0 {
+		notice.Info("cleaned up %d legacy overlay dir(s)", removed)
+	}
 }
 
 // expireSandboxes applies sandbox.max_age. A failure is a warning rather than

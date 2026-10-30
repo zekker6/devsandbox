@@ -216,8 +216,8 @@ func TestMise_Bindings_LocalBinReadOnly(t *testing.T) {
 	if !localBin.ReadOnly {
 		t.Error("~/.local/bin must be ReadOnly to prevent overlay shadowing of host binaries")
 	}
-	if localBin.Category != "" {
-		t.Errorf("~/.local/bin Category should be empty (explicit Type takes precedence), got %q", localBin.Category)
+	if localBin.Category != CategoryData {
+		t.Errorf("~/.local/bin Category = %q, want data for native installation sharing", localBin.Category)
 	}
 	if !localBin.Optional {
 		t.Error("~/.local/bin should be Optional (user may not have one)")

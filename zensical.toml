@@ -16,6 +16,7 @@ nav = [
     { "Quick start" = "getting-started/quickstart.md" },
     { "First run" = "getting-started/first-run.md" },
     { "krun microVM setup" = "getting-started/krun.md" },
+    { "Native macOS Seatbelt" = "getting-started/seatbelt.md" },
   ] },
   { "Guides" = [
     { "Use cases" = "use-cases.md" },

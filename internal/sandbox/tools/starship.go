@@ -38,10 +38,11 @@ func (s *Starship) Bindings(homeDir, sandboxHome string) []Binding {
 
 	return []Binding{
 		{
-			Source:   sandboxStarshipConfig,
-			Dest:     starshipConfig,
-			Category: CategoryConfig,
-			Optional: true, // Might not exist if setup failed
+			Source:           sandboxStarshipConfig,
+			Dest:             starshipConfig,
+			HomeRelativeDest: true,
+			Category:         CategoryConfig,
+			Optional:         true, // Might not exist if setup failed
 		},
 	}
 }

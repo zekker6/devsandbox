@@ -5,17 +5,16 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"devsandbox/internal/cgroups"
 	"devsandbox/internal/egress"
 	"devsandbox/internal/embed"
 	"devsandbox/internal/network"
+	"devsandbox/internal/procsignal"
 )
 
 // wrapLimits places a launch inside a systemd transient scope carrying the
@@ -177,25 +176,7 @@ func ExecRun(limits cgroups.Limits, bwrapArgs []string, shellCmd []string, onSta
 // process' group - so the relay matters for the signals aimed at devsandbox
 // alone. Delivering one twice is harmless for all four.
 func forwardSignals(p *os.Process) func() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-
-	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case sig := <-ch:
-				_ = p.Signal(sig)
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	return func() {
-		signal.Stop(ch)
-		close(done)
-	}
+	return procsignal.Forward(p.Signal)
 }
 
 // SandboxProcess holds a running sandbox process started by StartWithPasta.

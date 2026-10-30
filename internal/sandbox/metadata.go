@@ -20,9 +20,10 @@ const MetadataFile = "metadata.json"
 type IsolationType string
 
 const (
-	IsolationBwrap  IsolationType = "bwrap"
-	IsolationDocker IsolationType = "docker"
-	IsolationKrun   IsolationType = "krun"
+	IsolationBwrap    IsolationType = "bwrap"
+	IsolationDocker   IsolationType = "docker"
+	IsolationKrun     IsolationType = "krun"
+	IsolationSeatbelt IsolationType = "seatbelt"
 )
 
 // Metadata stores information about a sandbox instance

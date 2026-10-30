@@ -30,6 +30,19 @@ func TestDetect_Auto_Linux(t *testing.T) {
 	}
 }
 
+func TestDetect_Auto_Darwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only test")
+	}
+	backend, err := Detect(BackendAuto)
+	if err != nil {
+		t.Fatalf("Detect failed: %v", err)
+	}
+	if backend != BackendDocker {
+		t.Errorf("Expected docker on macOS, got %s", backend)
+	}
+}
+
 func TestDetect_Explicit(t *testing.T) {
 	tests := []struct {
 		requested Backend
@@ -38,6 +51,7 @@ func TestDetect_Explicit(t *testing.T) {
 		{BackendBwrap, BackendBwrap},
 		{BackendDocker, BackendDocker},
 		{BackendKrun, BackendKrun},
+		{BackendSeatbelt, BackendSeatbelt},
 	}
 	for _, tt := range tests {
 		backend, err := Detect(tt.requested)
@@ -54,6 +68,26 @@ func TestDetect_UnknownBackend(t *testing.T) {
 	_, err := Detect(Backend("unknown"))
 	if err == nil {
 		t.Error("Detect with unknown backend should return error")
+	}
+}
+
+func TestNew_Seatbelt(t *testing.T) {
+	availableErr := NewSeatbeltIsolator(SeatbeltConfig{}).Available()
+	iso, err := New(BackendSeatbelt)
+	if availableErr != nil {
+		if err == nil || err.Error() != availableErr.Error() {
+			t.Fatalf("New(BackendSeatbelt) error = %v, want %v", err, availableErr)
+		}
+		if iso != nil {
+			t.Fatal("New(BackendSeatbelt) returned an unavailable isolator")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("New(BackendSeatbelt) failed: %v", err)
+	}
+	if iso.Name() != BackendSeatbelt {
+		t.Errorf("New(BackendSeatbelt).Name() = %s, want %s", iso.Name(), BackendSeatbelt)
 	}
 }
 

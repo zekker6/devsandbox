@@ -20,6 +20,21 @@ Known constraints of the current implementation.
 - File watching (hot reload) may require polling mode. See [File Watching Limitations](../sandboxing.md#file-watching-limitations) for workarounds.
 - Network isolation uses `HTTP_PROXY` instead of `pasta`.
 
+## macOS (Seatbelt backend, experimental)
+
+- Explicit-only via `--isolation=seatbelt`; automatic selection still uses Docker on macOS.
+- Runs native macOS host binaries, not Linux binaries. Uses deprecated `sandbox-exec` and unsupported SBPL policies that may change across OS releases.
+- No IP listeners, host Unix sockets or Mach services. Private Unix sockets work under `$TMPDIR` and `$XDG_RUNTIME_DIR`. Host Keychain, GUI `open`, AppleEvents and SSH-agent attachment are unavailable. Clients requiring `trustd` may fail even with proxy CA environment variables.
+- Ordinary outbound IP is allowed without proxy mode. With `--proxy`, only the actual localhost proxy port is directly reachable; the proxy's filters still decide which destinations it contacts.
+- Tool state is not a real overlay. Read-only installations can use host-backed links; configuration and writable state remain private copies. Persistent copies do not merge later host changes and can consume significant disk space. Private-home writes outside temporary bindings persist.
+- No custom mounts, resource caps, port forwarding, global or tool `readwrite` mount modes, multi-layer tool overlays, or remapping outside the private home.
+- Default Git routes each invocation to a sanitized read-only snapshot, including nested repositories and registered linked worktrees. Refs remain fixed at launch; direct metadata readers and absolute Git paths bypass routing but cannot read original metadata. Git `readwrite` and `--worktree` creation remain rejected; `disabled` permits regular project Git writes without importing host authentication or configuration.
+- One native session per project. Native launches appear in `devsandbox sessions` with or without a proxy, but have no namespace and cannot use `devsandbox forward`.
+- Exit and cancellation kill the child process group, but detached child sessions may survive with sandbox restrictions intact. No VM or PID namespace guarantees.
+- Linux compile checks cannot validate macOS policy enforcement.
+
+See [Seatbelt setup and limitations](../getting-started/seatbelt.md) for copied-home modes, integration handling and validation requirements.
+
 ## krun (microVM backend, experimental)
 
 - Egress lockdown in proxy mode is applied host-side in the VMM's pasta network namespace and requires `nft` or `iptables` on the host.
@@ -30,7 +45,7 @@ Known constraints of the current implementation.
 
 See [krun backend](../getting-started/krun.md) for the full setup and trust-boundary discussion.
 
-## Both platforms
+## bwrap and container backends
 
 - Docker socket access is read-only - no container creation, deletion, or modification from inside the sandbox. See [Supported tools - Docker](../tools.md#docker) for what does work.
 - Nested Docker (running Docker inside the sandbox) is not supported.

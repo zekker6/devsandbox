@@ -228,8 +228,8 @@ func TestClaude_Bindings_LocalShareClaudeReadOnly(t *testing.T) {
 	if !localShareClaude.ReadOnly {
 		t.Error("~/.local/share/claude must be ReadOnly to prevent overlay shadowing from failed in-sandbox updates")
 	}
-	if localShareClaude.Category != "" {
-		t.Errorf("~/.local/share/claude Category should be empty (explicit Type takes precedence), got %q", localShareClaude.Category)
+	if localShareClaude.Category != CategoryData {
+		t.Errorf("~/.local/share/claude Category = %q, want data for native installation sharing", localShareClaude.Category)
 	}
 	if !localShareClaude.Optional {
 		t.Error("~/.local/share/claude should be Optional (user may not have claude installed)")

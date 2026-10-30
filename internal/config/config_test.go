@@ -679,7 +679,7 @@ func TestValidate(t *testing.T) {
 				Sandbox: SandboxConfig{Isolation: "podman"},
 			},
 			wantErr: true,
-			errMsg:  "invalid isolation backend",
+			errMsg:  "invalid isolation backend \"podman\": must be one of: auto, bwrap, docker, krun, seatbelt",
 		},
 		{
 			name: "valid isolation backends",
@@ -692,6 +692,13 @@ func TestValidate(t *testing.T) {
 			name: "valid krun isolation backend",
 			cfg: &Config{
 				Sandbox: SandboxConfig{Isolation: IsolationKrun},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid seatbelt isolation backend",
+			cfg: &Config{
+				Sandbox: SandboxConfig{Isolation: IsolationSeatbelt},
 			},
 			wantErr: false,
 		},
@@ -1216,6 +1223,7 @@ func TestSandboxConfig_GetIsolation(t *testing.T) {
 		{IsolationBwrap, IsolationBwrap},
 		{IsolationDocker, IsolationDocker},
 		{IsolationKrun, IsolationKrun},
+		{IsolationSeatbelt, IsolationSeatbelt},
 	}
 
 	for _, tt := range tests {

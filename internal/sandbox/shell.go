@@ -69,11 +69,15 @@ func BuildShellCommand(cfg *Config, args []string) []string {
 }
 
 func buildFishCommand(cfg *Config, args []string) []string {
-	miseActivation := "if command -q mise; mise activate fish | source; end"
+	miseActivation := "if command -q mise; mise activate fish | source; end" + commandPathPrefix(cfg)
 
 	if len(args) == 0 {
 		greeting := fmt.Sprintf(`set -gx fish_greeting "🔒 Sandbox: %s | .env blocked | No SSH/git push"`, escapeForFishDoubleQuote(cfg.ProjectName))
 		fishInit := miseActivation + "; " + greeting + "; exec fish"
+		if cfg.CommandPathPrefix != "" {
+			// fish reads its rc again on exec; --init-command runs afterwards.
+			fishInit += " --init-command " + shellwrap.FishQuote(strings.TrimPrefix(commandPathPrefix(cfg), "; "))
+		}
 		return []string{cfg.ShellPath, "-c", fishInit}
 	}
 
@@ -83,7 +87,7 @@ func buildFishCommand(cfg *Config, args []string) []string {
 }
 
 func buildBashCommand(cfg *Config, args []string) []string {
-	miseActivation := `if command -v mise &>/dev/null; then eval "$(mise activate bash)"; fi`
+	miseActivation := `if command -v mise &>/dev/null; then eval "$(mise activate bash)"; fi` + commandPathPrefix(cfg)
 
 	if len(args) == 0 {
 		// Set PS1 prompt with sandbox indicator
@@ -98,7 +102,7 @@ func buildBashCommand(cfg *Config, args []string) []string {
 }
 
 func buildZshCommand(cfg *Config, args []string) []string {
-	miseActivation := `if command -v mise &>/dev/null; then eval "$(mise activate zsh)"; fi`
+	miseActivation := `if command -v mise &>/dev/null; then eval "$(mise activate zsh)"; fi` + commandPathPrefix(cfg)
 
 	if len(args) == 0 {
 		// Set PROMPT with sandbox indicator
@@ -110,6 +114,16 @@ func buildZshCommand(cfg *Config, args []string) []string {
 	cmdString := shellJoinArgs(args, cfg.Shell)
 	zshCmd := miseActivation + "; " + cmdString
 	return []string{cfg.ShellPath, "-c", zshCmd}
+}
+
+func commandPathPrefix(cfg *Config) string {
+	if cfg.CommandPathPrefix == "" {
+		return ""
+	}
+	if cfg.Shell == ShellFish {
+		return "; set -gx PATH " + shellwrap.FishQuote(cfg.CommandPathPrefix) + " $PATH"
+	}
+	return "; export PATH=" + shellwrap.PosixQuote(cfg.CommandPathPrefix) + ":\"$PATH\""
 }
 
 // shellJoinArgs joins arguments with proper shell quoting.

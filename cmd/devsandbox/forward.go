@@ -158,6 +158,10 @@ func runForward(_ context.Context, name, bind string, portSpecs []string) error 
 		}
 	}
 
+	if !sess.CanForward() {
+		return fmt.Errorf("session %q: port forwarding is unavailable for native or no-network-namespace sessions (backend %q)", sess.Name, sess.Backend)
+	}
+
 	// 3. Parse all port specs.
 	type portMapping struct{ sandboxPort, hostPort int }
 	mappings := make([]portMapping, 0, len(portSpecs))

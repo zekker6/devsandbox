@@ -19,12 +19,19 @@ import (
 type Session struct {
 	Name           string          `json:"name"`
 	PID            int             `json:"pid"`
-	NetworkNS      string          `json:"network_ns"`
+	Backend        string          `json:"backend,omitempty"`
+	NetworkNS      string          `json:"network_ns,omitempty"`
 	StartedAt      time.Time       `json:"started_at"`
 	WorkDir        string          `json:"work_dir"`
 	ProxyPort      int             `json:"proxy_port,omitempty"`
 	ForwardedPorts []ForwardedPort `json:"forwarded_ports,omitempty"`
 	Worktree       *WorktreeInfo   `json:"worktree,omitempty"`
+}
+
+// CanForward reports whether this session has a network namespace that can
+// be used for port forwarding. Older namespace records have no Backend.
+func (s *Session) CanForward() bool {
+	return s.NetworkNS != "" && s.Backend != "seatbelt"
 }
 
 // WorktreeInfo records the git worktree this session is rooted at, if any.

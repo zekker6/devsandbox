@@ -290,11 +290,12 @@ See [Use Cases: Avoiding GitHub Rate Limits](use-cases.md#avoiding-github-rate-l
 
 ```toml
 [sandbox]
-# Isolation backend: "auto", "bwrap", "docker", or "krun"
+# Isolation backend: "auto", "bwrap", "docker", "krun", or "seatbelt"
 # - "auto" (default): bwrap on Linux, docker on macOS
 # - "bwrap": bubblewrap (Linux only)
 # - "docker": Docker containers (Linux, macOS)
 # - "krun": libkrun microVM (experimental, opt-in; never auto-selected)
+# - "seatbelt": native macOS tools (experimental, opt-in; never auto-selected)
 isolation = "auto"
 
 # Docker-specific settings (only used when isolation = "docker")
@@ -309,6 +310,18 @@ isolation = "auto"
 # When false: containers are removed on exit
 keep_container = true
 ```
+
+#### Seatbelt native macOS backend (experimental)
+
+Select with `--isolation=seatbelt` or `[sandbox] isolation = "seatbelt"`. `auto` remains Docker on macOS and bwrap on Linux. Seatbelt runs native host binaries without Docker, a VM or images, using deprecated `sandbox-exec` and unsupported SBPL policies.
+
+It uses a separate private copied home, with a sandbox name ending in `-seatbelt`. Config copies refresh each launch under `split`, while nested persistent data and caches survive. Persistent overlay copies are seeded once, do not merge later host changes, and can consume substantial disk space. Read-only data and installations can use host-backed links instead of copies. Under `split`, installed mise versions are linked read-only while new sandbox-only versions remain private; existing private versions are preserved. Configuration remains copied, file overlays become read-only, and native-home writes outside declared temporary bindings persist.
+
+Seatbelt rejects custom mounts, resource caps, port forwarding and auto-detection, global or tool `readwrite` mount modes, multi-layer tool overlays, remapping outside its private home, `--worktree` creation and concurrent native sessions for one project. Optional active, host-terminal and shared-temp integrations detach with informational notices; explicit unsupported requests fail.
+
+Git `readonly` uses a protected command wrapper to select sanitized snapshots per invocation, including nested repositories and registered linked worktrees. Original metadata stays inaccessible and refs remain fixed at launch. Git `disabled` allows regular project `.git` writes without importing host authentication or configuration; linked worktrees require `readonly`, and `readwrite` is rejected. Native launches appear in `devsandbox sessions` but cannot be forwarded.
+
+Unix sockets are allowed only within the private `$TMPDIR` and `$XDG_RUNTIME_DIR`. IP listeners, host sockets and Mach services remain denied. Ordinary outbound IP works without proxy mode; `--proxy` permits direct outbound only to the actual authenticated localhost proxy port. Proxy filters still govern destinations reached through it. See [Seatbelt setup and limitations](getting-started/seatbelt.md), including macOS TLS service restrictions and validation requirements.
 
 #### krun microVM backend (experimental)
 
@@ -438,7 +451,7 @@ this experimental release:
 ### Resource Limits
 
 `[sandbox.resources]` caps what the sandbox may consume. It is backend-neutral -
-the same block applies whether you run bwrap, docker or krun.
+the same block applies whether you run bwrap, docker or krun. Seatbelt cannot enforce these caps and rejects configured limits rather than running unlimited.
 
 ```toml
 [sandbox.resources]
@@ -461,7 +474,7 @@ All three fields are optional. Defaults differ by backend:
 Only krun applies defaults. On bwrap and docker an unset field means unlimited,
 so the sandbox behaves exactly as it did before you added the block.
 
-`memory` bounds the sandbox's **resident memory** on every backend. What it does
+`memory` bounds the sandbox's **resident memory** on bwrap, docker and krun. What it does
 to *swap* differs, so on a host with swap the same value is not the same
 guarantee everywhere:
 
@@ -561,7 +574,7 @@ as a shell does.
 # use_embedded = true
 
 # Hide .env files from the sandbox (default: true)
-# When true, matching files are overlaid with /dev/null.
+# When true, matching files are masked with /dev/null, or denied on Seatbelt.
 # Set to false if sandboxed tools need to read .env files directly.
 # hide_env_files = true
 
@@ -594,7 +607,7 @@ its includes; a project `.devsandbox.toml` that sets it is ignored with a warnin
 
 **`hide_env_files`** (default `true`) is the setting behind the [`.env` row of the Security
 Model](sandboxing.md#security-model): files matching `.env` and `.env.*` in the project are overlaid
-with `/dev/null` so sandboxed code cannot read them. Which files are in scope - and which are not -
+with `/dev/null` on bwrap and container backends so sandboxed code cannot read them. Seatbelt uses policy denials instead of empty-file masks, including for `config_visibility`; denied access returns a permission error. Which files are in scope on mount-based backends - and which are not -
 is described under [Environment Files](sandboxing.md#whats-not-available-by-default).
 
 Set it to `false`, or pass `--no-hide-env` for a single run, when a tool inside the sandbox has to
@@ -653,7 +666,7 @@ When a rule matches a symlink to a file, the mount is applied to the resolved ta
 
 ### Port Forwarding
 
-Forward TCP/UDP ports between host and sandbox. Requires network isolation (proxy mode).
+Forward TCP/UDP ports between host and sandbox. Requires network isolation (proxy mode). Seatbelt rejects port forwarding and `auto_detect`; native sessions have no private network namespace.
 
 ```toml
 [port_forwarding]
@@ -748,7 +761,7 @@ Ports can also be forwarded on-the-fly to running sandboxes. See [Sandboxing: Ru
 
 ### Overlay Settings
 
-Global overlayfs settings control the default mount mode for all tool bindings:
+Global overlayfs settings control the default mount mode for all tool bindings. Seatbelt implements these as [private copies](getting-started/seatbelt.md#files-and-private-home), not overlays, and rejects `readwrite`:
 
 ```toml
 [overlay]
@@ -776,6 +789,8 @@ Use a broader mode only when you explicitly trust the project and need write-thr
 Each tool can have its own configuration section under `[tools.<name>]`.
 
 #### Git
+
+Seatbelt supports only `readonly` and `disabled`, with [snapshot behavior](getting-started/seatbelt.md#git) rather than the mount behavior below. It rejects host credential sharing through `readwrite`.
 
 ```toml
 [tools.git]

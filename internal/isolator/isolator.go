@@ -1,4 +1,4 @@
-// Package isolator provides an abstraction over sandbox backends (bwrap, docker).
+// Package isolator provides an abstraction over sandbox backends (bwrap, docker, krun, seatbelt).
 package isolator
 
 import (
@@ -24,6 +24,8 @@ const (
 	// BackendKrun runs the sandbox image inside a libkrun microVM (podman +
 	// --runtime krun) for hardware-level isolation of untrusted code.
 	BackendKrun Backend = "krun"
+	// BackendSeatbelt uses Seatbelt for isolation (macOS only).
+	BackendSeatbelt Backend = "seatbelt"
 	// BackendAuto automatically selects the best available backend.
 	BackendAuto Backend = "auto"
 )
@@ -57,6 +59,11 @@ type RunConfig struct {
 	// Receives the PID of a process inside the sandbox network namespace and
 	// the namespace path. Can be nil.
 	OnSandboxStart func(nsPID int, nsPath string)
+
+	// OnNativeStart receives the real workload PID after a native process starts.
+	// An error aborts the launch and kills and reaps its process group. Native
+	// launches do not call OnSandboxStart. Can be nil.
+	OnNativeStart func(pid int) error
 
 	// SandboxName is the human-readable session name (from --name or auto-generated).
 	SandboxName string
@@ -255,6 +262,8 @@ func Detect(requested Backend) (Backend, error) {
 		return BackendDocker, nil
 	case BackendKrun:
 		return BackendKrun, nil
+	case BackendSeatbelt:
+		return BackendSeatbelt, nil
 	case BackendAuto:
 		return autoDetect()
 	default:
@@ -319,6 +328,12 @@ func New(backend Backend, opts ...Option) (Isolator, error) {
 		return iso, nil
 	case BackendKrun:
 		iso := NewKrunIsolator(o.krunConfig())
+		if err := iso.Available(); err != nil {
+			return nil, err
+		}
+		return iso, nil
+	case BackendSeatbelt:
+		iso := NewSeatbeltIsolator(SeatbeltConfig{Limits: o.limits})
 		if err := iso.Available(); err != nil {
 			return nil, err
 		}

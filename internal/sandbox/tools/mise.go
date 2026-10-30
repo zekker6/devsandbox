@@ -46,6 +46,7 @@ func (m *Mise) Bindings(homeDir, sandboxHome string) []Binding {
 		// attack surface (H6 in docs/security-assessment-2026-04-04.md).
 		{
 			Source:   filepath.Join(homeDir, ".local", "bin"),
+			Category: CategoryData,
 			Type:     MountBind,
 			ReadOnly: true,
 			Optional: true,
