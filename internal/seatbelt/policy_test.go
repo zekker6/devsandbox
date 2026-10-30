@@ -191,6 +191,16 @@ func TestProfileQuotesUnixSocketRoots(t *testing.T) {
 	}
 }
 
+func TestProfileBaselineRootDirectory(t *testing.T) {
+	profile := mustProfile(t, Policy{})
+	if !strings.Contains(profile, "(allow file-read* (literal \"/\"))\n") {
+		t.Fatal("baseline must allow reading the root directory for dyld startup")
+	}
+	if strings.Count(profile, `(literal "/")`) != 1 {
+		t.Fatal("baseline root access must be limited to the read-only rule")
+	}
+}
+
 func TestProfileBaselineDoesNotExposeHostData(t *testing.T) {
 	profile := mustProfile(t, Policy{})
 	if !strings.HasPrefix(profile, "(version 1)\n(deny default)\n") {

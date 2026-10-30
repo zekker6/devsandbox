@@ -241,6 +241,8 @@ const baseProfile = `(version 1)
   (sysctl-name "kern.version")
   (sysctl-name "kern.maxfilesperproc")
   (sysctl-name "kern.usrstack64"))
+; dyld/libignition needs root-directory reads during startup, not recursive access.
+(allow file-read* (literal "/"))
 (allow file-read*
   (subpath "/System")
   (subpath "/usr")

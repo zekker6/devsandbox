@@ -40,6 +40,8 @@ func TestSeatbeltHelper(t *testing.T) {
 		if err == nil {
 			_, err = os.Stdout.Write(data)
 		}
+	case "read-dir":
+		_, err = os.ReadDir(args[2])
 	case "write":
 		err = os.WriteFile(args[2], []byte("written"), 0600)
 	case "chmod":
@@ -590,6 +592,37 @@ func TestEnforcementPrivateUnixSockets(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckBaseline(t *testing.T) {
+	profile := mustProfile(t, Policy{})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := Check(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		program, arg, output string
+	}{
+		{"/bin/echo", "seatbelt-started", "seatbelt-started\n"},
+		{"/usr/bin/uname", "-s", "Darwin\n"},
+	} {
+		t.Run(filepath.Base(tc.program), func(t *testing.T) {
+			output, err := nativeCommand(t, profile, tc.program, tc.arg)
+			if err != nil || string(output) != tc.output {
+				t.Fatalf("system program startup: %v; output %q, want %q", err, output, tc.output)
+			}
+		})
+	}
+}
+
+func TestEnforcementBaselineRootDirectory(t *testing.T) {
+	secret := filepath.Join(nativeRoot(t), "host-secret")
+	nativeFile(t, secret)
+	profile, exe := nativeProfile(t, Policy{})
+	nativeOperation(t, profile, exe, true, "read-dir", "/")
+	nativeOperation(t, profile, exe, false, "read", secret)
+	nativeOperation(t, profile, exe, false, "write", secret)
 }
 
 func TestCheckRejectsInvalidProfile(t *testing.T) {

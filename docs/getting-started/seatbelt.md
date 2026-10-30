@@ -26,7 +26,7 @@ Linux tests can compile both Darwin architectures, but cannot validate macOS enf
 
 ## Files and private home
 
-System roots and selected tool sources are readable. The project and a private native `HOME` are writable, subject to the denials below. The rest of your host home is not generally accessible. Selected host tool sources remain accessible read-only at their original paths so absolute shebangs can find their interpreters.
+System roots and selected tool sources are readable. The root directory `/` itself is readable for macOS dyld/libignition startup; this permits listing its entries, not recursively reading their contents. Without that literal-directory grant, the preflight can abort before `/usr/bin/true` starts. The project and a private native `HOME` are writable, subject to the denials below. The rest of your host home is not generally accessible. Selected host tool sources remain accessible read-only at their original paths so absolute shebangs can find their interpreters.
 
 The native home lives in separate sandbox state whose name ends in `-seatbelt`. It does not reuse a Docker volume or bwrap home. This is a copied home, not a mount namespace or a kernel overlay filesystem:
 

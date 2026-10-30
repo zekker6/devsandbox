@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Fixed Seatbelt's `signal: abort trap` preflight failure when the macOS loader could not read the root directory. The fix permits root-directory reads without granting recursive host-file access. See [Seatbelt filesystem access](docs/getting-started/seatbelt.md#files-and-private-home).
 - Read-only Git now strips embedded credentials from quoted and continued remote URLs, including URLs on the same line as a section header. See [Safe Git configuration](docs/configuration.md#what-the-safe-copy-carries).
 - Generated Starship, tmux, Oh My Zsh and Powerlevel10k configuration now reaches the correct sandbox home on Docker and krun instead of being mounted where the tools never read it. See [Prompt tools](docs/tools.md#prompt-tools).
 - Reduced the default Docker and krun image size without removing bundled tools, so first launches download less and the image takes less disk space. See [Docker Image](docs/sandboxing.md#docker-image).
