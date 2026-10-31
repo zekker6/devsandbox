@@ -2,16 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.0...HEAD)
+## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.1...HEAD)
 
 ### Added
 
 - Pi is now preinstalled in the default Docker image, so Docker and krun users can run `devsandbox pi` without installing it themselves. See [Pi Coding Agent](docs/tools.md#pi-coding-agent).
 
+### Changed
+
+- Updated embedded bubblewrap to 0.13.1. See [Sandbox Settings](docs/configuration.md#sandbox-settings).
+- Updated embedded `pasta` to passt `2026_10_02.cba3570`, from `2026_09_25.df90211`. See [Sandbox Settings](docs/configuration.md#sandbox-settings).
+
 ### Fixed
 
 - New sandboxes use only the project hash when their directory name would exceed 24 bytes, reducing Unix socket path failures such as herdr startup on macOS. Existing sandboxes keep their paths and state, and full names remain in metadata and listings. See [Project Naming](docs/sandboxing.md#project-naming).
 - Reduced the default Docker and krun image size without removing bundled tools, so first launches download less and the image takes less disk space. See [Docker Image](docs/sandboxing.md#docker-image).
+
+## [v0.23.1](https://github.com/zekker6/devsandbox/releases/tag/v0.23.1) - 2026-10-12
+
+### Fixed
+
 - Port auto-forwarding now honors project and include settings, detects IPv6 listeners, and reaches apps bound to a specific sandbox address. Failed setup is retried, and idle client connections no longer stall discovery after an app stops. Runtime failures reach the terminal instead of silently dropping connections. See [Runtime Port Forwarding](docs/sandboxing.md#runtime-port-forwarding).
 
 ## [v0.23.0](https://github.com/zekker6/devsandbox/releases/tag/v0.23.0) - 2026-09-30
