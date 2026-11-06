@@ -64,7 +64,7 @@ jobs:
     # (kernel.apparmor_restrict_unprivileged_userns) refuses the embedded
     # bwrap devsandbox runs, so every sandbox test fails with
     # "setting up uid map: Permission denied" instead of skipping.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [lint]
     steps:
       - name: Checkout
