@@ -1130,6 +1130,16 @@ herdr can remember which agent a pane was running and, after the server restarts
 
 The host's real herdr socket is **not** bind-mounted into the sandbox, and neither is the script relocation directory.
 
+### How the proxy socket reaches the sandbox
+
+On Linux with bwrap or Docker, the proxy socket is bind-mounted into the sandbox and `HERDR_SOCKET_PATH` points at it. That does not work where the sandbox home is not a native bind mount: on macOS the Docker backend keeps the home in a named volume, and the krun backend shares it over virtio-fs, and a unix socket bind-mounted into either accepts no connections. On those backends devsandbox runs a **socket relay** instead:
+
+- Once the container is ready and before the workload starts, devsandbox runs `devsandbox-shim socket-relay` inside the container as the sandbox user, with stdin and stdout attached to the devsandbox process on the host. The guest end listens on `$HERDR_SOCKET_PATH` and on `~/.config/herdr/herdr.sock`; every connection it accepts is multiplexed over that pipe, and the host end connects it to the proxy socket - the same filter, the same capabilities, the same scoping. The kitty proxy socket goes through the same relay.
+- Nothing listens on the host for it. The pipe belongs to the `docker exec` devsandbox started, so no other process on the host, and no other sandbox, can reach the relay. The host end answers only the socket names it registered itself, and a malformed frame from the guest ends the relay rather than being skipped.
+- The relay ends with the session: closing the pipe removes the guest sockets and their per-session directory.
+
+The relay lives in the image, so after upgrading devsandbox the image has to carry the matching shim: `docker pull ghcr.io/zekker6/devsandbox:latest`, `devsandbox image build`, then remove the kept container so it is recreated. With an older image the launch still proceeds, with a warning that names these steps and that the herdr socket is unreachable from the sandbox. The relay needs a kept container (`keep_container = true`, the default): an ephemeral `docker run --rm` session cannot be exec'd into, and such a launch warns that the sockets are unreachable for that run.
+
 The second socket path exists because a few subcommands bypass the environment variable. `herdr session list` connects directly to `<config dir>/herdr.sock` and reports the session `stopped` when that fails - which it always did in the sandbox, since the host socket is never mounted. That probe is `connect(2)` only, with no protocol traffic, so pointing it at the proxy makes the status correct without any request crossing the filter. It is the same filtered socket under a second name, so it grants no additional reach.
 
 ### Environment Variables

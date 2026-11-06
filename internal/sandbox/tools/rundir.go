@@ -18,12 +18,14 @@ const runDirName = ".run"
 // RunDirRoot returns the per-sandbox root holding the socket directories. It
 // is the path internal/reclaim reports for the location, taken from here so
 // the catalogue cannot drift from the directory cleanupStaleRunDirs sweeps.
-// root is sandboxHome on the host or homeDir inside the sandbox, as for runDir.
+// root is sandboxHome on the host or homeDir inside the sandbox, as for RunDir.
 func RunDirRoot(root string) string {
 	return filepath.Join(root, runDirName)
 }
 
-// runDir returns the socket directory owned by this devsandbox process.
+// RunDir returns the socket directory owned by this devsandbox process. It is
+// exported for the socket relay in internal/isolator, which derives the host
+// and guest socket paths from the same function the tools listen under.
 //
 // Sandbox home is keyed on the project, so concurrent sessions for the same
 // project share it. A socket at a fixed path there belongs to whichever session
@@ -33,13 +35,13 @@ func RunDirRoot(root string) string {
 //
 // Pass sandboxHome for the host-side path, or homeDir for the same directory as
 // seen from inside the sandbox, where sandboxHome is mounted at homeDir.
-func runDir(root string) string {
+func RunDir(root string) string {
 	return filepath.Join(RunDirRoot(root), strconv.Itoa(os.Getpid()))
 }
 
 // ensureRunDir creates this process's socket directory under sandboxHome.
 func ensureRunDir(sandboxHome string) (string, error) {
-	dir := runDir(sandboxHome)
+	dir := RunDir(sandboxHome)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create run dir: %w", err)
 	}

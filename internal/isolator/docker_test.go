@@ -1932,6 +1932,7 @@ func TestRemapEnvValue(t *testing.T) {
 		{"path below the project dir", projectDir + "/.mise.toml", projectDir + "/.mise.toml"},
 		{"unix: scheme on a project path", "unix:" + projectDir + "/a.sock", "unix:" + projectDir + "/a.sock"},
 		{"KITTY_LISTEN_ON unix: scheme", "unix:/home/u/.run/1/kitty.sock", "unix:/home/sandboxuser/.run/1/kitty.sock"},
+		{"unrelated value", "/opt/tool", "/opt/tool"},
 		{"DBUS_SESSION_BUS_ADDRESS unix:path= scheme", "unix:path=/home/u/.run/1/bus", "unix:path=/home/sandboxuser/.run/1/bus"},
 		{"DOCKER_HOST unix:// scheme", "unix:///home/u/.run/1/docker.sock", "unix:///home/sandboxuser/.run/1/docker.sock"},
 		{"bare home path", "/home/u/.cache/x", "/home/sandboxuser/.cache/x"},
@@ -2121,13 +2122,16 @@ func TestBuildExecArgs_CarriesCurrentProxyEnv(t *testing.T) {
 }
 
 // TestBuildExecArgs_NoProxyEnvWhenProxyOff pins that a non-proxy session exec
-// carries no proxy variables at all.
+// carries no proxy variables at all. Tool variables still ride on `-e`, so
+// the check is on the proxy names, not on the flag.
 func TestBuildExecArgs_NoProxyEnvWhenProxyOff(t *testing.T) {
 	iso := NewDockerIsolator(DockerConfig{})
-	cfg := &Config{Shell: "/bin/bash", ProxyAuthToken: "tok"}
+	cfg := &Config{Shell: "/bin/bash", HomeDir: "/home/testuser", ProxyAuthToken: "tok"}
 	args := iso.buildExecArgs(cfg, "container")
-	if slices.Contains(args, "-e") {
-		t.Errorf("exec args carry -e with the proxy off: %v", args)
+	for _, arg := range args {
+		if strings.Contains(strings.ToUpper(arg), "PROXY") || strings.Contains(arg, "tok") {
+			t.Errorf("exec args carry a proxy variable with the proxy off: %v", args)
+		}
 	}
 	if env := iso.commandEnv(cfg); env != nil {
 		t.Errorf("commandEnv = %v with the proxy off, want nil so the CLI inherits unchanged", env)

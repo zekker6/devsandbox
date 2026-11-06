@@ -83,7 +83,7 @@ func (p *Portal) SetLogger(logger ErrorLogger) {
 // project cannot unlink a live socket. Its own subdirectory keeps the other
 // tools' sockets out of the read-only bind published at XDG_RUNTIME_DIR.
 func (p *Portal) proxySocketDir(sandboxHome string) string {
-	return filepath.Join(runDir(sandboxHome), "dbus")
+	return filepath.Join(RunDir(sandboxHome), "dbus")
 }
 
 // buildProxyArgs constructs xdg-dbus-proxy arguments.

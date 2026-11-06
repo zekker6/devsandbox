@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -576,9 +577,9 @@ func TestHerdr_EnvironmentMatchesKittyConvention(t *testing.T) {
 		}
 	}
 
-	want := filepath.Join(runDir(homeDir), herdrProxySocketName)
+	want := filepath.Join(RunDir(homeDir), herdrProxySocketName)
 	if herdrSock != want {
-		t.Errorf("HERDR_SOCKET_PATH = %q, want %q (runDir(homeDir), as kitty uses)", herdrSock, want)
+		t.Errorf("HERDR_SOCKET_PATH = %q, want %q (RunDir(homeDir), as kitty uses)", herdrSock, want)
 	}
 }
 
@@ -612,7 +613,7 @@ func TestHerdr_BindingsExposeProxyAtDefaultPath(t *testing.T) {
 	if sock.Dest != wantDest {
 		t.Errorf("dest = %q, want %q (the path herdr's client derives on its own)", sock.Dest, wantDest)
 	}
-	wantSrc := filepath.Join(runDir(sandboxHome), herdrProxySocketName)
+	wantSrc := filepath.Join(RunDir(sandboxHome), herdrProxySocketName)
 	if sock.Source != wantSrc {
 		t.Errorf("source = %q, want the proxy socket %q", sock.Source, wantSrc)
 	}
@@ -953,5 +954,41 @@ func TestHerdr_OutsideHerdrPaneNothingChanges(t *testing.T) {
 	}
 	if got := h.Bindings("/home/u", sandboxHome); got != nil {
 		t.Errorf("Bindings() = %v outside a herdr session, want none", got)
+	}
+}
+
+// The default-path socket lives inside the sandbox home, so on a backend that
+// mounts the home at /home/sandboxuser the destination has to be rewritten;
+// without HomeRelativeDest the Docker conversion left it at the host home path,
+// where the guest's herdr never looks.
+func TestHerdr_DefaultPathSocketBindingIsHomeRelative(t *testing.T) {
+	t.Setenv("HERDR_ENV", "1")
+	h := &Herdr{proxy: &herdrproxy.Proxy{}}
+	for _, b := range h.Bindings("/home/zekker", "/host/sandbox/home") {
+		if strings.HasSuffix(b.Dest, herdrProxySocketName) && !b.HomeRelativeDest {
+			t.Fatalf("binding to %q is not HomeRelativeDest", b.Dest)
+		}
+	}
+}
+
+// RelaySockets names the proxy socket for backends that cannot bind-mount a
+// unix socket, with the default client path as an alias so `herdr session
+// list` keeps working there too. It is empty while no proxy runs: a relay
+// listener with nothing behind it would be a dead endpoint.
+func TestHerdr_RelaySockets(t *testing.T) {
+	t.Setenv("HERDR_ENV", "1")
+	const homeDir = "/home/zekker"
+
+	if got := (&Herdr{}).RelaySockets(homeDir); len(got) != 0 {
+		t.Fatalf("RelaySockets with no proxy = %+v, want none", got)
+	}
+
+	got := (&Herdr{proxy: &herdrproxy.Proxy{}}).RelaySockets(homeDir)
+	want := []RelaySocket{{
+		Name:    herdrProxySocketName,
+		Aliases: []string{filepath.Join(homeDir, ".config", "herdr", herdrProxySocketName)},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RelaySockets = %+v, want %+v", got, want)
 	}
 }

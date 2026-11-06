@@ -53,6 +53,13 @@ const (
 )
 
 func main() {
+	// The socket relay is a separate entry point the host execs into a
+	// running container as the sandbox user; it never touches the root-phase
+	// setup below and does not share its log file.
+	if len(os.Args) > 1 && os.Args[1] == relaySubcommand {
+		os.Exit(runSocketRelay(os.Args[2:]))
+	}
+
 	_ = notice.Setup("/tmp/devsandbox-shim.log", os.Getenv("DEVSANDBOX_DEBUG") != "", nil)
 	defer notice.Flush()
 

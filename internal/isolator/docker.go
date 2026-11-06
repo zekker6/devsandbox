@@ -104,6 +104,10 @@ type DockerIsolator struct {
 	networkName string          // per-session network
 	gatewayIP   string          // per-session network gateway IP (proxy bind address)
 	logger      *logging.ComponentLogger
+	// relaySockets is set when the engine cannot bind-mount a unix socket into
+	// the guest, so tool proxy sockets go through the socket relay instead;
+	// see needsSocketRelay.
+	relaySockets bool
 }
 
 // SetLogger configures the logger for the Docker isolator.
@@ -144,7 +148,17 @@ func (d *DockerIsolator) logAlert(format string, args ...any) {
 
 // NewDockerIsolator creates a new Docker isolator.
 func NewDockerIsolator(cfg DockerConfig) *DockerIsolator {
-	return &DockerIsolator{config: cfg, engine: dockerEngine}
+	return newEngineIsolator(cfg, dockerEngine)
+}
+
+// newEngineIsolator is the constructor both backends share, so a decision
+// derived from the engine is made in one place.
+func newEngineIsolator(cfg DockerConfig, engine containerEngine) *DockerIsolator {
+	return &DockerIsolator{
+		config:       cfg,
+		engine:       engine,
+		relaySockets: needsSocketRelay(runtime.GOOS, engine.microVM),
+	}
 }
 
 // resolveDockerfile determines the Dockerfile path to use.
@@ -436,6 +450,9 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 		// resolved and the session registered for port forwarding (modeled on the
 		// bwrap StartWithPasta -> OnSandboxStart -> Wait flow). Docker and
 		// krun-without-proxy keep the simple blocking run.
+		if d.relaySockets && len(d.relaySocketsFor(isoCfg)) > 0 {
+			notice.Alert("%v; tool sockets are unreachable from the sandbox for this run", errNoRelayForRun)
+		}
 		if d.usesMicroVMSession(sandboxCfg.ProxyEnabled) {
 			return d.runMicroVMSession(ctx, cmd, result.ContainerName, cfg.OnSandboxStart, isoCfg.SandboxHome, isoCfg.ProxyPort)
 		}
@@ -465,6 +482,8 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 			notice.Warn("failed to install tools: %v", err)
 		}
 
+		stopRelay := d.startSocketRelayIfNeeded(ctx, result.BinaryPath, isoCfg, result.ContainerName)
+		defer stopRelay()
 		return execIntoContainer(d.execCommand(result.BinaryPath, isoCfg, result.ContainerName))
 
 	case DockerActionExec:
@@ -480,6 +499,8 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 			notice.Warn("failed to install tools: %v", err)
 		}
 
+		stopRelay := d.startSocketRelayIfNeeded(ctx, result.BinaryPath, isoCfg, result.ContainerName)
+		defer stopRelay()
 		return execIntoContainer(d.execCommand(result.BinaryPath, isoCfg, result.ContainerName))
 
 	default:
@@ -1105,7 +1126,8 @@ func (d *DockerIsolator) buildExecArgs(cfg *Config, containerName string) []stri
 	} else {
 		args = append(args, "-i")
 	}
-	args = append(args, "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	args = append(args, "-u", sandboxUserSpec())
+	args = append(args, d.toolEnvArgs(cfg)...)
 	args = append(args, d.proxyEnvArgs(cfg)...)
 	args = append(args, containerName)
 	if len(cfg.Command) > 0 {
@@ -1114,6 +1136,12 @@ func (d *DockerIsolator) buildExecArgs(cfg *Config, containerName string) []stri
 		args = append(args, cfg.Shell)
 	}
 	return args
+}
+
+// sandboxUserSpec is the `-u` value every workload-side exec runs as: the
+// invoking user's ids, which the shim provisioned as the sandbox user.
+func sandboxUserSpec() string {
+	return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 }
 
 // buildRunArgs builds arguments for docker run with --rm.
@@ -1778,6 +1806,14 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 					continue
 				}
 			}
+			// A unix socket bind-mounted into a named volume or a virtio-fs
+			// home accepts no connections, and the relay listens at the same
+			// guest path instead - a dead mount there would block the relay
+			// from creating its socket. Only socket sources are dropped;
+			// everything else binds as on Linux.
+			if d.relaySockets && isUnixSocket(b.Source) {
+				continue
+			}
 			dest := b.Dest
 			switch {
 			case dest == "":
@@ -1832,21 +1868,62 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 			}
 		}
 
-		// Get environment variables from tool.
-		// Remap paths: tools return paths relative to the host home directory,
-		// but inside the Docker container sandboxHome is at /home/sandboxuser.
-		for _, env := range tool.Environment(cfg.HomeDir, cfg.SandboxHome) {
-			if env.FromHost {
-				if val := os.Getenv(env.Name); val != "" {
-					envVars = append(envVars, env.Name+"="+val)
-				}
-			} else if env.Value != "" {
-				envVars = append(envVars, env.Name+"="+remapEnvValue(env.Value, cfg.HomeDir, cfg.ProjectDir))
-			}
-		}
+		envVars = append(envVars, toolEnv(cfg, tool)...)
 	}
 
 	return mounts, envVars, manifest
+}
+
+// toolEnv renders one tool's environment as NAME=VALUE pairs for the
+// container. Paths are remapped: tools spell them against the host home, but
+// inside the container the sandbox home is containerHome.
+func toolEnv(cfg *Config, tool tools.Tool) []string {
+	var envVars []string
+	for _, env := range tool.Environment(cfg.HomeDir, cfg.SandboxHome) {
+		if env.FromHost {
+			if val := os.Getenv(env.Name); val != "" {
+				envVars = append(envVars, env.Name+"="+val)
+			}
+		} else if env.Value != "" {
+			envVars = append(envVars, env.Name+"="+remapEnvValue(env.Value, cfg.HomeDir, cfg.ProjectDir))
+		}
+	}
+	return envVars
+}
+
+// toolEnvArgs renders the current tool environment as `-e` arguments for a
+// workload exec. A kept container was created with the environment of the
+// session that created it, and values keyed on that session - the per-pid
+// proxy socket paths herdr and kitty export - are dead for every later one;
+// `docker exec -e` overrides them for the workload. Tools are configured
+// here as getToolBindings does, since Environment may depend on it.
+func (d *DockerIsolator) toolEnvArgs(cfg *Config) []string {
+	globalCfg := tools.GlobalConfig{
+		DefaultMountMode: cfg.DefaultMountMode,
+		ProjectDir:       cfg.ProjectDir,
+		HomeDir:          cfg.HomeDir,
+		GitRepoRoot:      cfg.GitRepoRoot,
+		LaunchedAgent:    cfg.LaunchedAgent,
+	}
+	var args []string
+	for _, tool := range tools.Available(cfg.HomeDir) {
+		if configurable, ok := tool.(tools.ToolWithConfig); ok {
+			configurable.Configure(globalCfg, config.ToolSection(cfg.ToolsConfig, tool.Name()))
+		}
+		if config.ToolMountMode(cfg.ToolsConfig, tool.Name()) == "disabled" {
+			continue
+		}
+		for _, env := range toolEnv(cfg, tool) {
+			args = append(args, "-e", env)
+		}
+	}
+	return args
+}
+
+// isUnixSocket reports whether path is a unix socket on the host.
+func isUnixSocket(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode()&os.ModeSocket != 0
 }
 
 // remapEnvValue rewrites a tool environment value for the container, where the
@@ -1858,6 +1935,10 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 // (MISE_TRUSTED_CONFIG_PATHS, for a project under $HOME) must reach the guest
 // unchanged, or it names a directory nothing mounts.
 func remapEnvValue(value, homeDir, projectDir string) string {
+	if homeDir == "" {
+		// ReplaceAll with an empty pattern inserts between every byte.
+		return value
+	}
 	if projectDir != "" {
 		path := value
 		for _, scheme := range []string{"unix:path=", "unix://", "unix:"} {
