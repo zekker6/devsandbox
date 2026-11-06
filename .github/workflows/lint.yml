@@ -60,7 +60,11 @@ jobs:
 
   e2e:
     name: E2E Tests
-    runs-on: ubuntu-latest
+    # Pinned: on ubuntu-26.04 the system bwrap probe passes but AppArmor
+    # (kernel.apparmor_restrict_unprivileged_userns) refuses the embedded
+    # bwrap devsandbox runs, so every sandbox test fails with
+    # "setting up uid map: Permission denied" instead of skipping.
+    runs-on: ubuntu-24.04
     needs: [lint]
     steps:
       - name: Checkout
