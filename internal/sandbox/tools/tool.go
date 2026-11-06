@@ -361,6 +361,27 @@ type ToolWithAgentSessionDir interface {
 	AgentSessionDir(homeDir string) string
 }
 
+// RelaySocket is a proxy socket a tool listens on under RunDir(sandboxHome)
+// that must reach the sandbox through the socket relay on backends where a
+// unix socket cannot be bind-mounted (Docker on macOS, krun). Name is the
+// socket's file name in the run directory on both sides. Aliases are extra
+// guest paths the relay listens on for the same socket, spelled with the host
+// home prefix like a HomeRelativeDest binding, for clients that derive a
+// default path on their own instead of reading the environment.
+type RelaySocket struct {
+	Name    string
+	Aliases []string
+}
+
+// ToolWithRelaySockets is implemented by tools whose proxy socket lives in the
+// run directory. RelaySockets must return nothing while the proxy is not
+// running: a relay listener with nothing behind it is a dead endpoint.
+type ToolWithRelaySockets interface {
+	Tool
+
+	RelaySockets(homeDir string) []RelaySocket
+}
+
 // ToolWithHerdrLaunchScript is implemented by tools that declare a launch
 // capability and want the scripts they run restricted.
 //

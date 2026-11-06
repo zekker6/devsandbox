@@ -25,7 +25,7 @@ func reapedPID(t *testing.T) int {
 }
 
 func TestRunDir_IsScopedToProcess(t *testing.T) {
-	got := runDir("/sandbox/home")
+	got := RunDir("/sandbox/home")
 	want := filepath.Join("/sandbox/home", runDirName, strconv.Itoa(os.Getpid()))
 	if got != want {
 		t.Errorf("runDir = %q, want %q", got, want)
@@ -39,8 +39,8 @@ func TestEnsureRunDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureRunDir failed: %v", err)
 	}
-	if dir != runDir(sandboxHome) {
-		t.Errorf("ensureRunDir = %q, want %q", dir, runDir(sandboxHome))
+	if dir != RunDir(sandboxHome) {
+		t.Errorf("ensureRunDir = %q, want %q", dir, RunDir(sandboxHome))
 	}
 	info, err := os.Stat(dir)
 	if err != nil {

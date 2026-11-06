@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.2...HEAD)
 
+### Fixed
+
+- The herdr and kitty proxy sockets now reach the sandbox on macOS (Docker) and krun, where a bind-mounted unix socket accepts no connections and the sandbox home is not a host bind mount. The sockets go through a relay the image's shim runs over a `docker exec` pipe the host owns, so herdr's agent session reporting and restore work from inside a sandbox on macOS. The image has to be updated to carry the relay (`docker pull ghcr.io/zekker6/devsandbox:latest`, `devsandbox image build`, then recreate the kept container); an older image warns and starts without it. See [How the proxy socket reaches the sandbox](docs/tools.md#how-the-proxy-socket-reaches-the-sandbox).
+- On the Docker backend, a reused container now gets the current session's tool environment on the workload exec. The per-session proxy socket paths in `HERDR_SOCKET_PATH` and `KITTY_LISTEN_ON` were baked in at container creation, so every session after the first pointed at a socket that no longer existed.
+- The herdr proxy's default-path socket (`~/.config/herdr/herdr.sock`) was mounted at the host home path on the Docker backend instead of inside the container home, so `herdr session list` could not find it there.
+
 ## [v0.23.2](https://github.com/zekker6/devsandbox/releases/tag/v0.23.2) - 2026-10-31
 
 ### Added

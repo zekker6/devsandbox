@@ -85,7 +85,7 @@ func TestRegistry_NoWritableBindUnderHostHome(t *testing.T) {
 		zellijSocketDir: "zellij socket directory",
 		// devsandbox's own filtered proxy socket under the sandbox home, which
 		// connect(2) needs write permission on.
-		filepath.Join(runDir(sandboxHome), herdrProxySocketName): "herdr proxy socket",
+		filepath.Join(RunDir(sandboxHome), herdrProxySocketName): "herdr proxy socket",
 	}
 	// Per-tool settings that reach the widest writable set: zellij binds
 	// nothing until enabled, and readwrite is git's most permissive mode.

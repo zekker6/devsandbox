@@ -99,7 +99,7 @@ func (d *Docker) Available(homeDir string) bool {
 // process's run directory so that a concurrent session for the same project
 // cannot unlink a live socket.
 func (d *Docker) socketPath(sandboxHome string) string {
-	return filepath.Join(runDir(sandboxHome), dockerSocketName)
+	return filepath.Join(RunDir(sandboxHome), dockerSocketName)
 }
 
 // dockerConfig is the [tools.docker] section. It deliberately does not embed
@@ -136,7 +136,7 @@ func (d *Docker) Environment(homeDir, sandboxHome string) []EnvVar {
 	// The socket is created under sandboxHome on the host, but sandboxHome is
 	// mounted at $HOME inside the sandbox, so the same relative path under
 	// homeDir is what the sandbox sees.
-	sandboxVisiblePath := filepath.Join(runDir(homeDir), dockerSocketName)
+	sandboxVisiblePath := filepath.Join(RunDir(homeDir), dockerSocketName)
 	return []EnvVar{
 		{Name: "DOCKER_HOST", Value: "unix://" + sandboxVisiblePath},
 	}

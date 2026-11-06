@@ -122,13 +122,22 @@ func (k *Kitty) Environment(homeDir, _ string) []EnvVar {
 		return nil
 	}
 	return []EnvVar{
-		{Name: "KITTY_LISTEN_ON", Value: "unix:" + filepath.Join(runDir(homeDir), kittyProxySocketName)},
+		{Name: "KITTY_LISTEN_ON", Value: "unix:" + filepath.Join(RunDir(homeDir), kittyProxySocketName)},
 		{Name: "KITTY_WINDOW_ID", FromHost: true},
 		{Name: "KITTY_PID", FromHost: true},
 	}
 }
 
 func (k *Kitty) ShellInit(_ string) string { return "" }
+
+// RelaySockets implements ToolWithRelaySockets. No alias: the kitty client
+// only ever reads KITTY_LISTEN_ON.
+func (k *Kitty) RelaySockets(_ string) []RelaySocket {
+	if k.proxy == nil {
+		return nil
+	}
+	return []RelaySocket{{Name: kittyProxySocketName}}
+}
 
 // aggregate returns capabilities + launch patterns collected from every
 // available tool implementing ToolWithKittyRequirements (and optionally
@@ -222,7 +231,7 @@ func (k *Kitty) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		return fmt.Errorf("kitty: %w", err)
 	}
 
-	listenPath := filepath.Join(runDir(sandboxHome), kittyProxySocketName)
+	listenPath := filepath.Join(RunDir(sandboxHome), kittyProxySocketName)
 	if err := checkSocketPath(listenPath); err != nil {
 		return fmt.Errorf("kitty: %w", err)
 	}
@@ -274,9 +283,10 @@ func (k *Kitty) Check(_ string) CheckResult {
 
 // Ensure interfaces are implemented.
 var (
-	_ Tool           = (*Kitty)(nil)
-	_ ToolWithConfig = (*Kitty)(nil)
-	_ ToolWithCheck  = (*Kitty)(nil)
-	_ ActiveTool     = (*Kitty)(nil)
-	_ ToolWithLogger = (*Kitty)(nil)
+	_ Tool                 = (*Kitty)(nil)
+	_ ToolWithConfig       = (*Kitty)(nil)
+	_ ToolWithCheck        = (*Kitty)(nil)
+	_ ActiveTool           = (*Kitty)(nil)
+	_ ToolWithLogger       = (*Kitty)(nil)
+	_ ToolWithRelaySockets = (*Kitty)(nil)
 )

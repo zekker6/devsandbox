@@ -69,7 +69,7 @@ var krunEngine = containerEngine{
 // entrypoint, tool bindings, .env hiding, proxy wiring) and differs only in the
 // container engine descriptor.
 func NewKrunIsolator(cfg DockerConfig) *DockerIsolator {
-	return &DockerIsolator{config: cfg, engine: krunEngine}
+	return newEngineIsolator(cfg, krunEngine)
 }
 
 // MicroVMCheck is one structured prerequisite result for the krun microVM

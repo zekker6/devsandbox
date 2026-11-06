@@ -962,6 +962,7 @@ The Docker backend:
 4. **Tool Configs**: Mounts nvim, tmux, starship configs read-only from host
 5. **Host mise Tools** (Linux hosts): Mounts `~/.local/share/mise/installs` read-only and seeds the versions into the sandbox on startup, so host-installed tools resolve without a reinstall (see [Tools: mise](tools.md#tool-management-with-mise))
 6. **Proxy Support**: Uses `host.docker.internal` for proxy connections
+7. **Tool Socket Relay** (macOS and krun): The herdr and kitty proxy sockets cannot be bind-mounted into a named volume or a virtio-fs home, so they reach the sandbox through a relay the shim runs over the stdio of a `docker exec` devsandbox owns; see [How the proxy socket reaches the sandbox](tools.md#how-the-proxy-socket-reaches-the-sandbox)
 
 ### Docker Image
 

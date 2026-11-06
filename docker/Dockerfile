@@ -7,6 +7,7 @@ COPY cmd/devsandbox-shim/ ./cmd/devsandbox-shim/
 COPY internal/fsutil/ ./internal/fsutil/
 COPY internal/logrotate/ ./internal/logrotate/
 COPY internal/notice/ ./internal/notice/
+COPY internal/sockrelay/ ./internal/sockrelay/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /devsandbox-shim ./cmd/devsandbox-shim
 
 # ---- Stage 2: Runtime ----

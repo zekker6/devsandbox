@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -154,7 +155,7 @@ func TestKitty_AggregateAndStart_StartsProxyWhenConsumerPresent(t *testing.T) {
 	if k.proxy == nil {
 		t.Fatal("expected proxy to be started when consumer present")
 	}
-	expected := filepath.Join(runDir(sandboxHome), kittyProxySocketName)
+	expected := filepath.Join(RunDir(sandboxHome), kittyProxySocketName)
 	if _, err := os.Stat(expected); err != nil {
 		t.Errorf("proxy socket not created: %v", err)
 	}
@@ -240,5 +241,19 @@ func TestKitty_DisabledMode(t *testing.T) {
 
 	if k.proxy != nil {
 		t.Error("disabled mode must not start proxy")
+	}
+}
+
+// kitty's proxy socket needs the same relay as herdr's on backends that
+// cannot bind-mount a unix socket; it has no default-path alias because the
+// kitty client only ever reads KITTY_LISTEN_ON.
+func TestKitty_RelaySockets(t *testing.T) {
+	if got := (&Kitty{}).RelaySockets("/home/zekker"); len(got) != 0 {
+		t.Fatalf("RelaySockets with no proxy = %+v, want none", got)
+	}
+	got := (&Kitty{proxy: &kittyproxy.Proxy{}}).RelaySockets("/home/zekker")
+	want := []RelaySocket{{Name: kittyProxySocketName}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RelaySockets = %+v, want %+v", got, want)
 	}
 }

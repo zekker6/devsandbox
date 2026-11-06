@@ -162,8 +162,8 @@ func (h *Herdr) Bindings(homeDir string, sandboxHome string) []Binding {
 	// var already names, reachable under a second path.
 	if h.proxy != nil && sandboxHome != "" {
 		bs = append(bs, Binding{
-			Source: filepath.Join(runDir(sandboxHome), herdrProxySocketName),
-			Dest:   filepath.Join(homeDir, ".config", "herdr", herdrProxySocketName),
+			Source: filepath.Join(RunDir(sandboxHome), herdrProxySocketName),
+			Dest:   herdrDefaultSocketPath(homeDir),
 			// A real bind: a unix socket cannot be reached through an overlay
 			// lower layer, and it must stay writable because connect(2) requires
 			// write permission on the socket file.
@@ -171,10 +171,31 @@ func (h *Herdr) Bindings(homeDir string, sandboxHome string) []Binding {
 			Category: CategoryRuntime,
 			ReadOnly: false,
 			Optional: true,
+			// The destination is inside the sandbox home; Docker and krun mount
+			// that at /home/sandboxuser, so the prefix has to be rewritten.
+			HomeRelativeDest: true,
 		})
 	}
 
 	return bs
+}
+
+// herdrDefaultSocketPath is the path herdr's client derives on its own,
+// spelled with the host home prefix.
+func herdrDefaultSocketPath(homeDir string) string {
+	return filepath.Join(homeDir, ".config", "herdr", herdrProxySocketName)
+}
+
+// RelaySockets implements ToolWithRelaySockets: the proxy socket, plus the
+// default client path as an alias for the same reason Bindings exposes it.
+func (h *Herdr) RelaySockets(homeDir string) []RelaySocket {
+	if h.proxy == nil {
+		return nil
+	}
+	return []RelaySocket{{
+		Name:    herdrProxySocketName,
+		Aliases: []string{herdrDefaultSocketPath(homeDir)},
+	}}
 }
 
 // binaryNeedsBind reports whether a tool binary must be bind-mounted explicitly.
@@ -208,7 +229,7 @@ func (h *Herdr) Environment(homeDir, _ string) []EnvVar {
 		return nil
 	}
 	return []EnvVar{
-		{Name: "HERDR_SOCKET_PATH", Value: filepath.Join(runDir(homeDir), herdrProxySocketName)},
+		{Name: "HERDR_SOCKET_PATH", Value: filepath.Join(RunDir(homeDir), herdrProxySocketName)},
 		{Name: "HERDR_ENV", FromHost: true},
 		{Name: "HERDR_SESSION", FromHost: true},
 		{Name: "HERDR_WORKSPACE_ID", FromHost: true},
@@ -437,7 +458,7 @@ func (h *Herdr) Start(ctx context.Context, homeDir, sandboxHome string) error {
 		cleanupRelocator()
 		return fmt.Errorf("herdr: %w", err)
 	}
-	listenPath := filepath.Join(runDir(sandboxHome), herdrProxySocketName)
+	listenPath := filepath.Join(RunDir(sandboxHome), herdrProxySocketName)
 	if err := checkSocketPath(listenPath); err != nil {
 		cleanupRelocator()
 		return fmt.Errorf("herdr: %w", err)
@@ -566,9 +587,10 @@ func (h *Herdr) Check(homeDir string) CheckResult {
 
 // Ensure interfaces are implemented.
 var (
-	_ Tool           = (*Herdr)(nil)
-	_ ToolWithConfig = (*Herdr)(nil)
-	_ ToolWithCheck  = (*Herdr)(nil)
-	_ ActiveTool     = (*Herdr)(nil)
-	_ ToolWithLogger = (*Herdr)(nil)
+	_ Tool                 = (*Herdr)(nil)
+	_ ToolWithConfig       = (*Herdr)(nil)
+	_ ToolWithCheck        = (*Herdr)(nil)
+	_ ActiveTool           = (*Herdr)(nil)
+	_ ToolWithLogger       = (*Herdr)(nil)
+	_ ToolWithRelaySockets = (*Herdr)(nil)
 )

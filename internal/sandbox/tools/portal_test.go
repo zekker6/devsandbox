@@ -55,7 +55,7 @@ func TestPortal_Configure_Disabled(t *testing.T) {
 func TestPortal_ProxySocketPath(t *testing.T) {
 	p := &Portal{}
 	path := p.proxySocketDir("/sandbox/home")
-	expected := filepath.Join(runDir("/sandbox/home"), "dbus")
+	expected := filepath.Join(RunDir("/sandbox/home"), "dbus")
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}

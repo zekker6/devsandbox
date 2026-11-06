@@ -100,7 +100,7 @@ func TestDocker_Environment_Enabled(t *testing.T) {
 
 	// Socket path is under homeDir, where sandboxHome is mounted inside the
 	// sandbox, and mirrors the host-side path under sandboxHome.
-	expected := "unix://" + filepath.Join(runDir(homeDir), "docker.sock")
+	expected := "unix://" + filepath.Join(RunDir(homeDir), "docker.sock")
 	if env[0].Value != expected {
 		t.Errorf("expected %q, got %q", expected, env[0].Value)
 	}
