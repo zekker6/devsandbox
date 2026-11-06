@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Host is the devsandbox end of the relay: it answers the guest's OPEN by
@@ -34,7 +35,7 @@ func NewHost(rw io.ReadWriteCloser, allowed map[string]string) *Host {
 		}
 		return net.Dial("unix", path)
 	}
-	return &Host{mux: New(rw, RoleHost, open)}
+	return &Host{mux: New(rw, open)}
 }
 
 // Run relays until the guest end closes or ctx ends.
@@ -54,17 +55,28 @@ type GuestSocket struct {
 	Paths []string
 }
 
+// LogFunc receives the guest end's non-fatal diagnostics. nil discards them.
+type LogFunc func(format string, args ...any)
+
 // ServeGuest is the sandbox end: it listens on every path, relays each accepted
 // connection as a stream named after its socket, reports READY, and runs until
 // rw closes - which is how a dead or finished host ends the relay. Listeners
 // are removed on return so a stale socket never outlives its session.
 //
-// A path that already holds a socket is replaced, since that is what a previous
-// session left behind. Anything else in the way is an error: the relay runs as
-// the sandbox user in the sandbox home, and it must not clobber a file there on
-// the strength of a name.
-func ServeGuest(ctx context.Context, rw io.ReadWriteCloser, sockets []GuestSocket) error {
-	mux := New(rw, RoleGuest, nil)
+// A primary path that cannot be served is fatal. An alias that cannot be is
+// logged and skipped: it is a convenience for clients that derive a path on
+// their own, and losing it must not take the primary down, nor another
+// socket's. A path that already holds a dead socket is replaced, since that is
+// what a previous session left behind; one that holds a live socket is left
+// alone, because a second session of the same project in one container would
+// otherwise unlink the first's. Anything else in the way is refused: the relay
+// runs as the sandbox user in the sandbox home, and it must not clobber a file
+// there on the strength of a name.
+func ServeGuest(ctx context.Context, rw io.ReadWriteCloser, sockets []GuestSocket, logf LogFunc) error {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	mux := New(rw, nil)
 	var listeners []net.Listener
 	closeAll := func() {
 		for _, ln := range listeners {
@@ -80,15 +92,23 @@ func ServeGuest(ctx context.Context, rw io.ReadWriteCloser, sockets []GuestSocke
 		}
 	}
 	for _, s := range sockets {
-		for _, p := range s.Paths {
+		for i, p := range s.Paths {
 			ln, err := listenReplacingStale(p)
-			if err != nil {
+			switch {
+			case err == nil:
+			case i == 0:
 				closeAll()
 				_ = rw.Close()
 				return err
+			case errors.Is(err, errLiveSocket):
+				logf("sockrelay: alias %s is served by another session; leaving it", p)
+				continue
+			default:
+				logf("sockrelay: alias %s skipped: %v", p, err)
+				continue
 			}
 			listeners = append(listeners, ln)
-			go acceptLoop(mux, s.Name, ln)
+			go acceptLoop(mux, s.Name, ln, logf)
 		}
 	}
 	defer closeAll()
@@ -98,7 +118,10 @@ func ServeGuest(ctx context.Context, rw io.ReadWriteCloser, sockets []GuestSocke
 	return mux.Run(ctx)
 }
 
-var errNotASocket = errors.New("sockrelay: path exists and is not a socket")
+var (
+	errNotASocket = errors.New("sockrelay: path exists and is not a socket")
+	errLiveSocket = errors.New("sockrelay: path holds a live socket")
+)
 
 // listenReplacingStale listens on path, unlinking a leftover socket first.
 func listenReplacingStale(path string) (net.Listener, error) {
@@ -108,6 +131,9 @@ func listenReplacingStale(path string) (net.Listener, error) {
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("%w: %s", errNotASocket, path)
+		}
+		if socketAccepts(path) {
+			return nil, fmt.Errorf("%w: %s", errLiveSocket, path)
 		}
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("sockrelay: remove stale %s: %w", path, err)
@@ -128,13 +154,32 @@ func listenReplacingStale(path string) (net.Listener, error) {
 	return ln, nil
 }
 
-func acceptLoop(mux *Mux, name string, ln net.Listener) {
+// socketAccepts reports whether something answers connect(2) at path. The
+// probe sends nothing.
+func socketAccepts(path string) bool {
+	c, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+// acceptLoop feeds accepted connections into mux until the listener closes.
+// An Accept error short of that - EMFILE under a descriptor flood, say - is
+// logged and retried after a pause rather than ending the listener for good.
+func acceptLoop(mux *Mux, name string, ln net.Listener, logf LogFunc) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			logf("sockrelay: accept on %s: %v", name, err)
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
 		wg.Add(1)
 		go func() {

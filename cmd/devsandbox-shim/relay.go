@@ -71,7 +71,8 @@ func runSocketRelay(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	if err := sockrelay.ServeGuest(context.Background(), stdio{in: os.Stdin, out: os.Stdout}, sockets); err != nil {
+	logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+	if err := sockrelay.ServeGuest(context.Background(), stdio{in: os.Stdin, out: os.Stdout}, sockets, logf); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", relaySubcommand, err)
 		return 1
 	}

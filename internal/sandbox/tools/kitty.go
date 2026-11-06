@@ -122,7 +122,7 @@ func (k *Kitty) Environment(homeDir, _ string) []EnvVar {
 		return nil
 	}
 	return []EnvVar{
-		{Name: "KITTY_LISTEN_ON", Value: "unix:" + filepath.Join(RunDir(homeDir), kittyProxySocketName)},
+		{Name: "KITTY_LISTEN_ON", Value: "unix:" + filepath.Join(RunDir(homeDir), kittyProxySocketName), Session: true},
 		{Name: "KITTY_WINDOW_ID", FromHost: true},
 		{Name: "KITTY_PID", FromHost: true},
 	}
@@ -136,7 +136,7 @@ func (k *Kitty) RelaySockets(_ string) []RelaySocket {
 	if k.proxy == nil {
 		return nil
 	}
-	return []RelaySocket{{Name: kittyProxySocketName}}
+	return []RelaySocket{{Name: kittyProxySocketName, Required: k.mode == kittyModeEnforce}}
 }
 
 // aggregate returns capabilities + launch patterns collected from every

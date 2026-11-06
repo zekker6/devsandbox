@@ -13,12 +13,15 @@ import (
 	"testing"
 	"time"
 
+	"devsandbox/internal/sandbox"
 	"devsandbox/internal/sandbox/tools"
 )
 
-// A unix socket bind-mounted into a guest whose home is a named volume or a
-// virtio-fs share accepts no connections, so the relay replaces it exactly on
-// the engines that mount the home that way. Docker on Linux keeps the bind.
+// A unix socket bind-mounted into a named-volume home accepts no connections,
+// so the relay replaces it on macOS. Docker on Linux keeps the bind. krun is
+// deliberately excluded: its home is shared read-write over virtio-fs, so the
+// host would dial a path the guest can replace with a symlink; the relay
+// there needs a host-only socket directory first.
 func TestNeedsSocketRelay(t *testing.T) {
 	tests := []struct {
 		goos    string
@@ -27,7 +30,7 @@ func TestNeedsSocketRelay(t *testing.T) {
 	}{
 		{"darwin", false, true},
 		{"linux", false, false},
-		{"linux", true, true},
+		{"linux", true, false},
 	}
 	for _, tt := range tests {
 		if got := needsSocketRelay(tt.goos, tt.microVM); got != tt.want {
@@ -38,7 +41,10 @@ func TestNeedsSocketRelay(t *testing.T) {
 
 // relayProbeTool stands in for herdr/kitty: a proxy socket in the run
 // directory plus a default-path alias, and the bind a tool emits for the alias.
-type relayProbeTool struct{ socket string }
+type relayProbeTool struct {
+	socket   string
+	required bool
+}
 
 func (r *relayProbeTool) Name() string          { return "relay-probe" }
 func (r *relayProbeTool) Description() string   { return "test tool" }
@@ -57,9 +63,96 @@ func (r *relayProbeTool) Environment(_, _ string) []tools.EnvVar { return nil }
 func (r *relayProbeTool) ShellInit(string) string                { return "" }
 func (r *relayProbeTool) RelaySockets(homeDir string) []tools.RelaySocket {
 	return []tools.RelaySocket{{
-		Name:    "probe.sock",
-		Aliases: []string{filepath.Join(homeDir, ".config", "probe", "probe.sock")},
+		Name:     "probe.sock",
+		Aliases:  []string{filepath.Join(homeDir, ".config", "probe", "probe.sock")},
+		Required: r.required,
 	}}
+}
+
+func TestRelaySocketsFor_HonorsDisabledMountMode(t *testing.T) {
+	probe := &relayProbeTool{socket: "/nonexistent/probe.sock"}
+	tools.Register(probe)
+	defer tools.Unregister(probe.Name())
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{
+		HomeDir: t.TempDir(), SandboxHome: filepath.Join(t.TempDir(), "home"), ProjectDir: t.TempDir(), Shell: "bash",
+		ToolsConfig: map[string]any{"relay-probe": map[string]any{"mount_mode": "disabled"}},
+	}
+	for _, s := range iso.relaySocketsFor(cfg) {
+		if s.Name == "probe.sock" {
+			t.Fatalf("relaySocketsFor includes a disabled tool: %+v", s)
+		}
+	}
+}
+
+// A relay the user asked for by name (`mode = "enforce"`) that cannot start
+// fails the launch, as Herdr.Start does for an unreachable host socket. In
+// auto mode the same failure is announced and the launch goes on.
+func TestStartSocketRelayIfNeeded_RequiredFailureAborts(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		probe := &relayProbeTool{socket: "/nonexistent/probe.sock", required: required}
+		tools.Register(probe)
+		iso := NewDockerIsolator(DockerConfig{})
+		iso.relaySockets = true
+		cfg := &Config{HomeDir: t.TempDir(), SandboxHome: filepath.Join(t.TempDir(), "home"), ProjectDir: t.TempDir(), Shell: "bash"}
+		// /usr/bin/false stands in for an engine whose exec exits before READY.
+		stop, err := iso.startSocketRelayIfNeeded(context.Background(), "/usr/bin/false", cfg, "container")
+		stop()
+		tools.Unregister(probe.Name())
+		if (err != nil) != required {
+			t.Fatalf("required=%v: err = %v", required, err)
+		}
+	}
+}
+
+// A relay that dies after READY takes herdr and kitty with it; the session
+// has to hear about that rather than find every request hanging.
+func TestSocketRelay_ExitAfterReadyIsReported(t *testing.T) {
+	shim := buildShim(t)
+	sandboxHome := shortSandboxHome(t)
+	hostSock := listenProbeSocket(t, sandboxHome)
+	guestDir := filepath.Join(filepath.Dir(sandboxHome), "guest")
+	specs := []relaySocketSpec{{Name: "probe.sock", HostPath: hostSock, GuestPaths: []string{filepath.Join(guestDir, "probe.sock")}}}
+
+	reported := make(chan error, 1)
+	cmd := exec.Command(shim, relayArgv(specs)...)
+	relay, err := startSocketRelay(context.Background(), cmd, specs, 5*time.Second, nil, func(err error) { reported <- err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relay.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-reported:
+		if err == nil {
+			t.Fatal("exit reported with a nil error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("relay death after READY was not reported")
+	}
+
+	// A deliberate Stop is not an incident.
+	cmd = exec.Command(shim, relayArgv(specs)...)
+	relay, err = startSocketRelay(context.Background(), cmd, specs, 5*time.Second, nil, func(err error) { reported <- err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.Stop()
+	select {
+	case err := <-reported:
+		t.Fatalf("Stop was reported as an exit: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestTailWriter_KeepsLastBytes(t *testing.T) {
+	w := newTailWriter(8)
+	_, _ = w.Write([]byte("0123456789"))
+	_, _ = w.Write([]byte("ab"))
+	if got := w.String(); got != "456789ab" {
+		t.Fatalf("tail = %q, want the last 8 bytes", got)
+	}
 }
 
 func listenProbeSocket(t *testing.T, sandboxHome string) string {
@@ -200,7 +293,7 @@ func TestSocketRelay_EndToEndThroughShim(t *testing.T) {
 	}}
 
 	cmd := exec.Command(shim, relayArgv(specs)...)
-	relay, err := startSocketRelay(context.Background(), cmd, specs, 5*time.Second)
+	relay, err := startSocketRelay(context.Background(), cmd, specs, 5*time.Second, nil, nil)
 	if err != nil {
 		t.Fatalf("startSocketRelay: %v", err)
 	}
@@ -244,7 +337,7 @@ func TestSocketRelay_OldShimFailsBeforeReady(t *testing.T) {
 	// root-phase setup first, so stderr is several lines of noise ending in
 	// the one that matters.
 	cmd := exec.Command("sh", "-c", "echo 'noise line' >&2; echo 'unknown command' >&2; exit 2")
-	_, err := startSocketRelay(context.Background(), cmd, []relaySocketSpec{{Name: "x", HostPath: "/nonexistent", GuestPaths: []string{"/tmp/x"}}}, 5*time.Second)
+	_, err := startSocketRelay(context.Background(), cmd, []relaySocketSpec{{Name: "x", HostPath: "/nonexistent", GuestPaths: []string{"/tmp/x"}}}, 5*time.Second, nil, nil)
 	if err == nil {
 		t.Fatal("startSocketRelay succeeded without a READY")
 	}
@@ -265,7 +358,10 @@ func (execEnvProbeTool) Available(string) bool                { return true }
 func (execEnvProbeTool) Bindings(_, _ string) []tools.Binding { return nil }
 func (execEnvProbeTool) ShellInit(string) string              { return "" }
 func (execEnvProbeTool) Environment(homeDir, _ string) []tools.EnvVar {
-	return []tools.EnvVar{{Name: "ENV_PROBE_SOCK", Value: filepath.Join(tools.RunDir(homeDir), "probe.sock")}}
+	return []tools.EnvVar{
+		{Name: "ENV_PROBE_SOCK", Value: filepath.Join(tools.RunDir(homeDir), "probe.sock"), Session: true},
+		{Name: "ENV_PROBE_EDITOR", Value: "nvim"},
+	}
 }
 
 // A kept container carries the tool environment of the session that created
@@ -289,6 +385,29 @@ func TestBuildExecArgs_CarriesCurrentToolEnv(t *testing.T) {
 	if c := slices.Index(argv, "container"); c < i {
 		t.Fatalf("tool env %q placed after the container name in %q", want, argv)
 	}
+	// A value that is stable across sessions was set at create time and is
+	// still right; re-sending it would override the user's own setting for
+	// the same name, which docker create emitted after the tool's.
+	if slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, "ENV_PROBE_EDITOR=") }) {
+		t.Fatalf("exec argv %q re-sends a non-session tool variable", argv)
+	}
+}
+
+// The user's own value for a session variable wins at create time and must
+// keep winning on exec, which `-e` would otherwise override.
+func TestBuildExecArgs_SessionEnvYieldsToUserConfig(t *testing.T) {
+	probe := execEnvProbeTool{}
+	tools.Register(probe)
+	defer tools.Unregister(probe.Name())
+	iso := NewDockerIsolator(DockerConfig{})
+	cfg := &Config{
+		HomeDir: t.TempDir(), SandboxHome: filepath.Join(t.TempDir(), "home"), ProjectDir: t.TempDir(), Shell: "bash",
+		EnvVars: map[string]string{"ENV_PROBE_SOCK": "/custom.sock"},
+	}
+	argv := iso.buildExecArgs(cfg, "container")
+	if slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, "ENV_PROBE_SOCK=") }) {
+		t.Fatalf("exec argv %q overrides a user-configured variable", argv)
+	}
 }
 
 // An empty home directory must not turn the substring replace into an insert
@@ -296,5 +415,17 @@ func TestBuildExecArgs_CarriesCurrentToolEnv(t *testing.T) {
 func TestRemapEnvValue_EmptyHomeIsNoop(t *testing.T) {
 	if got := remapEnvValue("/opt/go", "", "/proj"); got != "/opt/go" {
 		t.Fatalf("remapEnvValue with empty home = %q, want the value unchanged", got)
+	}
+}
+
+func TestGuestHomeFor(t *testing.T) {
+	if got := GuestHomeFor(sandbox.IsolationDocker); got != containerHome {
+		t.Errorf("docker = %q, want %q", got, containerHome)
+	}
+	if got := GuestHomeFor(sandbox.IsolationKrun); got != containerHome {
+		t.Errorf("krun = %q, want %q", got, containerHome)
+	}
+	if got := GuestHomeFor(sandbox.IsolationBwrap); got != "" {
+		t.Errorf("bwrap = %q, want empty: the home is bound at the host path", got)
 	}
 }

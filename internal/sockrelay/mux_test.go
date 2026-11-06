@@ -17,8 +17,8 @@ import (
 func pair(t *testing.T, onOpen OpenFunc) (guest, host *Mux, done func()) {
 	t.Helper()
 	g, h := net.Pipe()
-	guest = New(g, RoleGuest, nil)
-	host = New(h, RoleHost, onOpen)
+	guest = New(g, nil)
+	host = New(h, onOpen)
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -37,7 +37,10 @@ func pair(t *testing.T, onOpen OpenFunc) (guest, host *Mux, done func()) {
 func echoUpstream() (OpenFunc, <-chan string) {
 	names := make(chan string, 8)
 	return func(name string) (net.Conn, error) {
-		names <- name
+		select {
+		case names <- name:
+		default: // a test that opens many streams does not read them all
+		}
 		a, b := net.Pipe()
 		go func() {
 			defer func() { _ = b.Close() }()
@@ -161,7 +164,7 @@ func TestMux_OversizedFrameTearsDownTheChannel(t *testing.T) {
 	// must end the whole relay, never be buffered or skipped.
 	open, _ := echoUpstream()
 	raw, h := net.Pipe()
-	host := New(h, RoleHost, open)
+	host := New(h, open)
 	runErr := make(chan error, 1)
 	go func() { runErr <- host.Run(context.Background()) }()
 
@@ -182,19 +185,18 @@ func TestMux_OversizedFrameTearsDownTheChannel(t *testing.T) {
 	}
 }
 
-func TestMux_OpenWithWrongParityIsRefused(t *testing.T) {
-	// Stream ids are partitioned by role so a peer cannot hijack a stream the
-	// other side allocated. A guest frame claiming a host-parity id is a
-	// protocol violation and ends the relay.
+func TestMux_OpenOnReservedStreamZeroIsRefused(t *testing.T) {
+	// Stream 0 carries READY only; an OPEN there is a protocol violation and
+	// ends the relay.
 	open, _ := echoUpstream()
 	raw, h := net.Pipe()
-	host := New(h, RoleHost, open)
+	host := New(h, open)
 	runErr := make(chan error, 1)
 	go func() { runErr <- host.Run(context.Background()) }()
 
 	var f bytes.Buffer
 	f.WriteByte(frameOpen)
-	_ = binary.Write(&f, binary.BigEndian, uint32(2)) // even: host-allocated
+	_ = binary.Write(&f, binary.BigEndian, uint32(0))
 	_ = binary.Write(&f, binary.BigEndian, uint32(len("x")))
 	f.WriteString("x")
 	_ = raw.SetWriteDeadline(time.Now().Add(2 * time.Second))
@@ -203,17 +205,90 @@ func TestMux_OpenWithWrongParityIsRefused(t *testing.T) {
 	select {
 	case err := <-runErr:
 		if err == nil {
-			t.Fatal("Run returned nil on a wrong-parity OPEN")
+			t.Fatal("Run returned nil on an OPEN for stream 0")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("host kept running after a wrong-parity OPEN")
+		t.Fatal("host kept running after an OPEN for stream 0")
+	}
+}
+
+func TestMux_StalledStreamIsClosedWhileOthersKeepFlowing(t *testing.T) {
+	// A client that stops reading must cost only its own stream: the write
+	// to it times out, that stream is closed, and the read loop goes on
+	// serving the rest instead of blocking behind it.
+	defer func(d time.Duration) { streamWriteTimeout = d }(streamWriteTimeout)
+	streamWriteTimeout = 100 * time.Millisecond
+
+	open, _ := echoUpstream()
+	guest, _, done := pair(t, open)
+	defer done()
+
+	stalledLocal, stalledRemote := net.Pipe()
+	if err := guest.Open("herdr.sock", stalledRemote); err != nil {
+		t.Fatal(err)
+	}
+	// The echo comes back as DATA for the stalled stream; nobody reads
+	// stalledLocal, so the guest's write to stalledRemote blocks.
+	if _, err := stalledLocal.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(3 * streamWriteTimeout)
+
+	healthyLocal, healthyRemote := net.Pipe()
+	if err := guest.Open("herdr.sock", healthyRemote); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = healthyLocal.Write([]byte("pong")) }()
+	if got := readWithTimeout(t, healthyLocal, 4); string(got) != "pong" {
+		t.Fatalf("healthy stream echo = %q", got)
+	}
+
+	_ = stalledLocal.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := stalledLocal.Read(make([]byte, 1)); err == nil {
+		t.Fatal("stalled stream is still open; want it closed after the write timeout")
+	}
+}
+
+func TestMux_StreamCapRefusesExtraOpens(t *testing.T) {
+	// Every OPEN costs the host a descriptor, a goroutine and a buffer in the
+	// process that also runs the HTTP proxy, so the guest cannot open an
+	// unbounded number of them.
+	open, _ := echoUpstream()
+	guest, _, done := pair(t, open)
+	defer done()
+
+	locals := make([]net.Conn, 0, MaxStreams)
+	for i := 0; i < MaxStreams; i++ {
+		l, r := net.Pipe()
+		if err := guest.Open("herdr.sock", r); err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		locals = append(locals, l)
+	}
+	// Prove the cap is counted on the host: the first MaxStreams streams are
+	// live, the next is refused there and closed back here.
+	go func() { _, _ = locals[0].Write([]byte("ok")) }()
+	if got := readWithTimeout(t, locals[0], 2); string(got) != "ok" {
+		t.Fatalf("stream under the cap does not flow: %q", got)
+	}
+	extraLocal, extraRemote := net.Pipe()
+	if err := guest.Open("herdr.sock", extraRemote); err != nil {
+		t.Fatal(err)
+	}
+	_ = extraLocal.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extraLocal.Read(make([]byte, 1)); err == nil {
+		t.Fatal("stream over the cap stayed open")
+	}
+	for _, l := range locals {
+		_ = l.Close()
 	}
 }
 
 func TestMux_PeerEOFEndsRun(t *testing.T) {
 	open, _ := echoUpstream()
 	raw, h := net.Pipe()
-	host := New(h, RoleHost, open)
+	host := New(h, open)
 	runErr := make(chan error, 1)
 	go func() { runErr <- host.Run(context.Background()) }()
 	_ = raw.Close()

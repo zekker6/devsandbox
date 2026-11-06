@@ -11,7 +11,10 @@ import (
 
 // ActiveToolsConfig contains configuration for running active tools.
 type ActiveToolsConfig struct {
-	HomeDir          string
+	HomeDir string
+	// GuestHome is the sandbox's view of its home when it differs from
+	// HomeDir; see GlobalConfig.GuestHome.
+	GuestHome        string
 	SandboxHome      string
 	DefaultMountMode string
 	ProjectDir       string
@@ -78,6 +81,7 @@ func (r *ActiveToolsRunner) start(ctx context.Context) (bool, error) {
 				DefaultMountMode: r.cfg.DefaultMountMode,
 				ProjectDir:       r.cfg.ProjectDir,
 				HomeDir:          r.cfg.HomeDir,
+				GuestHome:        r.cfg.GuestHome,
 				GitRepoRoot:      r.cfg.GitRepoRoot,
 				LaunchedAgent:    r.cfg.LaunchedAgent,
 			}

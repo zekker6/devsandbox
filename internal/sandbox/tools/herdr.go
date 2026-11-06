@@ -45,6 +45,9 @@ type Herdr struct {
 
 	projectDir string
 	homeDir    string
+	// guestHome is the sandbox's spelling of its home on backends that mount
+	// it elsewhere; empty on bwrap. See GlobalConfig.GuestHome.
+	guestHome string
 
 	// launchedAgent is the canonical agent devsandbox was asked to run, derived
 	// host-side from the command argv. It is one of the two trust anchors for
@@ -91,6 +94,7 @@ func (h *Herdr) Configure(globalCfg GlobalConfig, toolCfg map[string]any) {
 	h.mode = herdrModeAuto
 	h.projectDir = globalCfg.ProjectDir
 	h.homeDir = globalCfg.HomeDir
+	h.guestHome = globalCfg.GuestHome
 	h.launchedAgent = globalCfg.LaunchedAgent
 
 	var cfg herdrConfig
@@ -193,8 +197,9 @@ func (h *Herdr) RelaySockets(homeDir string) []RelaySocket {
 		return nil
 	}
 	return []RelaySocket{{
-		Name:    herdrProxySocketName,
-		Aliases: []string{herdrDefaultSocketPath(homeDir)},
+		Name:     herdrProxySocketName,
+		Aliases:  []string{herdrDefaultSocketPath(homeDir)},
+		Required: h.mode == herdrModeEnforce,
 	}}
 }
 
@@ -229,7 +234,7 @@ func (h *Herdr) Environment(homeDir, _ string) []EnvVar {
 		return nil
 	}
 	return []EnvVar{
-		{Name: "HERDR_SOCKET_PATH", Value: filepath.Join(RunDir(homeDir), herdrProxySocketName)},
+		{Name: "HERDR_SOCKET_PATH", Value: filepath.Join(RunDir(homeDir), herdrProxySocketName), Session: true},
 		{Name: "HERDR_ENV", FromHost: true},
 		{Name: "HERDR_SESSION", FromHost: true},
 		{Name: "HERDR_WORKSPACE_ID", FromHost: true},
@@ -372,6 +377,10 @@ func (h *Herdr) filterConfig(
 		// "/.claude/projects" and deny every real report, so agentSessionDir
 		// returns "" instead — which denies every path, not every report.
 		AgentSessionDir: h.agentSessionDir(homeDir),
+		// A Docker guest reports the transcript under /home/sandboxuser; the
+		// filter translates that to the host spelling before bounding it.
+		HostHome:  homeDir,
+		GuestHome: h.guestHome,
 	}
 }
 

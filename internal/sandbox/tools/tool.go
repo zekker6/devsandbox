@@ -81,6 +81,12 @@ type EnvVar struct {
 	Name     string // Variable name
 	Value    string // Variable value (ignored if FromHost is true)
 	FromHost bool   // Copy value from host environment
+	// Session marks a value that is only right for the devsandbox process
+	// that produced it - a socket path under RunDir, keyed on this pid. A
+	// backend that reuses a container created by an earlier session has to
+	// re-send these on the workload exec; everything else was baked at create
+	// time and is still right.
+	Session bool
 }
 
 // Tool defines the interface for sandbox tools.
@@ -160,6 +166,13 @@ type GlobalConfig struct {
 
 	// HomeDir is the user's home directory on the host.
 	HomeDir string
+
+	// GuestHome is where the sandbox sees its home when that differs from
+	// HomeDir: /home/sandboxuser on the Docker and krun backends, empty on
+	// bwrap, which binds the sandbox home at the host path. A tool that
+	// validates a path the sandbox reports needs it to translate the guest
+	// spelling back to the host one.
+	GuestHome string
 
 	// GitRepoRoot is the main repo root when ProjectDir is a git worktree path.
 	// Empty otherwise. Tools that need to reach git metadata (e.g. the git
@@ -371,6 +384,11 @@ type ToolWithAgentSessionDir interface {
 type RelaySocket struct {
 	Name    string
 	Aliases []string
+	// Required marks a socket the user asked for by name (`mode = "enforce"`):
+	// a relay that cannot bring it into the sandbox fails the launch, as the
+	// tool's own Start does for an unreachable host socket. Otherwise the
+	// failure is announced and the launch goes on without the socket.
+	Required bool
 }
 
 // ToolWithRelaySockets is implemented by tools whose proxy socket lives in the

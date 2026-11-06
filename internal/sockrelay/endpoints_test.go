@@ -2,10 +2,12 @@ package sockrelay
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,7 +64,7 @@ func TestEndToEnd_GuestSocketReachesAllowedHostSocket(t *testing.T) {
 		_ = ServeGuest(ctx, g, []GuestSocket{{
 			Name:  "herdr.sock",
 			Paths: []string{filepath.Join(guestDir, "herdr.sock"), filepath.Join(guestDir, "alias", "herdr.sock")},
-		}})
+		}}, nil)
 	}()
 	defer func() {
 		cancel()
@@ -100,7 +102,7 @@ func TestServeGuest_RemovesSocketsWhenHostGoesAway(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, h) }()
 	done := make(chan error, 1)
 	go func() {
-		done <- ServeGuest(context.Background(), g, []GuestSocket{{Name: "herdr.sock", Paths: []string{sock}}})
+		done <- ServeGuest(context.Background(), g, []GuestSocket{{Name: "herdr.sock", Paths: []string{sock}}}, nil)
 	}()
 	// Wait for the listener, then drop the host end as a dead host would.
 	deadline := time.Now().Add(3 * time.Second)
@@ -139,7 +141,7 @@ func TestServeGuest_SocketIsPrivateToTheUser(t *testing.T) {
 	defer func() { _ = h.Close() }()
 	go func() { _, _ = io.Copy(io.Discard, h) }()
 	go func() {
-		_ = ServeGuest(context.Background(), g, []GuestSocket{{Name: "herdr.sock", Paths: []string{sock}}})
+		_ = ServeGuest(context.Background(), g, []GuestSocket{{Name: "herdr.sock", Paths: []string{sock}}}, nil)
 	}()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -163,13 +165,8 @@ func TestServeGuest_ReplacesStaleSocketButNotARegularFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = ln.Close() // Go unlinks on Close; recreate a dead socket entry by listening again and leaking it
-	ln2, err := net.Listen("unix", stale)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln2.(*net.UnixListener).SetUnlinkOnClose(false)
-	_ = ln2.Close()
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = ln.Close()
 	if _, err := os.Lstat(stale); err != nil {
 		t.Fatalf("precondition: stale socket entry missing: %v", err)
 	}
@@ -181,14 +178,16 @@ func TestServeGuest_ReplacesStaleSocketButNotARegularFile(t *testing.T) {
 
 	g, h := net.Pipe()
 	defer func() { _ = h.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, h) }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
+		// The primary is a regular file: fatal, nothing else is served.
 		done <- ServeGuest(ctx, g, []GuestSocket{
 			{Name: "stale.sock", Paths: []string{stale}},
 			{Name: "notes", Paths: []string{regular}},
-		})
+		}, nil)
 	}()
 	select {
 	case err := <-done:
@@ -203,13 +202,95 @@ func TestServeGuest_ReplacesStaleSocketButNotARegularFile(t *testing.T) {
 	}
 }
 
+// An alias is a convenience for clients that derive a path on their own; one
+// that cannot be created must not take the primary down with it, and kitty's
+// socket in the same relay even less so.
+func TestServeGuest_AliasFailureIsLoggedNotFatal(t *testing.T) {
+	guestDir := shortDir(t)
+	primary := filepath.Join(guestDir, "run", "herdr.sock")
+	alias := filepath.Join(guestDir, "alias.txt")
+	if err := os.WriteFile(alias, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hostDir := shortDir(t)
+	upstream := filepath.Join(hostDir, "herdr.sock")
+	echoUnix(t, upstream)
+	g, h := net.Pipe()
+	host := NewHost(h, map[string]string{"herdr.sock": upstream})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var logged []string
+	logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	go func() { _ = host.Run(ctx) }()
+	go func() {
+		_ = ServeGuest(ctx, g, []GuestSocket{{Name: "herdr.sock", Paths: []string{primary, alias}}}, logf)
+	}()
+	defer func() { _ = host.Close() }()
+
+	select {
+	case <-host.Ready():
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay never became ready with a failed alias")
+	}
+	c, err := net.Dial("unix", primary)
+	if err != nil {
+		t.Fatalf("primary not served: %v", err)
+	}
+	_ = c.Close()
+	if data, _ := os.ReadFile(alias); string(data) != "keep" {
+		t.Fatalf("alias file clobbered: %q", data)
+	}
+	if len(logged) == 0 || !strings.Contains(logged[0], alias) {
+		t.Fatalf("alias failure not logged: %q", logged)
+	}
+}
+
+// Two sessions of one project share a kept container and so the alias path.
+// The second must not unlink the first's live socket; it skips the alias,
+// and the first session keeps serving it.
+func TestServeGuest_LeavesLiveAliasAlone(t *testing.T) {
+	guestDir := shortDir(t)
+	alias := filepath.Join(guestDir, "herdr.sock")
+	echoUnix(t, alias) // the first session's live listener
+
+	primary := filepath.Join(guestDir, "run2", "herdr.sock")
+	g, h := net.Pipe()
+	defer func() { _ = h.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, h) }()
+	go func() {
+		_ = ServeGuest(context.Background(), g, []GuestSocket{{Name: "herdr.sock", Paths: []string{primary, alias}}}, nil)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Lstat(primary); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second session's primary never appeared")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	c, err := net.Dial("unix", alias)
+	if err != nil {
+		t.Fatalf("first session's alias no longer accepts: %v", err)
+	}
+	if _, err := c.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readWithTimeout(t, c, 2); string(got) != "hi" {
+		t.Fatalf("alias is not the first session's echo any more: %q", got)
+	}
+	_ = c.Close()
+}
+
 func TestHost_DeniesNameOutsideAllowlist(t *testing.T) {
 	hostDir := shortDir(t)
 	upstream := filepath.Join(hostDir, "herdr.sock")
 	echoUnix(t, upstream)
 	g, h := net.Pipe()
 	host := NewHost(h, map[string]string{"herdr.sock": upstream})
-	guest := New(g, RoleGuest, nil)
+	guest := New(g, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = host.Run(ctx) }()

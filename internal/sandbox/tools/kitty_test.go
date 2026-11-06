@@ -251,9 +251,13 @@ func TestKitty_RelaySockets(t *testing.T) {
 	if got := (&Kitty{}).RelaySockets("/home/zekker"); len(got) != 0 {
 		t.Fatalf("RelaySockets with no proxy = %+v, want none", got)
 	}
-	got := (&Kitty{proxy: &kittyproxy.Proxy{}}).RelaySockets("/home/zekker")
+	got := (&Kitty{proxy: &kittyproxy.Proxy{}, mode: kittyModeAuto}).RelaySockets("/home/zekker")
 	want := []RelaySocket{{Name: kittyProxySocketName}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RelaySockets = %+v, want %+v", got, want)
+	}
+	got = (&Kitty{proxy: &kittyproxy.Proxy{}, mode: kittyModeEnforce}).RelaySockets("/home/zekker")
+	if len(got) != 1 || !got[0].Required {
+		t.Fatalf("RelaySockets under enforce = %+v, want Required", got)
 	}
 }
