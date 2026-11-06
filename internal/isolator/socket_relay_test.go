@@ -193,6 +193,27 @@ func TestSocketRelay_DrainsStderrPastScannerLimit(t *testing.T) {
 	}
 }
 
+// A guest that dies straight after READY races the start's select against the
+// exit path. Whichever wins, the relay was up, so the session hears exactly one
+// report and it comes from onExit: a start error would call a relay that became
+// ready "exited before ready", and a skipped report would lose the death.
+func TestSocketRelay_ExitRightAfterReadyIsReportedOnce(t *testing.T) {
+	const readyFrame = `\005\000\000\000\000\000\000\000\000`
+	specs := []relaySocketSpec{{Name: "x", HostPath: "/nonexistent", GuestPaths: []string{"/tmp/x"}}}
+	for i := range 200 {
+		exits := make(chan error, 2)
+		cmd := exec.Command("sh", "-c", "exec 2>&-; printf '"+readyFrame+"'")
+		relay, err := startSocketRelay(context.Background(), cmd, specs, 5*time.Second, nil, func(err error) { exits <- err })
+		if err != nil {
+			t.Fatalf("iteration %d: start failed for a guest that sent READY: %v", i, err)
+		}
+		<-relay.done
+		if len(exits) != 1 {
+			t.Fatalf("iteration %d: got %d exit reports, want 1", i, len(exits))
+		}
+	}
+}
+
 func TestTailWriter_KeepsLastBytes(t *testing.T) {
 	w := newTailWriter(8)
 	_, _ = w.Write([]byte("0123456789"))

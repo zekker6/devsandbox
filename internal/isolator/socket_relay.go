@@ -121,7 +121,6 @@ type socketRelay struct {
 	cmd     *exec.Cmd
 	host    *sockrelay.Host
 	done    chan struct{}
-	ready   atomic.Bool
 	stopped atomic.Bool
 }
 
@@ -228,21 +227,36 @@ func startSocketRelay(ctx context.Context, cmd *exec.Cmd, specs []relaySocketSpe
 		}
 		exited <- err
 		// A guest that never became ready is reported once, by the start
-		// error; onExit is for a relay that was up and died.
-		if r.ready.Load() && !r.stopped.Load() && onExit != nil {
+		// error; onExit is for a relay that was up and died. Ready is the one
+		// answer to which of those happened: Run has returned, so it is final
+		// here, and the select below asks it again rather than trusting
+		// whichever case it happened to pick.
+		if relayWasReady(r) && !r.stopped.Load() && onExit != nil {
 			onExit(fmt.Errorf("%w: %s", err, lastStderrLine(tail.String())))
 		}
 	}()
 
 	select {
 	case <-r.host.Ready():
-		r.ready.Store(true)
 		return r, nil
 	case err := <-exited:
+		if relayWasReady(r) {
+			return r, nil
+		}
 		return nil, fmt.Errorf("socket relay: guest exited before ready (%v): %s", err, lastStderrLine(tail.String()))
 	case <-time.After(timeout):
 		r.Stop()
 		return nil, fmt.Errorf("socket relay: guest not ready within %s", timeout)
+	}
+}
+
+// relayWasReady reports whether the guest's READY has arrived.
+func relayWasReady(r *socketRelay) bool {
+	select {
+	case <-r.host.Ready():
+		return true
+	default:
+		return false
 	}
 }
 

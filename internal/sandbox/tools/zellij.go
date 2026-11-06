@@ -119,9 +119,9 @@ func (z *Zellij) Environment(_, _ string) []EnvVar {
 		return nil
 	}
 	return []EnvVar{
-		{Name: "ZELLIJ", FromHost: true},
-		{Name: "ZELLIJ_SESSION_NAME", FromHost: true},
-		{Name: "ZELLIJ_PANE_ID", FromHost: true},
+		{Name: "ZELLIJ", FromHost: true, Session: true},
+		{Name: "ZELLIJ_SESSION_NAME", FromHost: true, Session: true},
+		{Name: "ZELLIJ_PANE_ID", FromHost: true, Session: true},
 	}
 }
 

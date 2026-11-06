@@ -242,6 +242,14 @@ func TestZellij_Environment(t *testing.T) {
 	}
 }
 
+func TestZellij_EnvironmentIsPerSession(t *testing.T) {
+	for _, env := range (&Zellij{enabled: true}).Environment("/home/user", "/sandbox/home") {
+		if !env.Session {
+			t.Errorf("%s is not marked Session; a reused container would keep the first launch's value", env.Name)
+		}
+	}
+}
+
 func TestZellij_Check_NoBinary(t *testing.T) {
 	z := &Zellij{}
 	t.Setenv("PATH", t.TempDir())
