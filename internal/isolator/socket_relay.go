@@ -33,6 +33,10 @@ const relayReadyTimeout = 15 * time.Second
 // would be a guest-driven allocation on the host.
 const relayStderrTail = 4096
 
+// relayStderrLogLines bounds how many guest stderr lines reach the log per
+// session; the tail above still holds the latest for an error message.
+const relayStderrLogLines = 100
+
 // needsSocketRelay reports whether the engine mounts the sandbox home in a way
 // that a bind-mounted unix socket accepts no connections: the named volume on
 // macOS. Docker on Linux binds the home under the same kernel, where the
@@ -117,6 +121,7 @@ type socketRelay struct {
 	cmd     *exec.Cmd
 	host    *sockrelay.Host
 	done    chan struct{}
+	ready   atomic.Bool
 	stopped atomic.Bool
 }
 
@@ -187,13 +192,21 @@ func startSocketRelay(ctx context.Context, cmd *exec.Cmd, specs []relaySocketSpe
 		defer close(stderrDone)
 		sc := bufio.NewScanner(stderr)
 		sc.Buffer(make([]byte, 0, 4096), sockrelay.MaxPayload)
+		logged := 0
 		for sc.Scan() {
 			line := sc.Bytes()
 			_, _ = tail.Write(append(line, '\n'))
-			if logf != nil {
+			// The log is bounded too: the guest writes stderr for the whole
+			// session, and an unbounded forward turns the memory cap into a
+			// disk one.
+			if logf != nil && logged < relayStderrLogLines {
+				logged++
 				logf("socket relay: %s", termsafe.Escape(string(line)))
 			}
 		}
+		// The scanner stops on a line over its limit; keep draining so the
+		// guest never blocks on a full pipe with nobody reading it.
+		_, _ = io.Copy(io.Discard, stderr)
 	}()
 
 	r := &socketRelay{
@@ -214,13 +227,16 @@ func startSocketRelay(ctx context.Context, cmd *exec.Cmd, specs []relaySocketSpe
 			err = errors.New("exited")
 		}
 		exited <- err
-		if !r.stopped.Load() && onExit != nil {
+		// A guest that never became ready is reported once, by the start
+		// error; onExit is for a relay that was up and died.
+		if r.ready.Load() && !r.stopped.Load() && onExit != nil {
 			onExit(fmt.Errorf("%w: %s", err, lastStderrLine(tail.String())))
 		}
 	}()
 
 	select {
 	case <-r.host.Ready():
+		r.ready.Store(true)
 		return r, nil
 	case err := <-exited:
 		return nil, fmt.Errorf("socket relay: guest exited before ready (%v): %s", err, lastStderrLine(tail.String()))
@@ -300,3 +316,22 @@ func (d *DockerIsolator) startSocketRelayIfNeeded(ctx context.Context, dockerBin
 // relay: an anonymous container cannot be exec'd into, and a named one would
 // change that path's collision semantics on Docker.
 var errNoRelayForRun = errors.New("socket relay needs a kept container; set [sandbox.docker] keep_container = true")
+
+// checkRunPathRelay applies the run path's lack of a relay: a Required socket
+// fails the launch, any other is announced as unreachable for this run.
+func (d *DockerIsolator) checkRunPathRelay(cfg *Config) error {
+	if !d.relaySockets {
+		return nil
+	}
+	specs := d.relaySocketsFor(cfg)
+	if len(specs) == 0 {
+		return nil
+	}
+	for _, s := range specs {
+		if s.Required {
+			return fmt.Errorf("%w; %s is required by mode = \"enforce\"", errNoRelayForRun, s.Name)
+		}
+	}
+	notice.Alert("%v; tool sockets are unreachable from the sandbox for this run", errNoRelayForRun)
+	return nil
+}

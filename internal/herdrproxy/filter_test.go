@@ -1439,36 +1439,20 @@ func guestHomeFilter(t *testing.T) *Filter {
 }
 
 // On the Docker backend the integration reports the transcript at the path
-// the sandbox sees. The filter translates it to the host spelling before the
-// bound check and forwards the translated path, so herdr on the host names a
-// file that exists there.
-func TestDecidePaneReportAgentSessionRewritesGuestHomePath(t *testing.T) {
+// the sandbox sees. The filter translates it to the host spelling for the
+// bound check only and forwards the line as sent: herdr persists the ref
+// without dereferencing it and on restore types it back into a new sandbox
+// (`pi --session <path>`), where only the guest spelling exists.
+func TestDecidePaneReportAgentSessionAcceptsGuestHomePathUnmodified(t *testing.T) {
 	f := guestHomeFilter(t)
 	guestPath := "/home/sandboxuser/.claude/projects/-p/" + claudeSessionUUID + ".jsonl"
-	hostPath := claudeProjectsDir + "/-p/" + claudeSessionUUID + ".jsonl"
 
-	raw := []byte(sessionReportLine(t, map[string]any{"agent_session_path": guestPath}))
-	d := f.Decide(raw)
+	d := f.Decide([]byte(sessionReportLine(t, map[string]any{"agent_session_path": guestPath})))
 	if !d.Allow {
 		t.Fatalf("Decide denied a guest-home path inside the session directory: %s", d.Reason)
 	}
-	if d.Rewritten == nil {
-		t.Fatal("Decide forwarded the guest spelling; herdr on the host would name a file that does not exist there")
-	}
-	var env struct {
-		Params struct {
-			AgentSessionPath string `json:"agent_session_path"`
-			AgentSessionID   string `json:"agent_session_id"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal(d.Rewritten, &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Params.AgentSessionPath != hostPath {
-		t.Fatalf("rewritten path = %q, want %q", env.Params.AgentSessionPath, hostPath)
-	}
-	if env.Params.AgentSessionID != claudeSessionUUID {
-		t.Fatalf("rewrite dropped agent_session_id: %q", env.Params.AgentSessionID)
+	if d.Rewritten != nil {
+		t.Fatalf("Decide rewrote the path to %s; the sandbox spelling is what a restore inside the sandbox needs", d.Rewritten)
 	}
 }
 
@@ -1505,8 +1489,8 @@ func TestDecidePaneReportAgentSessionGuestPathDeniedWithoutGuestHome(t *testing.
 	}
 }
 
-// Pi reports the path on pane.report_agent too; the same translation applies.
-func TestDecidePaneReportAgentRewritesGuestHomePath(t *testing.T) {
+// Pi reports the path on pane.report_agent too; the same bound check applies.
+func TestDecidePaneReportAgentAcceptsGuestHomePath(t *testing.T) {
 	f := NewFilter(FilterConfig{
 		Capabilities:    []Capability{CapAgentReporting},
 		CurrentPaneID:   "pane7",
@@ -1530,7 +1514,7 @@ func TestDecidePaneReportAgentRewritesGuestHomePath(t *testing.T) {
 	if !d.Allow {
 		t.Fatalf("Decide denied: %s", d.Reason)
 	}
-	if !strings.Contains(string(d.Rewritten), `"/home/user/.pi/agent/sessions/s.jsonl"`) {
-		t.Fatalf("rewritten = %s", d.Rewritten)
+	if d.Rewritten != nil {
+		t.Fatalf("Decide rewrote a path-only report: %s", d.Rewritten)
 	}
 }

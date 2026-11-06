@@ -235,11 +235,15 @@ func (h *Herdr) Environment(homeDir, _ string) []EnvVar {
 	}
 	return []EnvVar{
 		{Name: "HERDR_SOCKET_PATH", Value: filepath.Join(RunDir(homeDir), herdrProxySocketName), Session: true},
-		{Name: "HERDR_ENV", FromHost: true},
-		{Name: "HERDR_SESSION", FromHost: true},
-		{Name: "HERDR_WORKSPACE_ID", FromHost: true},
-		{Name: "HERDR_TAB_ID", FromHost: true},
-		{Name: "HERDR_PANE_ID", FromHost: true},
+		// Per session as well: they name the pane the launch happens in, and
+		// the filter anchors every report to the host's HERDR_PANE_ID, so a
+		// reused container keeping the first launch's value would have every
+		// report of a later session from another pane denied.
+		{Name: "HERDR_ENV", FromHost: true, Session: true},
+		{Name: "HERDR_SESSION", FromHost: true, Session: true},
+		{Name: "HERDR_WORKSPACE_ID", FromHost: true, Session: true},
+		{Name: "HERDR_TAB_ID", FromHost: true, Session: true},
+		{Name: "HERDR_PANE_ID", FromHost: true, Session: true},
 	}
 }
 

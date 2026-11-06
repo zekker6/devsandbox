@@ -450,8 +450,8 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 		// resolved and the session registered for port forwarding (modeled on the
 		// bwrap StartWithPasta -> OnSandboxStart -> Wait flow). Docker and
 		// krun-without-proxy keep the simple blocking run.
-		if d.relaySockets && len(d.relaySocketsFor(isoCfg)) > 0 {
-			notice.Alert("%v; tool sockets are unreachable from the sandbox for this run", errNoRelayForRun)
+		if err := d.checkRunPathRelay(isoCfg); err != nil {
+			return err
 		}
 		if d.usesMicroVMSession(sandboxCfg.ProxyEnabled) {
 			return d.runMicroVMSession(ctx, cmd, result.ContainerName, cfg.OnSandboxStart, isoCfg.SandboxHome, isoCfg.ProxyPort)
@@ -1825,11 +1825,11 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 					continue
 				}
 			}
-			// A unix socket bind-mounted into a named volume or a virtio-fs
-			// home accepts no connections, and the relay listens at the same
-			// guest path instead - a dead mount there would block the relay
-			// from creating its socket. Only socket sources are dropped;
-			// everything else binds as on Linux.
+			// A unix socket bind-mounted into a named-volume home accepts no
+			// connections, and the relay listens at the same guest path
+			// instead - a dead mount there would block the relay from
+			// creating its socket. Only socket sources are dropped; everything
+			// else binds as on Linux.
 			if d.relaySockets && isUnixSocket(b.Source) {
 				continue
 			}

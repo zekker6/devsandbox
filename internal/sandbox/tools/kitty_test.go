@@ -261,3 +261,11 @@ func TestKitty_RelaySockets(t *testing.T) {
 		t.Fatalf("RelaySockets under enforce = %+v, want Required", got)
 	}
 }
+
+func TestKitty_EnvironmentIsPerSession(t *testing.T) {
+	for _, env := range (&Kitty{proxy: &kittyproxy.Proxy{}}).Environment("/home/zekker", "/host/sandbox/home") {
+		if !env.Session {
+			t.Errorf("%s is not marked Session; a reused container would keep the first launch's value", env.Name)
+		}
+	}
+}

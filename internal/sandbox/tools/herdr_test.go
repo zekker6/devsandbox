@@ -1012,3 +1012,16 @@ func TestHerdr_RelaySockets(t *testing.T) {
 		t.Fatalf("RelaySockets under enforce = %+v, want Required", got)
 	}
 }
+
+// A kept container was created with the first session's environment, and
+// every one of these differs per pane or per process: the socket path by pid,
+// the pane, tab, workspace and session ids by the pane the launch happens in.
+// The filter anchors reports to the host's pane id, so a stale one denies
+// every report of a later session from another pane.
+func TestHerdr_EnvironmentIsPerSession(t *testing.T) {
+	for _, env := range (&Herdr{proxy: &herdrproxy.Proxy{}}).Environment("/home/zekker", "/host/sandbox/home") {
+		if !env.Session {
+			t.Errorf("%s is not marked Session; a reused container would keep the first launch's value", env.Name)
+		}
+	}
+}
