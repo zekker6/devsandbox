@@ -1422,3 +1422,115 @@ func TestClaudeConfiguredFilterDeniesPiLifecycleReports(t *testing.T) {
 		}
 	}
 }
+
+// guestHomeFilter wires the filter the way Herdr.Start does on the Docker
+// backend, where the sandbox sees its home at /home/sandboxuser while the
+// session directory the host binds there is under the host home.
+func guestHomeFilter(t *testing.T) *Filter {
+	t.Helper()
+	return NewFilter(FilterConfig{
+		Capabilities:    []Capability{CapAgentReporting},
+		CurrentPaneID:   "pane7",
+		ExpectedAgent:   "claude",
+		AgentSessionDir: claudeProjectsDir,
+		HostHome:        "/home/user",
+		GuestHome:       "/home/sandboxuser",
+	})
+}
+
+// On the Docker backend the integration reports the transcript at the path
+// the sandbox sees. The filter translates it to the host spelling before the
+// bound check and forwards the translated path, so herdr on the host names a
+// file that exists there.
+func TestDecidePaneReportAgentSessionRewritesGuestHomePath(t *testing.T) {
+	f := guestHomeFilter(t)
+	guestPath := "/home/sandboxuser/.claude/projects/-p/" + claudeSessionUUID + ".jsonl"
+	hostPath := claudeProjectsDir + "/-p/" + claudeSessionUUID + ".jsonl"
+
+	raw := []byte(sessionReportLine(t, map[string]any{"agent_session_path": guestPath}))
+	d := f.Decide(raw)
+	if !d.Allow {
+		t.Fatalf("Decide denied a guest-home path inside the session directory: %s", d.Reason)
+	}
+	if d.Rewritten == nil {
+		t.Fatal("Decide forwarded the guest spelling; herdr on the host would name a file that does not exist there")
+	}
+	var env struct {
+		Params struct {
+			AgentSessionPath string `json:"agent_session_path"`
+			AgentSessionID   string `json:"agent_session_id"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(d.Rewritten, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Params.AgentSessionPath != hostPath {
+		t.Fatalf("rewritten path = %q, want %q", env.Params.AgentSessionPath, hostPath)
+	}
+	if env.Params.AgentSessionID != claudeSessionUUID {
+		t.Fatalf("rewrite dropped agent_session_id: %q", env.Params.AgentSessionID)
+	}
+}
+
+func TestDecidePaneReportAgentSessionGuestHomePathOutsideSessionDirIsDenied(t *testing.T) {
+	f := guestHomeFilter(t)
+	for _, p := range []string{
+		"/home/sandboxuser/.ssh/id_ed25519",
+		"/home/sandboxuser/.claude/projects/../../.ssh/id_ed25519",
+		"/home/sandboxuserx/.claude/projects/a.jsonl",
+	} {
+		d := f.Decide([]byte(sessionReportLine(t, map[string]any{"agent_session_path": p})))
+		if d.Allow {
+			t.Fatalf("Decide allowed %q", p)
+		}
+	}
+}
+
+// A host-spelled path is left as sent, so a bwrap launch is unchanged.
+func TestDecidePaneReportAgentSessionHostPathIsNotRewritten(t *testing.T) {
+	f := guestHomeFilter(t)
+	d := f.Decide([]byte(sessionReportLine(t, map[string]any{"agent_session_path": claudeProjectsDir + "/p/" + claudeSessionUUID + ".jsonl"})))
+	if !d.Allow || d.Rewritten != nil {
+		t.Fatalf("allow=%v rewritten=%v reason=%s", d.Allow, d.Rewritten != nil, d.Reason)
+	}
+}
+
+// Without a guest home configured a guest-spelled path is just a path outside
+// the session directory.
+func TestDecidePaneReportAgentSessionGuestPathDeniedWithoutGuestHome(t *testing.T) {
+	f := sessionReportFilter(t)
+	d := f.Decide([]byte(sessionReportLine(t, map[string]any{"agent_session_path": "/home/sandboxuser/.claude/projects/p/" + claudeSessionUUID + ".jsonl"})))
+	if d.Allow {
+		t.Fatal("Decide allowed a guest-spelled path with no guest home configured")
+	}
+}
+
+// Pi reports the path on pane.report_agent too; the same translation applies.
+func TestDecidePaneReportAgentRewritesGuestHomePath(t *testing.T) {
+	f := NewFilter(FilterConfig{
+		Capabilities:    []Capability{CapAgentReporting},
+		CurrentPaneID:   "pane7",
+		ExpectedAgent:   "pi",
+		AgentSessionDir: "/home/user/.pi/agent/sessions",
+		HostHome:        "/home/user",
+		GuestHome:       "/home/sandboxuser",
+	})
+	raw, err := json.Marshal(map[string]any{
+		"id":     "herdr:pi:1",
+		"method": methodPaneReportAgent,
+		"params": map[string]any{
+			"pane_id": "pane7", "source": "herdr:pi", "agent": "pi", "state": "working",
+			"agent_session_path": "/home/sandboxuser/.pi/agent/sessions/s.jsonl",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := f.Decide(raw)
+	if !d.Allow {
+		t.Fatalf("Decide denied: %s", d.Reason)
+	}
+	if !strings.Contains(string(d.Rewritten), `"/home/user/.pi/agent/sessions/s.jsonl"`) {
+		t.Fatalf("rewritten = %s", d.Rewritten)
+	}
+}

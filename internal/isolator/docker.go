@@ -482,7 +482,10 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 			notice.Warn("failed to install tools: %v", err)
 		}
 
-		stopRelay := d.startSocketRelayIfNeeded(ctx, result.BinaryPath, isoCfg, result.ContainerName)
+		stopRelay, err := d.startSocketRelayIfNeeded(ctx, result.BinaryPath, isoCfg, result.ContainerName)
+		if err != nil {
+			return err
+		}
 		defer stopRelay()
 		return execIntoContainer(d.execCommand(result.BinaryPath, isoCfg, result.ContainerName))
 
@@ -499,7 +502,10 @@ func (d *DockerIsolator) runAction(ctx context.Context, cfg *RunConfig, isoCfg *
 			notice.Warn("failed to install tools: %v", err)
 		}
 
-		stopRelay := d.startSocketRelayIfNeeded(ctx, result.BinaryPath, isoCfg, result.ContainerName)
+		stopRelay, err := d.startSocketRelayIfNeeded(ctx, result.BinaryPath, isoCfg, result.ContainerName)
+		if err != nil {
+			return err
+		}
 		defer stopRelay()
 		return execIntoContainer(d.execCommand(result.BinaryPath, isoCfg, result.ContainerName))
 
@@ -1665,6 +1671,18 @@ func (d *DockerIsolator) sandboxVolumeName(sandboxHome string) string {
 // containerHome is the home directory inside the Docker container.
 const containerHome = "/home/sandboxuser"
 
+// GuestHomeFor reports where the sandbox sees its home on the given backend,
+// or "" when that is the host home path (bwrap). Tools that validate a path
+// the sandbox reports take it through tools.GlobalConfig.GuestHome.
+func GuestHomeFor(t sandbox.IsolationType) string {
+	switch t {
+	case sandbox.IsolationDocker, sandbox.IsolationKrun:
+		return containerHome
+	default:
+		return ""
+	}
+}
+
 // remapToContainerHome converts a host path to its equivalent container path.
 // Paths under the project directory keep their original path (project is mounted
 // at its host path for PWD consistency). Other paths under homeDir are remapped
@@ -1723,6 +1741,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 		DefaultMountMode: cfg.DefaultMountMode,
 		ProjectDir:       cfg.ProjectDir,
 		HomeDir:          cfg.HomeDir,
+		GuestHome:        containerHome,
 		GitRepoRoot:      cfg.GitRepoRoot,
 		LaunchedAgent:    cfg.LaunchedAgent,
 	}
@@ -1868,7 +1887,7 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 			}
 		}
 
-		envVars = append(envVars, toolEnv(cfg, tool)...)
+		envVars = append(envVars, toolEnv(cfg, tool, false)...)
 	}
 
 	return mounts, envVars, manifest
@@ -1876,10 +1895,14 @@ func (d *DockerIsolator) getToolBindings(cfg *Config) (mounts []string, envVars 
 
 // toolEnv renders one tool's environment as NAME=VALUE pairs for the
 // container. Paths are remapped: tools spell them against the host home, but
-// inside the container the sandbox home is containerHome.
-func toolEnv(cfg *Config, tool tools.Tool) []string {
+// inside the container the sandbox home is containerHome. With sessionOnly,
+// only variables the tool marked Session are rendered.
+func toolEnv(cfg *Config, tool tools.Tool, sessionOnly bool) []string {
 	var envVars []string
 	for _, env := range tool.Environment(cfg.HomeDir, cfg.SandboxHome) {
+		if sessionOnly && !env.Session {
+			continue
+		}
 		if env.FromHost {
 			if val := os.Getenv(env.Name); val != "" {
 				envVars = append(envVars, env.Name+"="+val)
@@ -1891,17 +1914,23 @@ func toolEnv(cfg *Config, tool tools.Tool) []string {
 	return envVars
 }
 
-// toolEnvArgs renders the current tool environment as `-e` arguments for a
-// workload exec. A kept container was created with the environment of the
-// session that created it, and values keyed on that session - the per-pid
-// proxy socket paths herdr and kitty export - are dead for every later one;
-// `docker exec -e` overrides them for the workload. Tools are configured
-// here as getToolBindings does, since Environment may depend on it.
+// toolEnvArgs renders the tool environment a workload exec has to re-send as
+// `-e` arguments. A kept container was created with the environment of the
+// session that created it, and a value keyed on that session - the per-pid
+// proxy socket paths herdr and kitty export, marked EnvVar.Session - is dead
+// for every later one; `docker exec -e` overrides it for the workload. Only
+// those are re-sent: `-e` on exec beats everything `docker create` set, so a
+// stable tool value would silently override the user's own setting for the
+// same name, which create emitted after the tool's. For the same reason a
+// name the user configured is skipped even when it is a session variable.
+// Tools are configured here as getToolBindings does, since Environment may
+// depend on it.
 func (d *DockerIsolator) toolEnvArgs(cfg *Config) []string {
 	globalCfg := tools.GlobalConfig{
 		DefaultMountMode: cfg.DefaultMountMode,
 		ProjectDir:       cfg.ProjectDir,
 		HomeDir:          cfg.HomeDir,
+		GuestHome:        containerHome,
 		GitRepoRoot:      cfg.GitRepoRoot,
 		LaunchedAgent:    cfg.LaunchedAgent,
 	}
@@ -1913,7 +1942,11 @@ func (d *DockerIsolator) toolEnvArgs(cfg *Config) []string {
 		if config.ToolMountMode(cfg.ToolsConfig, tool.Name()) == "disabled" {
 			continue
 		}
-		for _, env := range toolEnv(cfg, tool) {
+		for _, env := range toolEnv(cfg, tool, true) {
+			name, _, _ := strings.Cut(env, "=")
+			if userConfiguredEnv(cfg, name) {
+				continue
+			}
 			args = append(args, "-e", env)
 		}
 	}
@@ -2015,7 +2048,8 @@ func (d *DockerIsolator) configHash(cfg *Config) string {
 		_, _ = fmt.Fprintf(h, "tool=%s:%v\n", k, cfg.ToolsConfig[k])
 	}
 
-	// Environment variables — baked into docker create, not passed via exec.
+	// Environment variables — baked into docker create. The exec re-sends only
+	// per-session tool variables (toolEnvArgs), which are not hashed either.
 	envKeys := make([]string, 0, len(cfg.Environment))
 	for k := range cfg.Environment {
 		envKeys = append(envKeys, k)

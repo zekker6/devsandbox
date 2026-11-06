@@ -1,21 +1,20 @@
 // Package sockrelay multiplexes unix-socket connections over a single byte
-// stream, so a sandbox whose home is not a native bind mount (Docker on macOS,
-// krun) can still reach the filtered proxy sockets devsandbox runs on the host.
+// stream, so a sandbox whose home is not a native bind mount (Docker on macOS)
+// can still reach the filtered proxy sockets devsandbox runs on the host.
 //
 // The stream is the stdio of a `docker exec -i` the host owns. Nothing listens
 // on the host for it, so the only process that can speak the protocol is the
 // one the host started. The guest end is untrusted all the same: every frame
 // the host reads is bounded, every name the guest opens is answered by the
-// host's own allowlist, and any malformed frame ends the whole relay rather
-// than being skipped.
+// host's own allowlist, the number of open streams is capped, and any
+// malformed frame ends the whole relay rather than being skipped.
 //
 // Wire format, both directions, big-endian:
 //
 //	type(1) stream(4) length(4) payload(length)
 //
-// Stream ids are allocated by the side that opens the stream and partitioned
-// by Role so the two sides can never collide: the guest uses odd ids, the host
-// even. Stream 0 carries only READY.
+// Only the guest opens streams; it allocates the ids, and the host refuses an
+// OPEN for an id it already serves. Stream 0 carries only READY.
 package sockrelay
 
 import (
@@ -26,6 +25,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 const (
@@ -42,17 +42,17 @@ const (
 	MaxPayload = 64 * 1024
 	// MaxNameLen bounds an OPEN payload.
 	MaxNameLen = 255
+	// MaxStreams caps the streams open at once. Each one costs the host a
+	// descriptor, a goroutine and a MaxPayload buffer in the process that
+	// also runs the HTTP proxy; a guest asking for more gets CLOSE back.
+	MaxStreams = 128
 )
 
-// Role selects the stream-id parity a mux allocates from.
-type Role int
-
-const (
-	// RoleHost dials upstream sockets on the guest's OPEN and allocates even ids.
-	RoleHost Role = iota
-	// RoleGuest opens a stream per accepted local connection and allocates odd ids.
-	RoleGuest
-)
+// streamWriteTimeout bounds a write into a stream's connection. The read loop
+// delivers DATA to every stream in turn, so a peer that stops reading its
+// socket would otherwise hold every other stream behind it; past this, only
+// that stream is closed. A variable so tests can shorten it.
+var streamWriteTimeout = 30 * time.Second
 
 // OpenFunc answers a peer's OPEN by connecting to the named upstream. A nil
 // OpenFunc denies every OPEN, which is the guest's configuration: only the
@@ -66,7 +66,6 @@ var ErrProtocol = errors.New("sockrelay: protocol violation")
 // Mux runs one end of the relay.
 type Mux struct {
 	rw     io.ReadWriteCloser
-	role   Role
 	onOpen OpenFunc
 
 	writeMu sync.Mutex
@@ -88,21 +87,14 @@ type stream struct {
 }
 
 // New wraps rw. onOpen may be nil to deny every peer-initiated stream.
-func New(rw io.ReadWriteCloser, role Role, onOpen OpenFunc) *Mux {
-	m := &Mux{
+func New(rw io.ReadWriteCloser, onOpen OpenFunc) *Mux {
+	return &Mux{
 		rw:      rw,
-		role:    role,
 		onOpen:  onOpen,
 		streams: make(map[uint32]*stream),
+		nextID:  1,
 		ready:   make(chan struct{}),
 	}
-	switch role {
-	case RoleGuest:
-		m.nextID = 1
-	default:
-		m.nextID = 2
-	}
-	return m
 }
 
 // Ready is closed once the peer sent READY.
@@ -125,7 +117,10 @@ func (m *Mux) Open(name string, conn net.Conn) error {
 		return net.ErrClosed
 	}
 	id := m.nextID
-	m.nextID += 2
+	m.nextID++
+	if m.nextID == 0 {
+		m.nextID = 1
+	}
 	m.streams[id] = &stream{conn: conn}
 	m.mu.Unlock()
 
@@ -222,7 +217,11 @@ func (m *Mux) handle(typ byte, id uint32, payload []byte) error {
 	}
 	switch typ {
 	case frameData:
-		if _, err := s.conn.Write(payload); err != nil {
+		// Bounded so one stalled peer costs only its own stream.
+		_ = s.conn.SetWriteDeadline(time.Now().Add(streamWriteTimeout))
+		_, err := s.conn.Write(payload)
+		_ = s.conn.SetWriteDeadline(time.Time{})
+		if err != nil {
 			m.closeStream(id, "write: "+err.Error())
 		}
 	case frameEOF:
@@ -243,8 +242,8 @@ func (m *Mux) handle(typ byte, id uint32, payload []byte) error {
 }
 
 func (m *Mux) handleOpen(id uint32, payload []byte) error {
-	if id == 0 || !m.peerOwns(id) {
-		return fmt.Errorf("%w: OPEN on stream %d not allocated by the peer", ErrProtocol, id)
+	if id == 0 {
+		return fmt.Errorf("%w: OPEN on stream 0", ErrProtocol)
 	}
 	if len(payload) == 0 || len(payload) > MaxNameLen {
 		return fmt.Errorf("%w: OPEN name of %d bytes", ErrProtocol, len(payload))
@@ -254,6 +253,9 @@ func (m *Mux) handleOpen(id uint32, payload []byte) error {
 	}
 	if m.onOpen == nil {
 		return m.writeFrame(frameClose, id, []byte("denied"))
+	}
+	if m.streamCount() >= MaxStreams {
+		return m.writeFrame(frameClose, id, []byte("too many streams"))
 	}
 	conn, err := m.onOpen(string(payload))
 	if err != nil {
@@ -318,15 +320,16 @@ func (m *Mux) closeStream(id uint32, reason string) {
 	_ = m.writeFrame(frameClose, id, []byte(reason))
 }
 
-func (m *Mux) peerOwns(id uint32) bool {
-	peerOdd := m.role == RoleHost // the guest allocates odd ids
-	return (id%2 == 1) == peerOdd
-}
-
 func (m *Mux) lookup(id uint32) *stream {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.streams[id]
+}
+
+func (m *Mux) streamCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.streams)
 }
 
 func (m *Mux) forget(id uint32) {

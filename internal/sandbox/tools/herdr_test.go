@@ -735,6 +735,18 @@ func TestHerdr_FilterConfigCarriesHostAnchors(t *testing.T) {
 	if want := filepath.Join("/home/test", ".claude", "projects"); cfg.AgentSessionDir != want {
 		t.Errorf("AgentSessionDir = %q, want the launched agent's session directory %q", cfg.AgentSessionDir, want)
 	}
+	if cfg.HostHome != "/home/test" || cfg.GuestHome != "" {
+		t.Errorf("HostHome/GuestHome = %q/%q, want the host home and no guest home on bwrap", cfg.HostHome, cfg.GuestHome)
+	}
+
+	// On a backend that mounts the home elsewhere, the guest spelling reaches
+	// the filter so a reported transcript path can be translated.
+	h = &Herdr{}
+	h.Configure(GlobalConfig{LaunchedAgent: "claude", GuestHome: "/home/sandboxuser"}, nil)
+	cfg = h.filterConfig(nil, cmdpattern.ScriptPattern{}, nil, nil, nil, "/home/test")
+	if cfg.GuestHome != "/home/sandboxuser" || cfg.HostHome != "/home/test" {
+		t.Errorf("HostHome/GuestHome = %q/%q, want /home/test and /home/sandboxuser", cfg.HostHome, cfg.GuestHome)
+	}
 }
 
 // TestHerdr_AgentSessionDirResolution pins where the agent_session_path bound
@@ -983,12 +995,20 @@ func TestHerdr_RelaySockets(t *testing.T) {
 		t.Fatalf("RelaySockets with no proxy = %+v, want none", got)
 	}
 
-	got := (&Herdr{proxy: &herdrproxy.Proxy{}}).RelaySockets(homeDir)
+	got := (&Herdr{proxy: &herdrproxy.Proxy{}, mode: herdrModeAuto}).RelaySockets(homeDir)
 	want := []RelaySocket{{
 		Name:    herdrProxySocketName,
 		Aliases: []string{filepath.Join(homeDir, ".config", "herdr", herdrProxySocketName)},
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RelaySockets = %+v, want %+v", got, want)
+	}
+
+	// Under enforce the proxy was asked for by name, and Start fails the
+	// launch when the host socket is unreachable; a relay that cannot bring
+	// the proxy into the sandbox is the same failure one hop later.
+	got = (&Herdr{proxy: &herdrproxy.Proxy{}, mode: herdrModeEnforce}).RelaySockets(homeDir)
+	if len(got) != 1 || !got[0].Required {
+		t.Fatalf("RelaySockets under enforce = %+v, want Required", got)
 	}
 }

@@ -1225,6 +1225,7 @@ func createActiveToolsRunner(cfg *sandbox.Config) (start func(ctx context.Contex
 
 	toolsCfg := tools.ActiveToolsConfig{
 		HomeDir:          cfg.HomeDir,
+		GuestHome:        isolator.GuestHomeFor(cfg.Isolation),
 		SandboxHome:      cfg.SandboxHome,
 		DefaultMountMode: cfg.DefaultMountMode,
 		ProjectDir:       cfg.ProjectDir,
