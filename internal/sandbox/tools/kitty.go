@@ -123,8 +123,8 @@ func (k *Kitty) Environment(homeDir, _ string) []EnvVar {
 	}
 	return []EnvVar{
 		{Name: "KITTY_LISTEN_ON", Value: "unix:" + filepath.Join(RunDir(homeDir), kittyProxySocketName), Session: true},
-		{Name: "KITTY_WINDOW_ID", FromHost: true},
-		{Name: "KITTY_PID", FromHost: true},
+		{Name: "KITTY_WINDOW_ID", FromHost: true, Session: true},
+		{Name: "KITTY_PID", FromHost: true, Session: true},
 	}
 }
 

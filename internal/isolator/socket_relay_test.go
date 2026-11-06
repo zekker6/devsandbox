@@ -146,6 +146,53 @@ func TestSocketRelay_ExitAfterReadyIsReported(t *testing.T) {
 	}
 }
 
+// The ephemeral run path cannot host a relay; under enforce that is a failed
+// launch, otherwise an announcement.
+func TestRunPathRelayCheck_RequiredAborts(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		probe := &relayProbeTool{socket: "/nonexistent/probe.sock", required: required}
+		tools.Register(probe)
+		iso := NewDockerIsolator(DockerConfig{})
+		iso.relaySockets = true
+		cfg := &Config{HomeDir: t.TempDir(), SandboxHome: filepath.Join(t.TempDir(), "home"), ProjectDir: t.TempDir(), Shell: "bash"}
+		err := iso.checkRunPathRelay(cfg)
+		tools.Unregister(probe.Name())
+		if (err != nil) != required {
+			t.Fatalf("required=%v: err = %v", required, err)
+		}
+	}
+}
+
+// A guest that never reaches READY is reported once, by the start error;
+// onExit is for a relay that was up and died.
+func TestSocketRelay_NoExitReportBeforeReady(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "echo 'unknown command' >&2; exit 2")
+	exits := make(chan error, 1)
+	_, err := startSocketRelay(context.Background(), cmd, []relaySocketSpec{{Name: "x", HostPath: "/nonexistent", GuestPaths: []string{"/tmp/x"}}}, 5*time.Second, nil, func(err error) { exits <- err })
+	if err == nil {
+		t.Fatal("startSocketRelay succeeded without a READY")
+	}
+	select {
+	case err := <-exits:
+		t.Fatalf("onExit fired for a guest that never became ready: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A stderr line over the scanner's limit stops the scanner; the pipe still has
+// to be drained or the guest blocks on a full pipe and the exit never arrives.
+func TestSocketRelay_DrainsStderrPastScannerLimit(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "head -c 300000 /dev/zero | tr '\\0' a >&2; echo >&2; echo 'last line' >&2; exit 1")
+	start := time.Now()
+	_, err := startSocketRelay(context.Background(), cmd, []relaySocketSpec{{Name: "x", HostPath: "/nonexistent", GuestPaths: []string{"/tmp/x"}}}, 10*time.Second, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "exited before ready") {
+		t.Fatalf("err = %v, want the guest's exit (elapsed %s)", err, time.Since(start))
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("exit took %s; the stderr pipe was not drained", time.Since(start))
+	}
+}
+
 func TestTailWriter_KeepsLastBytes(t *testing.T) {
 	w := newTailWriter(8)
 	_, _ = w.Write([]byte("0123456789"))

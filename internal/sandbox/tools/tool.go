@@ -81,11 +81,13 @@ type EnvVar struct {
 	Name     string // Variable name
 	Value    string // Variable value (ignored if FromHost is true)
 	FromHost bool   // Copy value from host environment
-	// Session marks a value that is only right for the devsandbox process
-	// that produced it - a socket path under RunDir, keyed on this pid. A
-	// backend that reuses a container created by an earlier session has to
-	// re-send these on the workload exec; everything else was baked at create
-	// time and is still right.
+	// Session marks a value that is only right for the launch that produced
+	// it: a socket path under RunDir, keyed on this pid, or a pane, tab or
+	// window id read from the host environment of this launch. A backend
+	// that reuses a container created by an earlier session has to re-send
+	// these on the workload exec. A value that is the same for every launch
+	// of the project is left as created, so it cannot override the user's
+	// own setting for that name.
 	Session bool
 }
 

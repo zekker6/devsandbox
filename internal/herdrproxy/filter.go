@@ -74,10 +74,11 @@ type FilterConfig struct {
 	// GuestHome and HostHome describe a backend that mounts the sandbox home
 	// elsewhere (Docker: /home/sandboxuser). The integration then reports the
 	// transcript at the guest spelling, so a path under GuestHome is
-	// translated to HostHome before the AgentSessionDir bound is checked, and
-	// the translated path is what gets forwarded: herdr on the host reads it
-	// back, and the file exists there only under the host spelling. Both
-	// empty, or equal, means no translation (bwrap).
+	// translated to HostHome for the AgentSessionDir bound check. The line is
+	// still forwarded as sent: herdr persists the ref without dereferencing
+	// it and on restore types it back into a new sandbox (`pi --session
+	// <path>`), where only the guest spelling exists. Both empty, or equal,
+	// means no translation (bwrap).
 	GuestHome string
 	HostHome  string
 }
@@ -122,9 +123,9 @@ func (f *Filter) Decide(raw []byte) Decision {
 	case methodNotificationShow:
 		return f.decideNotificationShow(d, req)
 	case methodPaneReportAgentSession:
-		return f.decidePaneReportAgentSession(d, req, raw)
+		return f.decidePaneReportAgentSession(d, req)
 	case methodPaneReportAgent:
-		return f.decidePaneReportAgent(d, req, raw)
+		return f.decidePaneReportAgent(d, req)
 	case methodPaneReleaseAgent:
 		return f.decidePaneReleaseAgent(d, req)
 	}
@@ -217,7 +218,7 @@ func (f *Filter) decidePaneSendInput(d Decision, req request, raw []byte) Decisi
 	}
 
 	if text != p.Text {
-		rewritten, err := rewriteParamString(raw, "text", text)
+		rewritten, err := rewriteSendInputText(raw, text)
 		if err != nil {
 			d.Reason = "pane.send_input: " + err.Error()
 			return d
@@ -259,9 +260,9 @@ func (f *Filter) validateLaunchText(text string) (string, error) {
 	return "", fmt.Errorf("command does not match any declared launch pattern")
 }
 
-// rewriteParamString replaces one string field of params in a request line,
-// preserving every other field exactly as the client sent it.
-func rewriteParamString(raw []byte, key, value string) ([]byte, error) {
+// rewriteSendInputText replaces params.text in a request line, preserving every
+// other field exactly as the client sent it.
+func rewriteSendInputText(raw []byte, text string) ([]byte, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("rewrite: %w", err)
@@ -270,11 +271,11 @@ func rewriteParamString(raw []byte, key, value string) ([]byte, error) {
 	if err := json.Unmarshal(envelope["params"], &params); err != nil {
 		return nil, fmt.Errorf("rewrite params: %w", err)
 	}
-	encoded, err := json.Marshal(value)
+	encoded, err := json.Marshal(text)
 	if err != nil {
-		return nil, fmt.Errorf("rewrite %s: %w", key, err)
+		return nil, fmt.Errorf("rewrite text: %w", err)
 	}
-	params[key] = encoded
+	params["text"] = encoded
 
 	encodedParams, err := json.Marshal(params)
 	if err != nil {
@@ -363,7 +364,7 @@ type paneReportAgentSessionParams struct {
 // this process and the agent devsandbox was asked to launch. The report can
 // therefore name only itself. No deny or allow reason repeats a session id —
 // these reasons are logged, and the id is the one secret this method carries.
-func (f *Filter) decidePaneReportAgentSession(d Decision, req request, raw []byte) Decision {
+func (f *Filter) decidePaneReportAgentSession(d Decision, req request) Decision {
 	var p paneReportAgentSessionParams
 	if err := strictUnmarshal(req.Params, &p); err != nil {
 		d.Reason = "pane.report_agent_session: " + err.Error()
@@ -396,12 +397,10 @@ func (f *Filter) decidePaneReportAgentSession(d Decision, req request, raw []byt
 	// The transcript filename embeds the session id, so a reason naming the path
 	// would leak it just as surely as naming the id.
 	if p.AgentSessionPath != "" {
-		rewritten, why := f.vetSessionPath(raw, p.AgentSessionPath)
-		if why != "" {
+		if why := f.agentSessionPathReason(p.AgentSessionPath); why != "" {
 			d.Reason = "pane.report_agent_session: " + why
 			return d
 		}
-		d.Rewritten = rewritten
 	}
 
 	d.Allow = true
@@ -434,7 +433,7 @@ var reportAgentStates = []string{"idle", "working", "blocked"}
 // It carries the same host-derived anchors as the session report, plus a state
 // and a free-text message herdr renders in the pane. The session ref is
 // optional here: Pi attaches it once it knows one, and omits it before then.
-func (f *Filter) decidePaneReportAgent(d Decision, req request, raw []byte) Decision {
+func (f *Filter) decidePaneReportAgent(d Decision, req request) Decision {
 	var p paneReportAgentParams
 	if err := strictUnmarshal(req.Params, &p); err != nil {
 		d.Reason = "pane.report_agent: " + err.Error()
@@ -465,12 +464,10 @@ func (f *Filter) decidePaneReportAgent(d Decision, req request, raw []byte) Deci
 		return d
 	}
 	if p.AgentSessionPath != "" {
-		rewritten, why := f.vetSessionPath(raw, p.AgentSessionPath)
-		if why != "" {
+		if why := f.agentSessionPathReason(p.AgentSessionPath); why != "" {
 			d.Reason = "pane.report_agent: " + why
 			return d
 		}
-		d.Rewritten = rewritten
 	}
 
 	d.Allow = true
@@ -549,26 +546,6 @@ func agentMessageReason(msg string) string {
 	return ""
 }
 
-// vetSessionPath validates agent_session_path as the host would see it. A
-// path the sandbox spelled against GuestHome is translated to HostHome first
-// and, when it passes, the request is rewritten to carry the translation;
-// rewritten is nil when the path was already host-spelled. The reason, when
-// non-empty, names no part of the path (see agentSessionPathReason).
-func (f *Filter) vetSessionPath(raw []byte, p string) (rewritten []byte, reason string) {
-	hostPath, translated := f.sessionPathOnHost(p)
-	if why := f.agentSessionPathReason(hostPath); why != "" {
-		return nil, why
-	}
-	if !translated {
-		return nil, ""
-	}
-	out, err := rewriteParamString(raw, "agent_session_path", hostPath)
-	if err != nil {
-		return nil, err.Error()
-	}
-	return out, ""
-}
-
 // sessionPathOnHost maps a guest-spelled path to its host spelling. Only a
 // path at or below GuestHome is translated; the comparison is lexical on the
 // cleaned path, so "/home/sandboxuserx" and "/home/sandboxuser/.." are not
@@ -592,7 +569,9 @@ func (f *Filter) sessionPathOnHost(p string) (string, bool) {
 }
 
 // agentSessionPathReason validates agent_session_path, returning the failing
-// rule or "" when the path is acceptable. The path is forwarded unmodified.
+// rule or "" when the path is acceptable. The path is forwarded unmodified; a
+// guest-spelled one is translated to the host spelling for the bound check
+// only (sessionPathOnHost).
 //
 // Confinement is deliberately LEXICAL, and pathWithin is deliberately NOT used
 // here: pathWithin resolves symlinks against the host filesystem, while this
@@ -634,7 +613,8 @@ func (f *Filter) agentSessionPathReason(p string) string {
 		return "no agent session directory configured to bound agent_session_path"
 	}
 	base = filepath.Clean(base)
-	if !strings.HasPrefix(filepath.Clean(p), base+string(filepath.Separator)) {
+	hostPath, _ := f.sessionPathOnHost(p)
+	if !strings.HasPrefix(filepath.Clean(hostPath), base+string(filepath.Separator)) {
 		return "agent_session_path is outside the launched agent's session directory"
 	}
 	return ""
