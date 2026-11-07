@@ -410,6 +410,9 @@ sandbox_port = %d
 	cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+tmpConfigDir)
 
 	output, err := cmd.CombinedOutput()
+	// Unblock Accept if the client never connected, or the waits below hang
+	// until the test binary's timeout. An accepted connection is unaffected.
+	_ = listener.Close()
 	if err != nil {
 		// Wait for server to finish
 		<-serverDone

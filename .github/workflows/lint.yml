@@ -104,8 +104,15 @@ jobs:
           cp .mise.ci.toml .mise.toml
           mise install
 
-      - name: Create mise config directory
-        run: mkdir -p ~/.config/mise
+      # The sandbox sees only its project directory (e2e/ under go test) and a
+      # fixed PATH, so mirror a typical dev host: CI tools in the global mise
+      # config, and mise itself in ~/.local/bin, where its installer puts it,
+      # rather than mise-action's ~/.local/share/mise/bin.
+      - name: Expose mise and CI tools to the sandbox
+        run: |
+          mkdir -p ~/.config/mise ~/.local/bin
+          cp .mise.ci.toml ~/.config/mise/config.toml
+          ln -sf "$(command -v mise)" ~/.local/bin/mise
 
       - name: Run e2e tests
         run: task test:e2e

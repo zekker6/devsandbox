@@ -121,6 +121,40 @@ func TestSandbox_EchoCommand(t *testing.T) {
 	}
 }
 
+// TestSandbox_AlternativesResolve pins the /etc/alternatives bind: on
+// Debian/Ubuntu, commands like awk and nc are /usr/bin symlinks into it, and
+// they vanished inside the sandbox while it was unbound.
+func TestSandbox_AlternativesResolve(t *testing.T) {
+	if !bwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	entries, err := os.ReadDir("/usr/bin")
+	if err != nil {
+		t.Fatalf("read /usr/bin: %v", err)
+	}
+	var link string
+	for _, e := range entries {
+		p := filepath.Join("/usr/bin", e.Name())
+		target, err := os.Readlink(p)
+		if err != nil || !strings.HasPrefix(target, "/etc/alternatives/") {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			link = p
+			break
+		}
+	}
+	if link == "" {
+		t.Skip("no /usr/bin command routed through /etc/alternatives on this host")
+	}
+
+	cmd := exec.Command(binaryPath, "test", "-e", link)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%s resolves on the host but not in the sandbox: %v\nOutput: %s", link, err, output)
+	}
+}
+
 func TestSandbox_EnvironmentVariables(t *testing.T) {
 	if !bwrapAvailable() {
 		t.Skip("bwrap not available")

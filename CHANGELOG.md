@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.3...HEAD)
 
+### Fixed
+
+- On Debian, Ubuntu and Fedora hosts, commands the distribution routes through `/etc/alternatives` (`awk`, `nc`, `vi`, `editor` and others) were missing inside the bwrap sandbox with "command not found". The sandbox now sees them like the host does. See [Filesystem Isolation](docs/sandboxing.md#filesystem-isolation).
+
 ## [v0.23.3](https://github.com/zekker6/devsandbox/releases/tag/v0.23.3) - 2026-11-07
 
 ### Fixed

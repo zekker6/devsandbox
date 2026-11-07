@@ -423,6 +423,10 @@ func (b *Builder) AddSystemBindings() *Builder {
 	b.addLibBinding("/lib64", "usr/lib64")
 	b.addLibBinding("/bin", "usr/bin")
 	b.addLibBinding("/sbin", "usr/sbin")
+	// Debian/Ubuntu and Fedora route commands such as awk, nc and vi through
+	// /usr/bin/<name> -> /etc/alternatives/<name>; without this bind those
+	// links dangle and the commands read as "not found".
+	b.ROBindIfExists("/etc/alternatives", "/etc/alternatives")
 
 	return b
 }
