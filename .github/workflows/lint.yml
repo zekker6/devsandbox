@@ -12,7 +12,7 @@ on:
 jobs:
   lint:
     name: Lint & Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -44,7 +44,7 @@ jobs:
 
   docs:
     name: Docs Site Links
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -60,11 +60,7 @@ jobs:
 
   e2e:
     name: E2E Tests
-    # Pinned: on ubuntu-26.04 the system bwrap probe passes but AppArmor
-    # (kernel.apparmor_restrict_unprivileged_userns) refuses the embedded
-    # bwrap devsandbox runs, so every sandbox test fails with
-    # "setting up uid map: Permission denied" instead of skipping.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [lint]
     steps:
       - name: Checkout
@@ -79,14 +75,18 @@ jobs:
           # Install passt if available
           sudo apt-get install -y passt || echo "passt not available in apt"
 
+      # Ubuntu 23.10+ refuses user namespaces to any binary without an AppArmor
+      # profile. The packaged bwrap has one; the embedded bwrap devsandbox
+      # extracts and runs does not, so without this every sandbox launch fails
+      # with "setting up uid map: Permission denied".
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Fail rather than let the sandbox tests skip: a skipped e2e suite once
+      # passed green for months with zero sandbox coverage. unshare has no
+      # AppArmor profile, so it sees what the embedded bwrap sees.
       - name: Check user namespace support
-        run: |
-          echo "=== Checking user namespace support ==="
-          if bwrap --ro-bind / / --unshare-user -- true 2>/dev/null; then
-            echo "User namespaces: SUPPORTED"
-          else
-            echo "User namespaces: NOT SUPPORTED (sandbox tests will be skipped)"
-          fi
+        run: unshare --user --map-root-user true
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -108,13 +108,11 @@ jobs:
         run: mkdir -p ~/.config/mise
 
       - name: Run e2e tests
-        run: |
-          echo "Note: Tests requiring user namespaces will be skipped in CI"
-          task test:e2e
+        run: task test:e2e
 
   macos:
     name: macOS Unit Tests
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
