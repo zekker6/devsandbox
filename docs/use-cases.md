@@ -109,6 +109,10 @@ devsandbox code .
 
 Any CLI-based AI coding tool works in the sandbox. Electron-based desktop apps (Cursor, VS Code) may require the Docker backend with additional configuration.
 
+## Databases and Other Services
+
+On the bwrap backend, rootless podman can run a database, cache or queue inside the sandbox, next to the code under test. The container shares the sandbox network, so it listens on the sandbox's loopback and stays under proxy mode's egress rules. It needs a small wrapper script and some flags for images that switch users; see [Containers inside the sandbox](containers.md).
+
 ## Scratchpads
 
 Managed throwaway workspaces for one-off experiments. See [Scratchpads](index.md#scratchpads) on the docs home for full usage and management commands.

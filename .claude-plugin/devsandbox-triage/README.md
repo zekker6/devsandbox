@@ -18,7 +18,7 @@ Two tiers, separated by how much the signature proves on its own:
 | Tier | Fires when | Examples |
 |---|---|---|
 | Named | always - the message names devsandbox, so the sandbox is already established | `Request blocked by devsandbox:`, `devsandbox: egress lockdown:`, `docker proxy: … write operations not allowed`, `unknown config key`, `invalid configuration:` |
-| Ambient | only when `$DEVSANDBOX` is set or the command invoked `devsandbox` | `Read-only file system`, `Permission denied (publickey)`, cloud SDK credential errors |
+| Ambient | only when `$DEVSANDBOX` is set or the command invoked `devsandbox` | `Read-only file system`, `Permission denied (publickey)`, cloud SDK credential errors, podman's cgroup and sysfs errors |
 
 An ambient signature is an ordinary kernel or tool error that means nothing on its own, which is why it needs the context gate. A named one identifies devsandbox by itself.
 

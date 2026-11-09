@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased](https://github.com/zekker6/devsandbox/compare/v0.23.3...HEAD)
 
+### Added
+
+- Documented how to run rootless podman inside a bwrap sandbox, so a database or cache for tests can run next to the code under the same network rules. It is a manual recipe with known limits (one uid per container, no `-p`). See [Containers inside the sandbox](docs/containers.md).
+- The `devsandbox-triage` plugin now recognizes podman's cgroup and sysfs errors inside a sandbox and points the agent at that recipe.
+
 ### Fixed
+
+- The `devsandbox-triage` plugin ignored errors from tools that log with timestamps such as `time="...T10:58:57..."`, mistaking each line for grep output, so a signature on such a line never matched.
 
 - On Debian, Ubuntu and Fedora hosts, commands the distribution routes through `/etc/alternatives` (`awk`, `nc`, `vi`, `editor` and others) were missing inside the bwrap sandbox with "command not found". The sandbox now sees them like the host does. See [Filesystem Isolation](docs/sandboxing.md#filesystem-isolation).
 

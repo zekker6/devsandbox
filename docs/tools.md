@@ -785,6 +785,8 @@ The Docker proxy allows:
 
 This allows debugging and inspecting running containers without the ability to modify the Docker environment.
 
+To start containers from inside the sandbox, for example a database for tests, run rootless podman inside it instead; see [Containers inside the sandbox](containers.md).
+
 ### Socket Auto-Detection
 
 On **Linux**, the Docker socket defaults to `/run/docker.sock`.

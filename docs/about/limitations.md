@@ -12,6 +12,7 @@ Known constraints of the current implementation.
 - Direct DNS does not work in proxy mode - only the proxy port on the gateway is reachable, and the proxy resolves hostnames itself. A tool that queries a nameserver directly instead of using `HTTP(S)_PROXY` will fail.
 - Host loopback ports are reachable in proxy mode only when declared as an `outbound` [port forwarding rule](../configuration.md#port-forwarding); the gateway is not open on every port.
 - GUI applications are not supported (no display server forwarding). Desktop notifications work via XDG Desktop Portal.
+- Rootless podman runs inside the sandbox only through a manual recipe, with one uid per container, no `-p` publishing and no podman resource limits. See [Containers inside the sandbox](../containers.md).
 
 ## macOS (Docker backend)
 
@@ -33,4 +34,4 @@ See [krun backend](../getting-started/krun.md) for the full setup and trust-boun
 ## Both platforms
 
 - Docker socket access is read-only - no container creation, deletion, or modification from inside the sandbox. See [Supported tools - Docker](../tools.md#docker) for what does work.
-- Nested Docker (running Docker inside the sandbox) is not supported.
+- Nested Docker (running Docker inside the sandbox) is not supported. On Linux, rootless podman works as a substitute for running services such as databases; see [Containers inside the sandbox](../containers.md).

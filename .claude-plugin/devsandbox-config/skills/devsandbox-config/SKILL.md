@@ -1,6 +1,6 @@
 ---
 name: devsandbox-config
-description: Answer devsandbox configuration and setup questions from the published documentation instead of from memory - which TOML key to set, what values it accepts, which file it belongs in, and how the files merge. Covers proxy mode, HTTP filtering, credential injection, content redaction, isolation backends (bwrap/docker/krun), resource limits, overlay and mount modes, port forwarding, remote logging and audit, and per-tool sections such as [tools.git] and [tools.docker]. Activates on "devsandbox config", "configure devsandbox", "devsandbox.toml", ".devsandbox.toml", "devsandbox settings", "how do I let the agent commit", "allow network access in devsandbox", "which isolation backend", "devsandbox memory limit", "devsandbox cpu limit", "where is the devsandbox config file", "devsandbox proxy settings", "devsandbox filter rules", "devsandbox credential injection", "why is my devsandbox setting ignored", "devsandbox per-project config".
+description: Answer devsandbox configuration and setup questions from the published documentation instead of from memory - which TOML key to set, what values it accepts, which file it belongs in, and how the files merge. Covers proxy mode, HTTP filtering, credential injection, content redaction, isolation backends (bwrap/docker/krun), resource limits, overlay and mount modes, port forwarding, remote logging and audit, running podman containers inside the sandbox, and per-tool sections such as [tools.git] and [tools.docker]. Activates on "devsandbox config", "configure devsandbox", "devsandbox.toml", ".devsandbox.toml", "devsandbox settings", "how do I let the agent commit", "allow network access in devsandbox", "which isolation backend", "devsandbox memory limit", "devsandbox cpu limit", "where is the devsandbox config file", "devsandbox proxy settings", "devsandbox filter rules", "devsandbox credential injection", "why is my devsandbox setting ignored", "devsandbox per-project config", "run podman or a database container in devsandbox".
 allowed-tools: [WebFetch, Read, Grep, Glob, Bash, Edit, Write]
 ---
 
@@ -69,6 +69,7 @@ Start at `configuration/` and its **Quick Reference** table, which lists every c
 | `[[include]]`, `.devsandbox.toml`, trust, merge order | `.../docs/configuration/` | Per-Project Configuration; Config Priority |
 | a key that was ignored, or a value that failed the load | `.../docs/configuration/` | Unrecognized Keys; Values of the Wrong Type |
 | what the sandbox blocks by default | `.../docs/sandboxing/` | Security Model |
+| running containers (podman, a database for tests) inside the sandbox, or why `podman` fails there | `.../docs/containers/` | whole page; Troubleshooting for a specific error |
 | whether something is possible at all on this backend | `.../docs/about/limitations/` | whole page |
 | setting up the krun microVM backend | `.../docs/getting-started/krun/` | whole page |
 

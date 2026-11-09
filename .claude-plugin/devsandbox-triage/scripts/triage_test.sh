@@ -197,6 +197,22 @@ run "cloud credentials inside a sandbox" EMIT "~/.aws" 1 Bash \
 	"aws s3 ls" \
 	"Unable to locate credentials. You can configure credentials by running \"aws configure\"."
 
+run "podman without /sys inside a sandbox" EMIT "docs/containers.md" 1 Bash \
+	"podman ps" \
+	'time="2026-11-09T10:58:57+04:00" level=fatal msg="Error determining cgroups mode"'
+
+run "podman on a tmpfs /sys/fs/cgroup inside a sandbox" EMIT "docs/containers.md" 1 Bash \
+	"podman info" \
+	'time="2026-11-09T10:59:50+04:00" level=fatal msg="Cgroups v1 not supported"'
+
+run "sysfs mount inside a sandbox" EMIT "docs/containers.md" 1 Bash \
+	"mount -t sysfs sysfs /sys" \
+	"mount: /sys: fsmount() failed: VFS: Mount too revealing."
+
+run "podman cgroups error outside a sandbox" SILENT - 0 Bash \
+	"podman ps" \
+	'time="2026-11-09T10:58:57+04:00" level=fatal msg="Error determining cgroups mode"'
+
 # --- silence ----------------------------------------------------------------
 
 run "unrelated failure" SILENT - 1 Bash \

@@ -20,6 +20,7 @@ nav = [
   { "Guides" = [
     { "Use cases" = "use-cases.md" },
     { "Supported tools" = "tools.md" },
+    { "Containers inside the sandbox" = "containers.md" },
   ] },
   { "Reference" = [
     { "How sandboxing works" = "sandboxing.md" },

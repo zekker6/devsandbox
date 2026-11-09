@@ -63,8 +63,9 @@ out=$(jq -r '
 
 # Drop "path:123:" lines so searching the devsandbox sources for one of these
 # strings is not mistaken for hitting it. Same reason a signature found in the
-# command itself is ignored below.
-scan=$(printf '%s\n' "$out" | grep -vE '^[^[:space:]]+:[0-9]+:' || true)
+# command itself is ignored below. The path excludes = and " because a logrus
+# line (time="2026-11-09T10:58:57...") has the same shape and is a real error.
+scan=$(printf '%s\n' "$out" | grep -vE '^[^[:space:]="]+:[0-9]+:' || true)
 
 # hit <literal> - the signature appears in the output but not in the command.
 hit() {
@@ -202,6 +203,12 @@ if hit "Unable to locate credentials" || hit "NoCredentialProviders" || hit "cou
 	emit "~/.aws, ~/.azure, ~/.gcloud and ~/.config/gcloud are not mounted, so no cloud SDK can authenticate." \
 		"there is no config key for these; run the cloud command outside the sandbox, or pass a token in via [sandbox] env_passthrough." \
 		'docs/sandboxing.md, section "What'"'"'s Not Available (by default)"'
+fi
+
+if hit "Error determining cgroups mode" || hit "Cgroups v1 not supported" || hit "Mount too revealing"; then
+	emit "the sandbox has no /sys, so podman finds no cgroup2 filesystem and a fresh sysfs mount is refused." \
+		"rootless podman works through a namespace wrapper that mounts cgroup2, plus a containers.conf with cgroups disabled and the host network namespace. Not a setting: a documented recipe with known limits." \
+		'docs/containers.md, sections "Setup" and "Troubleshooting"'
 fi
 
 exit 0
