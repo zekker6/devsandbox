@@ -9,12 +9,16 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"time"
+
+	"devsandbox/internal/fsutil"
 )
 
 const (
 	rsaKeyBits     = 4096
 	caValidityDays = 3650 // 10 years
+	caLockFile     = ".lock"
 )
 
 type CA struct {
@@ -23,7 +27,23 @@ type CA struct {
 	CertPEM     []byte
 }
 
+// LoadOrCreateCA returns the sandbox's CA, creating it on first use.
+//
+// Concurrent launches of one project share the CA files, so the existence check
+// and the creation run under an exclusive lock. Without it, two launches that
+// both find no CA each generate one: the last writer wins on disk, and the
+// other launch's proxy signs with a CA its sandbox does not trust, failing
+// every TLS handshake until that session restarts.
 func LoadOrCreateCA(cfg *Config) (*CA, error) {
+	if err := cfg.EnsureCADir(); err != nil {
+		return nil, fmt.Errorf("failed to create CA directory: %w", err)
+	}
+	lock, err := fsutil.AcquireFileLock(filepath.Join(cfg.CADir, caLockFile))
+	if err != nil {
+		return nil, fmt.Errorf("failed to lock CA directory: %w", err)
+	}
+	defer func() { _ = lock.Release() }()
+
 	if cfg.CAExists() {
 		return LoadCA(cfg)
 	}
@@ -59,6 +79,12 @@ func LoadCA(cfg *Config) (*CA, error) {
 	key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse CA key: %w", err)
+	}
+
+	// A key that does not match the certificate signs leaf certificates no
+	// client can verify, so every session would fail TLS with no clear cause.
+	if !key.PublicKey.Equal(cert.PublicKey) {
+		return nil, fmt.Errorf("CA key does not match CA certificate; remove %s to generate a new CA", cfg.CADir)
 	}
 
 	return &CA{
@@ -120,12 +146,15 @@ func CreateCA(cfg *Config) (*CA, error) {
 		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 	})
 
-	if err := os.WriteFile(cfg.CACertPath, certPEM, 0o644); err != nil {
-		return nil, fmt.Errorf("failed to write CA certificate: %w", err)
+	// Key first, certificate last: CAExists needs both files, so a reader never
+	// sees a complete-looking pair before the certificate is in place, and each
+	// rename leaves a file either absent or whole.
+	if err := fsutil.WriteFileAtomic(cfg.CAKeyPath, keyPEM, 0o600); err != nil {
+		return nil, fmt.Errorf("failed to write CA key: %w", err)
 	}
 
-	if err := os.WriteFile(cfg.CAKeyPath, keyPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("failed to write CA key: %w", err)
+	if err := fsutil.WriteFileAtomic(cfg.CACertPath, certPEM, 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write CA certificate: %w", err)
 	}
 
 	return &CA{

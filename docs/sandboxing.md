@@ -297,7 +297,8 @@ Sandbox data follows XDG conventions:
 │   └── go/                  # GOPATH
 ├── .ca/                     # Proxy CA (if proxy mode used)
 │   ├── ca.crt
-│   └── ca.key
+│   ├── ca.key
+│   └── .lock                # Serializes CA creation across launches
 └── logs/
     ├── proxy/               # HTTP request logs
     └── internal/            # Internal error logs

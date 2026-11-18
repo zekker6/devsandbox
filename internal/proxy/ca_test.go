@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -130,6 +133,79 @@ func TestLoadOrCreateCA_Loads(t *testing.T) {
 
 	if ca1.Certificate.SerialNumber.Cmp(ca2.Certificate.SerialNumber) != 0 {
 		t.Error("Should have loaded same CA, but got different serial numbers")
+	}
+}
+
+// Concurrent launches of one project share a sandbox root and so one CA file.
+// A launch whose proxy signs with a CA other than the one on disk fails every
+// TLS handshake, because its sandbox trusts the file, not the proxy's memory.
+func TestLoadOrCreateCA_ConcurrentCallersAgree(t *testing.T) {
+	cfg := NewConfig(t.TempDir(), DefaultProxyPort)
+
+	const callers = 4
+	cas := make([]*CA, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Go(func() {
+			cas[i], errs[i] = LoadOrCreateCA(cfg)
+		})
+	}
+	wg.Wait()
+
+	disk, err := LoadCA(cfg)
+	if err != nil {
+		t.Fatalf("LoadCA after concurrent creation: %v", err)
+	}
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if !bytes.Equal(cas[i].CertPEM, disk.CertPEM) {
+			t.Errorf("caller %d holds a CA that differs from the one on disk", i)
+		}
+	}
+}
+
+func TestLoadCA_RejectsMismatchedKey(t *testing.T) {
+	cfgA := NewConfig(t.TempDir(), DefaultProxyPort)
+	cfgB := NewConfig(t.TempDir(), DefaultProxyPort)
+	if _, err := CreateCA(cfgA); err != nil {
+		t.Fatalf("CreateCA A: %v", err)
+	}
+	if _, err := CreateCA(cfgB); err != nil {
+		t.Fatalf("CreateCA B: %v", err)
+	}
+	keyB, err := os.ReadFile(cfgB.CAKeyPath)
+	if err != nil {
+		t.Fatalf("read key B: %v", err)
+	}
+	if err := os.WriteFile(cfgA.CAKeyPath, keyB, 0o600); err != nil {
+		t.Fatalf("write key B over A: %v", err)
+	}
+
+	_, err = LoadCA(cfgA)
+	if err == nil {
+		t.Fatal("LoadCA accepted a key that does not match the certificate")
+	}
+	if !strings.Contains(err.Error(), cfgA.CADir) {
+		t.Errorf("error does not name the CA directory to remove: %v", err)
+	}
+}
+
+func TestCreateCA_LeavesNoTempFiles(t *testing.T) {
+	cfg := NewConfig(t.TempDir(), DefaultProxyPort)
+	if _, err := LoadOrCreateCA(cfg); err != nil {
+		t.Fatalf("LoadOrCreateCA: %v", err)
+	}
+	entries, err := os.ReadDir(cfg.CADir)
+	if err != nil {
+		t.Fatalf("read CA dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("temporary file left behind: %s", e.Name())
+		}
 	}
 }
 

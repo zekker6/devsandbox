@@ -384,6 +384,8 @@ A CA certificate is automatically generated for HTTPS interception and stored at
 ~/.local/share/devsandbox/<project>/.ca/ca.crt
 ```
 
+The CA lives as long as the sandbox: removing it (`--rm`, `sandboxes prune`, or expiry) means the next launch generates a new one. Sessions of the same project launched at the same time share one CA. If the key and certificate in `.ca/` do not match, the launch stops and names the directory to remove so that a new CA is generated.
+
 Inside the sandbox, the certificate is available at `/tmp/devsandbox-ca.crt` (bwrap backend) or `/etc/ssl/certs/devsandbox-ca.crt` (Docker and krun backends) and automatically configured via
 environment variables:
 
