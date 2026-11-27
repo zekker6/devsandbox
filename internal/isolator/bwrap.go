@@ -380,7 +380,7 @@ var ErrEgressLockdown = errors.New("the proxy-only egress lockdown could not be 
 
 // asLockdownOrCommandExit is asCommandExit for the pasta launch path. The
 // wrapper script exits egress.LockdownExitCode when a lockdown step fails, and
-// `sh` is pasta's first child - so waitForFirstChildPID has typically already
+// `sh` is pasta's sandbox child - so waitForSandboxChildPID has typically already
 // returned and the abort arrives here, via Wait, carrying the same shape as a
 // workload exit status. Mapping it back to a named error is what keeps an
 // unapplied security control from being reported as if the sandboxed program had

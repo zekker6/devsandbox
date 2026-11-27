@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
 
 - In proxy mode, two sessions of the same project started at the same time on a new sandbox could each generate their own CA. One of them then failed every HTTPS request with "self-signed certificate in certificate chain" or "unable to get local issuer certificate" until it was restarted. Sessions now share one CA. A CA whose key does not match its certificate now stops the launch and names the directory to remove, instead of failing TLS with no clear cause. See [CA Certificate](docs/proxy.md#ca-certificate).
 
+- In proxy mode on bwrap, some launches logged "cannot determine sandbox network namespace ... no such file or directory" and started without port auto-detect. On those launches `devsandbox forward` could not reach the session, and `devsandbox sessions` listed it as dead. devsandbox sometimes recorded a short-lived helper process of pasta as the sandbox. It now waits for the process that has the sandbox's network namespace. See [Runtime Port Forwarding](docs/sandboxing.md#runtime-port-forwarding).
+
 - On Debian, Ubuntu and Fedora hosts, commands the distribution routes through `/etc/alternatives` (`awk`, `nc`, `vi`, `editor` and others) were missing inside the bwrap sandbox with "command not found". The sandbox now sees them like the host does. See [Filesystem Isolation](docs/sandboxing.md#filesystem-isolation).
 
 ## [v0.23.3](https://github.com/zekker6/devsandbox/releases/tag/v0.23.3) - 2026-11-07

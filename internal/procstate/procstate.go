@@ -29,6 +29,7 @@ package procstate
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
 )
@@ -102,4 +103,26 @@ func probe(pid int, signal func(int) error) State {
 		return Dead
 	}
 	return Unknown
+}
+
+// NetNS identifies a network namespace by the inode and device of its nsfs
+// entry, the pair the kernel guarantees unique while the namespace exists.
+type NetNS struct {
+	Ino uint64
+	Dev uint64
+}
+
+// NetNSOf returns the network namespace a /proc/<pid>/ns/net path names. A
+// process that has exited has no namespace entry, so a zombie is an error here,
+// not a namespace.
+func NetNSOf(path string) (NetNS, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return NetNS{}, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return NetNS{}, fmt.Errorf("%s: stat returned unexpected type %T", path, info.Sys())
+	}
+	return NetNS{Ino: uint64(st.Ino), Dev: uint64(st.Dev)}, nil
 }

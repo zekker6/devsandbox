@@ -16,6 +16,7 @@ import (
 	"devsandbox/internal/egress"
 	"devsandbox/internal/embed"
 	"devsandbox/internal/network"
+	"devsandbox/internal/procstate"
 )
 
 // wrapLimits places a launch inside a systemd transient scope carrying the
@@ -32,12 +33,27 @@ func CheckInstalled() error {
 	return nil
 }
 
-// waitForFirstChildPID polls /proc/<parentPID>/task/<parentPID>/children until
-// it contains at least one child PID or the timeout elapses. Returns the first
-// child PID (host-visible) or an error on timeout / unreadable procfs entry.
-func waitForFirstChildPID(parentPID int, timeout time.Duration) (int, error) {
+// waitForSandboxChildPID polls /proc/<parentPID>/task/<parentPID>/children until
+// it lists a child in a network namespace of its own, or the timeout elapses.
+// Returns that child's PID (host-visible) or an error on timeout / unreadable
+// procfs entry.
+//
+// The first child is not necessarily the sandbox: pasta clones a user namespace
+// holder before it clones the sandbox child, kills it once it has joined the
+// namespace and reaps it only later. Until then the holder is listed first,
+// alive in the host netns or as a zombie with no netns entry, and recording its
+// PID leaves the session pointing at a namespace that no longer exists.
+func waitForSandboxChildPID(parentPID int, timeout time.Duration) (int, error) {
 	if parentPID <= 0 {
 		return 0, fmt.Errorf("invalid parent PID %d", parentPID)
+	}
+
+	host, err := procstate.NetNSOf("/proc/self/ns/net")
+	if err != nil {
+		return 0, fmt.Errorf("inspect own network namespace: %w", err)
+	}
+	netnsOf := func(pid int) (procstate.NetNS, error) {
+		return procstate.NetNSOf(fmt.Sprintf("/proc/%d/ns/net", pid))
 	}
 
 	path := fmt.Sprintf("/proc/%d/task/%d/children", parentPID, parentPID)
@@ -45,6 +61,7 @@ func waitForFirstChildPID(parentPID int, timeout time.Duration) (int, error) {
 	deadline := time.Now().Add(timeout)
 
 	var lastReadErr error
+	sawChild := false
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -52,11 +69,16 @@ func waitForFirstChildPID(parentPID int, timeout time.Duration) (int, error) {
 			time.Sleep(pollInterval)
 			continue
 		}
+		var children []int
 		for field := range strings.FieldsSeq(string(data)) {
 			pid, parseErr := strconv.Atoi(field)
 			if parseErr == nil && pid > 0 {
-				return pid, nil
+				children = append(children, pid)
 			}
+		}
+		sawChild = sawChild || len(children) > 0
+		if pid := sandboxChild(children, host, netnsOf); pid != 0 {
+			return pid, nil
 		}
 		// A process that died before forking still has a children file, and it
 		// reads empty - identical to one that has not forked yet. Without this
@@ -72,7 +94,23 @@ func waitForFirstChildPID(parentPID int, timeout time.Duration) (int, error) {
 	if lastReadErr != nil {
 		return 0, fmt.Errorf("read %s: %w", path, lastReadErr)
 	}
+	if sawChild {
+		return 0, fmt.Errorf("no child of PID %d entered its own network namespace within %s", parentPID, timeout)
+	}
 	return 0, fmt.Errorf("no child of PID %d within %s", parentPID, timeout)
+}
+
+// sandboxChild returns the first of children whose network namespace exists
+// and differs from host, or 0 when none qualifies yet. A child whose namespace
+// cannot be read has exited (or is about to), so it is skipped, not trusted.
+func sandboxChild(children []int, host procstate.NetNS, netnsOf func(int) (procstate.NetNS, error)) int {
+	for _, pid := range children {
+		ns, err := netnsOf(pid)
+		if err == nil && ns != host {
+			return pid
+		}
+	}
+	return 0
 }
 
 // processExited reports whether pid has terminated. A process the caller has
@@ -377,10 +415,10 @@ func StartWithPasta(limits cgroups.Limits, bwrapArgs, secretArgs []string, shell
 
 	// Pasta creates a new PID namespace for its child, so `echo $$` inside the
 	// wrapper would record PID 1 (namespace-local), not a host-visible PID.
-	// Instead, find pasta's direct child via procfs - that PID is host-visible
+	// Instead, find pasta's sandbox child via procfs - that PID is host-visible
 	// and lives inside pasta's network namespace, which is exactly what callers
 	// need for /proc/<pid>/ns/net and liveness checks.
-	namespacePID, err := waitForFirstChildPID(cmd.Process.Pid, pastaStartTimeout(limits))
+	namespacePID, err := waitForSandboxChildPID(cmd.Process.Pid, pastaStartTimeout(limits))
 	if err != nil {
 		_ = cmd.Process.Kill()
 		waitErr := cmd.Wait()

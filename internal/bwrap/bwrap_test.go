@@ -14,6 +14,7 @@ import (
 	"devsandbox/internal/cgroups"
 	"devsandbox/internal/egress"
 	"devsandbox/internal/network"
+	"devsandbox/internal/procstate"
 )
 
 func TestCheckInstalled(t *testing.T) {
@@ -488,13 +489,51 @@ func TestPastaCmdlineMapsTheGatewayTheRulesWereBuiltFrom(t *testing.T) {
 	}
 }
 
+// pasta clones a user namespace holder before the sandbox child, kills it and
+// reaps it only later, so the holder - alive in the host netns, or a zombie with
+// no netns entry - can be listed first. Taking it as the sandbox recorded a PID
+// whose /proc/<pid>/ns/net vanished, which broke port auto-detect and
+// `devsandbox forward` for the session.
+func TestSandboxChild(t *testing.T) {
+	host := procstate.NetNS{Ino: 1, Dev: 1}
+	sandbox := procstate.NetNS{Ino: 2, Dev: 1}
+	netns := map[int]procstate.NetNS{10: host, 30: sandbox, 40: sandbox}
+	netnsOf := func(pid int) (procstate.NetNS, error) {
+		ns, ok := netns[pid]
+		if !ok {
+			return procstate.NetNS{}, os.ErrNotExist
+		}
+		return ns, nil
+	}
+
+	tests := []struct {
+		name     string
+		children []int
+		want     int
+	}{
+		{name: "holder alive in host netns", children: []int{10, 30}, want: 30},
+		{name: "holder zombie without netns", children: []int{20, 30}, want: 30},
+		{name: "first qualifying child wins", children: []int{30, 40}, want: 30},
+		{name: "only host netns child", children: []int{10}, want: 0},
+		{name: "only zombie", children: []int{20}, want: 0},
+		{name: "no children", children: nil, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sandboxChild(tt.children, host, netnsOf); got != tt.want {
+				t.Errorf("sandboxChild(%v) = %d, want %d", tt.children, got, tt.want)
+			}
+		})
+	}
+}
+
 // A launcher that fails after preflight passed must be reported immediately.
 // Polling alone cannot see it - a zombie's children file reads empty, exactly
 // like a process that has not forked yet - so the whole budget would be waited
 // out and the failure then blamed on a missing sandbox PID. The scoped budget
 // is 10s, which makes waiting it out the difference between a prompt error and
 // an apparent hang.
-func TestWaitForFirstChildPIDFailsFastOnExit(t *testing.T) {
+func TestWaitForSandboxChildPIDFailsFastOnExit(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("procfs child tracking is Linux-only")
 	}
@@ -509,17 +548,17 @@ func TestWaitForFirstChildPIDFailsFastOnExit(t *testing.T) {
 	t.Cleanup(func() { _ = cmd.Wait() })
 
 	start := time.Now()
-	got, err := waitForFirstChildPID(pid, 10*time.Second)
+	got, err := waitForSandboxChildPID(pid, 10*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
-		t.Fatalf("waitForFirstChildPID() = %d, want an error once the process has exited", got)
+		t.Fatalf("waitForSandboxChildPID() = %d, want an error once the process has exited", got)
 	}
 	if !strings.Contains(err.Error(), "exited without a visible child") {
-		t.Errorf("waitForFirstChildPID() error = %q, want it to name the early exit", err)
+		t.Errorf("waitForSandboxChildPID() error = %q, want it to name the early exit", err)
 	}
 	if elapsed > 5*time.Second {
-		t.Errorf("waitForFirstChildPID() took %v, want it to fail well before the budget", elapsed)
+		t.Errorf("waitForSandboxChildPID() took %v, want it to fail well before the budget", elapsed)
 	}
 }
 

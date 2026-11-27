@@ -2,8 +2,8 @@ package portforward
 
 import (
 	"fmt"
-	"os"
-	"syscall"
+
+	"devsandbox/internal/procstate"
 )
 
 // SharesHostNetNS reports whether the given /proc/<pid>/ns/net path refers to
@@ -21,25 +21,13 @@ import (
 // "isolated by default" since an uninspectable state is not the shared-netns
 // bug this guard is protecting against.
 func SharesHostNetNS(nsPath string) (bool, error) {
-	sandboxIno, sandboxDev, err := netNSIdent(nsPath)
+	sandbox, err := procstate.NetNSOf(nsPath)
 	if err != nil {
 		return false, fmt.Errorf("inspect sandbox netns: %w", err)
 	}
-	hostIno, hostDev, err := netNSIdent("/proc/self/ns/net")
+	host, err := procstate.NetNSOf("/proc/self/ns/net")
 	if err != nil {
 		return false, fmt.Errorf("inspect host netns: %w", err)
 	}
-	return sandboxIno == hostIno && sandboxDev == hostDev, nil
-}
-
-func netNSIdent(path string) (ino uint64, dev uint64, err error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, 0, err
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, 0, fmt.Errorf("%s: stat returned unexpected type %T", path, info.Sys())
-	}
-	return uint64(st.Ino), uint64(st.Dev), nil
+	return sandbox == host, nil
 }

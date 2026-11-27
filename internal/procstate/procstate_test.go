@@ -122,3 +122,23 @@ func TestProbe_SelfIsLiveAndPID1IsUnknown(t *testing.T) {
 		t.Errorf("Probe(1) = %v, want Unknown", got)
 	}
 }
+
+func TestNetNSOf(t *testing.T) {
+	if _, err := os.Stat("/proc/self/ns/net"); err != nil {
+		t.Skipf("no procfs network namespace entry here: %v", err)
+	}
+	a, err := NetNSOf("/proc/self/ns/net")
+	if err != nil {
+		t.Fatalf("NetNSOf(self): %v", err)
+	}
+	b, err := NetNSOf(fmt.Sprintf("/proc/%d/ns/net", os.Getpid()))
+	if err != nil {
+		t.Fatalf("NetNSOf(own pid): %v", err)
+	}
+	if a != b {
+		t.Errorf("NetNSOf(self) = %+v, NetNSOf(own pid) = %+v, want equal", a, b)
+	}
+	if _, err := NetNSOf("/proc/0/ns/net"); err == nil {
+		t.Error("NetNSOf(missing path): err = nil, want error")
+	}
+}
